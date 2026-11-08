@@ -202,9 +202,9 @@ function writeJson(path: string, value: unknown, immutable = false): void {
 }
 
 /** 宿主只读ps元数据补充reader内不可用的startToken，不读取命令行或认证参数。 */
-function sampleOwnedProcesses(plan: NativePlan): ProcessIdentity[] {
+async function sampleOwnedProcesses(plan: NativePlan, deadline?: number): Promise<ProcessIdentity[]> {
   if (plan.worktreeProcessBaseline === 1) {
-    sampleNativeWorktreeProcesses(plan)
+    await sampleNativeWorktreeProcesses(plan, deadline)
     return JSON.parse(readFileSync(join(plan.root, 'owned-processes.json'), 'utf8')) as ProcessIdentity[]
   }
   const saved = join(plan.root, 'owned-processes.json')
@@ -239,8 +239,8 @@ function processIdentityState(identity: ProcessIdentity): 'live' | 'gone' | 'unk
 }
 
 /** 整组、宿主观察后代与实际reader记录分别核死亡；缺身份不取得冷取消权限。 */
-function ownedProcessesStopped(plan: NativePlan, terminate = false): boolean {
-  if (plan.worktreeProcessBaseline === 1) return nativeWorktreeProcessesStopped(plan, terminate)
+async function ownedProcessesStopped(plan: NativePlan, terminate = false, deadline?: number): Promise<boolean> {
+  if (plan.worktreeProcessBaseline === 1) return nativeWorktreeProcessesStopped(plan, terminate, deadline)
   if (!plan.pid || !existsSync(join(plan.root, 'owned-processes.json'))) return false
   const owned = JSON.parse(readFileSync(join(plan.root, 'owned-processes.json'), 'utf8')) as ProcessIdentity[]
   const ledger = join(plan.runtime, 'frozen-mcp', 'mcp-public.jsonl')
@@ -261,6 +261,7 @@ function ownedProcessesStopped(plan: NativePlan, terminate = false): boolean {
     if (state === 'gone') continue
     stopped = false
     if (terminate && state === 'live') {
+      if (deadline !== undefined && Date.now() >= deadline) return false
       try { process.kill(identity.pid, 'SIGTERM') }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error }
     }
@@ -338,11 +339,11 @@ export function assertZCodeStoppedDraftSource(prompt: string, execution: ZCodeSt
 }
 
 /** 同一原生 session/input/query/turn 和实际模型选择证明正常工具执行的终态。 */
-function settleWorktreeResult(plan: NativePlan, prompt: string, execution: ZCodeStructuredExecution): WorktreeNativeResult {
+async function settleWorktreeResult(plan: NativePlan, prompt: string, execution: ZCodeStructuredExecution, deadline?: number): Promise<WorktreeNativeResult> {
   verifyPlan(plan, plan.root, prompt, execution)
   const model = plan.model
   if (!model) throw new StructuredSessionError('stale_result', 'ZCode worktree plan has no actual model selection')
-  if (execution.state !== 'completed' && !ownedProcessesStopped(plan)) throw new StructuredSessionError('cancellation_pending', 'ZCode worktree native or unknown orphan stop remains unproven')
+  if (execution.state !== 'completed' && !(await ownedProcessesStopped(plan, false, deadline))) throw new StructuredSessionError('cancellation_pending', 'ZCode worktree native or unknown orphan stop remains unproven')
   const read = (name: string): unknown => JSON.parse(readFileSync(join(plan.root, name), 'utf8'))
   const terminal = read('terminal.json') as NativeEvent, events = read('events.json') as NativeEvent[], messages = read('messages.json') as Array<{ info?: Record<string, unknown>; parts?: Array<Record<string, unknown>> }>
   const exit = read('exit.json') as StopEvidence, send = read('send.json')
@@ -373,6 +374,7 @@ function settleWorktreeResult(plan: NativePlan, prompt: string, execution: ZCode
   const completed = { plan, terminal, events, messages, exit, send, result }
   const path = join(plan.root, 'completed.json')
   if (execution.state === 'completed' && (!existsSync(path) || execution.threadId !== result.threadId || execution.turnId !== result.turnId || execution.resultDigest !== digest(output))) throw new StructuredSessionError('stale_result', 'ZCode worktree durable completed identity differs')
+  if (deadline !== undefined && Date.now() >= deadline) throw new StructuredSessionError('cancellation_pending', 'ZCode completion exceeded the original stop deadline')
   writeJson(path, completed, true)
   return result
 }
@@ -411,7 +413,7 @@ async function completedResult(root: string, prompt: string, execution: ZCodeStr
   if (!model) throw new StructuredSessionError('stale_result', 'ZCode frozen plan has no exact model selection')
   const path = join(root, 'completed.json')
   if (!existsSync(path)) {
-    if (!['terminal.json', 'messages.json', 'events.json', 'exit.json', 'send.json'].every(name => existsSync(join(root, name))) || !ownedProcessesStopped(plan)) return null
+    if (!['terminal.json', 'messages.json', 'events.json', 'exit.json', 'send.json'].every(name => existsSync(join(root, name))) || !(await ownedProcessesStopped(plan))) return null
     const exit = JSON.parse(readFileSync(join(root, 'exit.json'), 'utf8')) as StopEvidence
     const terminal = JSON.parse(readFileSync(join(root, 'terminal.json'), 'utf8')) as NativeEvent
     if (!exit.stopped || !exit.idle || !exit.closed || exit.code !== 0 || exit.signal !== null || terminal.type !== 'turn.completed' || terminal.payload.resultType !== 'success') return null
@@ -440,12 +442,13 @@ async function completedResult(root: string, prompt: string, execution: ZCodeStr
   if (execution.state === 'completed') {
     if (execution.threadId !== plan.sessionId || execution.turnId !== plan.turnId || execution.resultDigest !== digest(execution.output) || execution.resultDigest !== digest(output)
       || !execution.frozenReadProof || digest(execution.frozenReadProof) !== digest(proof)) throw new StructuredSessionError('stale_result', 'ZCode durable completed result or evidence differs')
-  } else if (!ownedProcessesStopped(plan)) return null
+  } else if (!(await ownedProcessesStopped(plan))) return null
   return saved.result
 }
 
 /** 正式取消仅对同一固定plan及已核PID/start/receipt操作，不恢复或追加prompt。 */
 export async function stopZCodeStructuredTurn(execution: ZCodeStructuredExecution, timeoutMs = 15000): Promise<StopResult> {
+  const deadline = Date.now() + timeoutMs
   const native = execution.zcodeNative
   if (!native) return execution.turnStartRequested ? { nativeStopped: false, acknowledged: false, error: 'ZCode dispatch identity is unproven' } : { nativeStopped: true, acknowledged: false, nativeStatus: 'notStarted' }
   const path = join(native.root, 'plan.json')
@@ -455,17 +458,24 @@ export async function stopZCodeStructuredTurn(execution: ZCodeStructuredExecutio
   catch { return { nativeStopped: false, acknowledged: false, error: 'ZCode fixed launch policy or native identity differs' } }
   if (!execution.turnStartRequested && !plan.pid) return { nativeStopped: true, acknowledged: false, nativeStatus: 'notStarted' }
   if (!plan.pid || plan.pid !== native.pid || plan.receiptFile !== native.receiptFile) return { nativeStopped: false, acknowledged: false, error: 'ZCode launch/process identity differs' }
+  if (Date.now() >= deadline) return { nativeStopped: false, acknowledged: false, error: 'ZCode native stop deadline expired' }
   const local = active.get(native.root)
   if (local) local.interrupt()
   else if (!detachedRuntimeIsGone(plan.pid, plan.receiptFile)) {
     if (!verifyDetachedRuntime(plan.pid, plan.receiptFile).ok) return { nativeStopped: false, acknowledged: false, error: 'ZCode detached runtime identity is unproven' }
-    sampleOwnedProcesses(plan)
+    try { await sampleOwnedProcesses(plan, deadline) }
+    catch (error) { if (error instanceof StructuredSessionError && error.code === 'cancellation_pending') return { nativeStopped: false, acknowledged: false, error: error.message }; throw error }
+    if (!verifyDetachedRuntime(plan.pid, plan.receiptFile).ok || Date.now() >= deadline) return { nativeStopped: false, acknowledged: false, error: 'ZCode detached runtime identity is unproven' }
     try { process.kill(-plan.pid, 'SIGTERM') }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error }
   }
-  const deadline = Date.now() + timeoutMs
-  while (!ownedProcessesStopped(plan, !local) && Date.now() < deadline) await sleep(50)
-  const stopped = ownedProcessesStopped(plan), exitPath = join(native.root, 'exit.json')
+  const stoppedProcesses = async (terminate = false): Promise<boolean> => {
+    if (Date.now() >= deadline) return false
+    try { const stopped = await ownedProcessesStopped(plan, terminate, deadline); return Date.now() < deadline && stopped }
+    catch (error) { if (error instanceof StructuredSessionError && error.code === 'cancellation_pending') return false; throw error }
+  }
+  while (Date.now() < deadline && !(await stoppedProcesses(!local))) await sleep(50)
+  const stopped = await stoppedProcesses(), exitPath = join(native.root, 'exit.json')
   const exit = existsSync(exitPath) ? JSON.parse(readFileSync(exitPath, 'utf8')) as StopEvidence : undefined
   return { nativeStopped: stopped, acknowledged: exit?.acknowledged ?? false, nativeStatus: stopped ? 'stopped' : 'unknown', ...(!stopped ? { error: 'ZCode owned app/MCP processes remain unproven' } : {}) }
 }
@@ -525,7 +535,7 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
   const native = (): ZCodeNativeState => ({ version: plan.version, root, sessionId: plan.sessionId, inputId: plan.inputId, ...(plan.pid ? { pid: plan.pid, receiptFile: plan.receiptFile } : {}), ...(plan.turnId ? { turnId: plan.turnId } : {}) })
   await callbacks.onNative(native()); await callbacks.onTurnStarting?.()
   let launchFailure: Error | undefined
-  if (worktree) sampleNativeWorktreeProcesses(plan)
+  if (worktree) await sampleNativeWorktreeProcesses(plan)
   const child: ChildProcessWithoutNullStreams = spawn(worktree ? cliPath : '/usr/bin/sandbox-exec', worktree ? [ 'app-server', '--cwd', workspace] : ['-f', profile, cliPath, 'app-server', '--cwd', workspace], { cwd: workspace, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
   child.once('error', () => { launchFailure = new StructuredSessionError('cancellation_pending', 'ZCode native process failed during launch') })
   if (!child.pid) throw new StructuredSessionError('failed', 'ZCode isolated process could not start')
@@ -533,7 +543,7 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
   const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => child.once('close', (code, signal) => { exited = true; resolve({ code, signal }) }))
   try {
     writeDetachedRuntimeReceipt(child.pid, plan.receiptFile)
-    plan = { ...plan, pid: child.pid }; writeJson(join(root, 'plan.json'), plan); sampleOwnedProcesses(plan); await callbacks.onNative(native())
+    plan = { ...plan, pid: child.pid }; writeJson(join(root, 'plan.json'), plan); await sampleOwnedProcesses(plan); await callbacks.onNative(native())
   } catch {
     try { process.kill(-child.pid, 'SIGTERM') } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error }
     child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy(); child.unref()
@@ -570,15 +580,17 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
   child.stderr.on('data', (bytes: Buffer) => { stderrBytes += bytes.length; stderrHash.update(bytes) })
   child.once('error', () => { protocolError = new StructuredSessionError('cancellation_pending', 'ZCode native process failed') })
   const events: NativeEvent[] = [], seen = new Set<string>(), counts: Record<string, number> = {}
-  let terminal: NativeEvent | undefined, cursor: number | undefined, stopSent = false
+  let terminal: NativeEvent | undefined, cursor: number | undefined, stopSent = false, nativeStopped = false
+  let stopAt: number | undefined
   const interrupt = (): void => { abortRequested = true }
   active.set(root, { interrupt }); callbacks.signal?.addEventListener('abort', interrupt, { once: true })
   const timeout = structuredExecutionTimer(execution.timeoutMs, () => {
     timedOut = true; interrupt()
     void Promise.resolve().then(() => callbacks.onTimeout?.()).catch(() => { protocolError = new StructuredSessionError('cancellation_pending', 'ZCode timeout cancellation could not be durably published') })
   })
-  const poll = async (): Promise<NativeEvent | undefined> => {
-    sampleOwnedProcesses(plan)
+  const poll = async (deadline?: number): Promise<NativeEvent | undefined> => {
+    await sampleOwnedProcesses(plan, deadline)
+    if (deadline !== undefined && Date.now() >= deadline) throw new StructuredSessionError('cancellation_pending', 'ZCode process observation exceeded the original stop deadline')
     const page = await request('session/events', { sessionId: plan.sessionId, ...(cursor === undefined ? {} : { afterSeq: cursor }), limit: 100 }) as { events?: NativeEvent[] }
     for (const event of page.events ?? []) {
       if (seen.has(event.eventId)) continue
@@ -663,7 +675,7 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
       if (sent && !terminal) {
         await stop()
         const deadline = Date.now() + 10000
-        while (!terminal && Date.now() < deadline && !exited) { await poll(); if (!terminal) await sleep(100) }
+        while (!terminal && Date.now() < deadline && !exited) { await poll(deadline); if (!terminal) await sleep(100) }
       }
       if (sessionCreated && (!sent || terminal)) {
         const deadline = Date.now() + 3000
@@ -676,24 +688,25 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
           if (!idle) await sleep(50)
         } while (!idle && Date.now() < deadline)
         if (!idle) throw new StructuredSessionError('cancellation_pending', 'ZCode exact terminal has no matching idle runtime')
-        sampleOwnedProcesses(plan)
+        await sampleOwnedProcesses(plan, deadline)
         const response = await request('session/close', { sessionId: plan.sessionId, expectedPersistence: 'immediate' }) as { closed?: boolean }
         closeAcknowledged = response.closed === true
       }
     } catch (error) { resultError ??= error }
     child.stdin.end()
     let exit = await Promise.race([closed, sleep(3000).then(() => undefined)])
-    if (!exit || !ownedProcessesStopped(plan)) {
+    stopAt = Date.now() + 3000
+    if (!exit || !(await ownedProcessesStopped(plan, false, stopAt))) {
       if (verifyDetachedRuntime(plan.pid!, plan.receiptFile).ok) {
-        sampleOwnedProcesses(plan)
-        try { process.kill(-plan.pid!, 'SIGTERM') } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error }
+        await sampleOwnedProcesses(plan, stopAt)
+        if (verifyDetachedRuntime(plan.pid!, plan.receiptFile).ok && Date.now() < stopAt) try { process.kill(-plan.pid!, 'SIGTERM') } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error }
       }
-      const deadline = Date.now() + 3000
-      while (!ownedProcessesStopped(plan, true) && Date.now() < deadline) await sleep(50)
+      while (Date.now() < stopAt && !(await ownedProcessesStopped(plan, true, stopAt))) await sleep(50)
       exit ??= await Promise.race([closed, sleep(100).then(() => undefined)])
     }
-    const stopped = ownedProcessesStopped(plan)
+    const stopped = Date.now() < stopAt && await ownedProcessesStopped(plan, false, stopAt)
     writeJson(join(root, 'exit.json'), { code: exit?.code ?? null, signal: exit?.signal ?? null, stopped, acknowledged, idle, closed: closeAcknowledged, stderrBytes, stderrSha256: stderrHash.digest('hex') } satisfies StopEvidence, true)
+    nativeStopped = stopped
     if (!stopped) { child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy(); child.unref(); if (!(resultError instanceof ZCodeNativeTurnFailedError) && !(resultError instanceof StructuredSessionError && resultError.code === 'native_rpc_timeout')) resultError = new StructuredSessionError('cancellation_pending', 'ZCode app/MCP process stop is unproven') }
   } catch {
     if (!(resultError instanceof ZCodeNativeTurnFailedError) && !(resultError instanceof StructuredSessionError && resultError.code === 'native_rpc_timeout')) resultError = new StructuredSessionError('cancellation_pending', 'ZCode native cleanup or stop evidence could not be settled')
@@ -702,7 +715,7 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
     clearTimeout(timeout); callbacks.signal?.removeEventListener('abort', interrupt); active.delete(root); lines.close()
     for (const waiter of pending.values()) { clearTimeout(waiter.timer); waiter.reject(new StructuredSessionError('cancellation_pending', 'ZCode transport closed')) }
   }
-  if (abortRequested) throw new StructuredSessionError(ownedProcessesStopped(plan) ? timedOut ? 'timeout' : 'cancelled' : 'cancellation_pending', 'ZCode cancellation revoked result publication')
+  if (abortRequested) throw new StructuredSessionError(nativeStopped ? timedOut ? 'timeout' : 'cancelled' : 'cancellation_pending', 'ZCode cancellation revoked result publication')
   if (resultError) throw resultError
-  return worktree ? settleWorktreeResult(plan, prompt, { ...execution, zcodeNative: native() }) : settleResult(plan, prompt, execution)
+  return worktree ? settleWorktreeResult(plan, prompt, { ...execution, zcodeNative: native() }, stopAt) : settleResult(plan, prompt, execution)
 }

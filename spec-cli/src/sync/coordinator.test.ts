@@ -369,7 +369,7 @@ for (const [mode, defect] of [['pause', 'archived'], ['native-failure', 'archive
       readRecord: id => readRecord(id), cancel: cancelStructuredSession,
       run: async actual => {
         const execution = structuredExecutionPolicy(actual), session = sessionIdForCreateKey(actual.sessionCreateKey!), root = join(f.parent, 'original-native')
-        mkdirSync(root); sampleNativeWorktreeProcesses({ root, receiptFile: join(root, 'process.json'), workspace })
+        mkdirSync(root); await sampleNativeWorktreeProcesses({ root, receiptFile: join(root, 'process.json'), workspace })
         const child = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { detached: true, stdio: 'ignore' }); assert(child.pid)
         const ended = new Promise<void>(resolve => child.once('close', () => resolve())), receiptFile = join(root, 'process.json')
         writeDetachedRuntimeReceipt(child.pid, receiptFile); process.kill(-child.pid, 'SIGTERM'); await ended

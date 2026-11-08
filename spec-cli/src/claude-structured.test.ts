@@ -1127,7 +1127,7 @@ test('native configuration schema exhaustion authenticates per-request wire mode
   const hash = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
   const prompt = 'public schema task', model = 'provider/actual-model', selection = 'arbitrary/selection + context', rejected = { ok: 'bad' }
   try {
-    sampleNativeWorktreeProcesses({ root, receiptFile: join(root, 'process.json'), workspace })
+    await sampleNativeWorktreeProcesses({ root, receiptFile: join(root, 'process.json'), workspace })
     const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { detached: true, stdio: 'ignore' })
     assert(child.pid)
     const closed = new Promise<void>(resolve => child.once('close', () => resolve()))
@@ -1248,7 +1248,7 @@ test('sealed real Claude public evidence separates init selection from each wire
     assert(history.history.filter(row => row.type === 'api-request').every(row => row.model === 'glm-5.3-flash'))
     // 离线wrapper只替换路径、测试policy和自有已停Node的receipt；不重签真实记录或证明原业务/Git结果。
     const receiptFile = join(root, 'process.json')
-    sampleNativeWorktreeProcesses({ root, receiptFile, workspace })
+    await sampleNativeWorktreeProcesses({ root, receiptFile, workspace })
     const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { detached: true, stdio: 'ignore' }); assert(child.pid)
     const closed = new Promise<void>(resolve => child.once('close', () => resolve()))
     writeDetachedRuntimeReceipt(child.pid, receiptFile); process.kill(-child.pid, 'SIGTERM'); await closed

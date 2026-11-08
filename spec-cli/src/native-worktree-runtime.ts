@@ -1,7 +1,7 @@
-import { execFileSync, spawnSync } from 'node:child_process'
+import { spawn, execFileSync } from 'node:child_process'
 import { appendFileSync, existsSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { detachedRuntimeIsGone, processStartToken, type ProcessIdentity } from '@spexcode/spec-core'
+import { detachedRuntimeIsGone, hostProcessAdapter, processStartToken, type ProcessIdentity } from '@spexcode/spec-core'
 import { StructuredSessionError } from './session-structured-policy.js'
 
 export type NativeWorktreeRequest = { baseCommit: string; tree: string; mode: 'read' | 'edit' }
@@ -53,21 +53,88 @@ export type NativeOwnedPlan = { root: string; pid?: number; receiptFile: string;
 
 type NativeProcessRow = ProcessIdentity & { ppid: number }
 
+const observing = new Map<string, Promise<unknown>>()
+const probes = new Map<string, { child: ReturnType<typeof spawn>; closed: boolean }>()
+function observationPending(): StructuredSessionError { return new StructuredSessionError('cancellation_pending', 'native worktree process observation remains unproven') }
+function assertObservationDeadline(deadline: number): void { if (Date.now() >= deadline) throw observationPending() }
+function observeSerially<T>(plan: NativeOwnedPlan, observe: (deadline: number) => Promise<T>, deadline = Date.now() + 10_000): Promise<T> {
+  const run = (): Promise<T> => { assertObservationDeadline(deadline); return observe(deadline) }
+  const previous = observing.get(plan.root), current = previous ? previous.then(run, run) : Promise.resolve().then(run)
+  observing.set(plan.root, current)
+  const settled = current.finally(() => { if (observing.get(plan.root) === current) observing.delete(plan.root) })
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(observationPending()), Math.max(0, deadline - Date.now()))
+    settled.then(value => { clearTimeout(timer); if (Date.now() >= deadline) reject(observationPending()); else resolve(value) }, error => { clearTimeout(timer); reject(error) })
+  })
+}
+
+function nativeProcessOutput(plan: NativeOwnedPlan, command: string, args: string[], deadline: number, absentAllowed = false): Promise<string> {
+  assertObservationDeadline(deadline)
+  const previous = probes.get(plan.root)
+  const gone = (probe: NonNullable<typeof previous>): boolean => probe.closed && (!probe.child.pid || hostProcessAdapter.liveness(-probe.child.pid) === 'absent')
+  if (previous) {
+    if (!gone(previous)) return Promise.reject(observationPending())
+    probes.delete(plan.root)
+  }
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    const probe = { child, closed: false }
+    probes.set(plan.root, probe)
+    let stdout = Buffer.alloc(0), bytes = 0, failed = false
+    const stopProbe = (): void => {
+      if (failed) return
+      failed = true
+      const error = observationPending()
+      reject(error)
+      if (child.pid) try { process.kill(-child.pid, 'SIGKILL') } catch (cause) { if ((cause as NodeJS.ErrnoException).code !== 'ESRCH') Object.assign(error, { cause }) }
+      child.stdout?.destroy(); child.stderr?.destroy(); child.unref()
+    }
+    const append = (chunk: Buffer, output: boolean): void => {
+      if (failed) return
+      bytes += chunk.length
+      if (bytes > 1024 * 1024) { stopProbe(); return }
+      if (output) stdout = Buffer.concat([stdout, chunk])
+    }
+    child.stdout!.on('data', (chunk: Buffer) => append(chunk, true))
+    child.stderr!.on('data', (chunk: Buffer) => append(chunk, false))
+    const timer = setTimeout(stopProbe, Math.min(10_000, Math.max(0, deadline - Date.now())))
+    child.once('error', cause => { failed = true; clearTimeout(timer); reject(Object.assign(observationPending(), { cause })) })
+    child.once('close', code => {
+      clearTimeout(timer); probe.closed = true
+      const stopped = gone(probe)
+      if (stopped && probes.get(plan.root) === probe) probes.delete(plan.root)
+      if (failed || !stopped || Date.now() >= deadline || code !== 0 && !(absentAllowed && code === 1)) reject(observationPending())
+      else resolve(stdout.toString('utf8'))
+    })
+  })
+}
+
 /** 只读取同 UID 的 PID、父图与启动身份，不读取 argv、环境或凭据。 */
-function nativeProcessCensus(): NativeProcessRow[] {
+async function nativeProcessCensus(plan: NativeOwnedPlan, deadline: number): Promise<NativeProcessRow[]> {
   const uid = process.getuid?.()
   if (uid === undefined) throw new StructuredSessionError('unsupported', 'native worktree requires a same-UID process census')
-  const result = spawnSync('/bin/ps', ['-axo', 'uid=,pid=,ppid=,lstart='], { encoding: 'utf8' })
-  if (result.error || result.status !== 0) throw new StructuredSessionError('cancellation_pending', 'native worktree process census is unproven')
-  return result.stdout.split('\n').flatMap(line => {
+  const output = await nativeProcessOutput(plan, '/bin/ps', ['-axo', 'uid=,pid=,ppid=,lstart='], deadline)
+  return output.split('\n').flatMap(line => {
     const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line)
     return match && Number(match[1]) === uid ? [{ pid: Number(match[2]), ppid: Number(match[3]), startToken: match[4].replace(/\s+/g, ' ') }] : []
   })
 }
 
 /** spawn 前冻结同 UID 基线；运行中仅把实际观察到的 Native 后代记为已拥有。 */
-export function sampleNativeWorktreeProcesses(plan: NativeOwnedPlan): void {
-  const path = join(plan.root, 'owned-processes.json'), rows = nativeProcessCensus()
+export function sampleNativeWorktreeProcesses(plan: NativeOwnedPlan, deadline?: number): Promise<void> {
+  return observeSerially(plan, limit => sampleProcesses(plan, limit), deadline)
+}
+async function sampleProcesses(plan: NativeOwnedPlan, deadline: number): Promise<void> {
+  await captureOwnedProcesses(plan, deadline)
+  if (plan.pid) {
+    const observation = await classifyOrphans(plan, deadline)
+    assertObservationDeadline(deadline)
+    persistNativeOrphanObservation(plan, observation)
+  }
+}
+async function captureOwnedProcesses(plan: NativeOwnedPlan, deadline: number): Promise<void> {
+  const path = join(plan.root, 'owned-processes.json'), rows = await nativeProcessCensus(plan, deadline)
+  assertObservationDeadline(deadline)
   if (!plan.pid) {
     writeFileSync(join(plan.root, 'process-baseline.json'), JSON.stringify(rows), { mode: 0o400, flag: 'wx' })
     writeFileSync(path, '[]', { mode: 0o600 })
@@ -84,15 +151,15 @@ export function sampleNativeWorktreeProcesses(plan: NativeOwnedPlan): void {
     if (row) owned.set(pid, { pid, startToken: row.startToken })
     queue.push(...rows.filter(item => item.ppid === pid).map(item => item.pid))
   }
+  assertObservationDeadline(deadline)
   writeFileSync(path, JSON.stringify([...owned.values()]), { mode: 0o600 })
-  persistNativeOrphanObservation(plan, classifyNativeWorktreeOrphans(plan))
 }
 
 type NativeTaskRelatedProcess = ProcessIdentity & { boundaryVersion: 2; observedAt: number; cwd: string }
 export type NativeOrphanObservation = { related: NativeTaskRelatedProcess[]; pending: NativeTaskRelatedProcess[]; unattributed: Array<NativeProcessRow & { cwd: string | null }> }
 
 /** 只查候选 cwd；读取不到的位置不伪造成任务关联，且从不读取 argv/env。 */
-function nativeProcessWorkingDirectories(pids: number[]): Map<number, string> {
+async function nativeProcessWorkingDirectories(plan: NativeOwnedPlan, pids: number[], deadline: number): Promise<Map<number, string>> {
   const paths = new Map<number, string>()
   if (!pids.length) return paths
   if (process.platform === 'linux') {
@@ -102,10 +169,9 @@ function nativeProcessWorkingDirectories(pids: number[]): Map<number, string> {
     }
     return paths
   }
-  const result = spawnSync('/usr/sbin/lsof', ['-a', '-p', pids.join(','), '-d', 'cwd', '-Fn'], { encoding: 'utf8' })
-  if (result.error || ![0, 1].includes(result.status ?? -1)) throw new StructuredSessionError('cancellation_pending', 'native worktree cwd observation is unavailable')
+  const output = await nativeProcessOutput(plan, '/usr/sbin/lsof', ['-a', '-p', pids.join(','), '-d', 'cwd', '-Fn'], deadline, true)
   let pid: number | undefined
-  for (const line of result.stdout.split('\n')) {
+  for (const line of output.split('\n')) {
     if (/^p\d+$/.test(line)) pid = Number(line.slice(1))
     else if (pid !== undefined && line.startsWith('n')) paths.set(pid, line.slice(1))
   }
@@ -113,8 +179,12 @@ function nativeProcessWorkingDirectories(pids: number[]): Map<number, string> {
 }
 
 /** 只读分类可用于旧现场离线核验；同 UID/PPID1 本身不产生任务债务。 */
-export function classifyNativeWorktreeOrphans(plan: NativeOwnedPlan): NativeOrphanObservation {
-  const rows = nativeProcessCensus(), current = new Map(rows.map(row => [row.pid, row]))
+export function classifyNativeWorktreeOrphans(plan: NativeOwnedPlan, deadline?: number): Promise<NativeOrphanObservation> {
+  return observeSerially(plan, limit => classifyOrphans(plan, limit), deadline)
+}
+async function classifyOrphans(plan: NativeOwnedPlan, deadline: number): Promise<NativeOrphanObservation> {
+  const rows = await nativeProcessCensus(plan, deadline), current = new Map(rows.map(row => [row.pid, row]))
+  assertObservationDeadline(deadline)
   const baseline = new Map((JSON.parse(readFileSync(join(plan.root, 'process-baseline.json'), 'utf8')) as NativeProcessRow[]).map(row => [row.pid, row]))
   const owned = JSON.parse(readFileSync(join(plan.root, 'owned-processes.json'), 'utf8')) as ProcessIdentity[]
   const relatedPath = join(plan.root, 'task-related-processes.json')
@@ -129,7 +199,8 @@ export function classifyNativeWorktreeOrphans(plan: NativeOwnedPlan): NativeOrph
     }
     return true
   })
-  const paths = nativeProcessWorkingDirectories(candidates.filter(row => !related.some(item => item.pid === row.pid && item.startToken === row.startToken)).map(row => row.pid))
+  const paths = await nativeProcessWorkingDirectories(plan, candidates.filter(row => !related.some(item => item.pid === row.pid && item.startToken === row.startToken)).map(row => row.pid), deadline)
+  assertObservationDeadline(deadline)
   const domains = [plan.root, plan.workspace, plan.tmp].filter((path): path is string => !!path).map(path => existsSync(path) ? realpathSync(path) : resolve(path))
   const unattributed: NativeOrphanObservation['unattributed'] = []
   for (const row of candidates) {
@@ -149,10 +220,14 @@ function persistNativeOrphanObservation(plan: NativeOwnedPlan, observation: Nati
 }
 
 /** receipt/历史 owned 与正向任务关联分别结算；系统旁观进程不进入任务容量。 */
-export function nativeWorktreeProcessesStopped(plan: NativeOwnedPlan, terminate = false): boolean {
+export function nativeWorktreeProcessesStopped(plan: NativeOwnedPlan, terminate = false, deadline?: number): Promise<boolean> {
+  return observeSerially(plan, limit => processesStopped(plan, terminate, limit), deadline)
+}
+async function processesStopped(plan: NativeOwnedPlan, terminate: boolean, deadline: number): Promise<boolean> {
   const path = join(plan.root, 'owned-processes.json')
   if (!plan.pid || !existsSync(path) || !existsSync(join(plan.root, 'process-baseline.json'))) return false
-  sampleNativeWorktreeProcesses(plan)
+  await captureOwnedProcesses(plan, deadline)
+  assertObservationDeadline(deadline)
   let stopped = detachedRuntimeIsGone(plan.pid, plan.receiptFile)
   const owned = JSON.parse(readFileSync(path, 'utf8')) as ProcessIdentity[]
   for (const identity of owned) {
@@ -162,13 +237,16 @@ export function nativeWorktreeProcessesStopped(plan: NativeOwnedPlan, terminate 
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') continue; throw error }
     stopped = false
     if (terminate && token === identity.startToken) {
+      assertObservationDeadline(deadline)
       try { process.kill(identity.pid, 'SIGTERM') }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error }
     }
   }
-  const observation = classifyNativeWorktreeOrphans(plan)
+  const observation = await classifyOrphans(plan, deadline)
+  assertObservationDeadline(deadline)
   persistNativeOrphanObservation(plan, observation)
   const nativeStopped = stopped && observation.pending.length === 0
+  assertObservationDeadline(deadline)
   appendFileSync(join(plan.root, 'process-stop-observations.jsonl'), JSON.stringify({ boundaryVersion: 2, at: Date.now(), pid: plan.pid, receiptFile: plan.receiptFile, knownStopped: stopped, taskRelatedPending: observation.pending, unattributed: observation.unattributed, nativeStopped }) + '\n', { mode: 0o600 })
   return nativeStopped
 }
