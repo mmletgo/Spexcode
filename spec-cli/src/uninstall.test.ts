@@ -7,7 +7,9 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { join, relative, dirname } from 'node:path'
@@ -48,7 +50,7 @@ const CASES: HarnessCase[] = [
 ]
 
 function gitRepo(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix))
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), prefix)))
   execFileSync('git', ['-C', dir, 'init', '-q', '-b', 'main'])
   execFileSync('git', ['-C', dir, 'config', 'user.email', 'test@example.com'])
   execFileSync('git', ['-C', dir, 'config', 'user.name', 'Test User'])
@@ -248,6 +250,20 @@ Follow the house rules.
     writeFileSync(join(store, 'sessions', 'legacy-session', 'session.json'), '{"governed":true}\n')
     writeFileSync(join(store, 'hooks-manifest'), 'legacy global manifest\n')
     writeFileSync(join(store, 'plugin-folders'), '.legacy-global\n')
+    const runtimeSnapshot = join(store, 'sync', 'runtimes', 'frozen', 'trusted', 'package')
+    const runtimeDist = join(runtimeSnapshot, 'dist')
+    mkdirSync(runtimeDist, { recursive: true })
+    writeFileSync(join(runtimeDist, 'cli.js'), 'frozen runtime\n')
+    chmodSync(join(runtimeDist, 'cli.js'), 0o444)
+    const externalRuntime = join(userHome, 'external-runtime')
+    mkdirSync(externalRuntime)
+    writeFileSync(join(externalRuntime, 'keep.js'), 'external runtime: keep exactly\n')
+    chmodSync(join(externalRuntime, 'keep.js'), 0o444)
+    chmodSync(externalRuntime, 0o555)
+    symlinkSync(externalRuntime, join(runtimeSnapshot, 'dependency'), 'dir')
+    symlinkSync(join(userHome, 'missing-runtime'), join(runtimeSnapshot, 'missing-dependency'), 'dir')
+    chmodSync(runtimeDist, 0o555)
+    chmodSync(runtimeSnapshot, 0o555)
     writeFileSync(ledgers[0], '.former-host\n')
     const ledgerBundles = [
       writePlugin(proj, '.former-host', 'renamed-bundle', 'spexcode'),
@@ -307,6 +323,9 @@ Follow the house rules.
       assert.equal(readFileSync(join(proj, row.home, 'agents', 'user-owned.md'), 'utf8'), 'user agent: keep exactly\n', 'claude: foreign agent preserved')
     }
     assert.ok(!existsSync(store), `${row.id}: whole current/legacy per-project runtime store removed`)
+    assert.equal(readFileSync(join(externalRuntime, 'keep.js'), 'utf8'), 'external runtime: keep exactly\n', `${row.id}: external runtime symlink target bytes preserved`)
+    assert.equal(statSync(externalRuntime).mode & 0o777, 0o555, `${row.id}: external runtime symlink target directory mode preserved`)
+    assert.equal(statSync(join(externalRuntime, 'keep.js')).mode & 0o777, 0o444, `${row.id}: external runtime symlink target file mode preserved`)
     for (const bundle of [...ledgerBundles, standardBundle, folderStampedBundle]) assert.ok(!existsSync(bundle), `${row.id}: owned plugin bundle removed: ${bundle}`)
     assert.ok(existsSync(userPlugin), `${row.id}: foreign plugin preserved`)
     assert.equal(readFileSync(codexConfig, 'utf8'), userCodexConfig, `${row.id}: only project trust removed from global Codex config`)
@@ -330,6 +349,7 @@ Follow the house rules.
     assert.match(again, /no spexcode git hooks to remove/, `${row.id}: repeated hook backout is a clean no-op`)
     assert.doesNotMatch(again, /removed the global per-project store/, `${row.id}: absent store is not falsely reported removed`)
     assert.deepEqual(snapshotTree(join(proj, '.spec')), specBefore, `${row.id}: repeat keeps tracked intent`)
+    assert.equal(statSync(externalRuntime).mode & 0o777, 0o555, `${row.id}: repeat keeps external symlink target mode`)
     assert.ok(statSync(join(proj, '.spec')).isDirectory(), `${row.id}: spec asset remains usable`)
   }
 })

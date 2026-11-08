@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto'
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, symlinkSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { removeOwnedTree } from '@spexcode/spec-core'
 import { inspectTrustedRuntime } from './trusted-hooks.js'
 import type { TrustedRuntimeEntry } from './trusted-hooks.js'
 
@@ -177,9 +178,6 @@ export function freezeDeliveryRuntime(ownedDestination: string, trustedCliPackag
     if (error instanceof RuntimeFreezeError) throw error
     throw new RuntimeFreezeError('unsupported', `可信 runtime 无法冻结: ${(error as Error).message}`)
   } finally {
-    if (stage) {
-      const unlock = (path: string): void => { const stat = lstatSync(path); if (stat.isDirectory()) { chmodSync(path, 0o755); for (const name of readdirSync(path)) unlock(join(path, name)) } }
-      unlock(stage); rmSync(stage, { recursive: true, force: true })
-    }
+    if (stage) removeOwnedTree(stage)
   }
 }

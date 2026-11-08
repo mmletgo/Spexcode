@@ -3,7 +3,7 @@ import { basename, join, resolve, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 import { HARNESSES, type HarnessArtifacts } from './harness.js'
-import { runtimeRoot, readConfig, mainCheckout } from '@spexcode/spec-core'
+import { runtimeRoot, readConfig, mainCheckout, removeOwnedTree } from '@spexcode/spec-core'
 import { resolveHarnessTargets } from './harness-select.js'
 import { loadSkillConfig, loadAgentConfig } from '@spexcode/spec-core'
 import { dematerialize } from './materialize.js'
@@ -146,7 +146,7 @@ export function uninstall(targetArg: string | undefined, opts: { hooks?: boolean
   const removedStores: string[] = []
   for (const candidate of new Set([store].filter((path): path is string => !!path))) {
     if (!existsSync(candidate)) continue
-    rmSync(candidate, { recursive: true, force: true })
+    removeOwnedTree(candidate)
     removedStores.push(candidate)
   }
 

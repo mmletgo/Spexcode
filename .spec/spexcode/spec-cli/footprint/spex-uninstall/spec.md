@@ -45,6 +45,8 @@ It removes, for the resolved project:
   pre-slot manifest, the project's session records, backend control files, and versioned history-event ledgers.
   This is SpexCode's per-project runtime
   tier ([[runtime]]), not the user's spec asset, so the whole dir is ours to delete.
+  Frozen runtime snapshots within it may be read-only. The shared [[owned-tree-cleanup]] primitive unlocks only
+  real directories before deleting the tree; symlinks are removed without traversing or changing their targets.
 - The retired hashed event-cache layout is no longer a runtime input or uninstall target. Current stores use
   the per-project runtime root and its tree slots only; an old cache is historical residue for a separate
   migration operation, not something this command discovers or deletes.
