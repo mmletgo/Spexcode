@@ -79,10 +79,10 @@ export function readStoppedPhysicalDraft(commonDir: string, worktreePath: string
   if (status?.length === 0) return null
   const rows = status?.toString('utf8').split('\0').filter(Boolean) ?? []
   const ignoredOnly = rows.length > 0 && rows.every(row => row.startsWith('!! '))
+  if (rows.some(row => /^!! \.spex-sync-drafts(?:\/|$)/iu.test(row))) invalid()
   if (ignoredOnly) {
-    if (observedHeadCommit !== seed.baseCommit || observedTree !== seed.tree
-      || rows.some(row => /^!! \.spex-sync-drafts(?:\/|$)/iu.test(row))) invalid()
-  } else if (rows.some(row => !/^(?:\?\?|[ AM]{2}) /.test(row) || row.slice(3) !== binding.path)) invalid()
+    if (observedHeadCommit !== seed.baseCommit || observedTree !== seed.tree) invalid()
+  } else if (rows.some(row => !row.startsWith('!! ') && (!/^(?:\?\?|[ AM]{2}) /.test(row) || row.slice(3) !== binding.path))) invalid()
   const indexPath = resolve(worktreePath, git('rev-parse', '--git-path', 'index').toString().trim()), indexSha256 = contentHash(readFileSync(indexPath))
   const index = git('ls-files', '--stage', '-z').toString('utf8').split('\0').filter(Boolean).map(row => {
     const match = /^(\d{6}) ([a-f0-9]+) 0\t(.+)$/s.exec(row)
