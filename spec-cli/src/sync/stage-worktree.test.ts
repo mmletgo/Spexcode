@@ -161,30 +161,40 @@ for (const mode of ['clean', 'ignored', 'ignored-foreign-draft', 'untracked', 'h
   assert.equal(git(f.root, 'rev-parse', 'HEAD'), head)
 })
 
-for (const kind of ['untracked', 'tracked', 'staged'] as const) test(`stopped physical draft只读保存工作区原bytes，不授clean交付 kind=${kind}`, t => {
+for (const kind of ['untracked', 'tracked', 'staged'] as const) test(`stopped physical draft与普通ignored缓存并存，只读保存原bytes，不授clean交付 kind=${kind}`, t => {
   const f = fixture(t), ownerDigest = 'a'.repeat(64), path = `.spex-sync-drafts/${ownerDigest}.json`, schema = '{"type":"object"}'
   const binding = { ownerDigest, path, sourceInputId: 'input', schemaDigest: contentHash(schema) }
   const seed = stageWorktree(f.commonDir, f.parent, overlayStageTree(f.commonDir, f.tree, [{ path: path.replace('.json', '.schema.json'), source: schema }, { path: path.replace('.json', '.context.json'), source: '{"readonly":true}' }, ...(kind === 'tracked' ? [{ path, source: '{EARLIER' }] : [])]), 'edit')
   git(f.root, 'checkout', '--detach', seed.baseCommit)
+  writeFileSync(join(f.root, '.git/info/exclude'), '/runtime-cache/\n')
+  mkdirSync(join(f.root, 'runtime-cache')); writeFileSync(join(f.root, 'runtime-cache/retained'), 'ignored cache is not draft material')
   const source = '{INVALID_JSON原文\n'; writeFileSync(join(f.root, path), source)
   if (kind === 'staged') { git(f.root, 'add', path); writeFileSync(join(f.root, path), source + '未暂存的最新正文') }
   const bytes = readFileSync(join(f.root, path)), index = readFileSync(join(f.root, '.git/index'))
+  const statusArgs = ['--no-optional-locks', 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored']
+  const status = git(f.root, ...statusArgs)
   assert.throws(() => nativeWorktreeResult(f.root, seed), { code: 'native_worktree_result_invalid' })
   const material = readStoppedPhysicalDraft(f.commonDir, f.root, seed, binding)!
-  assert.equal(material.source, bytes.toString('utf8')); assert.equal(material.observedHeadCommit, seed.baseCommit)
-  assert.equal(material.indexSha256, contentHash(index)); assert.deepEqual(readFileSync(join(f.root, '.git/index')), index)
+  assert.deepEqual(material, { source: bytes.toString('utf8'), observedHeadCommit: seed.baseCommit, observedTree: seed.tree, indexSha256: contentHash(index) })
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), index)
   assert.deepEqual(readFileSync(join(f.root, path)), bytes); assert.equal(git(f.root, 'rev-parse', 'HEAD'), seed.baseCommit)
+  assert.equal(git(f.root, ...statusArgs), status)
+  assert.equal(readFileSync(join(f.root, 'runtime-cache/retained'), 'utf8'), 'ignored cache is not draft material')
 })
 
-for (const defect of ['source', 'test', 'schema', 'context', 'absence', 'index', 'hidden-source', 'mode', 'symlink'] as const) test(`stopped physical draft不豁免其他文件/index对象与absence defect=${defect}`, t => {
+for (const defect of ['source', 'test', 'schema', 'context', 'absence', 'index', 'hidden-source', 'mode', 'symlink', 'ignored-namespace', 'ignored-foreign-draft', 'ignored-foreign-sidecar', 'ignored-foreign-case'] as const) test(`stopped physical draft不豁免其他文件/index对象与absence defect=${defect}`, t => {
   const f = fixture(t), ownerDigest = 'b'.repeat(64), path = `.spex-sync-drafts/${ownerDigest}.json`, schema = '{}'
   const binding = { ownerDigest, path, sourceInputId: 'input', schemaDigest: contentHash(schema) }
   const seed = stageWorktree(f.commonDir, f.parent, overlayStageTree(f.commonDir, f.tree, [{ path: path.replace('.json', '.schema.json'), source: schema }, { path: path.replace('.json', '.context.json'), source: '{}' }]), 'edit')
   git(f.root, 'checkout', '--detach', seed.baseCommit); writeFileSync(join(f.root, path), '{partial')
+  const foreign = defect === 'ignored-foreign-draft' ? '.spex-sync-drafts/foreign.json' : defect === 'ignored-foreign-sidecar' ? '.spex-sync-drafts/foreign.schema.json' : defect === 'ignored-foreign-case' ? '.SPEX-SYNC-DRAFTS/foreign.context.json' : null
+  writeFileSync(join(f.root, '.git/info/exclude'), ['/runtime-cache/', ...(foreign ? [`/${foreign}`, `/${foreign.toLowerCase()}`] : []), ...(defect === 'ignored-namespace' ? ['/.spex-sync-drafts/'] : [])].join('\n') + '\n')
+  mkdirSync(join(f.root, 'runtime-cache')); writeFileSync(join(f.root, 'runtime-cache/retained'), 'ordinary ignored cache')
+  if (foreign) { mkdirSync(join(f.root, foreign, '..'), { recursive: true }); writeFileSync(join(f.root, foreign), 'unauthorized ignored draft material') }
   const protectedPath = defect === 'test' ? 'oracle.test.mjs' : defect === 'schema' ? path.replace('.json', '.schema.json') : defect === 'context' ? path.replace('.json', '.context.json') : defect === 'absence' ? 'unexpected.test.mjs' : 'source.mjs'
   if (defect === 'mode') chmodSync(join(f.root, protectedPath), 0o755)
   else if (defect === 'symlink') { rmSync(join(f.root, path)); symlinkSync('source.mjs', join(f.root, path)) }
-  else {
+  else if (!defect.startsWith('ignored-')) {
     const original = defect === 'index' ? readFileSync(join(f.root, protectedPath)) : undefined
     if (defect === 'hidden-source') git(f.root, 'update-index', '--assume-unchanged', protectedPath)
     writeFileSync(join(f.root, protectedPath), 'unauthorized')
@@ -245,6 +255,9 @@ for (const mode of ['absent', 'seed-draft', 'hidden-source', 'index', 'ignored-d
   const index = readFileSync(join(f.root, '.git/index'))
   const head = git(f.root, 'rev-parse', 'HEAD')
   if (mode === 'absent' || mode === 'seed-draft') assert.equal(readStoppedPhysicalDraft(f.commonDir, f.root, seed, binding), null)
+  else if (mode === 'dirty-draft') assert.deepEqual(readStoppedPhysicalDraft(f.commonDir, f.root, seed, binding), {
+    source: readFileSync(join(f.root, path), 'utf8'), observedHeadCommit: seed.baseCommit, observedTree: seed.tree, indexSha256: contentHash(index),
+  })
   else assert.throws(() => readStoppedPhysicalDraft(f.commonDir, f.root, seed, binding), /越界变化/)
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), index)
   assert.equal(git(f.root, 'rev-parse', 'HEAD'), head)
