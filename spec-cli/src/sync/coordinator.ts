@@ -1105,7 +1105,9 @@ function acceptanceRuns(frozen: FrozenContracts, ready: SyncScope, plan: SyncCoo
   return runs.sort((a, b) => a.verificationId.localeCompare(b.verificationId))
 }
 async function recoverResources(store: SyncStore, operation: SyncOperation, options: Pick<SyncCoordinatorOptions, 'recoveryOnly' | 'verificationDriver' | 'verificationTransport'> & { resourceRecoveryOnly?: true }, all: boolean): Promise<boolean> {
-  for (const item of store.listRecoverableResources().filter(item => item.operation.id === operation.id && (all || item.attempt.id !== operation.currentAttemptId))) {
+  const removedNative = store.listAttempts(operation.id).filter(attempt => all || attempt.id !== operation.currentAttemptId).flatMap(attempt =>
+    store.listResources(attempt.id).filter(resource => resource.phase === 'removed' && resource.plan.kind === 'native_session').map(resource => ({ operation, attempt, resource })))
+  for (const item of [...store.listRecoverableResources().filter(item => item.operation.id === operation.id && (all || item.attempt.id !== operation.currentAttemptId)), ...removedNative]) {
     const fence = fenceFor(item.operation, item.attempt), commonDir = operation.input.source.commonDir
     if (item.resource.plan.inputId !== operation.input.id) fail('resource_recovery', '既有resource不匹配原frozen input')
     if (item.resource.plan.kind === 'verification') {
@@ -1121,7 +1123,8 @@ async function recoverResources(store: SyncStore, operation: SyncOperation, opti
       const plan = JSON.parse(readEvidence(commonDir, item.resource.plan.planBlob).toString('utf8')) as NativeRunPlan
       const dispatch = item.attempt.dispatchPlans.find(dispatch => dispatch.key === item.resource.plan.key)
       if (!dispatch || plan.schemaVersion !== 1 || plan.operationId !== operation.id || plan.attemptId !== item.attempt.id || plan.inputId !== operation.input.id || plan.candidateDigest !== item.resource.plan.candidateDigest || plan.request.requestKey !== item.resource.plan.key || plan.requestDigest !== item.resource.plan.payloadDigest || contentHash(JSON.stringify(plan.request)) !== plan.requestDigest || dispatch.requestDigest !== plan.requestDigest || plan.sessionCreateKey !== dispatch.sessionCreateKey || plan.expectedSessionId !== sessionIdForCreateKey(dispatch.sessionCreateKey)) fail('resource_recovery', 'native resource plan differs from frozen request: 既有Native计划不匹配原resource/dispatch/创建键与身份')
-      try { await createAttemptRunner(store, fence, { resourceRecoveryOnly: options.resourceRecoveryOnly })({ ...plan.request, signal: AbortSignal.abort() }) }
+      if (item.resource.phase === 'removed' && !plan.request.worktree) continue
+      try { await createAttemptRunner(store, fence, { resourceRecoveryOnly: options.resourceRecoveryOnly, retireSettledWorktrees: true })({ ...plan.request, signal: AbortSignal.abort() }) }
       catch (error) { if (store.findResource(item.attempt.id, item.resource.plan.key)?.phase !== 'removed') fail('resource_recovery', error instanceof Error ? error.message : String(error)) }
       if (store.findResource(item.attempt.id, item.resource.plan.key)?.phase !== 'removed') return false
     }
