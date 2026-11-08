@@ -20,6 +20,8 @@ related:
 
 ## expanded spec
 
+本次 ZCodeNativeTurnFailedError 的不可重试 provider 业务拒绝仅在精确原生身份匹配且 exact adapter.stop 确证 nativeStopped 后，以 failed/errorCode=unsupported 保存固定无正文摘要。停止未知仍 cancelling 占容量，不能先持久 unsupported；不授 output、rejectedOutput 或 failedWorktree。run、同键冷读取及 removed 回放保持原码和原 message；旧 native_turn_transport_failed/generic failed 不补读旧 terminal 或追补分类。P0/P1 材料读取对 unsupported 保守跳过，原成功、格式、Git、预算及停止门不变。
+
 本次执行中新认证的 ZCode worktree 原生失败由 [[zcode-structured-runtime]] 保留 failed 首要原因，执行队列复用原 exact adapter.stop；只有独立真实停止证明成立，才以既有 failed+cancellation.nativeStopped 交给资源桥结算 terminal→removed。错误和清理事实分别保存在既有 error/cancellation，不增加持久格式或成功授权；停止未知仍 cancelling，首要失败不被清理诊断遮蔽。该路径不提供 output、rejectedOutput 或 failedWorktree，不扫描或重签历史 failed/cancelling、saved/reserved 请求。成功、schema、Git、独审与显式取消门禁保持；新不同请求只在原资源正式释放后取得容量，同键恢复不发送。
 
 新发生的 Claude worktree 普通 failed 同样只在记录的 thread/turn 与原 claudeNative session/user 精确一致时复用既有精确停止协议；确证后保存原 failed/error 与独立 cancellation.nativeStopped，未知保持原失败诊断和 cancelling。此清理事实不授予格式失败、output、rejectedOutput 或 failedWorktree；历史 failed 冷读取不补签停止证明。

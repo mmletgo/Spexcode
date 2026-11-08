@@ -108,6 +108,8 @@ Native局部P1的精确结构输出格式失败沿同一checkpoint接缝传递�
 
 实现文件分区的生成/独审失败保留原 Native session/thread/turn 与 requestKey/inputDigest，不让 aggregate 首失败抹去各局部故障身份；局部 candidate 命名空间保持，聚合失败不因此获得成功或续修资格。
 
+实现文件规划遇到原生 unsupported 时保留该终态，显式取消仍优先。分区调度、P1普通层与纯父接口层、P2准备与最终独审的主失败统一先选原 code 为 cancellation_pending 的未确证停止，再选原 status/code 为 unsupported 的拒绝，其余保持原序首失败；主状态、完整failure及原message来自同一结果，不把普通native_rpc_timeout提升为停止未知。异常后仍停止新调度、等待全部在途并保持原setImmediate让步与并行上限；P1同层先登记全部已收齐原件，所有局部checkpoint和证据保留，不因选主错而丢失兄弟结果。该选择不改变容量、fence、写权、材料批准或成功门槛。
+
 最终独审格式续修只经对应partition/edge的reviewRepair loader；成功组的input/prompt/schema/seed与原repairContext不注入兄弟格式错误，继续既有严格accept来源校验。真实新派发前以既有checkpoint记录该组完整冻结input原件，失败来源仅作诊断refs；当前candidate及所有局部和跨边覆盖仍重新核验，不把历史untrusted final当作accept或候选。
 
 已认证reviewCandidate续审复用原file-writer-plan与builderTraces、从实际候选Git差量重建结果变化，跳过实现规划/生成；两方向共用原候选、V1、发布基树和逐组/跨边独审门，不迁移局部builder接受缓存。

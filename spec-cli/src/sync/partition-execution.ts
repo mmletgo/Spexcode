@@ -49,6 +49,14 @@ export type PartitionAnalysisFailures = { planDigest: string; failures: Partitio
 const within = (path: string, paths: readonly string[]): boolean => paths.some(parent => path === parent || path.startsWith(`${parent}/`))
 const unique = (values: readonly string[]): string[] => [...new Set(values)].sort()
 const reject = (message: string): never => { throw Object.assign(new Error(message), { code: 'partition_binding' }) }
+function primaryPartitionFailure<T>(values: readonly T[]): T | undefined {
+  const priority = (value: unknown): number => {
+    const failure = value as { code?: unknown; status?: unknown; failure?: { code?: unknown } | null } | null | undefined
+    const code = failure?.failure?.code ?? failure?.code
+    return code === 'cancellation_pending' ? 2 : code === 'unsupported' || failure?.status === 'unsupported' ? 1 : 0
+  }
+  return values.reduce<T | undefined>((primary, value) => priority(value) > priority(primary) ? value : primary, values[0])
+}
 function readonlyRepairInput(input: ElaborationInput, repair: ReadonlySpecRepair, inheritFacts = false): ElaborationInput {
   if (repair.kind === 'partition_seal') {
     const repaired = { ...input, readonlySpecRepair: repair }
@@ -162,7 +170,7 @@ export async function mapSyncPartitions<T, R>(items: readonly T[], maxParallel: 
     while (!stopped && !signal?.aborted && next < items.length) {
       const index = next++
       try { results[index] = await run(items[index], index) }
-      catch (error) { if (!stopped) failure = error; stopped = true }
+      catch (error) { failure = stopped ? primaryPartitionFailure([failure, error]) : error; stopped = true }
       await yieldToControl()
     }
   }))
@@ -456,12 +464,10 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
   while (pending.length) {
     const layer = pending.filter(partition => !pending.some(ancestor => ancestor.id !== partition.id && seeds.get(partition.id)!.parentPath.startsWith(seeds.get(ancestor.id)!.parentPath.slice(0, -'spec.md'.length))))
     const results = await mapSyncPartitions(layer, maxParallel, input.signal, run)
-    for (let index = 0; index < layer.length; index++) {
-      const partition = layer[index], result = results[index]
-      byPartition.set(partition.id, result)
-      if (!result.structurePassed || !result.reviewPassed) return { ...result, contracts: [], graph: null, coverage: null, partitionEvidence: [{ partitionId: partition.id, resultRef: writeEvidence(commonDir, result) }] }
-      for (const change of result.changes) settledSources.set(change.path, change.source)
-    }
+    for (let index = 0; index < layer.length; index++) byPartition.set(layer[index].id, results[index])
+    const failed = primaryPartitionFailure(results.filter(result => !result.structurePassed || !result.reviewPassed))
+    if (failed) return { ...failed, contracts: [], graph: null, coverage: null, partitionEvidence: writers.filter(partition => byPartition.has(partition.id)).map(partition => ({ partitionId: partition.id, resultRef: writeEvidence(commonDir, byPartition.get(partition.id)!) })) }
+    for (const result of results) for (const change of result.changes) settledSources.set(change.path, change.source)
     pending = pending.filter(partition => !byPartition.has(partition.id))
   }
   const remaining = writers.filter(partition => !byPartition.has(partition.id))
@@ -485,10 +491,11 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
   const localStructurePassed = results.every(result => result.structurePassed)
   const reviewPassed = results.every(result => result.reviewPassed)
   const structurePassed = localStructurePassed && seal.seal.passed
+  const failed = primaryPartitionFailure(results.filter(result => !result.structurePassed || !result.reviewPassed || result.failure))
   const status = !structurePassed || !reviewPassed
-    ? results.find(result => !result.structurePassed || !result.reviewPassed)?.status ?? 'failed'
+    ? failed?.status ?? 'failed'
     : gaps.some(gap => gap.gapKind === 'conflict') ? 'conflict' : gaps.length ? 'needs_input' : 'complete'
-  const failure = results.find(result => result.failure)?.failure ?? (!seal.seal.passed ? { code: 'partition_final_seal_failed', message: JSON.stringify(seal.seal.findings.map(({ code, itemId, message }) => ({ code, itemId, message }))) } : null)
+  const failure = failed?.failure ?? (!seal.seal.passed ? { code: 'partition_final_seal_failed', message: JSON.stringify(seal.seal.findings.map(({ code, itemId, message }) => ({ code, itemId, message }))) } : null)
   const compact = { ...first, partitionBinding: undefined, readonlySpecRepair: undefined, repairDiagnostics: undefined, phase: 'partitioned_final' as const, inputDigest: partitionedElaborationInputDigest(plan.digest, results.map(result => result.inputDigest), analysisOnlyPartitions), candidateDigest: seal.seal.candidateDigest, changes,
     readyIds: structurePassed ? seal.coverage.items.filter(item => item.blockedBy.length === 0 && item.kind !== 'GAP').map(item => item.id) : [], readyFlowIds: readiness.readyFlowIds,
     blockedIds: seal.coverage.items.filter(item => item.blockedBy.length > 0).map(item => item.id), blockedFlows: readiness.blockedFlows,
@@ -677,7 +684,7 @@ export async function generateSyncPartitions(input: GenerationInput, plan: SyncP
     locals = dispatch.locals
   } catch (error) {
     const cause = error as { code?: string; message?: string; sessionId?: string; threadId?: string; turnId?: string; requestKey?: string; inputDigest?: string }
-    return { status: input.signal?.aborted ? 'cancelled' : 'repair', inputId: input.snapshot.id, inputDigest: '', candidate: null, candidateFiles: null, output: planned, reviewOutput: null, review: null, validationFindings: [], traces: planned.traces, candidateValidated: false, reviewPassed: false, runtimeVerification: 'not_run', delivery: 'not_applied', failure: { code: cause.code ?? 'implementation_plan_invalid', message: cause.message ?? String(error), ...(cause.sessionId ? { sessionId: cause.sessionId, ...(cause.threadId ? { threadId: cause.threadId } : {}), ...(cause.turnId ? { turnId: cause.turnId } : {}), ...(cause.requestKey ? { requestKey: cause.requestKey, inputDigest: cause.inputDigest } : {}) } : {}) } }
+    return { status: input.signal?.aborted ? 'cancelled' : cause.code === 'unsupported' ? 'unsupported' : 'repair', inputId: input.snapshot.id, inputDigest: '', candidate: null, candidateFiles: null, output: planned, reviewOutput: null, review: null, validationFindings: [], traces: planned.traces, candidateValidated: false, reviewPassed: false, runtimeVerification: 'not_run', delivery: 'not_applied', failure: { code: cause.code ?? 'implementation_plan_invalid', message: cause.message ?? String(error), ...(cause.sessionId ? { sessionId: cause.sessionId, ...(cause.threadId ? { threadId: cause.threadId } : {}), ...(cause.turnId ? { turnId: cause.turnId } : {}), ...(cause.requestKey ? { requestKey: cause.requestKey, inputDigest: cause.inputDigest } : {}) } : {}) } }
   }
   const prepared = specOnly || options.reviewCandidate ? [] : await mapSyncPartitions(locals, maxParallel, input.signal, async local => {
     const key = `partition:${local.partition.id}:generation`, saved = checkpoints.load<GenerationResult>(key)
@@ -691,7 +698,7 @@ export async function generateSyncPartitions(input: GenerationInput, plan: SyncP
     checkpoints.save(key, compact)
     return compact
   })
-  const failed = prepared.find(result => result.status !== 'prepared')
+  const failed = primaryPartitionFailure(prepared.filter(result => result.status !== 'prepared'))
   if (failed) return { ...failed, candidateFiles: null }
   const interfaceSpecChanges = input.elaboratedSpecs.filter(spec => interfaceParents.has(generationPartitions.find(partition => partition.targets.some(target => target.path === spec.path))?.id ?? '') && input.files.get(spec.path) !== spec.source).map(spec => {
     const before = input.manifest.entries.find(entry => entry.path === spec.path)
@@ -748,7 +755,7 @@ export async function generateSyncPartitions(input: GenerationInput, plan: SyncP
   base.traces = [...builders, ...checked.flatMap(result => result.traces)]
   independentTraces(base.traces)
   base.partitionEvidence = checked.flatMap((result, index) => result.review ? [{ partitionId: reviews[index].id, candidateDigest: candidate.digest, review: result.review, traces: result.traces }] : [])
-  const rejected = checked.find(result => !result.reviewPassed)
+  const rejected = primaryPartitionFailure(checked.filter(result => !result.reviewPassed))
   if (rejected) return { ...base, status: rejected.status, failure: rejected.failure, review: rejected.review }
   const checkedIds = unique(checked.flatMap(result => result.review!.checkedIds))
   if (input.readyIds.some(id => !checkedIds.includes(id))) reject('最终候选独审并集遗漏预定业务ID')

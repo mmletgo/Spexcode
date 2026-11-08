@@ -3840,6 +3840,47 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-wron
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
 })
 
+for (const target of ['elaboration_generate', 'code_generate'] as const) for (const pending of [true, false]) test(`并发RPC三分区保停止未知主诊断 ${target} pending=${pending}`, async t => {
+  const variants = ['export', 'import', 'archive'].map(name => {
+    const module = name === 'export' ? '' : name === 'import' ? 'beta/' : 'gamma/'
+    const path = `.spec/project/${module}${name}-contract/spec.md`, sourcePath = `src/${module}${name}.js`
+    const source = original.replaceAll('export-job', `${name}-job`).replaceAll('EXPORT', name.toUpperCase()).replaceAll('export-contract', `${name}-contract`).replaceAll('src/export.js', sourcePath).replaceAll('tests/export.test.mjs', `tests/${name}.test.mjs`).replaceAll(`VERIFY-${name.toUpperCase()}-01`, 'VERIFY-EXPORT-01').replaceAll(`decision:${name.toUpperCase()}-POLICY`, 'decision:EXPORT-POLICY').replaceAll(`["node","--test","tests/${name}.test.mjs"]`, '["node","--test","tests/export.test.mjs"]')
+    return { name, path, source: name === 'export' ? source : source.replace(/\n### VERIFY\n[\s\S]*?(?=\n当前固定业务事实)/, '\n'), sourcePath }
+  })
+  const extras = Object.fromEntries(variants.slice(1).flatMap(({ name, path, source, sourcePath }) => [[path, source], [sourcePath, readFileSync(new URL('src/export.js', fixturePath), 'utf8')], [`tests/${name}.test.mjs`, readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', name.toUpperCase()).replaceAll('src/export.js', sourcePath)]]))
+  const f = await fixture(t, { maxAttempts: 2, maxCalls: 18, maxRepairs: 1, timeoutMs: 120000 }, false, original, 'project', original, {
+    version: 'sync-coordinator-v2', direction: 'spec_to_code', sourcePaths: ['src'], targets: variants.map(({ name, path }) => ({ nodeId: `${name}-contract`, path })),
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 3 },
+  }, undefined, 'spec', undefined, false, extras)
+  const codes = [pending ? 'cancellation_pending' : 'failed', 'unsupported', 'native_rpc_timeout'] as const, failures: { code: string; message: string }[] = []
+  f.transform((output, request) => {
+    if (request.purpose === target) {
+      const code = codes[failures.length], message = '原三分区诊断-' + code
+      assert(code, '不得派发新分区或新attempt'); failures.push({ code, message })
+      throw new StructuredSessionError(code, message)
+    }
+    if (request.purpose === 'elaboration_generate') {
+      const frozen = JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as { targets: { path: string }[] }
+      const variant = variants.find(item => item.path === frozen.targets[0].path)!, generated = rows(variant.source, variant.path)
+      generated.changes[0].nodeId = `${variant.name}-contract`
+      for (const entry of generated.applicability) entry.affectedIds = [`REQ-${variant.name.toUpperCase()}-01`]
+      return generated
+    }
+    return output
+  })
+  const result = await runSyncOperation(f.store, f.operation.id, f.options), attempts = f.store.listAttempts(f.operation.id)
+  assert.equal(failures.length, 3, JSON.stringify({ failure: result.failure, calls: f.calls.map(call => call.purpose) })); assert.equal(attempts.length, 1)
+  assert.equal(result.status, pending ? 'recovery_required' : 'unsupported', JSON.stringify(result.failure)); assert.equal(result.failure?.code, pending ? 'cancellation_pending' : 'unsupported')
+  assert.ok(result.failure!.message.endsWith('原三分区诊断-' + (pending ? 'cancellation_pending' : 'unsupported')))
+  assert.equal(result.failure!.evidenceRefs.length, 1)
+  const aggregate = JSON.parse(readEvidence(f.input.source.commonDir, result.failure!.evidenceRefs[0]).toString()) as ElaborationResult
+  assert.equal(aggregate.failure!.code, pending ? 'cancellation_pending' : 'unsupported')
+  const locals = readSyncCheckpoints(f.store, result.operation, attempts[0]).json.map(item => item.value as { failure?: { code: string; message: string } }).filter(value => value.failure && failures.some(failure => failure.message === value.failure!.message))
+  for (const failure of failures) assert.ok(locals.some(local => JSON.stringify(local.failure) === JSON.stringify(failure)), '全部分区原诊断须保留')
+  assert.equal(f.store.listJournals(f.operation.id).length, 0); assert.deepEqual(f.store.listRecoverableResources(), [])
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+})
+
 for (const target of ['code_generate', 'code_review'] as const) for (const mode of ['settled', 'partition', 'unknown', 'paused', 'wrong-proof'] as const) test(`P2 typed RPC ${target}/${mode} preserves failure identity and shares exact-stop repair admission`, async t => {
   const f = await fixture(t, { maxAttempts: 2, maxCalls: 12, maxRepairs: 2, timeoutMs: 30000 }, false, original, 'project', original, mode === 'partition' ? { version: 'sync-coordinator-v2', direction: 'spec_to_code', sourcePaths: ['src/export.js'], partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 2 } } : {})
   const originalRunner = f.options.runner!, records = new Map<string, NativeRunRecord>()
@@ -4651,7 +4692,7 @@ test('v2已审局部进度 正式pause恢复保留旧unsupported timeout历史�
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
 })
 
-for (const mode of ['analysis-live', 'analysis-two-accepted', 'analysis-restart', 'analysis-pause', 'analysis-settled-timeout', 'analysis-format', 'analysis-schema', 'analysis-git', 'analysis-path', 'analysis-basis', 'analysis-mixed', 'analysis-mixed-unsupported', 'analysis-mixed-pause', 'analysis-transport-settled', 'analysis-transport-ordinary', 'analysis-transport-unknown', 'analysis-transport-foreign', 'analysis-transport-unreleased', 'analysis-ref', 'analysis-plan', 'analysis-selection', 'analysis-readset', 'analysis-input', 'analysis-unreviewed', 'analysis-foreign'] as const) test(`v2已审局部进度 ${mode} 只重跑失败分析区`, async t => {
+for (const mode of ['analysis-live', 'analysis-two-accepted', 'analysis-restart', 'analysis-pause', 'analysis-settled-timeout', 'analysis-format', 'analysis-schema', 'analysis-git', 'analysis-path', 'analysis-basis', 'analysis-mixed', 'analysis-mixed-unsupported', 'analysis-mixed-unsupported-pending', 'analysis-mixed-pause', 'analysis-transport-settled', 'analysis-transport-ordinary', 'analysis-transport-unknown', 'analysis-transport-foreign', 'analysis-transport-unreleased', 'analysis-ref', 'analysis-plan', 'analysis-selection', 'analysis-readset', 'analysis-input', 'analysis-unreviewed', 'analysis-foreign'] as const) test(`v2已审局部进度 ${mode} 只重跑失败分析区`, async t => {
   const transport = mode.startsWith('analysis-transport-')
   const includeArchive = transport || mode === 'analysis-two-accepted' || mode === 'analysis-mixed-pause'
   const otherPath = '.spec/project/beta/import-contract/spec.md'
@@ -4689,6 +4730,10 @@ for (const mode of ['analysis-live', 'analysis-two-accepted', 'analysis-restart'
         assert.deepEqual(context.repairDiagnostics, [{ partitionId: context.partition.id, code, message }])
       }
       if (mode === 'analysis-settled-timeout' && attempt.number === 1 && imported && request.purpose === 'code_behavior_analyze') throw new SettledSessionCreateTimeoutError({ version: 1, sessionId: 'settled-fixture-session', requestDigest: contentHash(request.requestKey), payloadHash: contentHash(request.prompt), code: 'session_create_timeout', phase: 'record-write', nativeStopped: true, nativeStatus: 'notStarted', cleanupComplete: true })
+      if (mode === 'analysis-mixed-unsupported-pending' && request.purpose === 'code_behavior_review') {
+        if (imported) await new Promise(resolve => setTimeout(resolve, 15))
+        throw Object.assign(new Error(imported ? '原P0停止未知诊断' : '原P0不支持诊断'), { code: imported ? 'cancellation_pending' : 'unsupported' })
+      }
       if (mode === 'analysis-mixed' && !imported && request.purpose === 'code_behavior_review') { await new Promise(resolve => setTimeout(resolve, 15)); throw Object.assign(new Error('未知资源不能被兄弟业务repair遮蔽'), { code: 'cancellation_pending' }) }
       if (mode === 'analysis-mixed-unsupported' && !imported && request.purpose === 'code_behavior_review') throw Object.assign(new Error('unsupported不能被兄弟业务repair遮蔽'), { code: 'unsupported' })
       if (mode === 'analysis-mixed-pause' && !imported && !archived && request.purpose === 'code_behavior_review') throw Object.assign(new Error('unsupported不能被兄弟业务repair遮蔽'), { code: 'unsupported' })
@@ -4789,7 +4834,7 @@ for (const mode of ['analysis-live', 'analysis-two-accepted', 'analysis-restart'
     if (store.readAttempt(fence.attemptId).number === 1) {
       if (transport) return recordFailure(fence, issue)
       const local = store.readAttempt(fence.attemptId).checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(value => value.stage?.startsWith('partition:') && value.stage.endsWith(':analysis'))
-      if (['analysis-mixed', 'analysis-mixed-unsupported'].includes(mode)) return recordFailure(fence, issue)
+      if (['analysis-mixed', 'analysis-mixed-unsupported', 'analysis-mixed-unsupported-pending'].includes(mode)) return recordFailure(fence, issue)
       assert.ok(local)
       const accepted = JSON.parse(readEvidence(f.input.source.commonDir, local.resultRef).toString())
       assert.equal(accepted.reviewPassed, true)
@@ -4862,11 +4907,13 @@ for (const mode of ['analysis-live', 'analysis-two-accepted', 'analysis-restart'
     store = new SyncStore(protocol, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) }); f.useStore(store)
     result = await runSyncOperation(store, f.operation.id, f.options)
   }
-  if (mode === 'analysis-mixed' || mode === 'analysis-mixed-unsupported') {
-    assert.equal(store.listAttempts(f.operation.id).length, 1); assert.equal(result.failure?.code, mode === 'analysis-mixed' ? 'cancellation_pending' : 'unsupported')
+  if (mode === 'analysis-mixed' || mode === 'analysis-mixed-unsupported' || mode === 'analysis-mixed-unsupported-pending') {
+    assert.equal(store.listAttempts(f.operation.id).length, 1); assert.equal(result.failure?.code, mode === 'analysis-mixed-unsupported' ? 'unsupported' : 'cancellation_pending')
+    if (mode === 'analysis-mixed-unsupported-pending') { assert.equal(result.status, 'recovery_required'); assert.match(result.failure!.message, /原P0停止未知诊断/); assert.equal(f.calls.length, 4); assert.deepEqual(store.listJournals(f.operation.id), []); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index) }
     const saved = store.listAttempts(f.operation.id)[0].checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(stage => stage.stage === 'partition:analysis-failures')
     const failures = JSON.parse(readEvidence(f.input.source.commonDir, saved.resultRef).toString()).failures as { code: string }[]
     assert.equal(failures.length, 2)
+    if (mode === 'analysis-mixed-unsupported-pending') assert.deepEqual(failures.map(failure => failure.code), ['unsupported', 'cancellation_pending'])
     if (mode === 'analysis-mixed-unsupported') {
       assert.equal(store.readAttempt(result.operation.currentAttemptId!).failure?.kind, 'unsupported')
       assert.ok(failures.some(failure => failure.code === 'behavior_analysis_invalid' || failure.code === 'behavior_review_failed'))

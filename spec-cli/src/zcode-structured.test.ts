@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { processStartToken, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
 import { freezeContext, frozenReadTool, readFrozenRange } from './frozen-context.js'
 import { ZCODE_FROZEN_TOOL, type ZCodeFrozenWitness, type ZCodeNativeEvent } from './zcode-frozen-evidence.js'
-import { structuredExecutionPolicy } from './session-structured-policy.js'
+import { structuredExecutionPolicy, type StructuredExecution } from './session-structured-policy.js'
 import { sampleNativeWorktreeProcesses } from './native-worktree-runtime.js'
 import { assertZCodeModelSnapshot, assertZCodeStoppedDraftSource, decodeZCodeStructuredText, stopZCodeStructuredTurn, zcodeCapability, zcodeIdleObservation, zcodeNativeConfigModel, zcodeNativeConfigSelection, zcodeNativeModel, zcodeNativeSelection, zcodeProofEvent, zcodeRuntimeConfiguration, zcodeStructuredPrompt, zcodeStructuredTurn, ZCodeNativeTurnFailedError, type ZCodeStructuredExecution } from './zcode-structured.js'
 
@@ -22,6 +22,39 @@ test('Native failure diagnostics expose only safe errno codes and exact turn ide
     assert.equal(worktree.code, code === 'EPIPE' ? 'native_turn_transport_failed' : 'failed')
     assert.equal(worktree.message, error.message)
   }
+})
+
+test('provider business rejection requires the exact non-retryable EPIPE attribution', () => {
+  const provider = { source: 'provider', errorPhase: 'stream', exceptionKind: 'provider_business', transport: 'sse', retryable: false, message: 'UNTRUSTED_PROVIDER_BODY' }
+  for (const { attribution, expected } of [
+    { attribution: provider, expected: 'unsupported' },
+    { attribution: { source: 'provider', exceptionKind: 'provider_business', retryable: false }, expected: 'unsupported' },
+    { attribution: undefined, expected: 'native_turn_transport_failed' },
+    { attribution: null, expected: 'native_turn_transport_failed' },
+    { attribution: 'UNTRUSTED_PROVIDER_BODY', expected: 'native_turn_transport_failed' },
+    { attribution: { ...provider, source: undefined }, expected: 'native_turn_transport_failed' },
+    { attribution: { ...provider, source: 'runtime' }, expected: 'native_turn_transport_failed' },
+    { attribution: { ...provider, exceptionKind: undefined }, expected: 'native_turn_transport_failed' },
+    { attribution: { ...provider, exceptionKind: 'transport' }, expected: 'native_turn_transport_failed' },
+    { attribution: { ...provider, retryable: undefined }, expected: 'native_turn_transport_failed' },
+    { attribution: { ...provider, retryable: true }, expected: 'native_turn_transport_failed' },
+    { attribution: { ...provider, retryable: 'false' }, expected: 'native_turn_transport_failed' },
+  ]) {
+    const error = new ZCodeNativeTurnFailedError('exact-session', 'exact-turn', 'EPIPE', true, attribution)
+    assert.equal(error.code, expected)
+    assert.equal(error.message, expected === 'unsupported' ? 'ZCode provider rejected the native turn (retryable=false)' : 'ZCode native turn failed (code=EPIPE)')
+    assert.equal(error.threadId, 'exact-session'); assert.equal(error.turnId, 'exact-turn')
+    assert.equal(error.rejectedOutput, undefined); assert.equal(error.failedWorktree, undefined)
+    for (const [code, worktree] of [['EACCES', true], ['UNTRUSTED_PROVIDER_BODY', true], ['EPIPE', false]] as const) {
+      const ordinary = new ZCodeNativeTurnFailedError('exact-session', 'exact-turn', code, worktree, attribution)
+      assert.equal(ordinary.code, 'failed')
+      assert.equal(ordinary.message.includes('UNTRUSTED_PROVIDER_BODY'), false)
+    }
+  }
+  const policy = structuredExecutionPolicy({ schema: { type: 'object' }, inputDigest: 'input', purpose: 'provider-rejection', timeoutMs: null, model: 'zcode:fixture/model', worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'read' } })
+  const observed: StructuredExecution = { ...policy, state: 'failed', errorCode: 'unsupported', error: 'fixed diagnostic' }
+  assert.equal(policy.version, 6)
+  assert.deepEqual(structuredExecutionPolicy(observed), policy, 'the existing observational errorCode cannot change fixed policy or its hash')
 })
 
 test('ZCode namespace requires both exact provider and model', () => {
