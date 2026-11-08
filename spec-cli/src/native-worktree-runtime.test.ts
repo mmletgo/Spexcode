@@ -6,7 +6,7 @@ import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, re
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
-import { writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
+import { hostProcessAdapter, processStartToken, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
 import { assertNativeWorktreeSeed, assertNativeWorktreeResult, nativeWorktreeResult, nativeWorktreePrompt, sampleNativeWorktreeProcesses, nativeWorktreeProcessesStopped, classifyNativeWorktreeOrphans } from './native-worktree-runtime.js'
 import { claudeWorktreeArgs, claudeStructuredArgs, claudeStructuredTurn, observeClaudeWorktreeMissingFinal, stopClaudeStructuredTurn } from './claude-structured.js'
 import { zcodeWorktreePermission, zcodeWorktreeConfiguration, zcodeRuntimeConfiguration, zcodeStructuredTurn, zcodeCapability, zcodeNativeSelection, type ZCodeStructuredExecution } from './zcode-structured.js'
@@ -547,6 +547,8 @@ const calls=JSON.parse(readFileSync(${JSON.stringify(count)},'utf8'));assert.equ
 
 test('Claude terminal settlement and closed-stdin cancellation remain bounded with an unlimited model budget', () => {
   const f = repoFixture(), bin = join(f.root, 'lifecycle-bin'), runner = join(f.root, 'lifecycle.mjs'), count = join(f.root, 'lifecycle-dispatches.json')
+  const termMs = 10_000, stopMs = 15_000, probeMs = 10_000, settlementMs = 2000
+  const modes = ['natural-success', 'natural-exhausted', 'hanging-exhausted', 'hanging-success', 'term-exit-zero', 'hanging-exhausted-exit1', 'esrch-race', 'cancel-closed', 'ignore-term', 'wrong-receipt']
   mkdirSync(bin)
   try {
     const executable = join(bin, 'claude')
@@ -561,7 +563,7 @@ fs.mkdirSync(project,{recursive:true});const history=path.join(project,session+'
 send({type:'system',subtype:'init',session_id:session,model,tools:['Read','Bash','StructuredOutput']});send(user);
 if(mode==='ignore-term')process.on('SIGTERM',()=>fs.writeFileSync(path.join(root,'term-received'),'true'));
 if(mode==='term-exit-zero'||mode==='hanging-exhausted-exit1')process.on('SIGTERM',()=>process.exit(mode==='term-exit-zero'?0:1));
-if(mode==='esrch-race')setTimeout(()=>process.exit(0),500);
+if(mode==='esrch-race')setTimeout(()=>process.exit(0),${termMs + 500});
 if(!mode.startsWith('natural'))setInterval(()=>{},1000);
 if(mode.includes('exhausted')){const Ajv=require(${JSON.stringify(createRequire(import.meta.url).resolve('ajv'))}).default,validate=new Ajv({allErrors:true}).compile(JSON.parse(arg('--json-schema'))),value={items:{}};validate(value);const error='Output does not match required schema: '+validate.errors.map(e=>e.instancePath+': '+e.message).join(', ');fs.appendFileSync(history,[{type:'api-request',sessionId:session,id:'request',params:{model}},{type:'assistant',sessionId:session,uuid:'call-parent',parentUuid:user.uuid,requestRef:'request',message:{role:'assistant',content:[{type:'tool_use',id:'schema-call',name:'StructuredOutput',input:value}]}},{type:'user',sessionId:session,uuid:'schema-error',parentUuid:'call-parent',promptId:'prompt-'+user.uuid,sourceToolAssistantUUID:'call-parent',message:{role:'user',content:[{type:'tool_result',tool_use_id:'schema-call',is_error:true,content:error}]}}].map(x=>JSON.stringify(x)).join('\\n')+'\\n');process.exitCode=1;send({type:'result',subtype:'error_max_structured_output_retries',is_error:true,session_id:session,user_message_uuid:user.uuid,user_message_uuids:[user.uuid]});}
 else send({type:'result',subtype:'success',is_error:false,session_id:session,user_message_uuid:user.uuid,user_message_uuids:[user.uuid],structured_output:{items:[]}});
@@ -569,21 +571,45 @@ else send({type:'result',subtype:'success',is_error:false,session_id:session,use
     chmodSync(executable, 0o755)
     const modulePath = (name: string): string => fileURLToPath(new URL(name, import.meta.url))
     writeFileSync(runner, String.raw`import assert from 'node:assert/strict';import{readFileSync,writeFileSync,existsSync,renameSync,chmodSync}from'node:fs';import{join}from'node:path';import{randomUUID,createHash}from'node:crypto';
+import childProcess from 'node:child_process';import{syncBuiltinESMExports}from'node:module';import{Transform}from'node:stream';
 import{claudeStructuredTurn,stopClaudeStructuredTurn}from${JSON.stringify(modulePath('./claude-structured.ts'))};import{structuredExecutionPolicy}from${JSON.stringify(modulePath('./session-structured-policy.ts'))};
-const originalTimeout=globalThis.setTimeout,armed=[];globalThis.setTimeout=(callback,delay,...args)=>{const control=delay===15000||delay===10000&&callback.name==='killOwnGroup';if(control)armed.push(delay);return originalTimeout(callback,control?(delay===10000?200:700):delay,...args)};
+const originalTimeout=globalThis.setTimeout,armed=[];globalThis.setTimeout=(callback,delay,...args)=>{const control=delay===15000||delay===10000&&callback.name==='killOwnGroup';if(control)armed.push(delay);return originalTimeout(callback,delay,...args)};
 const sleep=ms=>new Promise(resolve=>originalTimeout(resolve,ms)),hash=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex'),count=${JSON.stringify(count)},realm=${JSON.stringify(join(f.root, 'lifecycle-realm'))},workspace=${JSON.stringify(f.path)},seed=${JSON.stringify(f.seed)},schema={type:'object',properties:{items:{type:'array',maxItems:0}},required:['items'],additionalProperties:false};
-const errors=[],unhandled=[],originalKill=process.kill;process.on('unhandledRejection',error=>unhandled.push(error?.code??'unknown'));
-for(const mode of ['natural-success','natural-exhausted','hanging-exhausted','hanging-success','term-exit-zero','hanging-exhausted-exit1','esrch-race','cancel-closed','ignore-term','wrong-receipt']){
+const errors=[],unhandled=[],originalKill=process.kill,originalSpawn=childProcess.spawn,fixtureIdentities=new Map();let scope;
+childProcess.spawn=(command,args,options)=>{
+  const child=originalSpawn(command,args,options);
+  if(command==='/usr/sbin/lsof'){
+    scope.cwdProbes++;const pids=args[args.indexOf('-p')+1].split(',').map(Number);
+    assert(pids.every(pid=>fixtureIdentities.has(pid)),'cwd candidates must have real fixture ancestry and start identity');
+  }
+  if(command==='/bin/ps'&&args.join(' ')==='-axo uid=,pid=,ppid=,lstart='){
+    scope.psProbes++;const stdout=child.stdout,chunks=[];
+    const filtered=new Transform({transform(chunk,_encoding,callback){chunks.push(chunk);callback()},flush(callback){
+      const rows=Buffer.concat(chunks).toString('utf8').split('\n').flatMap(line=>{const match=/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line);return match?[{line,pid:Number(match[2]),ppid:Number(match[3]),start:match[4].replace(/\s+/g,' ')}]:[]});
+      const live=new Map(rows.map(row=>[row.pid,row]));
+      for(const[pid,start]of fixtureIdentities)if(live.get(pid)?.start!==start)fixtureIdentities.delete(pid);
+      const runner=live.get(process.pid);assert(runner,'real runner must exist in the actual census');fixtureIdentities.set(runner.pid,runner.start);
+      for(let changed=true;changed;){changed=false;for(const row of rows)if(!fixtureIdentities.has(row.pid)&&fixtureIdentities.get(row.ppid)===live.get(row.ppid)?.start&&live.has(row.ppid)){fixtureIdentities.set(row.pid,row.start);changed=true}}
+      const included=rows.filter(row=>fixtureIdentities.get(row.pid)===row.start);scope.excludedNonFixtureRows+=rows.length-included.length;
+      this.push(included.map(row=>row.line).join('\n')+'\n');callback();
+    },destroy(error,callback){stdout.destroy();callback(error)}});
+    stdout.pipe(filtered);child.stdout=filtered;
+  }
+  return child;
+};syncBuiltinESMExports();
+process.on('unhandledRejection',error=>unhandled.push(error?.code??'unknown'));
+for(const mode of ${JSON.stringify(modes)}){
+  scope={psProbes:0,cwdProbes:0,excludedNonFixtureRows:0};
   const execution={...structuredExecutionPolicy({schema,inputDigest:mode,purpose:'lifecycle',timeoutMs:null,model:'claude:MiniMax-M3.1-Flash',worktree:{...seed,mode:'read'}}),state:'running'},id=randomUUID(),root=join(realm,id),controller=new AbortController(),start=armed.length;
   const callbacks={signal:controller.signal,onThread:async value=>{execution.threadId=value},onTurn:async value=>{execution.turnId=value},onTurnStarting:async()=>{execution.turnStartRequested=true},onNative:async value=>{execution.claudeNative=value}};
   const flight=claudeStructuredTurn(realm,id,mode,execution,callbacks,workspace).then(value=>({value}),error=>({error}));
   try{
-    const ready=Date.now()+2000;while(!existsSync(join(root,'stdin-ended'))&&Date.now()<ready)await sleep(10);assert(existsSync(join(root,'stdin-ended')),'stdin must have ended after the terminal result');
+    const ready=Date.now()+${probeMs};while(!existsSync(join(root,'stdin-ended'))&&Date.now()<ready)await sleep(10);assert(existsSync(join(root,'stdin-ended')),'stdin must have ended after the terminal result');
     if(mode==='wrong-receipt'){const path=execution.claudeNative.receiptFile,receipt=JSON.parse(readFileSync(path,'utf8'));renameSync(path,path+'.held');writeFileSync(path,JSON.stringify({...receipt,pid:process.pid}))}
     if(mode==='esrch-race')process.kill=(pid,signal)=>{if(pid===-execution.claudeNative.pid&&signal==='SIGTERM'){const error=new Error('simulated exit between verification and signal');error.code='ESRCH';throw error}return originalKill(pid,signal)};
     if(mode==='cancel-closed')controller.abort();
     if(mode==='ignore-term'){controller.abort();await stopClaudeStructuredTurn(execution,30);await sleep(30);await stopClaudeStructuredTurn(execution,30)}
-    const outcome=await Promise.race([flight,sleep(1800).then(()=>{throw new Error('terminal/cancel flight exceeded test deadline')})]);
+    const outcome=await Promise.race([flight,sleep(${stopMs + settlementMs}).then(()=>{throw new Error('terminal/cancel flight exceeded real stop window and fixture settlement allowance')})]);
     if(mode==='natural-success'||mode==='esrch-race'){
       assert.deepEqual(JSON.parse(outcome.value.text),{items:[]});if(mode==='natural-success')assert.equal(existsSync(join(root,'terminal-stop.json')),false);else assert.equal(JSON.parse(readFileSync(join(root,'terminal-stop.json'),'utf8')).outcome,'gone');
       execution.state='completed';execution.output={items:[]};execution.resultDigest=hash(execution.output);renameSync(execution.claudeNative.receiptFile,execution.claudeNative.receiptFile+'.held');assert.deepEqual(await claudeStructuredTurn(realm,id,mode,execution,callbacks,workspace),outcome.value);
@@ -607,7 +633,7 @@ for(const mode of ['natural-success','natural-exhausted','hanging-exhausted','ha
       if(mode==='ignore-term'){assert(existsSync(join(root,'term-received')));assert.deepEqual(armed.slice(start),[10000,15000]);const stop=await stopClaudeStructuredTurn(execution,20);assert.equal(stop.nativeStopped,false)}
       else assert.equal(existsSync(join(root,'terminal-stop.json')),false,'wrong receipt must not authorize process termination');
     }
-    console.log(JSON.stringify({mode,status:'passed',error:outcome.error?.code,armed:armed.slice(start)}));
+    console.log(JSON.stringify({mode,status:'passed',error:outcome.error?.code,armed:armed.slice(start),scope:{...scope,cwdCandidatesAllFixture:true}}));
   }catch(error){errors.push({mode,message:error.message})}
   finally{
     process.kill=originalKill;const native=execution.claudeNative;if(native?.receiptFile&&existsSync(native.receiptFile+'.held'))renameSync(native.receiptFile+'.held',native.receiptFile);
@@ -615,15 +641,15 @@ for(const mode of ['natural-success','natural-exhausted','hanging-exhausted','ha
     await Promise.race([flight,sleep(1000)]);
   }
 }
-assert.deepEqual(errors,[]);assert.deepEqual(unhandled,[],'async settle rejection must be consumed before awaited final stop');`)
-    const result = spawnSync(process.execPath, ['--import', createRequire(import.meta.url).resolve('tsx/esm'), runner], { cwd: f.repo, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, ANTHROPIC_BASE_URL: 'https://example.invalid', SPEX_TEST: '1' }, encoding: 'utf8', timeout: 30000 })
+childProcess.spawn=originalSpawn;syncBuiltinESMExports();assert.deepEqual(errors,[]);assert.deepEqual(unhandled,[],'async settle rejection must be consumed before awaited final stop');`)
+    const result = spawnSync(process.execPath, ['--import', createRequire(import.meta.url).resolve('tsx/esm'), runner], { cwd: f.repo, env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, ANTHROPIC_BASE_URL: 'https://example.invalid', SPEX_TEST: '1' }, encoding: 'utf8', timeout: modes.length * (probeMs + stopMs + settlementMs) })
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
     console.log(result.stdout)
   } finally { f.close() }
 })
 
 
-for (const taskScoped of [true, false]) test(taskScoped ? 'task cwd orphan stays pending after chdir without gaining kill authority' : 'external orphan and reused task PID do not block stop or replace original evidence', async () => {
+for (const taskScoped of [true, false]) test(taskScoped ? 'task cwd orphan stays pending after chdir without gaining kill authority' : 'external orphan and reused task PID do not block stop or replace original evidence', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'spex-native-orphan-')), root = join(directory, 'native'), workspace = join(directory, 'worktree'), outside = join(directory, 'outside')
   for (const path of [root, workspace, outside]) mkdirSync(path)
   const receiptFile = join(root, 'process.json'), daemonFile = join(directory, 'daemon.json'), plan = { root, workspace, receiptFile, pid: undefined as number | undefined }
@@ -633,6 +659,17 @@ for (const taskScoped of [true, false]) test(taskScoped ? 'task cwd orphan stays
   assert(leader.pid)
   const closed = new Promise<void>(resolve => leader.once('close', () => resolve()))
   let daemonPid: number | undefined
+  const launch = childProcess.spawn, probes: Array<{ command: string; pid: number; startedAt: number; closedAt?: number }> = []
+  t.mock.method(childProcess, 'spawn', (command: string, args: string[], options: SpawnOptions) => {
+    const child = launch(command, args, options)
+    if (command === '/usr/sbin/lsof' || command === '/bin/ps') {
+      assert(child.pid); assert.equal(options.detached, true)
+      const observation: (typeof probes)[number] = { command, pid: child.pid, startedAt: performance.now() }
+      probes.push(observation); child.once('close', () => { observation.closedAt = performance.now() })
+    }
+    return child
+  })
+  syncBuiltinESMExports()
   try {
     await new Promise<void>(resolve => leader.stdout.once('data', () => resolve()))
     writeDetachedRuntimeReceipt(leader.pid, receiptFile); plan.pid = leader.pid
@@ -644,8 +681,30 @@ for (const taskScoped of [true, false]) test(taskScoped ? 'task cwd orphan stays
     writeFileSync(join(root, 'unknown-processes.json'), oldUnknown); writeFileSync(join(root, 'exit.json'), oldExit)
     if (!taskScoped) writeFileSync(join(root, 'task-related-processes.json'), JSON.stringify([{ pid: daemonPid, startToken: 'historical-other-identity', cwd: workspace, boundaryVersion: 2, observedAt: 1 }]))
     assert.equal((JSON.parse(readFileSync(join(root, 'owned-processes.json'), 'utf8')) as Array<{ pid: number }>).some(row => row.pid === daemonPid), false)
-    assert.equal(await nativeWorktreeProcessesStopped(plan), !taskScoped)
-    assert.equal(await nativeWorktreeProcessesStopped(plan, true), !taskScoped)
+    const originalPlan = JSON.stringify(plan), originalReceipt = readFileSync(receiptFile)
+    const originalDaemon = readFileSync(daemonFile), daemonStart = processStartToken(daemonPid)
+    assert(daemonStart)
+    let recovered = false
+    const observeStopped = async (terminate = false): Promise<boolean> => {
+      try { return await nativeWorktreeProcessesStopped(plan, terminate) }
+      catch (error) {
+        if (!(error instanceof StructuredSessionError) || error.code !== 'cancellation_pending' || recovered) throw error
+        recovered = true
+        const probe = probes.at(-1); assert(probe, '必须是本fixture实际派发的探针，不能拿其它unknown续验'); assert.equal(probe.command, '/usr/sbin/lsof')
+        const count = probes.length, waitUntil = Date.now() + 35_000
+        while ((probe.closedAt === undefined || hostProcessAdapter.liveness(-probe.pid) !== 'absent') && Date.now() < waitUntil) await new Promise(resolve => setTimeout(resolve, 25))
+        assert(probe.closedAt !== undefined); assert.equal(hostProcessAdapter.liveness(-probe.pid), 'absent', '原探针整组未停不能再派发')
+        assert.equal(probes.length, count, '等待原探针结算期间不能叠加新探针')
+        assert.equal(JSON.stringify(plan), originalPlan); assert.deepEqual(readFileSync(receiptFile), originalReceipt)
+        assert.deepEqual(readFileSync(daemonFile), originalDaemon); assert.equal(processStartToken(daemonPid!), daemonStart)
+        assert.equal(readFileSync(join(root, 'unknown-processes.json'), 'utf8'), oldUnknown); assert.equal(readFileSync(join(root, 'exit.json'), 'utf8'), oldExit)
+        const result = await nativeWorktreeProcessesStopped(plan, terminate)
+        console.log(JSON.stringify({ fixture: taskScoped ? 'task-cwd' : 'outside-cwd', recovered: true, samePlanReceiptAndPidStart: true, oldUnknownAndExitUnchanged: true, probeGroupGone: true, probeCloseElapsedMs: probe.closedAt - probe.startedAt, nativeStopped: result }))
+        return result
+      }
+    }
+    assert.equal(await observeStopped(), !taskScoped)
+    assert.equal(await observeStopped(true), !taskScoped)
     process.kill(daemonPid, 0)
     assert.equal(readFileSync(join(root, 'unknown-processes.json'), 'utf8'), oldUnknown)
     assert.equal(readFileSync(join(root, 'exit.json'), 'utf8'), oldExit)
@@ -664,7 +723,7 @@ for (const taskScoped of [true, false]) test(taskScoped ? 'task cwd orphan stays
       process.kill(daemonPid, 'SIGUSR1')
       for (let retry = 0; retry < 100 && JSON.parse(readFileSync(daemonFile, 'utf8')).cwd !== realpathSync(outside); retry++) await new Promise(resolve => setTimeout(resolve, 10))
       assert.equal(JSON.parse(readFileSync(daemonFile, 'utf8')).cwd, realpathSync(outside))
-      assert.equal(await nativeWorktreeProcessesStopped(plan), false, 'positive task association remains sticky after chdir')
+      assert.equal(await observeStopped(), false, 'positive task association remains sticky after chdir')
     } else {
       const diagnostic = JSON.parse(readFileSync(join(root, 'unattributed-processes.json'), 'utf8')) as Array<{ pid: number }>
       assert(diagnostic.some(row => row.pid === daemonPid))
@@ -679,6 +738,7 @@ for (const taskScoped of [true, false]) test(taskScoped ? 'task cwd orphan stays
     daemonPid = undefined
     assert.equal(await nativeWorktreeProcessesStopped(plan), true)
   } finally {
+    t.mock.restoreAll(); syncBuiltinESMExports()
     if (daemonPid) { try { process.kill(-daemonPid, 'SIGTERM') } catch (error) { assert.equal((error as NodeJS.ErrnoException).code, 'ESRCH') } }
     if (leader.exitCode === null && leader.signalCode === null) {
       try { process.kill(-leader.pid, 'SIGTERM') } catch (error) { assert.equal((error as NodeJS.ErrnoException).code, 'ESRCH') }
