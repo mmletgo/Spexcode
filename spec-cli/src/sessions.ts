@@ -1,4 +1,4 @@
-import { assertNativeWorktreeSeed } from './native-worktree-runtime.js'
+import { assertNativeWorktreeSeed, nativeWorktreeResult } from './native-worktree-runtime.js'
 import { structuredObserverState, type StructuredExecution } from './session-structured-policy.js'
 import { spawn } from 'node:child_process'
 import { createConnection } from 'node:net'
@@ -4054,7 +4054,7 @@ async function stopSessionUnlocked(id: string): Promise<boolean> {
 export const stopSession = (id: string): Promise<boolean> =>
   withSessionTransition(id, () => withRecordLock(id, () => stopSessionUnlocked(id)))
 
-async function coldStopSessionUnlocked(id: string): Promise<boolean> {
+async function coldStopSessionUnlocked(id: string, wakeQueue = true): Promise<boolean> {
   let wt: { path: string; branch: string | null; rec: SessRec } | null
   try { wt = await findWorktree(id) }
   catch (e) {
@@ -4143,7 +4143,7 @@ async function coldStopSessionUnlocked(id: string): Promise<boolean> {
     }
     throw error
   }
-  requestQueueDrain()
+  if (wakeQueue) requestQueueDrain()
   return true
   } finally { archiving.delete(id) }
 }
@@ -4241,14 +4241,14 @@ function scheduleCloseResidueReport(target: CloseResidueTarget): void {
   })
 }
 
-async function closeOwnedSessionUnlocked(id: string, wt: { path: string; branch: string | null; rec: SessRec }, _source: CloseSource, unboundStopped = false): Promise<boolean> {
+async function closeOwnedSessionUnlocked(id: string, wt: { path: string; branch: string | null; rec: SessRec }, _source: CloseSource, unboundStopped = false, wakeQueue = true): Promise<boolean> {
   const root = mainRoot()
   const receiptFailure = publishedSessionCandidateReceiptRetirementFailure(wt.rec, root)
   if (receiptFailure) throw new ResourceConflict(`refusing close for ${id}: ${receiptFailure}; public record and resources remain the authority fence`)
   const retired = !!retirementReason(wt.rec)
   if (!retired && wt.rec.status === 'queued') await assertQueuedCloseSafe(id, wt.rec)
   if (!retired && !unboundStopped && wt.rec.status !== 'queued') {
-    await coldStopSessionUnlocked(id)
+    await coldStopSessionUnlocked(id, wakeQueue)
     wt = (await findWorktree(id)) || wt
   }
   // The archive ref is published before any worktree removal. A failed ref write leaves the complete
@@ -4289,10 +4289,10 @@ async function closeOwnedSessionUnlocked(id: string, wt: { path: string; branch:
     }
   })
   if (slot) { try { rmSync(slot, { recursive: true, force: true }) } catch { /* best-effort GC */ } }
-  requestQueueDrain()   // a close frees a slot — start the next queued session if any
+  if (wakeQueue) requestQueueDrain()   // a close frees a slot — start the next queued session if any
   return true
 }
-async function closeSessionUnlocked(id: string, source: CloseSource): Promise<boolean> {
+async function closeSessionUnlocked(id: string, source: CloseSource, wakeQueue = true): Promise<boolean> {
   let wt: { path: string; branch: string | null; rec: SessRec } | null = null
   try { wt = await findWorktree(id) }
   catch (e) {
@@ -4327,8 +4327,8 @@ async function closeSessionUnlocked(id: string, source: CloseSource): Promise<bo
   }
   const target = wt
   const close = () => target.branch
-    ? withRecordLock(sessionCandidateLockId(target.path, target.branch), () => closeOwnedSessionUnlocked(id, target, source, unboundStopped))
-    : closeOwnedSessionUnlocked(id, target, source, unboundStopped)
+    ? withRecordLock(sessionCandidateLockId(target.path, target.branch), () => closeOwnedSessionUnlocked(id, target, source, unboundStopped, wakeQueue))
+    : closeOwnedSessionUnlocked(id, target, source, unboundStopped, wakeQueue)
   // Codex threads share one app-server. Its cold proof snapshots the full resident census and then
   // mutates that same census; serialize project-local Codex closes so a sibling close cannot make a
   // previously captured reference disappear during archive verification.
@@ -4336,11 +4336,29 @@ async function closeSessionUnlocked(id: string, source: CloseSource): Promise<bo
     ? withRecordLock('codex-shared-close', close)
     : close()
 }
-export const closeSession = (id: string, rawSource?: unknown): Promise<boolean> => {
+export type SessionCloseOptions = {
+  wakeQueue?: false
+  completed?: { record: SessRec; commonDir: string; worktree: NonNullable<StructuredExecution['resultWorktree']> }
+}
+export const closeSession = (id: string, rawSource?: unknown, options: SessionCloseOptions = {}): Promise<boolean> => {
   const source = normalizeCloseSource(rawSource)
   let residueTarget: CloseResidueTarget | null = null
   return withSessionTransition(id, () => withRecordLock(id, async () => {
-    const closed = await closeSessionUnlocked(id, source)
+    if (options.completed) {
+      const { record, commonDir, worktree } = options.completed, current = readRecord(id)
+      if (!current || JSON.stringify(current) !== JSON.stringify(record) || current.session !== id || current.worktreePath !== worktree.worktreePath
+        || current.structuredExecution?.state !== 'completed' || !current.structuredExecution.worktree || JSON.stringify(current.structuredExecution.resultWorktree) !== JSON.stringify(worktree))
+        throw new ResourceConflict(`deferring completed worktree close for ${id}: session identity changed`)
+      if (current.archived && current.closedAt && !existsSync(current.worktreePath)) return false
+      const path = current.worktreePath
+      const actualCommonDir = await git(['-C', path, 'rev-parse', '--git-common-dir'])
+      const branch = await git(['-C', path, 'symbolic-ref', '--short', 'HEAD'])
+      const actual = nativeWorktreeResult(path, current.structuredExecution.worktree)
+      if (realpathSync(resolve(path, actualCommonDir.trim())) !== realpathSync(commonDir)
+        || JSON.stringify(actual) !== JSON.stringify(worktree) || branch.trim() !== current.branch)
+        throw new ResourceConflict(`deferring completed worktree close for ${id}: Git identity changed or worktree is dirty`)
+    }
+    const closed = await closeSessionUnlocked(id, source, options.wakeQueue !== false)
     if (closed) {
       revokeSenderDelivery(id)
       const archived = readRecord(id)

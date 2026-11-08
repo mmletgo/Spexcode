@@ -1591,7 +1591,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           break
         }
       }
-      const runner = options.runner ? injectedRunner(store, fence, options.runner) : createAttemptRunner(store, fence)
+      const runner = options.runner ? injectedRunner(store, fence, options.runner) : createAttemptRunner(store, fence, { retireCompletedWorktrees: true })
       const readonlyAccepted = (key: string, binding: NonNullable<ElaborationResult['partitionBinding']>, inputDigest: string): SavedElaboration | null => {
         if (!readonlyBase || readonlyActiveOwners.some(owner => owner.key === key)) return null
         const approved = readonlyBase!.result

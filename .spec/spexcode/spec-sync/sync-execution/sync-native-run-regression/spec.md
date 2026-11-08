@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+受控真实CLI/SQLite/Git夹具须先复现completed/removed仍留目录，再证明read/edit完成后正式close消除物理目录及Git登记，branch/archive/record/Native历史和原result保持。同键归档冷重放不新send或计费；syntax-invalid及schema-invalid业务JSON均能在删目录后由原Git capture/read并逐字overlay到新seed。dirty、完整expected record漂移、archive-ref写入失败明确defer/pending且保目录与成功结果；失败/取消/未知停止保物理材料。已有真实queued sibling在wakeQueue:false及无execution-wake关闭期间原record/launch不变且零新send，随后仅fixture显式drain的正控制须可真实完成。
+
 受控 ZCode 真实创建/队列/Git 结算复现已接受 turn 的 EPIPE。原公开失败和 exit=0、idle=false、closed=false、acknowledged=false 经正式肯定停止后成为 native_turn_transport_failed，原 canonical/CAS 与完整请求身份在同键冷重放保持，派发数不增加。EACCES 保持普通失败，错 session/turn/input 与未知停止无此资格。
 
 同一夹具让第二页 `session/events` 超过原 RPC 期限，并先交回原 ID 的迟到回复，再以原游标交付精确的本轮成功终态。校验原消息、idle/close、Git 草稿、正式 removed 和单次 send/计费。同一重读无终态时继续原 stop；重读若看到 `turn.completed` / `cancelled` 则直接核停稳。两者都保留原 typed 超时，输出仍为空。
