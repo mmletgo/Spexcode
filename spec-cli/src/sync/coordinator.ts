@@ -75,7 +75,7 @@ const completedReviewRepairCodes = new Set(['review_location_format'])
 const analysisRepairDiagnosticCodes = new Set([...behaviorAnalysisRepairCodes, ...structuredAnalysisRepairCodes])
 function requireSettledRpcSources(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, sources: readonly { status: string; failure: { code: string; message: string; sessionId?: string; threadId?: string; turnId?: string; requestKey?: string; inputDigest?: string } | null }[], evidenceRefs: BlobRef[]): void {
   if (!sources.some(source => source.failure?.code === 'native_rpc_timeout')) return
-  const blocked = sources.find(source => ['unsupported', 'cancelled', 'conflict', 'needs_input'].includes(source.status))
+  const blocked = sources.find(source => source.failure?.code === 'cancellation_pending') ?? sources.find(source => ['unsupported', 'cancelled', 'conflict', 'needs_input'].includes(source.status))
   if (blocked) fail(blocked.failure?.code ?? 'unsupported', blocked.failure?.message ?? '并发分区仍有不可自动续修的结果', evidenceRefs)
   if (sources.some(source => source.failure?.code === 'native_rpc_timeout' && !hasSettledNativeRpcFailure(store, operation, attempt, source.failure))) fail('cancellation_pending', '原生RPC故障尚无本尝试的精确停止及资源结算证明', evidenceRefs)
 }
