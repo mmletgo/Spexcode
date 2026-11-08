@@ -20,4 +20,4 @@ workspace 仅复制 package.json 的 files 发布范围及 package 元数据、m
 
 发布文件路径必须可证明在所属 package 内；未知 glob/导出路径不猜默认。Git、node_modules 原目录、home 配置和已知凭据元数据在读取字节前排除，并列出排除路径。遵循 npm 发布不包含 payload symlink 的规则，源 payload symlink（包括越界和断链）不跟随读取并明确列入排除；必需入口、bin/main 和 exports 运行条件引用被排除路径或缺文件仍拒绝，特殊文件也拒绝。最终闭包中所有 symlink 只指向 runtime 内已复制对象。所有实际发布字节、模式和链接由复用的 inspectTrustedRuntime 形成 manifest/digest，并返回 CLI 原 package 身份与依赖关系。
 
-先在目标父目录的独立临时目录复制、核完整声明和内部链接，再封为只读、rename 发布；已存在目标拒绝替换，失败清理本次临时目录，不修改可信安装或主运行配置。成功返回 trustedRuntimeRoot、toolEntry、canonicalHooksDir、manifest、digest、sourcePackage 和 packages；后续源安装变化不修改固定产物。
+先在目标父目录的独立临时目录复制、核完整声明和内部链接，再封为只读、rename 发布；已存在目标拒绝替换，失败清理本次临时目录，不修改可信安装或主运行配置。清理复用 [[owned-tree-cleanup]]，只解锁实体目录，不跟随 symlink 改动目标。成功返回 trustedRuntimeRoot、toolEntry、canonicalHooksDir、manifest、digest、sourcePackage 和 packages；后续源安装变化不修改固定产物。
