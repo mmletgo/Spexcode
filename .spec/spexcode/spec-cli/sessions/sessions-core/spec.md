@@ -33,7 +33,7 @@ foundation owner: the features govern their own surfaces and REFERENCE this modu
 
 ## expanded spec
 
-同步已完成工作树的自动回收复用[[archive]]，在原close的transition/record锁内用可选完成身份与Git clean守卫拒绝漂移。可选非持久wakeQueue:false仅抑制这次close的主动队列唤醒；正式冷停、记录/分支/历史保留及普通close默认行为不变，不另建回收状态机。
+同步已结算且clean的工作树回收复用[[archive]]，同一close身份守卫覆盖completed与确证停止的failed/cancelled，未知停止/dirty拒绝。正式归档失败材料可在原锁下临时恢复缺失checkout并严格观察；registry内只接纳本次创建，restore或观察异常也仅复用原物理回收段收尾，保原archive/record，零Native/queue wake。wakeQueue:false为非持久内部选项，普通close/resume默认行为保持，不另建状态机。
 
 受限结构化创建的内部可信 policy 决定固定 launcher：既有 Codex policy 保留 codex-headless/codex，明确 Claude policy 使用 claude-headless/claude；公开 create 对象不能注入该 policy。两者复用原创建事务和队列，普通人工 launcher 选择不受影响；精确结构化运行/恢复由 [[structured-session-runtime]] 负责。
 

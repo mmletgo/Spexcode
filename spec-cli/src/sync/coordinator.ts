@@ -38,7 +38,7 @@ import { deliverVerifiedAttempt, planPrivateDelivery } from './private-delivery.
 import { assemblePublicationBase, verifyPublicationBase } from './publication-base.js'
 import { obligationPaths, ownedObligationPaths } from './prior-context.js'
 import { composeControlledRequest, readControlledChanges, readControlledDecision } from './request-input.js'
-import { sessionIdForCreateKey } from '../sessions.js'
+import { sessionIdForCreateKey, withArchivedStructuredWorktree } from '../sessions.js'
 import { withoutSessionApplicationExecutionWake } from '../session-application.js'
 import { assertFrozenBinding, readFrozenManifest, readFrozenRange } from '../frozen-context.js'
 import { assertClaudeStoppedDraftSource, observeClaudeStoppedWorktreeFailure } from '../claude-structured.js'
@@ -1591,7 +1591,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           break
         }
       }
-      const runner = options.runner ? injectedRunner(store, fence, options.runner) : createAttemptRunner(store, fence, { retireCompletedWorktrees: true })
+      const runner = options.runner ? injectedRunner(store, fence, options.runner) : createAttemptRunner(store, fence, { retireSettledWorktrees: true })
       const readonlyAccepted = (key: string, binding: NonNullable<ElaborationResult['partitionBinding']>, inputDigest: string): SavedElaboration | null => {
         if (!readonlyBase || readonlyActiveOwners.some(owner => owner.key === key)) return null
         const approved = readonlyBase!.result
@@ -1690,7 +1690,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         if (current.control !== 'run' || current.currentAttemptId !== active.id || current.generation !== fence!.generation || active.generation !== fence!.generation || active.leaseToken !== fence!.leaseToken || ['failed', 'superseded', 'settled'].includes(active.status) || active.expiresAtMs <= Date.now() || store.readPhysicalControl(current.input.source).control !== 'run') fail('cancelled', '新草稿材料观察已失去当前运行fence')
       }
       let materialCheckpoints: ReturnType<typeof readSyncCheckpoints> | undefined
-      const loadElaborationDraftMaterial = (key: string, binding?: NonNullable<ElaborationResult['partitionBinding']>, schemaDigest?: string, request?: StageDraftMaterialRequest): ElaborationDraftMaterial | null => {
+      const loadElaborationDraftMaterial = async (key: string, binding?: NonNullable<ElaborationResult['partitionBinding']>, schemaDigest?: string, request?: StageDraftMaterialRequest): Promise<ElaborationDraftMaterial | null> => {
         const commonDir = operation.input.source.commonDir, provenanceKey = `${key}:stopped-git-material-provenance`
         let allowCommitted = false
         if (request?.allowStoppedGitDraft) {
@@ -1738,25 +1738,31 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
                 if (completedEventsRpc) assertStoppedEventsRpcDraft(prior, requestKey, proof)
                 const context = elaborationMaterialContext(operation.input.source.commonDir, native.request, request)
                 if (proof.record.base === native.request.worktree.baseCommit && proof.record.forkCommit === native.request.worktree.baseCommit && /草稿文件=([^\s；。]+)/.exec(native.request.prompt)?.[1] === request.binding.path && context) {
-                  const prompt = nativeWorktreePrompt(native.request.prompt, native.request.worktree)
-                  const failed = zcode ? assertZCodeStoppedDraftSource(prompt, (completedEventsRpc ? proof.state : state) as ZCodeStructuredExecution, proof.record.worktreePath) : undefined
-                  if (zcode && failed === null) continue
-                  if (!zcode) assertClaudeStoppedDraftSource(prompt, state, proof.record.worktreePath)
-                  assertMaterialFence()
-                  const physical = readStoppedPhysicalDraft(commonDir, proof.record.worktreePath, native.request.worktree, request.binding, { allowCommitted })
-                  if (physical && (!completedEventsRpc || physical.committedOid)) {
-                    if (zcode && !failed) fail('stale_result', 'ZCode物理细化草稿没有原精确失败终态')
-                    const errors = [...existingDraft?.errors ?? [], ...round.findings, ...source.result.failure ? [{ code: source.result.failure.code, message: source.result.failure.message }] : []]
-                    if (physical.committedOid) {
-                      const material = { source: physical.source, errors, diagnostics: context.diagnostics, sourceKind: 'stopped_git_draft' as const }
-                      const materialRef = writeEvidence(commonDir, { version: 'stopped-git-draft-v1', path: request.binding.path, ...material })
-                      saveStage(store, fence!, provenanceKey, { sourceKind: material.sourceKind, approved: false, observationKind: zcode || proof.observedFailure ? 'native-failure' : 'pause', observedAt: Date.now(), fromOperationId: owner.id, fromAttemptId: prior.id, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef, originalFailure: prior.failure, canonicalRecordSha256: contentHash(JSON.stringify(proof.record)), resultCommit: physical.observedHeadCommit, resultTree: physical.observedTree, oid: physical.committedOid, indexSha256: physical.indexSha256, readonlyOverlay: { previous: context.previousReadonlyOverlay, current: context.currentReadonlyOverlay }, materialRef, draftSha256: contentHash(physical.source), schemaDigest, originalInputDigest: native.request.inputDigest, currentInputDigest: request.inputDigest, currentSeed: request.worktree })
-                      return material
+                  let skipSource = false
+                  const material = await withArchivedStructuredWorktree(proof.record, (): ElaborationDraftMaterial | null => {
+                    const prompt = nativeWorktreePrompt(native.request.prompt, native.request.worktree!)
+                    const failed = zcode ? assertZCodeStoppedDraftSource(prompt, (completedEventsRpc ? proof.state : state) as ZCodeStructuredExecution, proof.record.worktreePath) : undefined
+                    if (zcode && failed === null) { skipSource = true; return null }
+                    if (!zcode) assertClaudeStoppedDraftSource(prompt, state, proof.record.worktreePath)
+                    assertMaterialFence()
+                    const physical = readStoppedPhysicalDraft(commonDir, proof.record.worktreePath, native.request.worktree!, request.binding, { allowCommitted })
+                    if (physical && (!completedEventsRpc || physical.committedOid)) {
+                      if (zcode && !failed) fail('stale_result', 'ZCode物理细化草稿没有原精确失败终态')
+                      const errors = [...existingDraft?.errors ?? [], ...round.findings, ...source.result.failure ? [{ code: source.result.failure.code, message: source.result.failure.message }] : []]
+                      if (physical.committedOid) {
+                        const material = { source: physical.source, errors, diagnostics: context.diagnostics, sourceKind: 'stopped_git_draft' as const }
+                        const materialRef = writeEvidence(commonDir, { version: 'stopped-git-draft-v1', path: request.binding.path, ...material })
+                        saveStage(store, fence!, provenanceKey, { sourceKind: material.sourceKind, approved: false, observationKind: zcode || proof.observedFailure ? 'native-failure' : 'pause', observedAt: Date.now(), fromOperationId: owner.id, fromAttemptId: prior.id, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef, originalFailure: prior.failure, canonicalRecordSha256: contentHash(JSON.stringify(proof.record)), resultCommit: physical.observedHeadCommit, resultTree: physical.observedTree, oid: physical.committedOid, indexSha256: physical.indexSha256, readonlyOverlay: { previous: context.previousReadonlyOverlay, current: context.currentReadonlyOverlay }, materialRef, draftSha256: contentHash(physical.source), schemaDigest, originalInputDigest: native.request.inputDigest, currentInputDigest: request.inputDigest, currentSeed: request.worktree })
+                        return material
+                      }
+                      const materialRef = writeEvidence(operation.input.source.commonDir, { version: 'stopped-physical-draft-v1', path: request.binding.path, source: physical.source })
+                      saveStage(store, fence!, `${key}:stopped-physical-material-provenance`, { sourceKind: 'physical_draft', approved: false, observationKind: zcode || proof.observedFailure ? 'native-failure' : 'pause', observedAt: Date.now(), fromOperationId: owner.id, fromAttemptId: prior.id, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef, canonicalRecordSha256: contentHash(JSON.stringify(proof.record)), observedHeadCommit: physical.observedHeadCommit, observedTree: physical.observedTree, indexSha256: physical.indexSha256, readonlyOverlay: { previous: context.previousReadonlyOverlay, current: context.currentReadonlyOverlay }, materialRef, draftSha256: contentHash(physical.source), schemaDigest, originalInputDigest: native.request.inputDigest, currentInputDigest: request.inputDigest })
+                      return { source: physical.source, errors, diagnostics: context.diagnostics, sourceKind: 'physical_draft' }
                     }
-                    const materialRef = writeEvidence(operation.input.source.commonDir, { version: 'stopped-physical-draft-v1', path: request.binding.path, source: physical.source })
-                    saveStage(store, fence!, `${key}:stopped-physical-material-provenance`, { sourceKind: 'physical_draft', approved: false, observationKind: zcode || proof.observedFailure ? 'native-failure' : 'pause', observedAt: Date.now(), fromOperationId: owner.id, fromAttemptId: prior.id, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef, canonicalRecordSha256: contentHash(JSON.stringify(proof.record)), observedHeadCommit: physical.observedHeadCommit, observedTree: physical.observedTree, indexSha256: physical.indexSha256, readonlyOverlay: { previous: context.previousReadonlyOverlay, current: context.currentReadonlyOverlay }, materialRef, draftSha256: contentHash(physical.source), schemaDigest, originalInputDigest: native.request.inputDigest, currentInputDigest: request.inputDigest })
-                    return { source: physical.source, errors, diagnostics: context.diagnostics, sourceKind: 'physical_draft' }
-                  }
+                    return null
+                  })
+                  if (skipSource) continue
+                  if (material) return material
                 }
               }
             }
@@ -1888,7 +1894,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         }
         return null
       }
-      const loadBehaviorDraftMaterial = (key: string, purpose: string, schemaDigest: string, inputDigest: string, request: Pick<ElaborationSessionRequest, 'prompt' | 'worktree'>, planDigest?: string, existingDraft?: ElaborationDraft): ElaborationDraftMaterial | null => {
+      const loadBehaviorDraftMaterial = async (key: string, purpose: string, schemaDigest: string, inputDigest: string, request: Pick<ElaborationSessionRequest, 'prompt' | 'worktree'>, planDigest?: string, existingDraft?: ElaborationDraft): Promise<ElaborationDraftMaterial | null> => {
         const sources = retryDraftSources(store, operation, attempt!.number)
         const currentRequest = { ...request, inputDigest, purpose }
         const suffix = key === 'analysis' ? '' : `:partition:${key.slice('partition:'.length, -':analysis'.length)}`
@@ -1954,33 +1960,37 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
             if (proof.record.base !== native.request.worktree.baseCommit || proof.record.forkCommit !== native.request.worktree.baseCommit || /草稿文件=([^\s；]+)/.exec(native.request.prompt)?.[1] !== binding.path || !schema || schema.mode !== '100644' || contentHash(readObject(operation.input.source.commonDir, schema.oid)) !== schemaDigest || behaviorMaterialTask(native.request, operation.input.source.commonDir) !== behaviorMaterialTask(currentRequest, operation.input.source.commonDir)) continue
             const protectedEntries = (tree: string) => readTree(operation.input.source.commonDir, tree).filter(entry => entry.path !== binding.path && entry.path !== binding.path.replace(/\.json$/, '.schema.json') && entry.path !== binding.path.replace(/\.json$/, '.context.json'))
             if (!request.worktree || canonical(protectedEntries(native.request.worktree.tree)) !== canonical(protectedEntries(request.worktree.tree))) continue
-            const prompt = nativeWorktreePrompt(native.request.prompt, native.request.worktree)
-            const zcodeFailed = zcode ? assertZCodeStoppedDraftSource(prompt, (completedEventsRpc ? proof.state : state) as ZCodeStructuredExecution, proof.record.worktreePath) : undefined
-            if (zcode && zcodeFailed === null) continue
-            if (!zcode) assertClaudeStoppedDraftSource(prompt, state, proof.record.worktreePath)
-            assertMaterialFence()
-            const physical = completedEventsRpc ? null : readStoppedPhysicalDraft(operation.input.source.commonDir, proof.record.worktreePath, native.request.worktree, binding)
-            if (physical) {
-              if (zcode && !zcodeFailed) fail('stale_result', 'ZCode物理草稿没有原精确失败终态')
-              const context = readCodeBehaviorContext(native.request, operation.input.source.commonDir)
-              const materialRef = writeEvidence(operation.input.source.commonDir, { version: 'stopped-physical-draft-v1', path: binding.path, source: physical.source })
-              saveStage(store, fence!, `${key}:${purpose}:stopped-physical-material-provenance`, { sourceKind: 'physical_draft', approved: false, observationKind: zcode || proof.observedFailure ? 'native-failure' : 'pause', observedAt: Date.now(), fromOperationId: owner.id, fromAttemptId: prior.id, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef, originalFailure: prior.failure, canonicalRecordSha256: contentHash(JSON.stringify(proof.record)), observedHeadCommit: physical.observedHeadCommit, observedTree: physical.observedTree, indexSha256: physical.indexSha256, materialRef, draftSha256: contentHash(physical.source), schemaDigest, originalInputDigest: native.request.inputDigest, currentInputDigest: inputDigest })
-              return { source: physical.source, errors: [...context.errors], repairDiagnostics: context.repairDiagnostics, sourceKind: 'physical_draft' }
-            }
-            const witness = nativeWorktreeResult(proof.record.worktreePath, native.request.worktree)
-            if (witness.headCommit === native.request.worktree.baseCommit) continue
-            if (zcode && !zcodeFailed) fail('stale_result', 'ZCode新Git材料没有原精确失败终态')
-            const format = !zcode && proof.observedFailure ? observeClaudeStoppedWorktreeFailure(prompt, state, proof.record.worktreePath) : undefined
-            const draft = captureStageDraft(operation.input.source.commonDir, native.request.worktree, { worktree: witness }, binding)
-            const source = readStageDraft(operation.input.source.commonDir, draft, binding), observedAt = Date.now()
-            const context = completedEventsRpc ? readCodeBehaviorContext(native.request, operation.input.source.commonDir) : undefined
-            const errors = context && [...context.errors]
-            if (errors) {
-              const rpc = { code: 'native_rpc_timeout', message: proof.state.error! }
-              if (!errors.some(error => canonical(error) === canonical(rpc))) errors.push(rpc)
-            }
-            saveStage(store, fence!, `${key}:${purpose}:stopped-git-material-provenance`, { sourceKind: 'git_draft', approved: false, observationKind: format ? 'missing-final' : zcode || proof.observedFailure ? 'native-failure' : 'pause', observedAt, fromOperationId: owner.id, fromAttemptId: prior.id, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef, originalFailure: prior.failure, canonicalRecordSha256: contentHash(JSON.stringify(proof.record)), resultCommit: draft.resultCommit, resultTree: draft.resultTree, oid: draft.oid, draftSha256: contentHash(source), schemaDigest, originalInputDigest: native.request.inputDigest, currentInputDigest: inputDigest })
-            return { source, errors: errors ?? (zcode ? [...readCodeBehaviorContext(native.request, operation.input.source.commonDir).errors] : format ? [{ code: format.code, message: format.message }] : []), ...(context ? { repairDiagnostics: context.repairDiagnostics } : {}), sourceKind: 'git_draft' }
+            const material = await withArchivedStructuredWorktree(proof.record, (): ElaborationDraftMaterial | null => {
+              const prompt = nativeWorktreePrompt(native.request.prompt, native.request.worktree!)
+              const zcodeFailed = zcode ? assertZCodeStoppedDraftSource(prompt, (completedEventsRpc ? proof.state : state) as ZCodeStructuredExecution, proof.record.worktreePath) : undefined
+              if (zcode && zcodeFailed === null) return null
+              if (!zcode) assertClaudeStoppedDraftSource(prompt, state, proof.record.worktreePath)
+              assertMaterialFence()
+              const physical = completedEventsRpc ? null : readStoppedPhysicalDraft(operation.input.source.commonDir, proof.record.worktreePath, native.request.worktree!, binding)
+              if (physical) {
+                if (zcode && !zcodeFailed) fail('stale_result', 'ZCode物理草稿没有原精确失败终态')
+                const context = readCodeBehaviorContext(native.request, operation.input.source.commonDir)
+                const materialRef = writeEvidence(operation.input.source.commonDir, { version: 'stopped-physical-draft-v1', path: binding.path, source: physical.source })
+                saveStage(store, fence!, `${key}:${purpose}:stopped-physical-material-provenance`, { sourceKind: 'physical_draft', approved: false, observationKind: zcode || proof.observedFailure ? 'native-failure' : 'pause', observedAt: Date.now(), fromOperationId: owner.id, fromAttemptId: prior.id, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef, originalFailure: prior.failure, canonicalRecordSha256: contentHash(JSON.stringify(proof.record)), observedHeadCommit: physical.observedHeadCommit, observedTree: physical.observedTree, indexSha256: physical.indexSha256, materialRef, draftSha256: contentHash(physical.source), schemaDigest, originalInputDigest: native.request.inputDigest, currentInputDigest: inputDigest })
+                return { source: physical.source, errors: [...context.errors], repairDiagnostics: context.repairDiagnostics, sourceKind: 'physical_draft' }
+              }
+              const witness = nativeWorktreeResult(proof.record.worktreePath, native.request.worktree!)
+              if (witness.headCommit === native.request.worktree!.baseCommit) return null
+              if (zcode && !zcodeFailed) fail('stale_result', 'ZCode新Git材料没有原精确失败终态')
+              const format = !zcode && proof.observedFailure ? observeClaudeStoppedWorktreeFailure(prompt, state, proof.record.worktreePath) : undefined
+              const draft = captureStageDraft(operation.input.source.commonDir, native.request.worktree!, { worktree: witness }, binding)
+              const source = readStageDraft(operation.input.source.commonDir, draft, binding), observedAt = Date.now()
+              const context = completedEventsRpc ? readCodeBehaviorContext(native.request, operation.input.source.commonDir) : undefined
+              const errors = context && [...context.errors]
+              if (errors) {
+                const rpc = { code: 'native_rpc_timeout', message: proof.state.error! }
+                if (!errors.some(error => canonical(error) === canonical(rpc))) errors.push(rpc)
+              }
+              saveStage(store, fence!, `${key}:${purpose}:stopped-git-material-provenance`, { sourceKind: 'git_draft', approved: false, observationKind: format ? 'missing-final' : zcode || proof.observedFailure ? 'native-failure' : 'pause', observedAt, fromOperationId: owner.id, fromAttemptId: prior.id, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef, originalFailure: prior.failure, canonicalRecordSha256: contentHash(JSON.stringify(proof.record)), resultCommit: draft.resultCommit, resultTree: draft.resultTree, oid: draft.oid, draftSha256: contentHash(source), schemaDigest, originalInputDigest: native.request.inputDigest, currentInputDigest: inputDigest })
+              return { source, errors: errors ?? (zcode ? [...readCodeBehaviorContext(native.request, operation.input.source.commonDir).errors] : format ? [{ code: format.code, message: format.message }] : []), ...(context ? { repairDiagnostics: context.repairDiagnostics } : {}), sourceKind: 'git_draft' }
+            })
+            if (material) return material
+            continue
           }
           if (existingDraft || native.request.worktree?.mode !== 'read' || native.request.frozenContext) continue
           const wholeAnalysis = purpose === 'code_behavior_analyze' && key === 'analysis' ? stage<CodeBehaviorAnalysis>(store, owner, prior, key) : null

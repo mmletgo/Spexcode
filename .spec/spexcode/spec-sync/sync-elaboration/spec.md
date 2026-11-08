@@ -25,6 +25,8 @@ related:
 
 ## expanded spec
 
+loadDraftMaterial可异步完成已认证停止来源的临时checkout观察；新生成前等待原JSON/Git材料及finally正式回收。归档后的原稿仍沿既有owner/seed/schema、较新来源和未批准身份进入新seed，空稿保持原恢复；不启动旧Native或新造历史witness。
+
 
 同owner连续事实返修把原acceptedRef认证、原generation实际attempt为V5的已批准事实值作为固定继承基线。先逐值证明其相对原作者仅desc/prose/RULE.basis变化，raw、元数据、身份、全部非事实业务列和绑定保持；局部targets/sourceDigest/files自洽且进入现有输入摘要。当前relatedIds只开放本次命中字段，未命中旧basis必须等于固定已批准值；省略旧行也继承该值，不回滚到作者旧事实，不累计旧IDs为自由修改权限。new、prior冷重建及saved/accepted缓存共用同一原件资格接缝。
 

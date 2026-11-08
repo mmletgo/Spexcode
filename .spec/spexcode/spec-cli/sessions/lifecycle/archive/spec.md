@@ -31,7 +31,7 @@ No product surface offers a permanent-delete verb.
 
 ## expanded spec
 
-同步owned的已完成native-worktree可由[[sync-native-run]]自动复用此close。内部可选completed守卫在同一transition/record锁内核对完整原record、精确root/commonDir/branch/HEAD/tree及clean状态；identity、恢复事务或工作文件已变化则明确推迟，不能关闭用户恢复的新runtime。正式冷停止、archive/ref与record保留、trash/prune及补偿路径保持唯一。内部回收可抑制既有queue wake，不能借close重启其他已暂停工作。
+同步owned的completed或精确已停止failed/cancelled native-worktree可由[[sync-native-run]]自动复用此close。内部settled守卫在原transition/record锁内核对完整原record、root/commonDir/branch/HEAD/tree和clean状态，保Native允许缺席的thread/turn身份；恢复事务、identity或工作文件变化明确推迟。已正式archived、有效coldProof且精确停止的失败材料可以在同一锁内临时还原缺失checkout：复用原restoreArchivedWorktree的内部临时模式，在registry锁内要求path仍缺席并记录仅进程内的本次created事实；普通resume行为不变。callback不持registry锁、不materialize、不启动runtime，沿原严格observer读取材料。restore或callback异常亦finally仅回收本次created且经proveSessionCandidate确认归属的checkout，复用原close的registry→trash/prune→slot GC物理段；不重复归档，不修改原archive SHA、record/closedAt/Native状态和历史。内部回收抑制queue及execution wake，无新持久状态。
 
 **Close is a soft cold transition.** A close is admitted only after exact leaf ownership, tmux/session transport
 absence, adapter cleanup, generation and descendant fences, and all failure compensation from the former cold-stop

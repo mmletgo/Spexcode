@@ -29,7 +29,7 @@ export function pinSyncNativeRequest(request: FrozenRequest, saved: Pick<Structu
 export type NativeRunRecord = Pick<SessRec, 'session' | 'status' | 'harnessSessionId' | 'structuredExecution' | 'createRequestId' | 'createPayloadHash'> & Partial<Pick<SessRec, 'worktreePath'>>
 export type AttemptRunnerOptions = {
   resourceRecoveryOnly?: true
-  retireCompletedWorktrees?: true
+  retireSettledWorktrees?: true
   runtime?: { run: typeof runStructuredSession; cancel: typeof cancelStructuredSession; readRecord: (id: string) => NativeRunRecord | null; readCreateTermination?: typeof readSessionCreateTermination; recoverCreateTermination?: typeof recoverSessionCreateTermination }
   blobIO?: { put: (bytes: Buffer) => BlobRef; read: (ref: BlobRef) => Buffer }
   pollMs?: number
@@ -383,27 +383,54 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
     if (signal?.aborted) current.controller.abort()
     const abort = (): void => current.controller.abort()
     signal?.addEventListener('abort', abort, { once: true })
+    const retire = async (result?: ElaborationSessionResult): Promise<void> => {
+      if (!options.retireSettledWorktrees || !frozen.worktree) return
+      const resource = store.findResource(fence.attemptId, frozen.requestKey)
+      if (!resource || resource.phase !== 'removed') return
+      const attempt = store.readAttempt(fence.attemptId), dispatch = attempt.dispatchPlans.find(plan => plan.key === frozen.requestKey)
+      const id = dispatch && sessionIdForCreateKey(dispatch.sessionCreateKey)
+      try {
+        const checkpoint = read<NativeRunCheckpoint>(resource.checkpointRef), record = id ? readRecord(id) : null, state = record?.structuredExecution
+        const plan = read<NativeRunPlan>(resource.plan.planBlob)
+        const execution = structuredExecutionPolicy(frozen), prompt = nativeWorktreePrompt(frozen.prompt, frozen.worktree)
+        const payloadHash = hash({ prompt, parent: null, launcher: null, base: frozen.worktree.baseCommit, structuredExecution: execution })
+        if (!record || !state || !dispatch || resource.operationId !== operation.id || resource.attemptId !== attempt.id || resource.generation !== attempt.generation
+          || hash(plan) !== hash({ schemaVersion: 1, request: frozen, requestDigest, sessionCreateKey: dispatch.sessionCreateKey, expectedSessionId: id, operationId: operation.id, attemptId: attempt.id, inputId: operation.input.id, candidateDigest: resource.plan.candidateDigest })
+          || checkpoint.operationId !== operation.id || checkpoint.attemptId !== attempt.id || checkpoint.inputId !== operation.input.id || checkpoint.candidateDigest !== resource.plan.candidateDigest
+          || resource.plan.inputId !== operation.input.id || resource.plan.payloadDigest !== requestDigest || checkpoint.requestDigest !== requestDigest
+          || checkpoint.expectedSessionId !== id || checkpoint.phase !== 'removed' || checkpoint.session.sessionId !== id
+          || record.createRequestId !== sha(dispatch.sessionCreateKey) || record.createPayloadHash !== payloadHash
+          || hash(structuredExecutionPolicy(state)) !== hash(execution) || (state.threadId ?? null) !== checkpoint.session.threadId || (state.turnId ?? null) !== checkpoint.session.turnId)
+          throw new Error('settled native identity no longer matches its durable resource')
+        if (result) {
+          if (checkpoint.status !== 'completed' || hash(checkpoint.result) !== hash(result) || state.state !== 'completed'
+            || state.threadId !== result.threadId || state.turnId !== result.turnId || state.resultDigest !== result.resultDigest
+            || hash(state.output) !== result.resultDigest || hash(state.resultWorktree) !== hash(result.worktree))
+            throw new Error('completed native identity no longer matches its durable result')
+        } else {
+          if (!['failed', 'cancelled'].includes(state.state ?? '') || state.cancellation?.nativeStopped !== true) return
+          const stop = { sessionId: id, state: state.state, threadId: state.threadId, turnId: state.turnId, nativeStopped: true,
+            acknowledged: state.cancellation.acknowledged, nativeStatus: state.cancellation.nativeStatus, error: state.cancellation.error }
+          if (checkpoint.status !== state.state || checkpoint.result || !checkpoint.stop?.nativeStopped || checkpoint.stop.state !== stop.state || checkpoint.stop.sessionId !== stop.sessionId
+            || (checkpoint.stop.threadId ?? null) !== (stop.threadId ?? null) || (checkpoint.stop.turnId ?? null) !== (stop.turnId ?? null)
+            || checkpoint.stop.acknowledged !== stop.acknowledged || checkpoint.stop.nativeStatus !== stop.nativeStatus || checkpoint.stop.error !== stop.error
+            || state.state === 'failed' && (checkpoint.failure?.code !== (state.errorCode ?? 'failed') || checkpoint.failure.message !== state.error))
+            throw new Error('failed native identity no longer matches its durable stop')
+        }
+        await withoutSessionApplicationExecutionWake(() => closeSession(record.session, undefined, {
+          wakeQueue: false, settled: { record, commonDir: operation.input.source.commonDir, ...(result?.worktree ? { worktree: result.worktree } : {}) },
+        }))
+      } catch (error) {
+        console.warn(`spex sync: settled worktree cleanup pending for ${id ?? frozen.requestKey}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
     try {
       const result = await current.promise
-      if (options.retireCompletedWorktrees && frozen.worktree && !signal?.aborted) {
-        try {
-          const record = readRecord(result.sessionId), state = record?.structuredExecution
-          const attempt = store.readAttempt(fence.attemptId), dispatch = attempt.dispatchPlans.find(plan => plan.key === frozen.requestKey)
-          const execution = structuredExecutionPolicy(frozen), prompt = nativeWorktreePrompt(frozen.prompt, frozen.worktree)
-          const payloadHash = hash({ prompt, parent: null, launcher: null, base: frozen.worktree.baseCommit, structuredExecution: execution })
-          if (!record || !state || !dispatch || record.createRequestId !== sha(dispatch.sessionCreateKey) || record.createPayloadHash !== payloadHash
-            || record.session !== sessionIdForCreateKey(dispatch.sessionCreateKey) || hash(structuredExecutionPolicy(state)) !== hash(execution)
-            || state.state !== 'completed' || state.threadId !== result.threadId || state.turnId !== result.turnId
-            || state.resultDigest !== result.resultDigest || hash(state.output) !== result.resultDigest || hash(state.resultWorktree) !== hash(result.worktree))
-            throw new Error('completed native identity no longer matches its durable result')
-          await withoutSessionApplicationExecutionWake(() => closeSession(result.sessionId, undefined, {
-            wakeQueue: false, completed: { record, commonDir: operation.input.source.commonDir, worktree: result.worktree! },
-          }))
-        } catch (error) {
-          console.warn(`spex sync: completed worktree cleanup pending for ${result.sessionId}: ${error instanceof Error ? error.message : String(error)}`)
-        }
-      }
+      await retire(result)
       return copy(result)
+    } catch (error) {
+      await retire()
+      throw error
     }
     finally { signal?.removeEventListener('abort', abort); if (flights.get(frozen.requestKey) === current) flights.delete(frozen.requestKey) }
   }
