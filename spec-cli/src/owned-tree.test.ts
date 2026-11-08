@@ -4,7 +4,7 @@ import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { removeOwnedTree } from './owned-tree.js'
+import { removeOwnedTree } from '@spexcode/spec-core'
 
 test('removing private and read-only trees never expands group or other permissions', t => {
   const root = fs.mkdtempSync(join(tmpdir(), 'spex-owned-tree-'))

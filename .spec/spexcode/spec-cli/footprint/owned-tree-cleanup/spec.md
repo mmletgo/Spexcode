@@ -6,7 +6,7 @@ desc: 回收调用方已证明拥有的树，包括只读快照；删除链接�
 code:
   - packages/spec-core/src/owned-tree.ts#removeOwnedTree
 related:
-  - packages/spec-core/src/owned-tree.test.ts
+  - spec-cli/src/owned-tree.test.ts
 ---
 # 自有只读树回收
 
