@@ -7655,26 +7655,27 @@ test('未采纳settled重验重新派发P0/P1并续原Git稿，坏candidate不�
   assert.notEqual(result.receipt!.actualTree, first.receipt!.actualTree)
 })
 
-for (const frozen of ['new', 'v1', 'legacy-checkpoint', 'reserved', 'null', 'empty', 'future'] as const) test(`P0 context传输只在首次冻结选择，${frozen}保留旧字段缺席与请求绑定`, async t => {
+for (const frozen of ['new', 'v1', 'v2-reserved', 'legacy-checkpoint', 'reserved', 'null', 'empty', 'future'] as const) test(`P0 context传输只在首次冻结选择，${frozen}保留旧字段缺席与请求绑定`, async t => {
   const f = await fixture(t, { maxAttempts: 1, maxCalls: 8, maxRepairs: 0, timeoutMs: 120_000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, 'code', 'claude:default')
   const claim = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30_000, expectedMessageId: f.operation.dispatchMessageId })
   let originalProtocol: { ref: { sha256: string }; bytes: Buffer } | undefined
   const rejectsTransport = ['null', 'empty', 'future'].includes(frozen)
-  const expectedTransport = frozen === 'new' ? 'git-json-v2' : frozen === 'v1' ? 'git-json-v1' : undefined
-  const protocolValue = { version: 'code-behavior-draft-v1', ...(frozen === 'v1' ? { contextTransport: 'git-json-v1' } : rejectsTransport ? { contextTransport: frozen === 'null' ? null : frozen === 'empty' ? '' : 'git-json-future' } : {}) }
-  if (frozen === 'legacy-checkpoint' || frozen === 'v1' || rejectsTransport) {
+  const expectedTransport = frozen === 'new' ? 'git-json-v3' : frozen === 'v1' ? 'git-json-v1' : frozen === 'v2-reserved' ? 'git-json-v2' : undefined
+  const protocolValue = { version: 'code-behavior-draft-v1', ...(expectedTransport ? { contextTransport: expectedTransport } : rejectsTransport ? { contextTransport: frozen === 'null' ? null : frozen === 'empty' ? '' : 'git-json-future' } : {}) }
+  if (frozen === 'legacy-checkpoint' || frozen === 'v1' || frozen === 'v2-reserved' || rejectsTransport) {
     const value = protocolValue, resultRef = writeEvidence(f.input.source.commonDir, value)
     const ref = writeEvidence(f.input.source.commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: claim.attempt.id, inputId: f.input.id, policyDigest: f.operation.policyDigest, stage: 'behavior-draft-protocol', resultRef })
     f.store.checkpoint(claim.fence, { ...ref, artifacts: syncCheckpointArtifacts(value, resultRef) })
     originalProtocol = { ref, bytes: readEvidence(f.input.source.commonDir, ref) }
   }
-  const reserved = frozen === 'reserved' ? f.store.reserveDispatch(claim.fence, { key: `sync:${claim.attempt.id}:original-reserved`, purpose: 'code_behavior_review', requestDigest: contentHash('原完整冻结Native请求摘要') }) : null
+  const reserved = frozen === 'reserved' || frozen === 'v2-reserved' ? f.store.reserveDispatch(claim.fence, { key: `sync:${claim.attempt.id}:original-reserved`, purpose: 'code_behavior_review', requestDigest: contentHash('原完整冻结Native请求摘要') }) : null
   const reservedBytes = JSON.stringify(reserved)
   let captured = false
   f.options.runner = async request => {
     captured = true
     const task = JSON.parse(request.prompt.split('\n任务:\n')[1].split('\n草稿文件=')[0])
     assert.equal(task.contextTransport, expectedTransport)
+    assert.equal(request.prompt.includes('SPEX_P0_COVERAGE'), frozen === 'new')
     assert.equal(request.worktree!.mode, frozen === 'reserved' ? 'read' : 'edit')
     const contexts = readTree(f.input.source.commonDir, request.worktree!.tree).filter(entry => entry.path.endsWith('.context.json'))
     assert.equal(contexts.length, expectedTransport ? 1 : 0)
@@ -7687,7 +7688,7 @@ for (const frozen of ['new', 'v1', 'legacy-checkpoint', 'reserved', 'null', 'emp
   const attempt = f.store.readAttempt(claim.attempt.id)
   const protocols = attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).filter(wrapper => wrapper.stage === 'behavior-draft-protocol')
   assert.equal(protocols.length, frozen === 'reserved' ? 0 : 1)
-  if (protocols.length) assert.deepEqual(JSON.parse(readEvidence(f.input.source.commonDir, protocols[0].resultRef).toString()), frozen === 'new' ? { version: 'code-behavior-draft-v1', contextTransport: 'git-json-v2' } : protocolValue)
+  if (protocols.length) assert.deepEqual(JSON.parse(readEvidence(f.input.source.commonDir, protocols[0].resultRef).toString()), protocolValue)
   if (rejectsTransport) assert.equal(attempt.dispatchPlans.length, 0)
   if (originalProtocol) assert.deepEqual(readEvidence(f.input.source.commonDir, originalProtocol.ref), originalProtocol.bytes)
   if (reserved) assert.equal(JSON.stringify(attempt.dispatchPlans.find(dispatch => dispatch.key === reserved.key)), reservedBytes)

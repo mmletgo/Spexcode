@@ -163,7 +163,8 @@ CREATE INDEX sync_observations_committed_frontiers ON sync_observations(
  source_key,json_extract(record_json,'$.input.id'),json_extract(record_json,'$.latestDifferenceDigest'),json_extract(record_json,'$.outcome')
 ) WHERE json_extract(record_json,'$.input.captureKind')='commit'
  AND json_extract(record_json,'$.failure') IS NULL AND json_extract(record_json,'$.outcome')!='blocked';
-` }, { version: 35, sql: 'SELECT 1; -- Protect frozen discovery packing and cross-operation approved P0 provenance from older writers.' }]
+` }, { version: 35, sql: 'SELECT 1; -- Protect frozen discovery packing and cross-operation approved P0 provenance from older writers.' },
+{ version: 36, sql: 'SELECT 1; -- Protect P0 draft coverage guidance frozen before dispatch from older writers.' }]
 
 /** 升级前以 SQLite online backup 保存一致性旧库；迁移本身由组件事务执行。 */
 export async function migrateSyncStore(protocol: SessionProtocol, options: { backupPath?: string } = {}): Promise<number> {

@@ -1794,6 +1794,39 @@ test('P4 精确 frontier 将共享路径字节与独立作者 ID 分开，显式
   } finally { f.cleanup() }
 })
 
+test('全树精确基线的读取次数与缺席路径数无关', async () => {
+  const f = await fixture()
+  try {
+    const path = 'src/含"引号\n的路径.ts'
+    const covered = scope(path, 'RULE-BATCH')
+    const exact = [{ kind: 'path' as const, path }, { kind: 'contract' as const, id: 'RULE-BATCH' }]
+    const initial = f.store.readBaselineSelection(source(), exact)
+    assert.ok('selection' in initial)
+    const ready = f.ready({ ...f.admit(source(), 'batch', covered), baselineSelection: initial.selection })
+    const journal = f.store.beginApply(ready.fence, ready.plan, ready.target)
+    for (const step of journal.steps) f.store.recordApplyStep(ready.fence, journal.id, { ...step, status: 'completed' })
+    const receipt = f.receipt(journal.id, ready.plan)
+    f.store.recordReceipt(journal.id, receipt)
+    f.store.settleApply(journal.id, receipt.id)
+
+    const transaction = f.protocol.withTransaction.bind(f.protocol)
+    let queries = 0
+    f.protocol.withTransaction = body => transaction(tx => body({
+      ...tx,
+      query: (...args) => { queries++; return tx.query(...args) },
+    }))
+    const small = f.store.readBaselineSelection(source(), exact)
+    assert.ok('selection' in small)
+    const smallQueries = queries
+    const absent = Array.from({ length: 1_748 }, (_, index) => ({ kind: 'path' as const, path: `src/module-${index}.ts` }))
+    const large = f.store.readBaselineSelection(source(), [...absent, ...exact, ...exact].reverse())
+    assert.ok('selection' in large)
+    assert.equal(large.selection.bindings.length, absent.length + exact.length)
+    assert.deepEqual(large.selection.bindings.filter(binding => 'bytePair' in binding ? binding.bytePair : binding.intentPair), small.selection.bindings)
+    assert.equal(queries - smallQueries, smallQueries)
+  } finally { f.cleanup() }
+})
+
 test('P4 无关 path/ID 交付不使已冻结选择过期，相同资源 frontier 前进拒绝 beginApply', async () => {
   const f = await fixture()
   try {
@@ -2545,27 +2578,27 @@ test('writer34观察索引正常备份升级、失败原子回滚、保旧行且
   } finally { backup?.close(); f.cleanup() }
 })
 
-test('writer35只追加计划与P0批准来源版本并保留可回滚v34备份', async () => {
+for (const prior of [34, 35] as const) test(`从writer${prior}升级仅追加P0版本并保留可回滚备份`, async () => {
   const f = await fixture()
   let backup: ReturnType<typeof openProtocol> | undefined
   try {
-    const claimed = f.claim(), versions = SYNC_MIGRATIONS.slice(0, 34)
-    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version=35', SYNC_COMPONENT))
+    const claimed = f.claim(), versions = SYNC_MIGRATIONS.slice(0, prior)
+    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>?', SYNC_COMPONENT, prior))
     const read = (protocol: typeof f.protocol) => protocol.withTransaction(tx => ({
       schema: tx.query('SELECT * FROM sqlite_master ORDER BY type,name'),
       business: tx.query('SELECT * FROM sync_operations ORDER BY rowid'),
       attempts: tx.query('SELECT * FROM sync_attempts ORDER BY rowid'),
-      previousRegistry: tx.query('SELECT * FROM schema_migrations WHERE component!=? OR version<=34 ORDER BY component,version', SYNC_COMPONENT),
+      previousRegistry: tx.query('SELECT * FROM schema_migrations WHERE component!=? OR version<=? ORDER BY component,version', SYNC_COMPONENT, prior),
     }))
-    const before = read(f.protocol), backupPath = join(f.root, 'v34-before-p0-reuse.backup')
-    assert.equal(SYNC_MIGRATIONS[34].version, 35)
-    assert.match(SYNC_MIGRATIONS[34].sql, /^SELECT 1;/)
-    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), 35)
+    const before = read(f.protocol), backupPath = join(f.root, `v${prior}-before-p0-guidance.backup`)
+    assert.deepEqual(SYNC_MIGRATIONS.slice(prior).map(({ version }) => version), prior === 34 ? [35, 36] : [36])
+    for (const { sql } of SYNC_MIGRATIONS.slice(prior)) assert.match(sql, /^SELECT 1;/)
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), 36)
     assert.deepEqual(read(f.protocol), before)
     assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, versions), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
     assert.deepEqual(f.store.readAttempt(claimed.attempt.id), claimed.attempt)
     backup = openProtocol(backupPath)
-    assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, versions), 34)
+    assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, versions), prior)
     assert.deepEqual(read(backup), before)
   } finally { backup?.close(); f.cleanup() }
 })

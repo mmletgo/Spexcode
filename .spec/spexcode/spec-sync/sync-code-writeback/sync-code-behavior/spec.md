@@ -22,7 +22,9 @@ physical_draft是已认证停止owner工作树的未批准物理JSON材料，提
 
 既有 P0 的 contextTransport:git-json-v1 仍沿原冻结格式冷验。只有既有behavior-draft-protocol对象与code_behavior派发均缺席时才选择，旧对象字段缺席及全部saved/reserved请求按原prompt/tree/schema字节恢复，不补字段。分析与独审沿同owner/purpose的只读.context.json完整保存task、repairDiagnostics及原具体errors，独审另含完整pendingAnalysis（analysisDigest、analysis、newNodeProposals），不同拒因、旧JSON与findings均不截断或丢弃。prompt仅引用精确路径/SHA及原业务digest并保任务责任、直接相关Spec和自由仓库读取说明；临时context/schema不是业务checkedPaths。context与schema同seed只读，真实diff含其修改即拒绝。业务inputDigest/analysisDigest、原business worktree与accepted早退不含运输overlay，旧已审缓存仍沿完整原绑定承接；新prompt/seed另使Native requestDigest变化。材料冷验从完整冻结请求的真实Git tree读取显式context指针并核路径/SHA/任务身份，损坏明确拒绝，不信任宿主文件或fallback猜测。loadMaterial仍接原运输前语义，文件与旧inline只在既有材料比较接缝归一，不替历史请求改签。该运输改善不宣称已证明provider EPIPE根因或修复。
 
-新 P0 冻结 git-json-v2。Git context 只承载当前任务与完整待审分析，修复诊断与具体错误正文在该运输中为空。失败检查点仅保留状态、类别及原请求身份。格式失败继续核对并修改原 JSON 草稿与精确 schema。业务拒绝以最新相关、经认证的真实独审原件为依据，任务只引用该原 Git 结果，程序不另封装提案、分析和拒因。原草稿、验收原件、写入范围、独审和正式结果身份保持。
+P0 的 git-json-v2 与 git-json-v3 共用正文格式。Git context 只承载当前任务与完整待审分析，修复诊断与具体错误正文在该运输中为空。失败检查点仅保留状态、类别及原请求身份。格式失败继续核对并修改原 JSON 草稿与精确 schema。业务拒绝以最新相关、经认证的真实独审原件为依据，任务只引用该原 Git 结果，程序不另封装提案、分析和拒因。原草稿、验收原件、写入范围、独审和正式结果身份保持。
+
+新冻结的 git-json-v3 只给分析请求追加草稿自检命令。命令只读当前草稿和任务，向当前会话输出未归类的必分析路径，以及没有新节点或实际重大未知/冲突的未治理源码路径。初始化覆盖全部必分析路径，包括 Git 内容与基线相同的路径。续修先检查原稿，提交前再次检查实际稿件。自检不写文件，不把诊断写入 Git、context 或检查点。正式程序校验及独审继续核真实路径、归属、证据与业务语义。旧运输的完整请求、业务输入摘要、草稿迁接与原批准身份保持。
 
 P1精确后置门禁可对已审refactor分类提出非权威回审：只接同operation、原输入/组合/读取及计划绑定的已结算拒绝round，finding须命中原refactor的affectedIds与其真实changedPaths治理owner。原analysisRef及原分析、P1 resultRef/candidateDigest、完整finding、匹配原beforeDigest的真实旧/新业务行与代码差量一并进入postGateReview。该语义质疑参与新的分析inputDigest，使旧accept及readyAnalysis不跨质疑承接；真实Agent重新analyze并由独立Agent审查，可改判allowed_change，也可维持refactor要求P1恢复错误改写。程序不改kind、不采纳被拒候选为事实或raw，不扩AC/VERIFY/生命周期授权。认证原Git分析稿仅按原bytes迁为本轮临时材料，明确来源且不继承已校验资格；旧只读成功Native输出须沿原完整请求、schema、seed、trace及completed资源认证后才迁为临时JSON，不能伪造历史Git稿。
 
