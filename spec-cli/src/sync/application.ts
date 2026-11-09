@@ -14,7 +14,7 @@ import type { SyncCoordinatorOptions, SyncCoordinatorPlan, SyncCoordinatorResult
 import type { SyncResourceRecoveryResult } from './coordinator.js'
 import { migrateSyncStore } from './migrations.js'
 import type { BaselinePair, BlobRef, FrozenBaselineSelection, InputSnapshot, PhysicalControl, PhysicalScope, SyncObserverHealth as PersistentObserverHealth, SyncObservation, SyncOperation, WorktreeIdentity } from './operation-types.js'
-import { buildSyncApplicationPlan, deriveSyncBaselineResources } from './planning.js'
+import { createSyncApplicationPlanner } from './planning.js'
 import { readDecisionAuthority } from './code-behavior.js'
 import { readCompositionEvidence, type SelectedCompositionEvidence } from './composition.js'
 import { composeAuthoredInput } from './author-input.js'
@@ -22,7 +22,7 @@ import { claimFileMutex } from './file-mutex.js'
 import { composeControlledRequest, controlledDecisionIdentity, guardControlledRequestPath, prepareControlledDecision, readControlledDecision, prepareControlledRequest, renderControlledDecisionRaw } from './request-input.js'
 import type { CodeBehaviorAnalysis, SyncDecisionInput } from './writeback-types.js'
 import { freezeDeliveryRuntime } from './runtime-freeze.js'
-import { captureInputSnapshot, captureContinuityConfiguration, contentHash, identifyRawWorktree, identifyWorktree, readRawSource, objectGit, readEvidence, readObject, readPhysicalFingerprint, readTree, verifySnapshot, writeEvidence } from './snapshot.js'
+import { captureInputSnapshot, captureContinuityConfiguration, contentHash, identifyRawWorktree, identifyWorktree, readRawSource, objectGit, readEvidence, readObject, readPhysicalFingerprint, readTree, verifySnapshot, withReadonlySnapshotQuery, writeEvidence } from './snapshot.js'
 import { readEnabledRecord, registeredSources as enabledSources, sourceRegistrationLock, sourceRegistrationPath, sourceRegistryDirectory, proveSourceContinuity, writeEnabledRecord, writeRegistrationEvidence, readRegistrationEvidence, type EnabledRecord, type PreviousDevices, type SourceContinuityProof } from './source-registration.js'
 import { inspectTrustedRuntime, inspectTrustedRuntimeAsync } from './trusted-hooks.js'
 import type { TrustedRuntimeEntry } from './trusted-hooks.js'
@@ -326,17 +326,21 @@ export class SyncApplication {
     const cacheKey = `${nodeId}:${direction}:${commitTrigger ? contentHash(JSON.stringify({ before: commitTrigger.before?.id ?? null, paths: commitTrigger.paths })) : ''}`, cached = reuseObserved ? this.observedPlans.get(cacheKey) : null
     if (cached?.inputId === snapshot.id && cached.headsDigest === headsDigest && cached.direction === direction) return { plan: structuredClone(cached.plan), selection: cached.selection }
     const discoverySelection = heads.selection, planningOptions = { discoverySelection, direction, ...(commitTrigger ? { commitTrigger } : {}) }
-    const provisional = await buildSyncApplicationPlan(snapshot, nodeId, heads.selection, planningOptions)
-    const resources = await deriveSyncBaselineResources(snapshot, provisional, heads.selection)
-    const selected = this.store.readBaselineSelection(snapshot.source, resources)
-    if ('failure' in selected) throw Object.assign(new SyncApplicationError(selected.failure.code, selected.failure.message), { syncFailure: selected.failure })
-    const selectedPlan = await buildSyncApplicationPlan(snapshot, nodeId, selected.selection, planningOptions)
-    const exact = this.store.readBaselineSelection(snapshot.source, await deriveSyncBaselineResources(snapshot, selectedPlan, selected.selection))
-    if ('failure' in exact) throw Object.assign(new SyncApplicationError(exact.failure.code, exact.failure.message), { syncFailure: exact.failure })
-    const plan = await buildSyncApplicationPlan(snapshot, nodeId, exact.selection, planningOptions)
-    plan.agentWorkflow = 'native-worktree-v1'
-    if (reuseObserved) this.observedPlans.set(cacheKey, { direction, inputId: snapshot.id, headsDigest, plan: structuredClone(plan), selection: exact.selection })
-    return { plan, selection: exact.selection }
+    const frozen = await withReadonlySnapshotQuery(async () => {
+      const planner = createSyncApplicationPlanner(snapshot)
+      const provisional = await planner.build(nodeId, discoverySelection, planningOptions)
+      const resources = await planner.resources(provisional, discoverySelection)
+      const selected = this.store.readBaselineSelection(snapshot.source, resources)
+      if ('failure' in selected) throw Object.assign(new SyncApplicationError(selected.failure.code, selected.failure.message), { syncFailure: selected.failure })
+      const selectedPlan = await planner.build(nodeId, selected.selection, planningOptions)
+      const exact = this.store.readBaselineSelection(snapshot.source, await planner.resources(selectedPlan, selected.selection))
+      if ('failure' in exact) throw Object.assign(new SyncApplicationError(exact.failure.code, exact.failure.message), { syncFailure: exact.failure })
+      const plan = await planner.build(nodeId, exact.selection, planningOptions)
+      plan.agentWorkflow = 'native-worktree-v1'
+      return { plan, selection: exact.selection }
+    })
+    if (reuseObserved) this.observedPlans.set(cacheKey, { direction, inputId: snapshot.id, headsDigest, plan: structuredClone(frozen.plan), selection: frozen.selection })
+    return frozen
   }
   private observationChanges(snapshot: InputSnapshot, plan: SyncCoordinatorPlan, selection: FrozenBaselineSelection, evidence: SelectedCompositionEvidence): { changed: boolean; specChanged: boolean; codeChanged: boolean; readonlyContext: { path: string; oid: string | null; mode: string | null }[] } {
     const scope = plan.executionScope!

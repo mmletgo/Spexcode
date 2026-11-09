@@ -551,8 +551,13 @@ test('真实settle/adopt只写Spec且源码无byte head，Storage型单叶commit
   const snapshot = await captureInputSnapshot(f.root, { committed: true }), options = { discoverySelection: f.discovery, direction: 'code_to_spec' as const, commitTrigger: { before: f.before, paths: ['src/third.js'] } }
   let selection = f.discovery
   const allFiles = await context(snapshot, verifySnapshot(snapshot).map(entry => entry.path))
+  const frozen = await f.application['freezeNodePlan'](snapshot, 'project', false, options.direction, options.commitTrigger)
   for (let round = 0; round < 3; round++) {
     const plan = await buildSyncApplicationPlan(snapshot, 'project', selection, options)
+    if (round === 2) {
+      plan.agentWorkflow = 'native-worktree-v1'
+      assert.equal(JSON.stringify(frozen), JSON.stringify({ plan, selection }))
+    }
     t.diagnostic(JSON.stringify({ round, settledBusinessHeads: f.discovery.bindings.filter(binding => binding.resource.kind !== 'path').length, journalFiles: f.journal.plan.files.map(file => file.path), knownByteHeads: f.discovery.bindings.filter(binding => binding.resource.kind === 'path').map(binding => binding.resource), targets: plan.targets.map(target => target.nodeId) }))
     assert.deepEqual(plan.targets.map(target => target.nodeId), ['third-contract'], '已经正式验证并采纳但从未写过的源码不能使完整初始化资格退回全树')
     const partitions = planSyncPartitions({ plan, files: allFiles.files, contracts: allFiles.contracts, nodes: allFiles.nodes, changedPaths: ['src/third.js'] })

@@ -14,7 +14,7 @@ code:
 
 ## expanded spec
 
-只读初始化回归不用projectedSelection：实际P4 derive初始all-null、精确scope/ack/queued claim、受控四门、真实private delivery正常hooks与settleApply、application.adopt建立基线。journal.files只有root与三叶Spec，234个业务ID头真实结算，源码无byte资源行；从listBaselineResources取得discovery后，单Storage型JSON序列化commit三轮均只派owner及真实依赖，最终source bytePair仍显式null。原receipt/journal不改。四门为明确fake前置，不冒称真实模型/Docker验收。
+只读初始化回归不用projectedSelection：实际P4 derive初始all-null、精确scope/ack/queued claim、受控四门、真实private delivery正常hooks与settleApply、application.adopt建立基线。journal.files只有root与三叶Spec，234个业务ID头真实结算，源码无byte资源行；从listBaselineResources取得discovery后，单Storage型JSON序列化commit三轮均只派owner及真实依赖，最终source bytePair仍显式null。正式冻结的计划及精确selection与独立执行三轮的输出逐字节一致。原receipt/journal不改。四门为明确fake前置，不冒称真实模型/Docker验收。
 
 负例保留scope外、缺owner/ID头、未采纳before、before源码内容/mode/absence与正式对象不一致、未审owner正文/新增code claim漂移的bootstrap；不得借兄弟全树pair或当前未审声明。隔离库将journal列与原件一致改为未settled、撤销结算凭据后，真实readBaselineSelection必须返回unsupported，不补头/receipt、不修库。
 
