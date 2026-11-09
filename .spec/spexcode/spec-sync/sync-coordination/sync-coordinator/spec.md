@@ -44,7 +44,7 @@ P1生成的ZCode `session/events` 精确超时也可沿上述已提交材料准�
 
 上述观察只从通过原请求和停止身份认证的 ZCode Native root 派生原树槽供 [[content-filter]] 字节核验。共用 filter root 指针不能代替原身份。无可认证树槽时仍要求物理字节匹配 Git 对象。
 
-P0 context传输选择复用behavior-draft-protocol唯一checkpoint：对象不存在且本attempt无任何code_behavior saved/reserved dispatch时，首次写version:code-behavior-draft-v1与contextTransport:git-json-v1；已有对象无字段保持legacy；字段存在但为null、空串或未知版本时在派发前明确拒绝，不能补签或因部分owner尚未派发而换运输。新请求以同owner/purpose只读Git.context.json完整承载任务、修复诊断、原errors及独审pendingAnalysis；业务输入/分析摘要与accepted查找保持，只有真实Native prompt/seed/requestDigest变化。既有材料比较冷读受完整request/tree/SHA绑定的文件并归一原inline语义，原Native/草稿/schema/独立身份和业务范围认证保持；格式失败继续原JSON，合法业务repair仍重新分析和独审。writer25围栏拒绝忽略该checkpoint字段的旧writer，沿正常online backup及一致DB/evidence/Git refs回滚。
+P0 只在本次 attempt 尚无阶段检查点和 code_behavior saved/reserved 派发时冻结 git-json-v2。已冻结的 git-json-v1、缺席字段及原请求保持精确恢复，未知传输在派发前拒绝。新运输在 Git 任务中保留当前任务和完整独审输入，失败仅持久化状态码、固定说明和必要身份。真实草稿、审查结果、source/tests 保护及资源结算仍依原门核验。
 
 P1权限/绑定非法的独审沿[[sync-elaboration]]现有同owner repairDiagnostics重审原合法候选。续审保留原generation trace，不要求新review轮号存在generate；按真实session/thread/turn命中该operation原attempt实际dispatch，再冷验完整保存Native请求、原结果/summary摘要及Git草稿seed/result身份。只有当前局部完整输入与原candidate机械校验保持、原review重新判为越界/绑定非法时才跳过生成；旧seed排除draft的边界、原请求字段缺席、控制attempt跳过判据、预算/资源/取消及全图seal保持。多次续审与后续只读owner返修均追溯同一真实generation来源，不把新审查轮当新生成。
 
@@ -185,7 +185,7 @@ raw-only 初始化允许的空 affectedIds 不能被解释为没有阻塞。完�
 
 恢复Spec自带VERIFY时，其原技术ID与node tombstone同样纳入已审scope/head覆盖并推进新receipt；generation/review的readyIds仍只业务ID。P1及当前可信verifications的argv/cwd/预算精确登记不变，restore不能批准旧验证命令覆盖新政策。
 
-显式 retryOf 的行为修复反馈沿真实不可变引用逐代读取，仅在来源物理身份、input.id、policyDigest、readSetDigest、requestBlob 及 origin 与当前操作精确相同时，将各代 behavior_analysis_invalid/behavior_review_failed/structured_output_format_invalid 的完整 code/message 按原先后交给本次分析和新独审。来源/input/政策/request/origin 结构绑定不符仍拒绝；合法 P1 扩作用域使当前 readSetDigest 不同于祖先时，只停止继承该代及更早诊断，保留本操作反馈并继续新分析，不由可选诊断新增业务阻断。不沿 changed-input successorOf 取反馈。诊断始终是未批准数据，不构成基线、业务批准、权限或可重用分析；现有预算、尝试、deadline 和独审门禁保持。
+新 P0 不汇总同一操作或 retryOf 历次程序失败诊断。已认证的原 JSON 草稿仍沿原 owner、输入、政策和范围续修。当前业务拒绝引用真实独审原件，格式错误由原稿和精确 schema 核实。历史材料的来源、原请求及资源身份仍可核验，已批准结果的复用边界保持。旧已冻结运输沿原诊断读取合同恢复。
 
 所有行为分析、细化、生成与各自独立评审使用 operation 的固定有效 model（历史缺省为 gpt-6.1-sol），遵循 [[sync-model-selection]]；恢复沿原结构化请求，模型不改变预算、业务权限或已批准 P1 继承。
 
