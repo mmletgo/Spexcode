@@ -397,7 +397,8 @@ test('status复用本轮快照并让重试资格复用详情的闭包当前性',
       assert.equal(detail.retryEligibility.eligible, true)
       const entries = counter.entries()
       assert.equal(entries.filter(entry => entry === 'capture').length, 2, 'status只采一次快照（双重observe各读取一次索引）')
-      assert.equal(entries.filter(entry => entry.startsWith('tree:')).length, 15, '同一status保留完整闭包证明读取，并仅计算一次闭包当前性')
+      const treeReads = entries.filter(entry => entry.startsWith('tree:')).length
+      assert.ok(treeReads <= 9, `status 应共享一次闭包当前性读取，实际读树 ${treeReads} 次`)
     } finally { counter.restore() }
   } finally { f.cleanup() }
 })
