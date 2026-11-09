@@ -13,6 +13,17 @@ import { withDeliveryLocks } from './delivery-lock.js'
 
 export type FrozenReaderRuntime = { cliVersion: string; catalogDigest: string; catalogPath: string } & ({ version: 1 } | { version: 2; toolOutputTokenLimit: number })
 export type ZCodeToolPolicy = { version: 1; toolDenylist: readonly ['ExitPlanMode'] }
+export type NativeTokenUsage = {
+  source: 'claude-model-usage' | 'zcode-turn-usage'
+  uncachedInputTokens?: number
+  totalInputTokens?: number
+  outputTokens?: number
+  cacheReadInputTokens?: number
+  cacheWriteInputTokens?: number
+}
+export function isNativeTokenCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
 export type RejectedStructuredOutput = {
   version: 1; kind: 'untrusted_final'; representation: 'text' | 'native_json'
   text: string; sha256: string; ref?: { sha256: string }
@@ -38,6 +49,7 @@ export type StructuredExecution = {
   cancellation?: { reason: 'cancelled' | 'timeout'; requestedAt: number; nativeStopped: boolean; acknowledged: boolean; nativeStatus?: string; error?: string }
   output?: unknown
   resultDigest?: string
+  nativeTokenUsage?: NativeTokenUsage
   error?: string
   errorCode?: 'structured_output_retries_exhausted' | 'structured_output_format_invalid' | 'native_worktree_result_invalid' | 'native_rpc_timeout' | 'native_turn_transport_failed' | 'unsupported'
   rejectedOutput?: RejectedStructuredOutput
@@ -145,16 +157,18 @@ export class StructuredSessionError extends Error {
   readonly threadId?: string
   readonly turnId?: string
   readonly rejectedOutput?: RejectedStructuredOutput
+  readonly nativeTokenUsage?: NativeTokenUsage
   readonly failedWorktree?: NativeWorktreeResult
   readonly requestKey?: string
   readonly inputDigest?: string
-  constructor(readonly code: 'unsupported' | 'failed' | 'cancelled' | 'timeout' | 'key_reused' | 'stale_result' | 'cancellation_pending' | NonNullable<StructuredExecution['errorCode']>, message: string, identity: { sessionId?: string; threadId?: string; turnId?: string; rejectedOutput?: RejectedStructuredOutput; failedWorktree?: NativeWorktreeResult; requestKey?: string; inputDigest?: string } = {}) {
+  constructor(readonly code: 'unsupported' | 'failed' | 'cancelled' | 'timeout' | 'key_reused' | 'stale_result' | 'cancellation_pending' | NonNullable<StructuredExecution['errorCode']>, message: string, identity: { sessionId?: string; threadId?: string; turnId?: string; rejectedOutput?: RejectedStructuredOutput; nativeTokenUsage?: NativeTokenUsage; failedWorktree?: NativeWorktreeResult; requestKey?: string; inputDigest?: string } = {}) {
     super(message)
     this.name = 'StructuredSessionError'
     this.sessionId = identity.sessionId
     this.threadId = identity.threadId
     this.turnId = identity.turnId
     if (identity.rejectedOutput !== undefined) this.rejectedOutput = identity.rejectedOutput
+    if (identity.nativeTokenUsage !== undefined) this.nativeTokenUsage = identity.nativeTokenUsage
     if (identity.failedWorktree !== undefined) this.failedWorktree = identity.failedWorktree
     if (identity.requestKey !== undefined) this.requestKey = identity.requestKey
     if (identity.inputDigest !== undefined) this.inputDigest = identity.inputDigest

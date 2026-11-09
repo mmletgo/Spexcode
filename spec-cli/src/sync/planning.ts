@@ -5,7 +5,7 @@ import type { SyncCoordinatorPlan, SyncDirection } from './coordinator-types.js'
 import type { BaselinePair, BaselineResource, FrozenBaselineSelection, InputSnapshot, SyncScope } from './operation-types.js'
 import { adoptedDeliveryPaths, selectedRetiredIds, verifyBaselineSelection } from './composition.js'
 import { isSyncSpecPath, readFrozenContracts } from './frozen-contracts.js'
-import { readEvidence, readObject, readTree, verifySnapshot } from './snapshot.js'
+import { readEvidence, readObjectBatch, readTree, verifySnapshot, type TreeEntry } from './snapshot.js'
 import { controlledDecisionIdentity } from './request-input.js'
 import { readDecisionAuthority } from './code-behavior.js'
 import type { CodeBehaviorAnalysis, SyncDecisionInput } from './writeback-types.js'
@@ -15,37 +15,101 @@ import { ownedObligationPaths } from './prior-context.js'
 
 /** 授权范围只枚举实际未治理源码；当前及真实交付治理均排除，发现不授予归属或执行范围。 */
 export function discoverSyncSourcePaths(snapshot: InputSnapshot, sourcePaths: readonly string[], governanceFiles: Iterable<string>): string[] {
+  return discoverSourcePaths(verifySnapshot(snapshot), sourcePaths, governanceFiles)
+}
+
+function discoverSourcePaths(entries: readonly TreeEntry[], sourcePaths: readonly string[], governanceFiles: Iterable<string>): string[] {
   const governed = new Set([...governanceFiles].flatMap(text => {
     const code = parseFrontmatter(text).fm.code
     return Array.isArray(code) ? code.filter((anchor): anchor is string => typeof anchor === 'string').map(anchor => posix.normalize(anchor.split('#')[0])) : []
   }))
-  return verifySnapshot(snapshot).filter(entry => entry.mode !== '120000' && coveredPath(entry.path, sourcePaths) && /\.(?:[cm]?[jt]sx?|py|go|rs|java|rb)$/.test(entry.path) && !/\.(?:test|spec)\./.test(entry.path) && !governed.has(entry.path)).map(entry => entry.path).sort()
+  return entries.filter(entry => entry.mode !== '120000' && coveredPath(entry.path, sourcePaths) && /\.(?:[cm]?[jt]sx?|py|go|rs|java|rb)$/.test(entry.path) && !/\.(?:test|spec)\./.test(entry.path) && !governed.has(entry.path)).map(entry => entry.path).sort()
 }
 
 export type SyncPlanningOptions = { discoverySelection?: FrozenBaselineSelection; direction?: SyncDirection; commitTrigger?: { before: InputSnapshot | null; paths: readonly string[] } }
 
+/** 同一次冻结的各轮共享已验证 Git 输入及其纯派生数据。 */
+export function createSyncApplicationPlanner(snapshot: InputSnapshot) {
+  const reads = createPlanningReads(snapshot)
+  return {
+    build: (nodeId: string, baseline?: BaselinePair | FrozenBaselineSelection | null, options: SyncPlanningOptions = {}) => buildPlan(snapshot, nodeId, baseline, options, reads),
+    resources: (plan: SyncCoordinatorPlan, baseline?: FrozenBaselineSelection | null) => deriveResources(snapshot, plan, baseline, reads),
+  }
+}
+
+type PlanningReads = ReturnType<typeof createPlanningReads>
+
+function createPlanningReads(snapshot: InputSnapshot) {
+  const { commonDir, canonicalRoot } = snapshot.source
+  const snapshots = new Map<string, { entries: TreeEntry[]; byPath: Map<string, TreeEntry> }>()
+  const texts = new Map<string, string>()
+  const graphs = new Map<string, ReturnType<typeof readFrozenContracts>>()
+  const adoptions = new Map<string, Set<string>>()
+  let settings: ReturnType<typeof readSyncSettings>['settings'] | undefined
+  let nodes: ReturnType<typeof loadSpecs> | undefined
+  const specTexts = (entries: readonly TreeEntry[]): ReadonlyMap<string, string> => {
+    for (const [oid, bytes] of readObjectBatch(commonDir, entries.filter(entry => !texts.has(entry.oid)).map(entry => entry.oid))) {
+      texts.set(oid, bytes.toString('utf8'))
+    }
+    return new Map(entries.map(entry => [entry.path, texts.get(entry.oid)!]))
+  }
+  return {
+    settings: () => settings ??= readSyncSettings(snapshot).settings,
+    nodes: (files: ReadonlyMap<string, string>) => nodes ??= loadSpecs(canonicalRoot, { tip: snapshot.headCommit, history: null, drift: null, snapshot: { tip: snapshot.headCommit, files } }),
+    snapshot: (input: InputSnapshot) => {
+      const key = JSON.stringify(input)
+      const existing = snapshots.get(key)
+      if (existing) return existing
+      const entries = verifySnapshot(input)
+      const verified = { entries, byPath: new Map(entries.map(entry => [entry.path, entry])) }
+      snapshots.set(key, verified)
+      return verified
+    },
+    frozen: (entries: readonly TreeEntry[]): ReturnType<typeof readFrozenContracts> => {
+      const specs = entries.filter(entry => entry.mode !== '120000' && isSyncSpecPath(entry.path))
+      const key = JSON.stringify(specs.map(({ path, oid }) => [path, oid]))
+      const existing = graphs.get(key)
+      if (existing) return existing
+      const frozen = readFrozenContracts(canonicalRoot, specTexts(specs))
+      graphs.set(key, frozen)
+      return frozen
+    },
+    specText: (entry: TreeEntry): string => texts.get(entry.oid) ?? specTexts([entry]).get(entry.path)!,
+    adopted: (before: InputSnapshot, pair: BaselinePair): Set<string> => {
+      const key = JSON.stringify([before, pair])
+      const existing = adoptions.get(key)
+      if (existing) return existing
+      const paths = adoptedDeliveryPaths(before, pair)
+      adoptions.set(key, paths)
+      return paths
+    },
+  }
+}
+
 /** 冻结契约影响与既有节点治理共同决定闭包；目录授权允许新自然语言需求创建实现。 */
 export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: string, baseline?: BaselinePair | FrozenBaselineSelection | null, options: SyncPlanningOptions = {}): Promise<SyncCoordinatorPlan & { executionScope: SyncScope }> {
+  return createSyncApplicationPlanner(snapshot).build(nodeId, baseline, options)
+}
+
+async function buildPlan(snapshot: InputSnapshot, nodeId: string, baseline: BaselinePair | FrozenBaselineSelection | null | undefined, options: SyncPlanningOptions, reads: PlanningReads): Promise<SyncCoordinatorPlan & { executionScope: SyncScope }> {
   if (options.discoverySelection) verifyBaselineSelection(snapshot, options.discoverySelection)
   const selection = baseline && 'version' in baseline ? baseline : null
   if (selection) verifyBaselineSelection(snapshot, selection)
   const baselinePair = baseline && !('version' in baseline) ? baseline : null
   const pairs = selection ? [...new Map(selection.bindings.flatMap(binding => { const pair = 'bytePair' in binding ? binding.bytePair : binding.intentPair; return pair ? [[pair.id, pair] as const] : [] })).values()] : baselinePair ? [baselinePair] : []
-  const { settings } = readSyncSettings(snapshot), entries = verifySnapshot(snapshot)
-  const specEntries = entries.filter(entry => entry.mode !== '120000' && isSyncSpecPath(entry.path))
-  const files = new Map(specEntries.map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
+  const settings = reads.settings(), { entries } = reads.snapshot(snapshot)
   const oldEntryMap = new Map((selection ? entries : baselinePair ? readTree(snapshot.source.commonDir, baselinePair.verifiedDelivery.immutableTree) : []).map(entry => [entry.path, entry]))
-  if (options.commitTrigger?.before) {
-    verifySnapshot(options.commitTrigger.before)
-    for (const entry of readTree(snapshot.source.commonDir, options.commitTrigger.before.immutableTree)) if (isSyncSpecPath(entry.path)) oldEntryMap.set(entry.path, entry)
+  const before = options.commitTrigger?.before
+  const beforeTree = before ? reads.snapshot(before) : null
+  if (before) {
+    for (const entry of readTree(snapshot.source.commonDir, before.immutableTree)) if (isSyncSpecPath(entry.path)) oldEntryMap.set(entry.path, entry)
   }
-  for (const binding of selection?.bindings ?? []) if ('bytePair' in binding && binding.bytePair) { const entry = verifySnapshot(binding.bytePair.verifiedDelivery).find(entry => entry.path === binding.resource.path); if (entry) oldEntryMap.set(entry.path, entry); else oldEntryMap.delete(binding.resource.path) }
+  for (const binding of selection?.bindings ?? []) if ('bytePair' in binding && binding.bytePair) { const entry = reads.snapshot(binding.bytePair.verifiedDelivery).byPath.get(binding.resource.path); if (entry) oldEntryMap.set(entry.path, entry); else oldEntryMap.delete(binding.resource.path) }
   const oldEntries = [...oldEntryMap.values()]
-  const oldFiles = new Map(oldEntries.filter(entry => entry.mode !== '120000' && isSyncSpecPath(entry.path)).map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
-  const oldFrozen = await readFrozenContracts(snapshot.source.canonicalRoot, oldFiles)
-  const protectedGraphs = await Promise.all(pairs.map(pair => readFrozenContracts(snapshot.source.canonicalRoot, new Map(verifySnapshot(pair.verifiedDelivery).filter(entry => entry.mode !== '120000' && isSyncSpecPath(entry.path)).map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')])))))
-  const frozen = await readFrozenContracts(snapshot.source.canonicalRoot, files)
-  const nodes = await loadSpecs(snapshot.source.canonicalRoot, { tip: snapshot.headCommit, history: null, drift: null, snapshot: { tip: snapshot.headCommit, files } })
+  const oldFrozen = await reads.frozen(oldEntries)
+  const protectedGraphs = await Promise.all(pairs.map(pair => reads.frozen(reads.snapshot(pair.verifiedDelivery).entries)))
+  const frozen = await reads.frozen(entries), files = frozen.files, oldFiles = oldFrozen.files
+  const nodes = await reads.nodes(files)
   const currentIntent = nodes.find(node => node.id === nodeId)
   const currentIntentIds = new Set(frozen.contracts.find(contract => contract.nodeId === currentIntent?.id)?.items.map(item => item.id) ?? [])
   const previousIntent = oldFrozen.nodes.find(node => node.id === nodeId) ?? oldFrozen.nodes.find(node => oldFrozen.contracts.find(contract => contract.nodeId === node.id)?.items.some(item => currentIntentIds.has(item.id)))
@@ -56,11 +120,10 @@ export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: 
     const code = parseFrontmatter(view.files.get(node.path)!).fm.code
     return { ...node, code: parseRelation(Array.isArray(code) ? code.filter((entry): entry is string => typeof entry === 'string') : [], 'code').entries }
   }))
-  const before = options.commitTrigger?.before
   const readinessSelection = options.discoverySelection
   const readinessPairs = new Map((readinessSelection?.bindings ?? []).flatMap(binding => { const pair = 'bytePair' in binding ? binding.bytePair : binding.intentPair; return pair ? [[pair.id, pair] as const] : [] }))
-  const adopted = new Map([...readinessPairs.values()].map(pair => [pair.id, before ? adoptedDeliveryPaths(before, pair) : new Set<string>()]))
-  const beforeEntries = new Map((before ? verifySnapshot(before) : []).map(entry => [entry.path, entry]))
+  const adopted = new Map([...readinessPairs.values()].map(pair => [pair.id, before ? reads.adopted(before, pair) : new Set<string>()]))
+  const beforeEntries = beforeTree?.byPath ?? new Map<string, TreeEntry>()
   const beforePaths = new Set(beforeEntries.keys())
   const bootstrapNodes = oldFrozen.nodes.filter(node => beforePaths.has(node.path) && coveredPath(node.path, [posix.dirname(previousIntent?.path ?? intent.path)]))
   const bootstrapPaths = new Set(bootstrapNodes.map(node => node.path))
@@ -77,10 +140,10 @@ export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: 
     const binding = readinessSelection?.bindings.find(binding => binding.resource.kind === 'path' && binding.resource.path === node.path)
     const pair = binding && 'bytePair' in binding ? binding.bytePair : null
     if (!pair || !settledResource({ kind: 'path', path: node.path }, node.path)) return []
-    const source = new Map(verifySnapshot(pair.sourceInput).map(entry => [entry.path, entry])), delivery = new Map(verifySnapshot(pair.verifiedDelivery).map(entry => [entry.path, entry]))
+    const source = reads.snapshot(pair.sourceInput).byPath, delivery = reads.snapshot(pair.verifiedDelivery).byPath
     const owner = delivery.get(node.path), prior = beforeEntries.get(node.path)
     if (!owner || owner.mode === '120000') return []
-    const text = readObject(snapshot.source.commonDir, owner.oid).toString('utf8'), code = parseFrontmatter(text).fm.code
+    const text = reads.specText(owner), code = parseFrontmatter(text).fm.code
     const contract = parseContract({ nodeId: node.id, path: node.path, source: text }).contract
     const claims = [...parseRelation(Array.isArray(code) ? code.filter((entry): entry is string => typeof entry === 'string') : [], 'code').entries.map(entry => entry.path), ...contract?.items.filter(item => item.kind === 'AC').map(item => parseCodeEntry(item.test).path) ?? []]
     for (const path of delivery.keys()) if (coveredPath(path, [...settings.sourcePaths, ...settings.testPaths]) && !settings.mandatoryTests.some(test => test.testPath === path) && claims.some(claim => relationClaimsPath(claim, path))) bootstrapPaths.add(path)
@@ -145,7 +208,7 @@ export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: 
   const ownedReadPaths = [
     ...ownedObligationPaths(targets, undefined, files, entries.map(entry => entry.path)),
     ...ownedObligationPaths(priorTargets, undefined, oldFiles, oldEntries.map(entry => entry.path)),
-    ...protectedGraphs.flatMap((graph, index) => ownedObligationPaths([...targets, ...priorTargets], undefined, graph.files, verifySnapshot(pairs[index].verifiedDelivery).map(entry => entry.path))),
+    ...protectedGraphs.flatMap((graph, index) => ownedObligationPaths([...targets, ...priorTargets], undefined, graph.files, reads.snapshot(pairs[index].verifiedDelivery).entries.map(entry => entry.path))),
   ]
   const ownedVerificationIds = new Set(graphs.flatMap(graph => [...graph.items.values()].filter(item => item.kind === 'VERIFY').map(item => item.id)))
   const activeVerificationIds = new Set([...impacts.flatMap(item => item.verifyIds), ...graphs.flatMap(graph => [...graph.items.values()].filter(item => item.kind === 'VERIFY' && (selected.has(item.nodeId) || readIds.has(item.id))).map(item => item.id))])
@@ -154,15 +217,16 @@ export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: 
   const mandatoryTests = settings.mandatoryTests.filter(item => !ownedVerificationIds.has(item.verificationId) || activeVerificationIds.has(item.verificationId))
   const discoveryOwnerFiles = (options.discoverySelection?.bindings ?? []).flatMap(binding => {
     if (!('bytePair' in binding) || !binding.bytePair || !isSyncSpecPath(binding.resource.path)) return []
-    const entry = verifySnapshot(binding.bytePair.verifiedDelivery).find(entry => entry.path === binding.resource.path)
-    return entry && entry.mode !== '120000' ? [readObject(snapshot.source.commonDir, entry.oid).toString('utf8')] : []
+    const entry = reads.snapshot(binding.bytePair.verifiedDelivery).byPath.get(binding.resource.path)
+    return entry && entry.mode !== '120000' ? [reads.specText(entry)] : []
   })
   const discoveryGovernance = [...files.values(), ...oldFiles.values(), ...discoveryOwnerFiles]
-  const discoveryPaths = [...new Set([snapshot, ...before ? [before] : []].flatMap(input => discoverSyncSourcePaths(input, settings.sourcePaths, discoveryGovernance)))].filter(path => !before || options.commitTrigger!.paths.includes(path))
+  const discoveryPaths = [...new Set([entries, ...beforeTree ? [beforeTree.entries] : []].flatMap(input => discoverSourcePaths(input, settings.sourcePaths, discoveryGovernance)))].filter(path => !before || options.commitTrigger!.paths.includes(path))
   const executionScope: SyncScope = { paths: [...new Set([...targets.map(target => target.path), ...priorTargets.map(target => target.path), ...[...codePaths, ...impact.testPaths].filter(path => coveredPath(path, writable) && !settings.mandatoryTests.some(test => test.testPath === path))])].sort(), contractIds: [...selectedContractIds].filter(id => !graphs.some(graph => graph.items.get(id)?.kind === 'FLOW')).sort(), flowIds: [...selectedContractIds].filter(id => graphs.some(graph => graph.items.get(id)?.kind === 'FLOW')).sort() }
+  const initialDiscovery = options.direction === 'code_to_spec' && !before && pairs.length === 0 && readinessPairs.size === 0
   return {
     executionScope,
-    version: 'sync-coordinator-v2', direction: options.direction ?? 'spec_to_code', ...(options.commitTrigger ? { commitTrigger: options.commitTrigger } : {}), partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 512 * 1024, maxParallel: 4 }, intentNodeId: intent.id, targets,
+    version: 'sync-coordinator-v2', direction: options.direction ?? 'spec_to_code', ...(options.commitTrigger ? { commitTrigger: options.commitTrigger } : {}), partitionPolicy: { version: initialDiscovery ? 'sync-partition-policy-v2' : 'sync-partition-policy-v1', maxReadBytes: 512 * 1024, maxParallel: 4 }, intentNodeId: intent.id, targets,
     readPaths: [...new Set([...specReadPaths, ...declaredReadPaths, ...ownedReadPaths, '.spec/spexcode.json', ...settings.readPaths, ...settings.testPaths, ...codePaths, ...discoveryPaths, ...impact.testPaths, ...mandatoryTests.map(test => test.testPath)])].sort(),
     writePaths: [...new Set([...targets.map(target => target.path), ...targets.map(target => posix.dirname(target.path)), ...priorTargets.map(target => target.path), ...writable])].sort(),
     sourcePaths: [...settings.sourcePaths].sort(),
@@ -172,16 +236,19 @@ export async function buildSyncApplicationPlan(snapshot: InputSnapshot, nodeId: 
 
 /** 语义读取与保护对象按实际快照枚举；授权目录不是 lease，也不是已验证覆盖。 */
 export async function deriveSyncBaselineResources(snapshot: InputSnapshot, plan: SyncCoordinatorPlan, baseline?: FrozenBaselineSelection | null): Promise<BaselineResource[]> {
+  return createSyncApplicationPlanner(snapshot).resources(plan, baseline)
+}
+
+async function deriveResources(snapshot: InputSnapshot, plan: SyncCoordinatorPlan, baseline: FrozenBaselineSelection | null | undefined, reads: PlanningReads): Promise<BaselineResource[]> {
   if (baseline) verifyBaselineSelection(snapshot, baseline)
   const snapshots = [snapshot, ...(plan.version === 'sync-coordinator-v2' && plan.commitTrigger?.before ? [plan.commitTrigger.before] : []), ...new Map((baseline?.bindings ?? []).flatMap(binding => { const pair = 'bytePair' in binding ? binding.bytePair : binding.intentPair; return pair ? [[pair.sourceInput.id, pair.sourceInput] as const, [pair.verifiedDelivery.id, pair.verifiedDelivery] as const] : [] })).values()]
   const paths = new Set<string>(['.spec/spexcode.json', ...plan.targets.map(target => target.path), ...plan.mandatoryTests.map(test => test.testPath)])
   const resources = new Map<string, BaselineResource>()
   const readable = (path: string): boolean => plan.readPaths.some(parent => path === parent || path.startsWith(`${parent}/`))
   for (const input of snapshots) {
-    const entries = verifySnapshot(input).filter(entry => readable(entry.path))
+    const entries = reads.snapshot(input).entries.filter(entry => readable(entry.path))
     for (const entry of entries) paths.add(entry.path)
-    const files = new Map(entries.filter(entry => entry.mode !== '120000' && isSyncSpecPath(entry.path)).map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
-    const frozen = await readFrozenContracts(snapshot.source.canonicalRoot, files)
+    const frozen = await reads.frozen(entries)
     for (const node of frozen.nodes) if (baseline?.bindings.some(binding => binding.resource.kind === 'contract' && binding.resource.id === node.id && 'intentPair' in binding && binding.intentPair)) resources.set(`contract:${node.id}`, { kind: 'contract', id: node.id })
     for (const item of frozen.graph.items.values()) {
       if (item.kind === 'VERIFY') {

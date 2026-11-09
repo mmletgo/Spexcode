@@ -424,6 +424,8 @@ test('首次与未完成基线保持全树bootstrap，before或失败admission�
   const incomplete = projectedSelection({ ...f.baseline, coveredScope: { ...f.baseline.coveredScope, paths: f.baseline.coveredScope.paths.filter(path => path !== f.paths[2]) } }, f.heads.bindings.map(binding => binding.resource))
   for (const [baseline, before] of [[null, null], [f.heads, null], [null, f.before], [incomplete, f.before]] as const) {
     const plan = await buildSyncApplicationPlan(snapshot, 'project', baseline, { direction: 'code_to_spec', commitTrigger: { before, paths: ['src/export.js'] } })
+    assert.ok(plan.version === 'sync-coordinator-v2')
+    assert.equal(plan.partitionPolicy.version, !baseline && !before ? 'sync-partition-policy-v2' : 'sync-partition-policy-v1')
     assert.deepEqual(plan.targets.map(target => target.nodeId), complete)
     const frozen = await context(snapshot, verifySnapshot(snapshot).map(entry => entry.path))
     const partitions = planSyncPartitions({ plan, files: frozen.files, contracts: frozen.contracts, nodes: frozen.nodes, changedPaths: before ? ['src/export.js'] : verifySnapshot(snapshot).map(entry => entry.path) })
@@ -551,8 +553,13 @@ test('真实settle/adopt只写Spec且源码无byte head，Storage型单叶commit
   const snapshot = await captureInputSnapshot(f.root, { committed: true }), options = { discoverySelection: f.discovery, direction: 'code_to_spec' as const, commitTrigger: { before: f.before, paths: ['src/third.js'] } }
   let selection = f.discovery
   const allFiles = await context(snapshot, verifySnapshot(snapshot).map(entry => entry.path))
+  const frozen = await f.application['freezeNodePlan'](snapshot, 'project', false, options.direction, options.commitTrigger)
   for (let round = 0; round < 3; round++) {
     const plan = await buildSyncApplicationPlan(snapshot, 'project', selection, options)
+    if (round === 2) {
+      plan.agentWorkflow = 'native-worktree-v1'
+      assert.equal(JSON.stringify(frozen), JSON.stringify({ plan, selection }))
+    }
     t.diagnostic(JSON.stringify({ round, settledBusinessHeads: f.discovery.bindings.filter(binding => binding.resource.kind !== 'path').length, journalFiles: f.journal.plan.files.map(file => file.path), knownByteHeads: f.discovery.bindings.filter(binding => binding.resource.kind === 'path').map(binding => binding.resource), targets: plan.targets.map(target => target.nodeId) }))
     assert.deepEqual(plan.targets.map(target => target.nodeId), ['third-contract'], '已经正式验证并采纳但从未写过的源码不能使完整初始化资格退回全树')
     const partitions = planSyncPartitions({ plan, files: allFiles.files, contracts: allFiles.contracts, nodes: allFiles.nodes, changedPaths: ['src/third.js'] })

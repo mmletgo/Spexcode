@@ -77,7 +77,7 @@ export type RawOnlyInterfaceSeedEvidence = {
 
 type Claim = { path: string }
 type GovernanceNode = { id: string; path: string; rawSource: string | null; code: RelationEntry[]; related: RelationEntry[]; current: boolean; sourceDigest: string | null }
-type Draft = { targetNodeIds: string[]; changedPaths: string[]; discoveryNodeIds: string[]; packingKey: string; phase?: 'interface_seed' }
+type Draft = { targetNodeIds: string[]; changedPaths: string[]; discoveryNodeIds: string[]; packingKey: string; discoveryParent?: string; phase?: 'interface_seed' }
 type Context = { readPaths: string[]; contextNodeIds: string[]; contractIds: string[]; flowIds: string[] }
 
 function frontmatterPaths(value: unknown): string[] {
@@ -228,11 +228,14 @@ function targetWritePaths(input: PlanSyncPartitionsInput, nodeId: string, govern
   }
   addContractClaims(paths, claims, input.files, new Set(input.changedPaths))
   const knownPaths = [...input.files.keys(), ...input.changedPaths]
-  return uniqueSorted([...paths].filter(path =>
-    coveredPath(path, input.plan.writePaths)
-    && (!input.plan.executionScope || coveredPath(path, input.plan.executionScope.paths))
-    && !input.plan.mandatoryTests.some(test => coveredPath(test.testPath, [path]) || coveredPath(path, [test.testPath]))
+  return uniqueSorted([...paths].filter(path => permitsWrite(input.plan, path)
     && (input.files.has(path) || !knownPaths.some(known => known.startsWith(`${path}/`)))))
+}
+
+function permitsWrite(plan: SyncCoordinatorPlan, path: string): boolean {
+  return coveredPath(path, plan.writePaths)
+    && (!plan.executionScope || coveredPath(path, plan.executionScope.paths))
+    && !plan.mandatoryTests.some(test => coveredPath(test.testPath, [path]) || coveredPath(path, [test.testPath]))
 }
 
 function canonical(value: unknown): string {
@@ -419,6 +422,31 @@ function contextBytes(input: PlanSyncPartitionsInput, graph: ContractGraph, cont
   return readFootprint(context.readPaths, input.files, input.readByteSizes, limitBytes).readBytes
 }
 
+function packDrafts(drafts: readonly Draft[], keyFor: (draft: Draft) => string | undefined, bytesFor: (draft: Draft) => number, limitBytes: number): Draft[] {
+  const packed: Draft[] = []
+  const lastByKey = new Map<string, number>()
+  for (const draft of drafts) {
+    const key = keyFor(draft)
+    if (key === undefined) { packed.push(draft); continue }
+    if (bytesFor(draft) > limitBytes) { packed.push(draft); lastByKey.delete(key); continue }
+    const previousIndex = lastByKey.get(key)
+    if (previousIndex !== undefined) {
+      const previous = packed[previousIndex]
+      const combined: Draft = {
+        targetNodeIds: uniqueSorted([...previous.targetNodeIds, ...draft.targetNodeIds]),
+        changedPaths: uniqueSorted([...previous.changedPaths, ...draft.changedPaths]),
+        discoveryNodeIds: uniqueSorted([...previous.discoveryNodeIds, ...draft.discoveryNodeIds]),
+        packingKey: previous.packingKey,
+        ...(draft.discoveryParent && draft.discoveryParent === previous.discoveryParent ? { discoveryParent: draft.discoveryParent } : {}),
+      }
+      if (bytesFor(combined) <= limitBytes) { packed[previousIndex] = combined; continue }
+    }
+    packed.push(draft)
+    lastByKey.set(key, packed.length - 1)
+  }
+  return packed
+}
+
 function partitionDrafts(input: PlanSyncPartitionsInput, contracts: readonly Contract[], governanceNodes: ReadonlyMap<string, GovernanceNode>, specOnlyNodeIds: ReadonlySet<string>, interfaceSeedNodeIds: ReadonlySet<string>, graph: ContractGraph, limitBytes: number): Draft[] {
   const targets = [...input.plan.targets].sort((a, b) => compare(a.path, b.path) || compare(a.nodeId, b.nodeId))
   const targetByNode = new Map(targets.map(target => [target.nodeId, target]))
@@ -445,6 +473,8 @@ function partitionDrafts(input: PlanSyncPartitionsInput, contracts: readonly Con
   const assigned = new Map<string, string[]>()
   const discoveries = new Map<string, Draft[]>()
   const preferred = new Set(targetByNode.keys())
+  const packInitialDiscovery = input.plan.version === 'sync-coordinator-v2' && input.plan.direction === 'code_to_spec'
+    && input.plan.partitionPolicy.version === 'sync-partition-policy-v2'
   for (const path of changedPaths) {
     const owners = ownerNodesForPath(path, contracts, governanceNodes.values())
     for (const target of targets) if (target.path === path) owners.add(target.nodeId)
@@ -458,8 +488,11 @@ function partitionDrafts(input: PlanSyncPartitionsInput, contracts: readonly Con
     const nearest = closestNode(path, governanceNodes, preferred)
     const module = nearest ? specModuleDirectory(nearest.path) : sourceModuleDirectory(path, input.plan.sourcePaths ?? [])
     const key = nearest ? `discovery:${module}` : `discovery-source:${module}`
+    const parentDirectory = posix.dirname(module)
+    const discoveryParent = packInitialDiscovery && !nearest && owners.size === 0 && parentDirectory !== '.'
+      && coveredPath(path, input.plan.sourcePaths ?? []) && !permitsWrite(input.plan, path) ? parentDirectory : undefined
     const groups = discoveries.get(key) ?? []
-    groups.push({ targetNodeIds: [], changedPaths: [path], discoveryNodeIds: nearest ? [nearest.id] : [], packingKey: key })
+    groups.push({ targetNodeIds: [], changedPaths: [path], discoveryNodeIds: nearest ? [nearest.id] : [], packingKey: key, discoveryParent })
     discoveries.set(key, groups)
   }
 
@@ -497,38 +530,17 @@ function partitionDrafts(input: PlanSyncPartitionsInput, contracts: readonly Con
     contractsByNode.set(contract.nodeId, items)
   }
   const orderedDrafts = [...byRoot.values(), ...[...discoveries.values()].flat()].sort((a, b) => compare(a.packingKey, b.packingKey) || compare(a.changedPaths[0] ?? '', b.changedPaths[0] ?? ''))
-  const packed: Draft[] = []
-  const lastByKey = new Map<string, number>()
-  for (const draft of orderedDrafts) {
-    const currentBytes = contextBytes(input, graph, contractsByNode, governanceNodes, specOnlyNodeIds, draft, limitBytes)
-    const previousIndex = lastByKey.get(draft.packingKey)
-    const packable = draft.packingKey.startsWith('targets:') || draft.packingKey.startsWith('discovery:') || draft.packingKey.startsWith('discovery-source:')
-    if (packable && previousIndex !== undefined && currentBytes <= limitBytes) {
-      const previous = packed[previousIndex]
-      const combined: Draft = {
-        targetNodeIds: uniqueSorted([...previous.targetNodeIds, ...draft.targetNodeIds]),
-        changedPaths: uniqueSorted([...previous.changedPaths, ...draft.changedPaths]),
-        discoveryNodeIds: uniqueSorted([...previous.discoveryNodeIds, ...draft.discoveryNodeIds]),
-        packingKey: draft.packingKey,
-      }
-      if (contextBytes(input, graph, contractsByNode, governanceNodes, specOnlyNodeIds, combined, limitBytes) <= limitBytes) {
-        packed[previousIndex] = combined
-        continue
-      }
-    }
-    packed.push(draft)
-    if (packable && currentBytes <= limitBytes) lastByKey.set(draft.packingKey, packed.length - 1)
-    else lastByKey.delete(draft.packingKey)
-  }
-  return packed
+  const bytesFor = (draft: Draft): number => contextBytes(input, graph, contractsByNode, governanceNodes, specOnlyNodeIds, draft, limitBytes)
+  const modules = packDrafts(orderedDrafts, ({ packingKey }) => (
+    packingKey.startsWith('targets:') || packingKey.startsWith('discovery:') || packingKey.startsWith('discovery-source:') ? packingKey : undefined
+  ), bytesFor, limitBytes)
+  return packInitialDiscovery ? packDrafts(modules, draft => draft.discoveryParent, bytesFor, limitBytes) : modules
 }
 
 function projectedPartition(input: PlanSyncPartitionsInput, draft: Draft, context: Context, governanceNodes: ReadonlyMap<string, GovernanceNode>, specOnlyNodeIds: ReadonlySet<string>, limitBytes: number): SyncPartition {
   const targets = input.plan.targets.filter(target => draft.targetNodeIds.includes(target.nodeId)).sort((a, b) => compare(a.path, b.path) || compare(a.nodeId, b.nodeId))
   const writePaths = uniqueSorted([
-    ...draft.changedPaths.filter(path => coveredPath(path, input.plan.writePaths)
-      && (!input.plan.executionScope || coveredPath(path, input.plan.executionScope.paths))
-      && !input.plan.mandatoryTests.some(test => coveredPath(test.testPath, [path]) || coveredPath(path, [test.testPath]))),
+    ...draft.changedPaths.filter(path => permitsWrite(input.plan, path)),
     ...targets.flatMap(target => targetWritePaths(input, target.nodeId, governanceNodes, specOnlyNodeIds.has(target.nodeId))),
   ])
   const sourcePaths = uniqueSorted([...draft.changedPaths, ...writePaths].filter(path => coveredPath(path, input.plan.sourcePaths ?? [])))

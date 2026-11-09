@@ -10,7 +10,7 @@ import type { Contract, ContractFinding } from '@spexcode/spec-core/contracts'
 import { candidateReviewError, candidateReviewLocationError } from './candidate-review.js'
 import { actualTreeDiff, exportCandidate, isHostPrivatePath, verifyCandidate } from './candidate.js'
 import type { CodeBehaviorContinuation, CodeBehaviorPostGateReview } from './code-behavior.js'
-import { analyzeCodeBehavior, authoredContractChanges, CODE_BEHAVIOR_FAILURE_STATUS, CODE_BEHAVIOR_GUIDANCE_VERSION, codeBehaviorContinuationStatus, codeBehaviorDraftStatus, deriveBehaviorAuthorization, readCodeBehaviorContext, type CodeBehaviorContextTransport, type CodeBehaviorReviewReference } from './code-behavior.js'
+import { analyzeCodeBehavior, authoredContractChanges, CODE_BEHAVIOR_FAILURE_STATUS, CODE_BEHAVIOR_GUIDANCE_VERSION, codeBehaviorReviewSchema, codeBehaviorContinuationStatus, codeBehaviorDraftStatus, deriveBehaviorAuthorization, readCodeBehaviorContext, type CodeBehaviorContextTransport, type CodeBehaviorReviewReference } from './code-behavior.js'
 import type { CodeBehaviorAnalysis, CodeBehaviorEvidence, SyncDecisionInput } from './writeback-types.js'
 import { adoptedDeliveryPaths, isUtf8Text, readCompositionEvidence, selectedRetiredIds, verifyBaselineSelection } from './composition.js'
 import { readHistoryRequest, readReceiptHistoryRestorations } from './history-input.js'
@@ -278,18 +278,35 @@ function partitionStage<T>(store: SyncStore, operation: SyncOperation, attempt: 
   return { result, resultRef }
 }
 
-/** 正式retry链只供应未批准材料；原stage和Native身份始终由所属operation认证。 */
-function retryDraftSources(store: SyncStore, operation: SyncOperation, attemptNumber: number): { owner: SyncOperation; prior: SyncAttempt }[] {
-  const sources: { owner: SyncOperation; prior: SyncAttempt }[] = [], seen = new Set<string>()
+function* retryOperationLineage(store: SyncStore, operation: SyncOperation): Generator<SyncOperation> {
+  const seen = new Set<string>()
   let owner: SyncOperation | null = operation
   while (owner) {
-    if (seen.has(owner.id) || owner.input.id !== operation.input.id || canonical(owner.input.source) !== canonical(operation.input.source) || owner.policyDigest !== operation.policyDigest || (owner.requestBlob?.sha256 ?? null) !== (operation.requestBlob?.sha256 ?? null) || owner.origin !== operation.origin) fail('retry_provenance_binding', '草稿重试链不匹配固定来源、输入或政策')
+    if (seen.has(owner.id) || owner.input.id !== operation.input.id || canonical(owner.input.source) !== canonical(operation.input.source) || owner.policyDigest !== operation.policyDigest || (owner.requestBlob?.sha256 ?? null) !== (operation.requestBlob?.sha256 ?? null) || owner.origin !== operation.origin) fail('retry_provenance_binding', '重试链不匹配固定来源、输入或政策')
     seen.add(owner.id)
-    if (owner.readSetDigest !== operation.readSetDigest || canonical(store.readBusinessBaselineSelection(owner.id)) !== canonical(store.readBusinessBaselineSelection(operation.id)) || canonical(owner.scope) !== canonical(operation.scope)) break
-    sources.push(...store.listAttempts(owner.id).filter(prior => (owner!.id !== operation.id || prior.number < attemptNumber) && ['failed', 'superseded', 'settled'].includes(prior.status)).reverse().map(prior => ({ owner: owner!, prior })))
+    yield owner
     owner = owner.retryOf ? store.readOperation(owner.retryOf) : null
   }
+}
+
+/** 续修材料仍然未批准；原stage和Native身份由所属operation认证。 */
+function retryDraftSources(store: SyncStore, operation: SyncOperation, attemptNumber: number): { owner: SyncOperation; prior: SyncAttempt }[] {
+  const sources: { owner: SyncOperation; prior: SyncAttempt }[] = []
+  const selection = canonical(store.readBusinessBaselineSelection(operation.id))
+  for (const owner of retryOperationLineage(store, operation)) {
+    if (owner.readSetDigest !== operation.readSetDigest || canonical(store.readBusinessBaselineSelection(owner.id)) !== selection || canonical(owner.scope) !== canonical(operation.scope)) break
+    sources.push(...store.listAttempts(owner.id).filter(prior => (owner.id !== operation.id || prior.number < attemptNumber) && ['failed', 'superseded', 'settled'].includes(prior.status)).reverse().map(prior => ({ owner, prior })))
+  }
   return sources
+}
+function settledApprovalSource(store: SyncStore, source: SyncOperation): boolean {
+  if (source.phase !== 'superseded') return ['failed', 'budget_exhausted', 'cancelled'].includes(source.phase) && store.readRetryEligibility(source.id).eligible
+  // 正式重试的更早祖先可被新准入替代，原已结算的独审证据仍有来源。
+  return !!source.currentAttemptId
+    && store.listAttempts(source.id).every(attempt => ['failed', 'superseded', 'settled'].includes(attempt.status))
+    && !store.sourceContinuityState(source.input.source.commonDir).leasedOperationIds.includes(source.id)
+    && !store.listRecoverableResources().some(item => item.operation.id === source.id)
+    && store.listJournals(source.id).every(journal => journal.status === 'settled')
 }
 
 /** Git保活本身不证明模型完成；未认证的Native稿不能遮蔽更早合格原稿。 */
@@ -586,7 +603,7 @@ function behaviorMaterialTask(request: Pick<ElaborationSessionRequest, 'prompt' 
 }
 
 /** 续审analysis沿精确原件provenance回到实际Native提交；不借任意历史session授予已校验资格。 */
-function behaviorTraceBinding(store: SyncStore, operation: SyncOperation, origin: SyncAttempt, key: string, trace: ElaborationTrace, sourceSelection?: FrozenBaselineSelection, readCheckpoints?: (attempt: SyncAttempt) => ReturnType<typeof readSyncCheckpoints>): boolean {
+function behaviorTraceBinding(store: SyncStore, operation: SyncOperation, origin: SyncAttempt, key: string, trace: ElaborationTrace, sourceSelection?: FrozenBaselineSelection, readCheckpoints?: (attempt: SyncAttempt) => ReturnType<typeof readSyncCheckpoints>, bindModel = false): boolean {
   for (;;) {
     const dispatch = origin.dispatchPlans.find(dispatch => dispatch.purpose === trace.purpose && dispatch.session?.sessionId === trace.sessionId && dispatch.session.threadId === trace.threadId && dispatch.session.turnId === trace.turnId)
     if (trace.purpose !== 'code_behavior_analyze' && trace.purpose !== 'code_behavior_review') return false
@@ -595,7 +612,7 @@ function behaviorTraceBinding(store: SyncStore, operation: SyncOperation, origin
     if (dispatch) {
       const request = JSON.parse(readEvidence(operation.input.source.commonDir, ready.requestRef).toString()) as ElaborationSessionRequest
       const suffix = key === 'analysis' ? '' : `:partition:${key.slice('partition:'.length, -':analysis'.length)}`
-      if (request.requestKey !== `sync:${origin.id}:analysis${suffix}:${trace.purpose}` || source!.result.inputDigest !== trace.inputDigest) return false
+      if (request.requestKey !== `sync:${origin.id}:analysis${suffix}:${trace.purpose}` || source!.result.inputDigest !== trace.inputDigest || bindModel && request.model !== syncModel(operation)) return false
       const ownerDigest = contentHash(JSON.stringify({ version: 'code-behavior-draft-v1', source: canonicalSnapshotSource(operation.input.source), partitionId: key === 'analysis' ? null : key.slice('partition:'.length, -':analysis'.length), purpose: trace.purpose }))
       readStageDraft(operation.input.source.commonDir, draft, { ownerDigest, sourceInputId: operation.input.id, schemaDigest: draft.schemaDigest, path: `.spex-sync-drafts/${ownerDigest}.json` })
       const result = completedNativeStageResult(store, operation, origin, request, trace, ready.receipt, '')
@@ -952,6 +969,47 @@ function analysisStageBinding(store: SyncStore, operation: SyncOperation, analys
   }
   return null
 }
+/** 批准只来自原局部分析与独审，未生成旧whole也可认证。 */
+function authenticateApprovedBehaviorPartition(store: SyncStore, source: SyncOperation, origin: SyncAttempt, key: string, local: CodeBehaviorAnalysis, changedPaths: readonly string[], selection: FrozenBaselineSelection | undefined, checkpoints: (attempt: SyncAttempt) => ReturnType<typeof readSyncCheckpoints>, analysisSchemaDigest?: string): boolean {
+  const original = checkpoints(origin), commonDir = source.input.source.commonDir
+  const analysisDigest = contentHash(JSON.stringify({ ...local, traces: [], reviewPassed: false }))
+  if (!local.reviewPassed || local.traces.length !== 2 || local.traces[0].purpose !== 'code_behavior_analyze' || local.traces[1].purpose !== 'code_behavior_review' || local.traces[0].sessionId === local.traces[1].sessionId || local.traces[0].threadId === local.traces[1].threadId) return false
+  let reviewOutput: unknown
+  if (stage<{ version: string }>(store, source, origin, 'behavior-draft-protocol', 'automatic', original)?.version === 'code-behavior-draft-v1') {
+    if (!local.traces.every(trace => behaviorTraceBinding(store, source, origin, key, trace, selection, checkpoints, true))) return false
+    const drafts = partitionStage<CodeBehaviorContinuation>(store, source, origin, `${key}:continuation`, selection, original)?.result.drafts
+    const draft = drafts?.code_behavior_review
+    if (!draft || analysisSchemaDigest !== undefined && (drafts.code_behavior_analyze?.schemaDigest !== analysisSchemaDigest || draft.schemaDigest !== contentHash(JSON.stringify(codeBehaviorReviewSchema(local.inputDigest, analysisDigest))))) return false
+    reviewOutput = JSON.parse(readStageDraft(commonDir, draft, draft))
+  } else {
+    if (analysisSchemaDigest !== undefined) return false
+    for (const trace of local.traces) {
+      const requestKey = `sync:${origin.id}:analysis:partition:${key.slice('partition:'.length, -':analysis'.length)}:${trace.purpose}`
+      const dispatch = origin.dispatchPlans.find(item => item.key === requestKey && item.purpose === trace.purpose && item.session?.sessionId === trace.sessionId && item.session.threadId === trace.threadId && item.session.turnId === trace.turnId)
+      if (!dispatch || trace.sessionId !== sessionIdForCreateKey(dispatch.sessionCreateKey)) return false
+      const resource = store.findResource(origin.id, requestKey)
+      let result: ElaborationSessionResult | undefined
+      if (resource) {
+        const native = JSON.parse(readEvidence(commonDir, resource.plan.planBlob).toString('utf8')) as NativeRunPlan
+        const checkpoint = JSON.parse(readEvidence(commonDir, resource.checkpointRef).toString('utf8')) as NativeRunCheckpoint
+        if (!checkpoint.result || native.request.model !== syncModel(source)) return false
+        result = completedNativeStageResult(store, source, origin, native.request, trace, checkpoint.result.output, '') ?? undefined
+      } else {
+        const injected = stage<{ requestDigest: string; result: ElaborationSessionResult }>(store, source, origin, `injected:${requestKey}`, 'automatic', original)
+        if (injected?.requestDigest !== dispatch.requestDigest) return false
+        result = injected.result
+      }
+      if (!result || result.sessionId !== trace.sessionId || result.threadId !== trace.threadId || result.turnId !== trace.turnId || result.resultDigest !== trace.resultDigest || contentHash(JSON.stringify(result.output)) !== trace.resultDigest) return false
+      if (trace.purpose === 'code_behavior_review') reviewOutput = result.output
+    }
+  }
+  const review = reviewOutput as { inputDigest: string; analysisDigest: string; verdict: string; checkedPaths: string[]; checkedChangeIds: string[]; findings: unknown[] } | undefined
+  return review?.verdict === 'accept' && review.inputDigest === local.inputDigest
+    && review.analysisDigest === analysisDigest
+    && Array.isArray(review.findings) && review.findings.length === 0 && Array.isArray(review.checkedPaths) && Array.isArray(review.checkedChangeIds) && new Set(review.checkedPaths).size === review.checkedPaths.length && changedPaths.every(path => review.checkedPaths.includes(path))
+    && new Set(review.checkedChangeIds).size === review.checkedChangeIds.length && review.checkedChangeIds.length === local.changes.length && local.changes.every(change => review.checkedChangeIds.includes(change.id))
+}
+
 /** P0-only资格回到原冻结计划、P0 stage和每区真实独审，不依赖P1自报。 */
 function authenticateAnalysisOnlyPartitions(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, plan: SyncPartitionPlan, evidence: CodeBehaviorEvidence, owners: readonly AnalysisOnlyPartitionEvidence[]): boolean {
   const whole = stage<CodeBehaviorAnalysis>(store, operation, attempt, 'analysis')
@@ -964,60 +1022,38 @@ function authenticateAnalysisOnlyPartitions(store: SyncStore, operation: SyncOpe
   const source = { ...operation, readSetDigest: whole.readSetDigest, ...(selection ? { baselineSelection: selection } : {}) }
   const history = new Map<string, ReturnType<typeof readSyncCheckpoints>>()
   const checkpoints = (origin: SyncAttempt): ReturnType<typeof readSyncCheckpoints> => {
-    const cached = history.get(origin.id) ?? readSyncCheckpoints(store, source, origin)
+    const cached = history.get(origin.id) ?? readSyncCheckpoints(store, origin.operationId === operation.id ? source : store.readOperation(origin.operationId), origin)
     history.set(origin.id, cached)
     return cached
   }
   const planDigest = contentHash(JSON.stringify(plan))
+  let ancestors: Map<string, SyncOperation> | undefined
   return owners.every(owner => {
     const member = whole.partitionEvidence?.find(item => item.partitionId === owner.partitionId), key = `partition:${owner.partitionId}:analysis`
     if (!member || member.analysisRef.sha256 !== owner.analysisRef.sha256 || owner.wholeAnalysisRef.sha256 !== evidence.ref.sha256) return false
-    let origin = p0
+    let origin = p0, ownerOperation = source
     for (;;) {
       const original = checkpoints(origin)
-      const oldPlan = partitionStage<SyncPartitionPlan>(store, source, origin, 'partition-plan', selection, original)
-      const local = partitionStage<CodeBehaviorAnalysis>(store, source, origin, key, selection, original)
+      const oldPlan = partitionStage<SyncPartitionPlan>(store, ownerOperation, origin, 'partition-plan', selection, original)
+      const local = partitionStage<CodeBehaviorAnalysis>(store, ownerOperation, origin, key, selection, original)
       if (oldPlan?.resultRef.sha256 !== planDigest || local?.resultRef.sha256 !== owner.analysisRef.sha256 || origin.composedInput?.contentDigest !== whole.composedDigest) return false
-      const provenance = stage<{ fromOperationId: string; fromAttemptId: string; resultRef: BlobRef }>(store, source, origin, `${key}:provenance`, 'automatic', original)
+      const provenance = stage<{ fromOperationId: string; fromAttemptId: string; resultRef: BlobRef }>(store, ownerOperation, origin, `${key}:provenance`, 'automatic', original)
       if (!provenance) break
-      if (provenance.fromOperationId !== operation.id || provenance.resultRef.sha256 !== owner.analysisRef.sha256) return false
+      if (provenance.resultRef.sha256 !== owner.analysisRef.sha256) return false
       const previous = store.readAttempt(provenance.fromAttemptId)
-      if (previous.operationId !== operation.id || previous.number >= origin.number || !['failed', 'superseded', 'settled'].includes(previous.status)) return false
+      if (previous.operationId !== provenance.fromOperationId || !['failed', 'superseded', 'settled'].includes(previous.status)) return false
+      if (previous.operationId === ownerOperation.id) {
+        if (previous.number >= origin.number) return false
+      } else {
+        if (ownerOperation.id !== operation.id) return false
+        ancestors ??= new Map([...retryOperationLineage(store, operation)].filter(candidate => candidate.id !== operation.id && settledApprovalSource(store, candidate)).map(candidate => [candidate.id, candidate]))
+        const ancestor = ancestors.get(previous.operationId)
+        if (!ancestor) return false
+        ownerOperation = { ...ancestor, readSetDigest: whole.readSetDigest, ...(selection ? { baselineSelection: selection } : {}) }
+      }
       origin = previous
     }
-    const local = member.analysis, original = checkpoints(origin)
-    let reviewOutput: unknown
-    if (stage<{ version: string }>(store, source, origin, 'behavior-draft-protocol', 'automatic', original)?.version === 'code-behavior-draft-v1') {
-      if (!local.traces.every(trace => behaviorTraceBinding(store, source, origin, key, trace, selection, checkpoints))) return false
-      const draft = partitionStage<CodeBehaviorContinuation>(store, source, origin, `${key}:continuation`, selection, original)?.result.drafts.code_behavior_review
-      if (!draft) return false
-      reviewOutput = JSON.parse(readStageDraft(commonDir, draft, draft))
-    } else {
-      for (const trace of local.traces) {
-        const requestKey = `sync:${origin.id}:analysis:partition:${owner.partitionId}:${trace.purpose}`
-        const dispatch = origin.dispatchPlans.find(item => item.key === requestKey && item.purpose === trace.purpose && item.session?.sessionId === trace.sessionId && item.session.threadId === trace.threadId && item.session.turnId === trace.turnId)
-        if (!dispatch || trace.sessionId !== sessionIdForCreateKey(dispatch.sessionCreateKey)) return false
-        const resource = store.findResource(origin.id, requestKey)
-        let result: ElaborationSessionResult | undefined
-        if (resource) {
-          const native = JSON.parse(readEvidence(commonDir, resource.plan.planBlob).toString('utf8')) as NativeRunPlan
-          const checkpoint = JSON.parse(readEvidence(commonDir, resource.checkpointRef).toString('utf8')) as NativeRunCheckpoint
-          if (!checkpoint.result) return false
-          result = completedNativeStageResult(store, source, origin, native.request, trace, checkpoint.result.output, '') ?? undefined
-        } else {
-          const injected = stage<{ requestDigest: string; result: ElaborationSessionResult }>(store, source, origin, `injected:${requestKey}`, 'automatic', original)
-          if (injected?.requestDigest !== dispatch.requestDigest) return false
-          result = injected.result
-        }
-        if (!result || result.sessionId !== trace.sessionId || result.threadId !== trace.threadId || result.turnId !== trace.turnId || result.resultDigest !== trace.resultDigest || contentHash(JSON.stringify(result.output)) !== trace.resultDigest) return false
-        if (trace.purpose === 'code_behavior_review') reviewOutput = result.output
-      }
-    }
-    const review = reviewOutput as { inputDigest: string; analysisDigest: string; verdict: string; checkedPaths: string[]; checkedChangeIds: string[]; findings: unknown[] } | undefined
-    return review?.verdict === 'accept' && review.inputDigest === local.inputDigest
-      && review.analysisDigest === contentHash(JSON.stringify({ ...local, traces: [], reviewPassed: false }))
-      && Array.isArray(review.findings) && review.findings.length === 0 && Array.isArray(review.checkedPaths) && Array.isArray(review.checkedChangeIds) && new Set(review.checkedPaths).size === review.checkedPaths.length && member.changedPaths.every(path => review.checkedPaths.includes(path))
-      && new Set(review.checkedChangeIds).size === review.checkedChangeIds.length && review.checkedChangeIds.length === local.changes.length && local.changes.every(change => review.checkedChangeIds.includes(change.id))
+    return authenticateApprovedBehaviorPartition(store, ownerOperation, origin, key, member.analysis, member.changedPaths, selection, checkpoints)
   })
 }
 
@@ -1210,7 +1246,7 @@ async function verificationRetrySource(store: SyncStore, operation: SyncOperatio
     const p1 = elaboration!, p2 = generation, plan = partitions!
     const policy = JSON.parse(readEvidence(owner.input.source.commonDir, owner.planBlob!).toString()) as SyncCoordinatorPlan
     const specOnly = policy.version === 'sync-coordinator-v2' && policy.direction === 'code_to_spec'
-    for (const trace of [...analysis!.analysis.partitionEvidence!.flatMap(member => member.analysis.traces), ...p1.rounds.flatMap(round => round.traces), ...p2.traces]) {
+    for (const trace of [...p1.rounds.flatMap(round => round.traces), ...p2.traces]) {
       const actual = store.listAttempts(owner.id).filter(attempt => attempt.number <= prior.number).find(attempt => attempt.dispatchPlans.some(dispatch => dispatch.purpose === trace.purpose && canonical(dispatch.session) === canonical({ sessionId: trace.sessionId, threadId: trace.threadId, turnId: trace.turnId })))
       const dispatch = actual?.dispatchPlans.find(dispatch => dispatch.purpose === trace.purpose && dispatch.session?.sessionId === trace.sessionId)
       if (!actual || !dispatch) reject('候选阶段缺少原实际Native派发身份')
@@ -2080,6 +2116,13 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         }
         return null
       }
+      let approvalAncestors: ReturnType<typeof retryDraftSources> | undefined
+      const approvalHistory = new Map<string, ReturnType<typeof readSyncCheckpoints>>()
+      const approvalCheckpoints = (owner: SyncOperation, origin: SyncAttempt): ReturnType<typeof readSyncCheckpoints> => {
+        const original = approvalHistory.get(origin.id) ?? readSyncCheckpoints(store, owner, origin)
+        approvalHistory.set(origin.id, original)
+        return original
+      }
       const partitionCheckpoints: PartitionCheckpoints = {
         load: <T>(key: string) => stage<T>(store, operation, store.readAttempt(attempt!.id), key),
         elaborationDraftTagged: (key, result) => elaborationDraftTagged(store, operation, store.readAttempt(attempt!.id), key, result),
@@ -2133,14 +2176,29 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         loadBehaviorDraftMaterial: (key, planDigest, purpose, schemaDigest, inputDigest, request, existingDraft) => loadBehaviorDraftMaterial(key, purpose, schemaDigest, inputDigest, request, planDigest, existingDraft),
         loadBehaviorContinuation: (key, planDigest, inputDigest) => loadBehaviorContinuation(key, inputDigest, planDigest),
         loadBehaviorReviewFeedback: (key, planDigest, inputDigest) => loadBehaviorReviewFeedback(key, inputDigest, planDigest),
-        loadAcceptedAnalysis: (key, planDigest, inputDigest) => {
+        loadAcceptedAnalysis: (key, plan, inputDigest, binding) => {
           for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(item.status))) {
             const source = partitionStage<CodeBehaviorAnalysis>(store, operation, prior, key)
             const priorPlan = source ? partitionStage<SyncPartitionPlan>(store, operation, prior, 'partition-plan') : null
-            if (!source || priorPlan?.result.digest !== planDigest || !source.result.reviewPassed || source.result.inputDigest !== inputDigest || source.result.inputId !== operation.input.id || source.result.policyDigest !== operation.policyDigest || source.result.readSetDigest !== operation.readSetDigest || source.result.composedDigest !== view.composed.contentDigest) continue
+            if (!source || priorPlan?.result.digest !== plan.digest || !source.result.reviewPassed || source.result.inputDigest !== inputDigest || source.result.inputId !== operation.input.id || source.result.policyDigest !== operation.policyDigest || source.result.readSetDigest !== operation.readSetDigest || source.result.composedDigest !== view.composed.contentDigest) continue
             if (source.result.traces.length !== 2 || !source.result.traces.every(trace => stage<{ version: string }>(store, operation, prior, 'behavior-draft-protocol')?.version === 'code-behavior-draft-v1' ? behaviorTraceBinding(store, operation, prior, key, trace) : prior.dispatchPlans.some(dispatch => dispatch.purpose === trace.purpose && dispatch.session?.sessionId === trace.sessionId && dispatch.session.threadId === trace.threadId && dispatch.session.turnId === trace.turnId))) continue
             saveStage(store, fence!, `${key}:provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef })
             partitionCheckpoints.save(key, source.result)
+            return source.result
+          }
+          if (!operation.retryOf) return null
+          approvalAncestors ??= retryDraftSources(store, operation, attempt!.number).filter(({ owner }) => owner.id !== operation.id && settledApprovalSource(store, owner))
+          const planRef = contentHash(JSON.stringify(plan)), selection = store.readBusinessBaselineSelection(operation.id)
+          for (const { owner, prior } of approvalAncestors) {
+            if (canonical(prior.composedInput) !== canonical(view.composed)) continue
+            const checkpoints = (origin: SyncAttempt): ReturnType<typeof readSyncCheckpoints> => approvalCheckpoints(owner, origin)
+            const original = checkpoints(prior), savedPlan = partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan', selection, original)
+            if (savedPlan?.resultRef.sha256 !== planRef) continue
+            const source = partitionStage<CodeBehaviorAnalysis>(store, owner, prior, key, selection, original)
+            if (!source || source.result.inputDigest !== inputDigest || source.result.inputId !== operation.input.id || source.result.policyDigest !== operation.policyDigest || source.result.readSetDigest !== operation.readSetDigest || source.result.composedDigest !== view.composed.contentDigest) continue
+            if (!authenticateApprovedBehaviorPartition(store, owner, prior, key, source.result, binding.changedPaths, selection, checkpoints, binding.analysisSchemaDigest)) continue
+            assertMaterialFence()
+            saveStage(store, fence!, `${key}:provenance`, { fromOperationId: owner.id, fromAttemptId: prior.id, resultRef: source.resultRef })
             return source.result
           }
           return null

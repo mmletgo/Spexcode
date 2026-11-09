@@ -1058,6 +1058,14 @@ for (const [selected, configMode, outcome] of [['default', 'unset', 'success'], 
     childProcess.execFileSync('git', ['init', '-q'], { cwd: workspace, stdio: 'pipe' })
     writeFileSync(join(config, 'settings.json'), 'UNPARSEABLE_PUBLIC_FIXTURE_SETTINGS')
     const log = join(directory, 'observed.json'), cli = join(bin, 'claude'), actualModel = 'native-provider/resolved-model'
+    const usageModels = configMode === 'empty' ? undefined : {
+      main: { inputTokens: 700, outputTokens: 23, cacheReadInputTokens: 91, cacheCreationInputTokens: 0, costUSD: 99, unretained: 'SYNTHETIC_USAGE_METADATA' },
+      helper: { inputTokens: 100, outputTokens: 4, ...(selected === 'sonnet' ? { cacheReadInputTokens: -9 } : { cacheReadInputTokens: 9, cacheCreationInputTokens: 0 }) },
+    }
+    const expectedUsage = usageModels && {
+      source: 'claude-model-usage', uncachedInputTokens: 800, outputTokens: 27,
+      ...(selected === 'sonnet' ? {} : { cacheReadInputTokens: 100, cacheWriteInputTokens: 0 }),
+    }
     writeFileSync(cli, `#!${process.execPath}
 const fs=require('node:fs'),path=require('node:path'),readline=require('node:readline');
 if(process.argv.includes('--version')){console.log('9.8.7 (Claude Code)');process.exit(0)}
@@ -1070,7 +1078,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     process.exit(0);
   }
   if(input.type!=='user')return;
-  const session=input.session_id,user=input.uuid;const projects=path.join(process.env.CLAUDE_CONFIG_DIR||path.join(process.env.HOME,'.claude'),'projects','fixture');fs.mkdirSync(projects,{recursive:true});const history=[{type:'user',sessionId:session,uuid:user,parentUuid:null,promptId:'public-prompt',message:input.message},{type:'api-request',sessionId:session,id:'wire-request',params:{model:'wire-provider/actual-id'}},{type:'assistant',sessionId:session,uuid:'assistant',parentUuid:user,requestRef:'wire-request',message:{role:'assistant',content:[{type:'thinking',thinking:'SYNTHETIC_PRIVATE_THINKING'},{type:'tool_use',id:'final',name:'StructuredOutput',input:output}]}}];if(exhausted)history.push({type:'user',sessionId:session,uuid:'schema-error',parentUuid:'assistant',promptId:'public-prompt',sourceToolAssistantUUID:'assistant',message:{role:'user',content:[{type:'tool_result',tool_use_id:'final',is_error:true,content:'Output does not match required schema: /ok: must be boolean'}]}});fs.writeFileSync(path.join(projects,session+'.jsonl'),history.map(x=>JSON.stringify(x)).join('\\n')+'\\n');emit({type:'system',subtype:'init',session_id:session,model:${JSON.stringify(actualModel)},tools:['Read','Bash','StructuredOutput']});emit({type:'user',uuid:user,session_id:session,message:input.message});const finish=()=>{emit({type:'result',subtype:exhausted?'error_max_structured_output_retries':'success',is_error:exhausted,session_id:session,user_message_uuid:user,user_message_uuids:[user],...(exhausted?{}:{structured_output:output})});process.exitCode=exhausted?1:0;if(${controlled}){process.stdin.once('end',()=>fs.writeFileSync(${JSON.stringify(join(directory, 'stdin-ended'))},'true'));setInterval(()=>{},1000);process.on('SIGTERM',()=>{if(!${lateCancel})process.exit(143);fs.writeFileSync(${JSON.stringify(join(directory, 'term-received'))},'true');setInterval(()=>{if(fs.existsSync(${JSON.stringify(join(directory, 'allow-exit'))}))process.exit(143)},10)})}};
+  const session=input.session_id,user=input.uuid;const projects=path.join(process.env.CLAUDE_CONFIG_DIR||path.join(process.env.HOME,'.claude'),'projects','fixture');fs.mkdirSync(projects,{recursive:true});const history=[{type:'user',sessionId:session,uuid:user,parentUuid:null,promptId:'public-prompt',message:input.message},{type:'api-request',sessionId:session,id:'wire-request',params:{model:'wire-provider/actual-id'}},{type:'assistant',sessionId:session,uuid:'assistant',parentUuid:user,requestRef:'wire-request',message:{role:'assistant',content:[{type:'thinking',thinking:'SYNTHETIC_PRIVATE_THINKING'},{type:'tool_use',id:'final',name:'StructuredOutput',input:output}]}}];if(exhausted)history.push({type:'user',sessionId:session,uuid:'schema-error',parentUuid:'assistant',promptId:'public-prompt',sourceToolAssistantUUID:'assistant',message:{role:'user',content:[{type:'tool_result',tool_use_id:'final',is_error:true,content:'Output does not match required schema: /ok: must be boolean'}]}});fs.writeFileSync(path.join(projects,session+'.jsonl'),history.map(x=>JSON.stringify(x)).join('\\n')+'\\n');emit({type:'system',subtype:'init',session_id:session,model:${JSON.stringify(actualModel)},tools:['Read','Bash','StructuredOutput']});emit({type:'user',uuid:user,session_id:session,message:input.message});const finish=()=>{emit({type:'result',subtype:exhausted?'error_max_structured_output_retries':'success',is_error:exhausted,session_id:session,user_message_uuid:user,user_message_uuids:[user],...(exhausted?{}:{structured_output:output}),modelUsage:${JSON.stringify(usageModels)},usage:{input_tokens:5000,output_tokens:999}});process.exitCode=exhausted?1:0;if(${controlled}){process.stdin.once('end',()=>fs.writeFileSync(${JSON.stringify(join(directory, 'stdin-ended'))},'true'));setInterval(()=>{},1000);process.on('SIGTERM',()=>{if(!${lateCancel})process.exit(143);fs.writeFileSync(${JSON.stringify(join(directory, 'term-received'))},'true');setInterval(()=>{if(fs.existsSync(${JSON.stringify(join(directory, 'allow-exit'))}))process.exit(143)},10)})}};
   if(${periodic}){
     const waiting=setInterval(()=>{
       if(fs.existsSync(${JSON.stringify(release)})){
@@ -1186,6 +1194,7 @@ const waiting = setInterval(() => {
       await assert.rejects(pending, error => {
         assert.equal((error as { code: string }).code, 'structured_output_retries_exhausted')
         assert.equal((error as { rejectedOutput: { text: string } }).rejectedOutput.text, JSON.stringify({ ok: 'bad' }))
+        assert.deepEqual((error as { nativeTokenUsage?: unknown }).nativeTokenUsage, expectedUsage)
         return true
       })
       const plan = JSON.parse(readFileSync(join(root, 'plan.json'), 'utf8')) as { requestedModel: string; resolvedModel: string }
@@ -1212,6 +1221,11 @@ const waiting = setInterval(() => {
       assert.equal(JSON.parse(readFileSync(join(root, 'terminal-stop.json'), 'utf8')).outcome, 'sent')
     }
     assert.deepEqual(JSON.parse(result.text), { ok: true }); assert.equal(result.frozenReadProof, undefined)
+    assert.deepEqual('nativeTokenUsage' in result ? result.nativeTokenUsage : undefined, expectedUsage)
+    const terminal = JSON.parse(readFileSync(join(root, 'result.json'), 'utf8')) as Record<string, unknown>
+    assert.deepEqual(terminal.nativeTokenUsage, expectedUsage)
+    assert(!Object.hasOwn(terminal, 'modelUsage'))
+    assert(!Object.hasOwn(terminal, 'usage'))
     assert.equal(execution.model, `claude:${selected}`)
     const observed = JSON.parse(readFileSync(log, 'utf8')) as { args: string[]; config?: string; provider: string; model: string; baseUrl: string; identity: Record<string, string>; store: Record<string, string | undefined> }
     assert.equal(observed.config, configMode === 'unset' ? undefined : configMode === 'empty' ? '' : config); assert.equal(observed.provider, '1'); assert.equal(observed.model, 'native-user-default'); assert.equal(observed.baseUrl, 'https://public-provider.invalid/arbitrary-route')
@@ -1223,6 +1237,28 @@ const waiting = setInterval(() => {
     assert.equal(plan.version, 2); assert.equal(plan.cliVersion, '9.8.7 (Claude Code)'); assert.match(plan.binaryDigest, /^[a-f0-9]{64}$/)
     assert.equal(plan.requestedModel, `claude:${selected}`); assert.equal(plan.resolvedModel, actualModel)
     const snapshot = readFileSync(join(root, 'public-history.json'), 'utf8'); assert(!snapshot.includes('SYNTHETIC_PRIVATE_THINKING'))
+    if (configMode === 'unset') {
+      const { sessionArtifactPath } = await import('@spexcode/spec-core')
+      const { fromRaw, writeRecord, readRecord } = await import('./session-record.js')
+      const { configuredSessionApplication } = await import('./session-application.js')
+      const { executeQueuedStructuredSession } = await import('./session-structured.js')
+      const git = (...args: string[]) => childProcess.execFileSync('git', args, { cwd: workspace, encoding: 'utf8' }).trim()
+      git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'seed')
+      const id = 'f9a673a2-28e1-4e8e-9ae0-6f8b56e0d66b', prompt = 'measure the canonical result'
+      const policy = structuredExecutionPolicy({ ...execution, worktree: { baseCommit: git('rev-parse', 'HEAD'), tree: git('rev-parse', 'HEAD^{tree}'), mode: 'read' } })
+      configuredSessionApplication().createSession({ sessionId: id, status: 'queued' })
+      const record = fromRaw({ session_id: id, governed: true, worktree_path: workspace, branch: null, title: null, name: null, status: 'queued', proposal: null, merges: 0, note: null, sortkey: null, createdAt: 1, stopped: false, archived: false, harness: 'claude-headless', launch_cmd: 'claude' })
+      writeRecord({ ...record, structuredExecution: policy })
+      const launch = sessionArtifactPath(id, 'launch')
+      mkdirSync(dirname(launch), { recursive: true }); writeFileSync(launch, prompt)
+      assert.equal(await executeQueuedStructuredSession(id), 'completed')
+      const saved = readRecord(id)?.structuredExecution
+      assert.deepEqual(saved?.nativeTokenUsage, expectedUsage)
+      assert.deepEqual(saved?.output, { ok: true })
+      assert.deepEqual(structuredExecutionPolicy(saved!), policy)
+      assert.equal(await executeQueuedStructuredSession(id), 'completed')
+      assert.deepEqual(readRecord(id)?.structuredExecution, saved)
+    }
     execution = { ...execution, state: 'completed', output: { ok: true }, resultDigest: createHash('sha256').update(JSON.stringify({ ok: true })).digest('hex') }
     rmSync(config, { recursive: true }); rmSync(bin, { recursive: true }); process.env.CLAUDE_CONFIG_DIR = join(directory, 'different-config')
     const noDispatch = { onThread: async () => assert.fail('cold replay must not dispatch'), onTurn: async () => assert.fail('cold replay must not append'), onNative: async () => assert.fail('cold replay must not launch') }

@@ -48,7 +48,7 @@ function gitReadCounter(directory: string): { reset(): void; entries(): string[]
   const bin = join(directory, 'git-read-counter-bin'), log = join(directory, 'git-read-counter.log'), wrapper = join(bin, 'git')
   const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim()
   mkdirSync(bin, { mode: 0o700 }); writeFileSync(log, '')
-  writeFileSync(wrapper, '#!/bin/sh\ncase " $* " in\n  *" ls-tree -rlz --full-tree "*) last=""; for arg do last="$arg"; done; printf "tree:%s\\n" "$last" >> "$SPEX_SYNC_TEST_GIT_COUNTER" ;;\n  *" ls-files -z --full-name --cached --others --exclude-standard "*) printf "capture\\n" >> "$SPEX_SYNC_TEST_GIT_COUNTER" ;;\nesac\nexec "$SPEX_SYNC_TEST_REAL_GIT" "$@"\n')
+  writeFileSync(wrapper, '#!/bin/sh\ncase " $* " in\n  *" ls-tree -rlz --full-tree "*) last=""; for arg do last="$arg"; done; printf "tree:%s\\n" "$last" >> "$SPEX_SYNC_TEST_GIT_COUNTER" ;;\n  *" ls-files -z --full-name --cached --others --exclude-standard "*) printf "capture\\n" >> "$SPEX_SYNC_TEST_GIT_COUNTER" ;;\n  *" cat-file "*) printf "object\\n" >> "$SPEX_SYNC_TEST_GIT_COUNTER" ;;\n  *" rev-parse "*"^{tree} "*) printf "head-tree\\n" >> "$SPEX_SYNC_TEST_GIT_COUNTER" ;;\nesac\nexec "$SPEX_SYNC_TEST_REAL_GIT" "$@"\n')
   chmodSync(wrapper, 0o700)
   const oldPath = process.env.PATH, oldCounter = process.env.SPEX_SYNC_TEST_GIT_COUNTER, oldRealGit = process.env.SPEX_SYNC_TEST_REAL_GIT
   process.env.PATH = `${bin}:${oldPath ?? ''}`; process.env.SPEX_SYNC_TEST_GIT_COUNTER = log; process.env.SPEX_SYNC_TEST_REAL_GIT = realGit
@@ -349,6 +349,39 @@ test('AC-APPLICATION-03 受控编辑成为持久operation，重复幂等且真�
   } finally { f.cleanup() }
 })
 
+test('冻结计划的三轮精确选择逐字节保持且不重复读同一棵树', async t => {
+  const f = await fixture(settings, undefined, true)
+  try {
+    governDemoCode(f)
+    const before = await captureInputSnapshot(f.root, { committed: true })
+    writeFileSync(join(f.root, 'src/demo.mjs'), 'export const demo = text => String(text)\n')
+    f.git(['add', 'src/demo.mjs']); f.git(['commit', '-qm', 'change committed implementation'])
+    const input = await captureInputSnapshot(f.root, { committed: true })
+    const trigger = { before, paths: ['src/demo.mjs'] }
+    const counter = gitReadCounter(f.temp)
+    try {
+      const started = performance.now()
+      const result = await f.application['freezeNodePlan'](input, 'demo', false, 'code_to_spec', trigger)
+      const elapsedMs = performance.now() - started
+      const calls = counter.entries()
+      const trees = calls.filter(call => call.startsWith('tree:'))
+      t.diagnostic(JSON.stringify({ elapsedMs, trees: trees.length, objects: calls.filter(call => call === 'object').length, headTrees: calls.filter(call => call === 'head-tree').length }))
+      const store = f.application.store
+      const heads = store.readBaselineSelection(input.source, store.listBaselineResources(input.source)); assert.ok('selection' in heads)
+      const options = { direction: 'code_to_spec' as const, commitTrigger: trigger, discoverySelection: heads.selection }
+      const provisional = await buildSyncApplicationPlan(input, 'demo', heads.selection, options)
+      const selected = store.readBaselineSelection(input.source, await deriveSyncBaselineResources(input, provisional, heads.selection)); assert.ok('selection' in selected)
+      const selectedPlan = await buildSyncApplicationPlan(input, 'demo', selected.selection, options)
+      const exact = store.readBaselineSelection(input.source, await deriveSyncBaselineResources(input, selectedPlan, selected.selection)); assert.ok('selection' in exact)
+      const plan = await buildSyncApplicationPlan(input, 'demo', exact.selection, options)
+      plan.agentWorkflow = 'native-worktree-v1'
+      assert.equal(JSON.stringify(result), JSON.stringify({ plan, selection: exact.selection }))
+      assert.deepEqual(trees.sort(), [before.immutableTree, input.immutableTree].map(tree => 'tree:' + tree).sort())
+      assert.ok(calls.filter(call => call === 'head-tree').length >= 2, '仍核对before及当前提交HEAD')
+    } finally { counter.restore() }
+  } finally { f.cleanup() }
+})
+
 test('status复用本轮快照并让重试资格复用详情的闭包当前性', async () => {
   const f = await fixture()
   try {
@@ -364,7 +397,8 @@ test('status复用本轮快照并让重试资格复用详情的闭包当前性',
       assert.equal(detail.retryEligibility.eligible, true)
       const entries = counter.entries()
       assert.equal(entries.filter(entry => entry === 'capture').length, 2, 'status只采一次快照（双重observe各读取一次索引）')
-      assert.equal(entries.filter(entry => entry.startsWith('tree:')).length, 15, '同一status保留完整闭包证明读取，并仅计算一次闭包当前性')
+      const treeReads = entries.filter(entry => entry.startsWith('tree:')).length
+      assert.ok(treeReads <= 9, `status 应共享一次闭包当前性读取，实际读树 ${treeReads} 次`)
     } finally { counter.restore() }
   } finally { f.cleanup() }
 })

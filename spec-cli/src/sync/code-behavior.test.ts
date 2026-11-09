@@ -1096,8 +1096,8 @@ test('raw-only v2同tree冻结角色共享单次完整读取且保留verifySnaps
   const treeReads = calls.filter(args => args.includes('ls-tree'))
   const objectBatches = calls.filter(args => args.includes('cat-file') && args.includes('--batch')).length
   t.diagnostic(JSON.stringify({ treeReads: treeReads.length, objectBatches }))
-  assert.equal(treeReads.length, 3, '原有两次verifySnapshot各自完整校验，六个角色的相同树只再完整读取一次')
-  assert.equal(objectBatches, 3, '相同tree的完整blob校验与读取仍只通过原batch机制执行')
+  assert.equal(treeReads.length, 1, '相同不可变tree只做一次完整校验并绑定manifest，角色正文按精确OID另取')
+  assert.equal(objectBatches, 2, '一次完整blob校验加一次本区精确正文批读')
 })
 
 test('行为分析按完整tree OID隔离角色并保留旧、新、交付及组合字节', async t => {
