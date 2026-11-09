@@ -75,7 +75,7 @@ code→Spec的分区AC提案引用未变只读父规则时，完整原proposal�
 
 同operation局部多轮的真实Git/SQLite回归先复现已accept分析区和叶P1在兄弟失败后被重复派发，再证明下一attempt仅运行失败区；原ref/review/traces、预算/绝对deadline、source/index及零journal保持，SQLite重启和正式pause→resume后旧fence仍拒写。readSet/input/未审/foreign/ref污染拒绝承接，局部并集仍通过新的严格seal。并行分析回归保存所有在途失败及原proposal/review诊断，checkpoint绑定错误也保primary且不能借空失败列表取得有限修复权；确定性runner仅证明机制，不声称真实Native、Docker或完整交付通过。
 
-正式 retryOf 的局部 P0 回归先使首分区通过独审、兄弟失败且旧 whole 缺席，关闭重开 SQLite 后换模型重试。原分区零重派，旧 trace、Git 和 resultRef 保留，新的批准来自当前模型；来源记录和未完成侧的校验保持。
+正式 retryOf 的局部 P0 回归先使首分区通过独审、兄弟失败且旧 whole 缺席，关闭重开 SQLite 后换模型重试。原分区零重派，旧 trace、Git 和 resultRef 保留，新的批准来自当前模型；来源记录和未完成侧的校验保持。第二代重试经原已替代祖先取得批准，P0 零重派；混合仅分析分区扩域及冷恢复仍验原 ref，伪造来源在 P1 前拒绝。更换模型的 V3 前置失败保留已批准 P0，后续生成与独审按新模型正常执行。
 
 混合行为分析失败回归证明业务拒绝与unsupported并存时仍不自动续修；同operation经显式pause→resume、且旧资源已结算后启动新attempt，只有已保存的 `behavior_analysis_invalid` / `behavior_review_failed` 原件按partitionId进入对应失败分区，unsupported/基础设施失败不进入诊断，已accept分区沿原ref复用而不重新派发。资源仍未知时沿原 `recovery_required` 门禁停止且不运行新attempt；本用例不扩大自动修复资格或预算。
 

@@ -6469,8 +6469,8 @@ for (const defect of ['none', 'recording-continuation', 'recording-continuation-
       const rejected = await runSyncOperation(store, active.id, f.options)
       assert.equal(rejected.operation.phase, path ? 'conflicted' : 'failed', JSON.stringify(rejected.failure))
       assert.ok(path ? rejected.failure?.code === 'input_changed' : defect === 'model' ? rejected.failure?.code === 'verification_unsupported' : (['candidate_retry_binding', 'retry_provenance_binding'].includes(rejected.failure?.code ?? '') || defect === 'publication' && rejected.failure?.message.includes('SYNC_PUBLICATION_BASE_BINDING')), JSON.stringify(rejected.failure))
-      assert.equal(rejected.operation.callsUsed, defect === 'model' ? 6 : 0); assert.equal(calls.length, defect === 'model' ? 12 : originalCalls)
-      if (defect === 'model') assert.deepEqual(calls.slice(6), calls.slice(0, 6), '显式新model按原正常retry重做生成与独审，不取运输续验资格')
+      assert.equal(rejected.operation.callsUsed, defect === 'model' ? 4 : 0); assert.equal(calls.length, defect === 'model' ? originalCalls + 4 : originalCalls)
+      if (defect === 'model') assert.deepEqual(calls.slice(originalCalls), calls.slice(2, originalCalls), '显式新model保留已批准P0，正常重做后续生成与独审')
       assert.equal(store.listJournals(active.id).length, 0)
     } finally {
       store.readOperation = readOperation; store.readAttempt = readAttempt
