@@ -30,7 +30,7 @@ import { planSyncPartitions } from './partitioning.js'
 import type { SyncPartitionPlan } from './partitioning.js'
 import { contractOmissionBound, freezeGenerationInput, generationReviewRequest, generationStageTree, restoreGenerationInput, reviewError, verifyGenerationReviewDraft, runGeneration } from './generation.js'
 import type { GenerationFinding, GenerationInput, GenerationResult } from './generation-types.js'
-import { captureStageDraft, readStageDraft, readStoppedPhysicalDraft, stageWorktree, type StageDraftMaterialRequest } from './stage-worktree.js'
+import { captureStageDraft, readStageDraft, readStoppedPhysicalDraft, stageWorktree, StoppedPhysicalDraftStatusError, type StageDraftMaterialRequest } from './stage-worktree.js'
 import { createAttemptRunner, hasSettledNativeRpcFailure, hasSettledNativeTurnTransportFailure, pinSyncNativeRequest } from './native-run.js'
 import type { NativeRunCheckpoint, NativeRunPlan } from './native-run.js'
 import type { AdmitSyncInput, ApplyReceipt, BlobRef, CandidateRef, ComposedInputRef, FrozenBaselineSelection, InputSnapshot, SyncAttempt, SyncFailure, SyncOperation, SyncScope, SyncResourceRecord, VerificationResultBlob, WriteFence } from './operation-types.js'
@@ -1969,7 +1969,14 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
               if (zcode && zcodeFailed === null) return null
               if (!zcode) assertClaudeStoppedDraftSource(prompt, state, proof.record.worktreePath)
               assertMaterialFence()
-              const physical = completedEventsRpc ? null : readStoppedPhysicalDraft(operation.input.source.commonDir, proof.record.worktreePath, native.request.worktree!, binding)
+              let physical: ReturnType<typeof readStoppedPhysicalDraft>
+              try {
+                physical = completedEventsRpc ? null : readStoppedPhysicalDraft(operation.input.source.commonDir, proof.record.worktreePath, native.request.worktree!, binding)
+              } catch (error) {
+                if (purpose !== 'code_behavior_review' || !(error instanceof StoppedPhysicalDraftStatusError)) throw error
+                saveStage(store, fence!, `${key}:${purpose}:stopped-physical-material-rejection`, { reason: 'outside-owner-status', fromOperationId: owner.id, fromAttemptId: prior.id, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef })
+                return null
+              }
               if (physical) {
                 if (zcode && !zcodeFailed) fail('stale_result', 'ZCode物理草稿没有原精确失败终态')
                 const context = readCodeBehaviorContext(native.request, operation.input.source.commonDir)

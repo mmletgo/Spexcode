@@ -21,6 +21,8 @@ StageDraftMaterialRequest仅在进程内传当前binding/真实seed/inputDigest�
 
 P0分析及独审同样复用此草稿捕获/读取能力；owner与purpose共同隔离临时路径，两个阶段只可提交各自精确draft，schema/Spec/源码/tests及其absence继续保持。P0独审seed可以含自身未批准JSON临时稿，但分析稿不混入独审业务tree；最终candidate与交付不含任何临时草稿。认证的旧Native final只作为新seed输入材料，不是旧Git witness，必须经下一真实Agent提交后才产生当前草稿身份。
 
+精确通过仓库、owner、原seed、schema和提交差量的旧物理草稿，若严格Git状态出现非ignored的授权范围外路径或状态，仍拒绝整份材料，并将此类工作区状态与身份、索引、物理字节和复查竞态失配区分。调用者不能把该拒绝当作空草稿后继续捕获同一来源的Git结果。
+
 正式停止的工作树若严格Git状态只有ignored条目，只在HEAD及tree仍为精确原seed、全部stage-0索引path/mode/OID和受控物理文件逐项相等时判定无新增材料。`.spex-sync-drafts`本身及其所有子项的ignored变化（含大小写别名和其他owner草稿/sidecar）明确拒绝。授权draft在seed中缺席则物理也须缺席，已存在则保持原普通文件模式和字节。禁止穿过父目录软链接，并在返回前复核原索引摘要、HEAD及完整严格状态。其它ignored条目不进入草稿材料或交付；隐藏只读修改、索引变化、实际dirty与已有新提交仍经原严格门。
 
 P1完整生成的`ac-test-flow-binding-v2`、`ac-test-flow-review-binding-v3`与`ac-test-flow-review-verify-repair-v4`调用者可在原停止认证后显式观察已提交草稿。真实HEAD须为原seed后代，树差量只包含唯一授权UTF-8普通草稿，工作树须clean或只有草稿命名空间之外的ignored项。完整stage-0索引及全部受控物理文件（含草稿）逐项匹配实际HEAD的path、mode、OID和字节，返回前复读HEAD、索引、状态和所有受控物理路径的模式与字节以拒绝竞态。原停止来源与只读保护规则保持。返回真实commit/tree/OID用于未批准材料，其他调用者及无新增稿继续沿原规则。
