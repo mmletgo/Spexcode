@@ -1963,9 +1963,13 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
             if (proof.record.base !== native.request.worktree.baseCommit || proof.record.forkCommit !== native.request.worktree.baseCommit || /草稿文件=([^\s；]+)/.exec(native.request.prompt)?.[1] !== binding.path || !schema || schema.mode !== '100644' || contentHash(readObject(operation.input.source.commonDir, schema.oid)) !== schemaDigest || behaviorMaterialTask(native.request, operation.input.source.commonDir) !== behaviorMaterialTask(currentRequest, operation.input.source.commonDir)) continue
             const protectedEntries = (tree: string) => readTree(operation.input.source.commonDir, tree).filter(entry => entry.path !== binding.path && entry.path !== binding.path.replace(/\.json$/, '.schema.json') && entry.path !== binding.path.replace(/\.json$/, '.context.json'))
             if (!request.worktree || canonical(protectedEntries(native.request.worktree.tree)) !== canonical(protectedEntries(request.worktree.tree))) continue
+            const allowUnpublishedCompletion = zcode && proof.observedFailure
+              && checkpoint.status === 'cancelled' && checkpoint.nativeState === 'cancelled' && checkpoint.stop?.nativeStatus === 'stopped' && !checkpoint.result && !checkpoint.failure
+              && proof.record.harnessSessionId === checkpoint.session.threadId && canonical(prior.dispatchPlans.find(dispatch => dispatch.key === requestKey)?.session) === canonical(checkpoint.session)
             const material = await withArchivedStructuredWorktree(proof.record, (): ElaborationDraftMaterial | null => {
+              if (allowUnpublishedCompletion) assertMaterialFence()
               const prompt = nativeWorktreePrompt(native.request.prompt, native.request.worktree!)
-              const zcodeFailed = zcode ? assertZCodeStoppedDraftSource(prompt, (completedEventsRpc ? proof.state : state) as ZCodeStructuredExecution, proof.record.worktreePath) : undefined
+              const zcodeFailed = zcode ? assertZCodeStoppedDraftSource(prompt, (completedEventsRpc ? proof.state : state) as ZCodeStructuredExecution, proof.record.worktreePath, allowUnpublishedCompletion) : undefined
               if (zcode && zcodeFailed === null) return null
               if (!zcode) assertClaudeStoppedDraftSource(prompt, state, proof.record.worktreePath)
               assertMaterialFence()

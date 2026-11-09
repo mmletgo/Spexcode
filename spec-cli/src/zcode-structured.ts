@@ -27,6 +27,8 @@ type NativeCallbacks = { onThread(id: string): Promise<void>; onTurn(id: string)
 type WorktreeNativeResult = { threadId: string; turnId: string; text: string; frozenReadProof?: never }
 type NativeResult = { threadId: string; turnId: string; text: string; frozenReadProof: ZCodeFrozenReadProof }
 type NativeEvent = { sessionId: string; turnId?: string; seq: number; eventId: string; type: string; payload: Record<string, unknown> }
+type NativeMessage = { info?: Record<string, unknown>; parts?: Array<Record<string, unknown>> }
+type WorktreeCompletionEvidence = { terminal: NativeEvent; events: NativeEvent[]; messages: NativeMessage[]; exit: StopEvidence; send: unknown }
 type NativeModel = { providerId: string; modelId: string; options?: Record<string, unknown> }
 type NativeSelection = { model: NativeModel; thoughtLevel?: string }
 type NativeConfigSelection = { model?: NativeModel; thoughtLevel?: string }
@@ -301,9 +303,13 @@ export function isZCodeEventsRpcTimeout(execution: Pick<StructuredExecution, 'st
 }
 
 /** 只读核原任务与公开终态；true认证未批准稿，null跳过不具资格的候选。 */
-export function assertZCodeStoppedDraftSource(prompt: string, execution: ZCodeStructuredExecution, worktreePath: string): boolean | null {
+export function assertZCodeStoppedDraftSource(prompt: string, execution: ZCodeStructuredExecution, worktreePath: string, allowUnpublishedCompletion = false): boolean | null {
   const native = execution.zcodeNative
-  if (execution.version !== 6 || execution.policy !== 'native-worktree-v1' || !execution.model?.startsWith('zcode:') || execution.worktree?.mode !== 'edit' || !native || !['failed', 'cancelled'].includes(execution.state ?? '') || !execution.cancellation?.nativeStopped || existsSync(join(native.root, 'completed.json')))
+  if (execution.version !== 6 || execution.policy !== 'native-worktree-v1' || !execution.model?.startsWith('zcode:') || execution.worktree?.mode !== 'edit' || !native || !['failed', 'cancelled'].includes(execution.state ?? '') || !execution.cancellation?.nativeStopped)
+    throw new StructuredSessionError('stale_result', 'stopped ZCode draft requires its original stopped native worktree')
+  const completedPath = join(native.root, 'completed.json')
+  const sealed = existsSync(completedPath)
+  if (sealed && (!allowUnpublishedCompletion || execution.state !== 'cancelled' || execution.errorCode !== undefined || execution.output !== undefined || execution.resultDigest !== undefined || execution.resultWorktree || execution.failedWorktree || execution.rejectedOutput))
     throw new StructuredSessionError('stale_result', 'stopped ZCode draft requires its original stopped native worktree')
   const read = (name: string): unknown => JSON.parse(readFileSync(join(native.root, name), 'utf8'))
   const plan = read('plan.json') as NativePlan
@@ -316,7 +322,11 @@ export function assertZCodeStoppedDraftSource(prompt: string, execution: ZCodeSt
   catch (error) { if (completedEventsRpc && (error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error }
   let exit: StopEvidence
   try { exit = read('exit.json') as StopEvidence }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    if (sealed) throw new StructuredSessionError('stale_result', 'ZCode unpublished completion lacks its original exit evidence')
+    return null
+  }
   const starts = events.filter(event => event.type === 'turn.started'), terminals = events.filter(event => ['turn.completed', 'turn.failed', 'turn.cancelled'].includes(event.type)), requests = events.filter(event => event.type === 'session.updated')
   const nonSuccess = completedEventsRpc && (terminal.type !== 'turn.completed' || terminal.payload.resultType === 'cancelled' && typeof terminal.payload.response === 'string')
   const exitMatches = nonSuccess ? exit.stopped === true && (exit.code === null || Number.isSafeInteger(exit.code) && exit.code >= 0)
@@ -326,6 +336,12 @@ export function assertZCodeStoppedDraftSource(prompt: string, execution: ZCodeSt
     || !requests.length || requests.some(event => event.payload.providerId !== plan.model?.providerId || event.payload.modelId !== plan.model?.modelId)
     || terminals.length !== 1 || digest(terminals[0]) !== digest(terminal) || terminal.sessionId !== plan.sessionId || terminal.turnId !== plan.turnId || terminal.payload.inputId !== plan.inputId || !exitMatches)
     throw new StructuredSessionError('stale_result', 'stopped ZCode draft lost its original model/input/terminal/exit identity')
+  if (sealed) {
+    const messages = read('messages.json') as NativeMessage[]
+    const { completed } = verifyWorktreeCompletion(plan, plan.model, prompt, execution, { terminal, events, messages, exit, send }, true)
+    if (readFileSync(completedPath, 'utf8') !== JSON.stringify(completed)) throw new StructuredSessionError('stale_result', 'ZCode immutable native evidence differs')
+    return null
+  }
   if (completedEventsRpc) {
     if (nonSuccess) return null
     const idle = read('idle.json') as { sessionId: string; turnId: string; idle: boolean }
@@ -338,16 +354,9 @@ export function assertZCodeStoppedDraftSource(prompt: string, execution: ZCodeSt
   return terminal.type === 'turn.failed'
 }
 
-/** 同一原生 session/input/query/turn 和实际模型选择证明正常工具执行的终态。 */
-async function settleWorktreeResult(plan: NativePlan, prompt: string, execution: ZCodeStructuredExecution, freshStopDeadline?: number): Promise<WorktreeNativeResult> {
-  verifyPlan(plan, plan.root, prompt, execution)
-  const model = plan.model
-  if (!model) throw new StructuredSessionError('stale_result', 'ZCode worktree plan has no actual model selection')
-  // 本次调用写 exit 前已做最终停止观察。未结算的冷重放不能借用这次观察。
-  if (freshStopDeadline === undefined && execution.state !== 'completed' && !(await ownedProcessesStopped(plan))) throw new StructuredSessionError('cancellation_pending', 'ZCode worktree native or unknown orphan stop remains unproven')
-  const read = (name: string): unknown => JSON.parse(readFileSync(join(plan.root, name), 'utf8'))
-  const terminal = read('terminal.json') as NativeEvent, events = read('events.json') as NativeEvent[], messages = read('messages.json') as Array<{ info?: Record<string, unknown>; parts?: Array<Record<string, unknown>> }>
-  const exit = read('exit.json') as StopEvidence, send = read('send.json')
+/* 同一原生 session/input/query/turn 和实际模型选择证明正常工具执行的终态。 */
+function verifyWorktreeCompletion(plan: NativePlan, model: NativeModel, prompt: string, execution: ZCodeStructuredExecution, evidence: WorktreeCompletionEvidence, strictCompleted: boolean) {
+  const { terminal, events, messages, exit, send } = evidence
   const starts = events.filter(event => event.type === 'turn.started'), requests = events.filter(event => event.type === 'session.updated')
   if (!plan.turnId || terminal.type !== 'turn.completed' || terminal.sessionId !== plan.sessionId || terminal.turnId !== plan.turnId || terminal.payload.inputId !== plan.inputId || terminal.payload.resultType !== 'success' || typeof terminal.payload.response !== 'string'
     || starts.length !== 1 || starts[0].payload.inputId !== plan.inputId || starts[0].payload.queryId !== plan.queryId || starts[0].turnId !== plan.turnId
@@ -361,18 +370,31 @@ async function settleWorktreeResult(plan: NativePlan, prompt: string, execution:
   let output: unknown
   try { output = decodeZCodeStructuredText(terminal.payload.response) }
   catch (error) {
-    if (execution.state === 'completed' && error instanceof StructuredSessionError && error.code === 'structured_output_format_invalid') throw new StructuredSessionError('stale_result', 'ZCode completed worktree terminal response is not one strict JSON document')
+    if (strictCompleted && error instanceof StructuredSessionError && error.code === 'structured_output_format_invalid') throw new StructuredSessionError('stale_result', 'ZCode completed worktree terminal response is not one strict JSON document')
     if (error instanceof StructuredSessionError && error.code === 'structured_output_format_invalid') throw new StructuredSessionError(error.code, error.message, { threadId: plan.sessionId, turnId: plan.turnId, rejectedOutput: rejectedFinalOutput(terminal.payload.response, prompt, execution, { threadId: plan.sessionId, turnId: plan.turnId }) })
     throw error
   }
   const validate = new Ajv({ allErrors: true }).compile(execution.schema)
   if (!validate(output)) {
-    if (execution.state === 'completed') throw new StructuredSessionError('stale_result', 'ZCode completed worktree terminal JSON no longer matches its schema')
+    if (strictCompleted) throw new StructuredSessionError('stale_result', 'ZCode completed worktree terminal JSON no longer matches its schema')
     const diagnostics = validate.errors?.map(({ instancePath, schemaPath, keyword, params, message }) => ({ instancePath, schemaPath, keyword, params, message })) ?? []
     throw new StructuredSessionError('structured_output_format_invalid', `ZCode worktree terminal JSON does not match its schema: ${JSON.stringify(diagnostics)}`, { threadId: plan.sessionId, turnId: plan.turnId, rejectedOutput: rejectedFinalOutput(terminal.payload.response, prompt, execution, { threadId: plan.sessionId, turnId: plan.turnId }) })
   }
   const result: WorktreeNativeResult = { threadId: plan.sessionId, turnId: plan.turnId, text: JSON.stringify(output) }
-  const completed = { plan, terminal, events, messages, exit, send, result }
+  return { completed: { plan, terminal, events, messages, exit, send, result }, output }
+}
+
+async function settleWorktreeResult(plan: NativePlan, prompt: string, execution: ZCodeStructuredExecution, freshStopDeadline?: number): Promise<WorktreeNativeResult> {
+  verifyPlan(plan, plan.root, prompt, execution)
+  const model = plan.model
+  if (!model) throw new StructuredSessionError('stale_result', 'ZCode worktree plan has no actual model selection')
+  // 本次调用写 exit 前已做最终停止观察。未结算的冷重放不能借用这次观察。
+  if (freshStopDeadline === undefined && execution.state !== 'completed' && !(await ownedProcessesStopped(plan))) throw new StructuredSessionError('cancellation_pending', 'ZCode worktree native or unknown orphan stop remains unproven')
+  const read = (name: string): unknown => JSON.parse(readFileSync(join(plan.root, name), 'utf8'))
+  const terminal = read('terminal.json') as NativeEvent, events = read('events.json') as NativeEvent[], messages = read('messages.json') as NativeMessage[]
+  const exit = read('exit.json') as StopEvidence, send = read('send.json')
+  const { completed, output } = verifyWorktreeCompletion(plan, model, prompt, execution, { terminal, events, messages, exit, send }, execution.state === 'completed')
+  const { result } = completed
   const path = join(plan.root, 'completed.json')
   if (execution.state === 'completed' && (!existsSync(path) || execution.threadId !== result.threadId || execution.turnId !== result.turnId || execution.resultDigest !== digest(output))) throw new StructuredSessionError('stale_result', 'ZCode worktree durable completed identity differs')
   if (freshStopDeadline !== undefined && Date.now() >= freshStopDeadline) throw new StructuredSessionError('cancellation_pending', 'ZCode completion exceeded the original stop deadline')

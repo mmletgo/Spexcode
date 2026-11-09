@@ -72,6 +72,8 @@ macOS 的新 worktree 版本探测与 app-server 子进程沿 [[native-worktree-
 
 同一 v6 worktree 调用收到原子进程 close、且没有 stop 请求、取消、协议错误或原执行错误时，关闭后的首次非终止完整观察一旦确认停止，就在原绝对截止内直接用它写原 exit。未获 close、首检未证停止、进入终止回退、已有取消或失败及旧 frozen 仍按原观察与结算路径。随后本次 worktree 调用直接使用写原 exit 前的同一次新鲜停止观察。只有该次观察确认原进程组、相关后代与任务域未知进程都已结算，才进入同栈完成核验；期间不再排队重复观察，仍在原绝对停止截止内完成核验与发布。取消优先、原 exit、终态、消息、模型与 schema 门不变。
 
+若 [[sync-coordinator]] 的 P0 旧资源曾正式观察到失败，随后精确停止并结算为 cancelled，且从未发布结果，存在 completed.json 只表示可能已封存原 Native 轮次。适配器复用正常完成的核验，核对原 plan/workspace/send/model、同一终态和消息、退出停止及 JSON/schema，并按原封存格式逐字比对。仅完整原件可跳过该候选。跳过不将旧 Git/物理稿读作续修输入，不生成 output、Git witness 或补写完成缓存。缺失或不符原件明确拒绝，P1 和 typed 失败材料资格沿原门禁。
+
 已持久 completed 的 worktree 冷重放核原完成缓存、固定请求、Native 身份、schema/输出和原 exit.stopped/close 证据，不再探测历史 PID/PGID，避免无关复用导致伪 stale；未结算的冷恢复仍必须重新实时证明原进程与后代停止。
 
 worktree轮询、取消、未结算恢复与finally逐次等待[[native-worktree-runtime]]的异步有界进程观察，同root采样和停止串行，不让慢cwd探针阻塞RPC/取消timer或叠加观察。取消的原15秒与清理的原分段窗口以绝对截止沿排队/观察传递，内部剩余不重置；过期不追加Native信号或真停止原件，最后取消分类消费已保存的同一次fresh停止事实，不在截止后另开采样。探针失败保原未知停止及容量，不据此写成功exit/完成证据；已completed和sealed材料读取继续核原件，不活探历史PID或增加Native杀权。冷取消及清理在等待观察后、实际发TERM前重新核同一原receipt/专属组身份，等待前的proof不能跨异步窗口授信号权。
