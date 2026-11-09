@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createRequire, syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
@@ -2837,7 +2837,7 @@ for (const contextTransport of [undefined, 'git-json-v1'] as const) for (const p
 })
 
 
-for (const contextTransport of ['git-json-v1', 'git-json-v2'] as const) test(`P0 ${contextTransport} 绑定Git任务且不改变业务身份和批准复用`, async t => {
+for (const contextTransport of ['git-json-v1', 'git-json-v2', 'git-json-v3'] as const) test(`P0 ${contextTransport} 绑定Git任务且不改变业务身份和批准复用`, async t => {
   const f = await fixture(t)
   writeFileSync(join(f.root, 'src/export.js'), f.source + '\n// same business context fixture\n')
   const original = await f.input()
@@ -2846,11 +2846,39 @@ for (const contextTransport of ['git-json-v1', 'git-json-v2'] as const) test(`P0
   const input: CodeBehaviorInput = { ...original, draftProtocol: 'code-behavior-draft-v1', contextTransport, plan: { ...original.plan, agentWorkflow: 'native-worktree-v1' }, repairDiagnostics }
   const seen: { purpose: string; requestDigest: string; tree: string; contextSha256: string; bytes: number; promptBytes: number }[] = []
   let checkpoint: CodeBehaviorContinuation | null = null
+  let priorDraft: { oid: string; bytes: Buffer } | undefined
   const runner: ElaborationRunner = async request => {
+    const rejectedV2 = contextTransport === 'git-json-v3' && seen.length === 0
+    const transport = rejectedV2 ? 'git-json-v2' : contextTransport
+    const seededDraft = priorDraft && request.purpose === 'code_behavior_analyze' ? priorDraft : undefined
     const descriptor = JSON.parse(request.prompt.split('\n任务:\n')[1].split('\n草稿文件=')[0]) as { contextTransport: string; path: string; sha256: string }
-    assert.equal(descriptor.contextTransport, contextTransport)
+    assert.equal(descriptor.contextTransport, transport)
     assert.ok(!request.prompt.includes(repairDiagnostics[0].message)); assert.ok(!request.prompt.includes(repairDiagnostics[1].message))
     assert.match(request.prompt, /不属于业务checkedPaths/)
+    const coverageCheck = /\nnode - (\S+) (\S+) <<'SPEX_P0_COVERAGE'\n([\s\S]+?)\nSPEX_P0_COVERAGE(?:\n|$)/.exec(request.prompt)
+    if (transport === 'git-json-v3' && request.purpose === 'code_behavior_analyze') {
+      assert.ok(coverageCheck, '新分析请求需要可运行的当前草稿覆盖自检')
+      assert.equal(coverageCheck[1], descriptor.path)
+      assert.equal(coverageCheck[2], /草稿文件=([^\s；]+)/.exec(request.prompt)![1])
+      const directory = mkdtempSync(join(tmpdir(), 'p0-draft-coverage-'))
+      t.after(() => rmSync(directory, { recursive: true, force: true }))
+      const contextPath = join(directory, 'context.json'), draftPath = join(directory, 'draft.json')
+      const task = { requiredChangedPaths: ['src/a.ts', 'src/b.ts', 'test/a.ts'], unownedSourcePaths: ['src/a.ts', 'src/b.ts'] }
+      const taskBytes = JSON.stringify({ task })
+      writeFileSync(contextPath, taskBytes)
+      const run = (draft: object, status: number, expected: object) => {
+        const draftBytes = JSON.stringify(draft)
+        writeFileSync(draftPath, draftBytes)
+        const checked = spawnSync(process.execPath, ['-', contextPath, draftPath], { input: coverageCheck[3], encoding: 'utf8' })
+        assert.equal(checked.status, status, checked.stderr)
+        assert.deepEqual(JSON.parse(checked.stdout), expected)
+        assert.equal(readFileSync(contextPath, 'utf8'), taskBytes)
+        assert.equal(readFileSync(draftPath, 'utf8'), draftBytes)
+      }
+      const changes = [{ kind: 'allowed_change', paths: ['src/a.ts'] }, { kind: 'coverage_gap', paths: ['src/b.ts'] }]
+      run({ changes, newNodes: [] }, 1, { missingChangedPaths: ['test/a.ts'], missingOwnerPaths: ['src/a.ts'] })
+      run({ changes: [...changes, { kind: 'refactor', paths: ['test/a.ts'] }], newNodes: [{ codePath: 'src/a.ts' }] }, 0, { missingChangedPaths: [], missingOwnerPaths: [] })
+    } else assert.equal(coverageCheck, null, '旧冻结请求及独审保持原提示')
     const seed = request.worktree!, workspace = join(f.root, '..', `context-${seen.length}`)
     git(f.root, 'worktree', 'add', '--detach', workspace, seed.baseCommit)
     const bytes = readFileSync(join(workspace, descriptor.path))
@@ -2860,9 +2888,9 @@ for (const contextTransport of ['git-json-v1', 'git-json-v2'] as const) test(`P0
     const visible = JSON.parse(bytes.toString('utf8'))
     assert.deepEqual(visible.repairDiagnostics, contextTransport === 'git-json-v1' ? repairDiagnostics : [], '新P0任务的Git快照不得包含历史诊断')
     assert.equal(visible.diagnosticArchive, undefined)
-    if (contextTransport === 'git-json-v2') {
+    if (contextTransport !== 'git-json-v1') {
       assert.doesNotMatch(bytes.toString('utf8'), /原稿完整业务语义|全部旧证据|独立拒因/)
-      assert.equal(readTree(input.snapshot.source.commonDir, seed.tree).filter(entry => entry.path.startsWith('.spex-sync-drafts/')).length, 2)
+      assert.equal(readTree(input.snapshot.source.commonDir, seed.tree).filter(entry => entry.path.startsWith('.spex-sync-drafts/')).length, seededDraft ? 3 : 2)
     }
     const context = readCodeBehaviorContext(request, input.snapshot.source.commonDir)
     assert.deepEqual(context.repairDiagnostics, contextTransport === 'git-json-v1' ? repairDiagnostics : [])
@@ -2881,18 +2909,31 @@ for (const contextTransport of ['git-json-v1', 'git-json-v2'] as const) test(`P0
       assert.deepEqual(stage.newNodeProposals, [])
     }
     const path = /草稿文件=([^\s；]+)/.exec(request.prompt)![1]
-    mkdirSync(join(workspace, path, '..'), { recursive: true }); writeFileSync(join(workspace, path), JSON.stringify(output))
+    if (seededDraft) {
+      assert.equal(git(workspace, 'rev-parse', `HEAD:${path}`), seededDraft.oid)
+      assert.deepEqual(readFileSync(join(workspace, path)), seededDraft.bytes)
+    }
+    const draftBytes = Buffer.from(JSON.stringify(rejectedV2 ? { ...output, changes: [] } : output))
+    mkdirSync(join(workspace, path, '..'), { recursive: true }); writeFileSync(join(workspace, path), draftBytes)
     git(workspace, 'add', path); git(workspace, 'commit', '-m', `normal P0 context draft ${seen.length}`)
+    if (rejectedV2) priorDraft = { oid: git(workspace, 'rev-parse', `HEAD:${path}`), bytes: draftBytes }
     seen.push({ purpose: request.purpose, requestDigest: contentHash(JSON.stringify({ ...request, signal: undefined })), tree: seed.tree, contextSha256: descriptor.sha256, bytes: bytes.length, promptBytes: Buffer.byteLength(request.prompt) })
     const receipt = { summary: '已正常提交原业务JSON' }
     return { sessionId: `context-session-${seen.length}`, threadId: `context-thread-${seen.length}`, turnId: 'turn', output: receipt, resultDigest: contentHash(JSON.stringify(receipt)), worktree: nativeWorktreeResult(workspace, seed) }
   }
-  const result = await analyzeCodeBehavior(input, runner, undefined, { load: () => checkpoint, save: value => { checkpoint = structuredClone(value) } })
-  assert.equal(result.reviewPassed, true); assert.deepEqual(seen.map(item => item.purpose), ['code_behavior_analyze', 'code_behavior_review'])
+  const continuations = { load: () => checkpoint, save: (value: CodeBehaviorContinuation) => { checkpoint = structuredClone(value) } }
+  if (contextTransport === 'git-json-v3') {
+    await assert.rejects(analyzeCodeBehavior({ ...input, contextTransport: 'git-json-v2' }, runner, undefined, continuations), { code: 'behavior_analysis_invalid', message: 'P0 行为校验未通过' })
+    assert.ok(priorDraft)
+  }
+  const result = await analyzeCodeBehavior(input, runner, undefined, continuations)
+  assert.equal(result.reviewPassed, true)
+  assert.deepEqual(seen.map(item => item.purpose), [...(priorDraft ? ['code_behavior_analyze'] : []), 'code_behavior_analyze', 'code_behavior_review'])
   let calls = 0
   const neverRun: ElaborationRunner = async () => { calls++; throw new Error('accepted不得派发') }
   const accepted = (digest: string) => { assert.equal(digest, result.inputDigest); return result }
   const legacy = await analyzeCodeBehavior({ ...input, contextTransport: undefined }, neverRun, accepted)
+  assert.equal(await analyzeCodeBehavior({ ...input, contextTransport: 'git-json-v2' }, neverRun, accepted), legacy)
   for (let index = 0; index < 23; index++) assert.equal(await analyzeCodeBehavior({ ...input, requestKey: `new-attempt-${index}` }, neverRun, accepted), legacy)
   assert.equal(calls, 0)
   t.diagnostic(JSON.stringify({ transportContractOnly: true, epipeRootCauseClaimed: false, acceptedLookups: 23, distinctFixtureOwners: 1, addedRunnerCalls: calls, stages: seen }))

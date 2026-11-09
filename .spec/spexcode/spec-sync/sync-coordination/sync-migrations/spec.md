@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+v36 只追加 SELECT 1 writer marker，保护在派发前冻结的 P0 草稿覆盖自检指引。旧请求和数据原字节保持。升级先正式停稳旧 writer 并结算资源、租约，再做 SQLite online backup 并事务追加。回滚先停稳新 writer 并结算，再恢复一致 v35 备份及配套证据和 Git refs。
+
 v35 只追加 SELECT 1 writer marker，保护新初始化分区策略和跨操作的 P0 原批准来源。旧计划、调用与历史 records 保持原字节。旧 writer 遇到新库须在写入和派发前拒绝。升级先正式停稳旧 writer 并结算资源和租约，正常 online backup 后事务追加。回滚先停稳并结算新 writer，再恢复一致 v34 备份和配套证据及 Git refs。
 
 v34只新增sync_observations的部分表达式索引：键为完整source_key、input.id、latestDifferenceDigest与outcome，成员条件逐字沿用commit、failure为NULL且outcome非blocked。索引由SQLite维护既有行及后续写入，不保存第二份观察事实，不改原查询、分组、rowid顺序或任何历史业务行。升级前停稳旧writer并结算或保留资源和租约，沿正常online backup及组件事务建索引；v1–v33 SQL/checksum与全部旧记录保持，v33及更旧writer拒绝新代。建索引失败连同marker整体回滚，重复迁移幂等。回滚先停新writer并结算或保留资源，再恢复升级前一致v33库与配套evidence/runtime/Git refs，不能删marker降级。

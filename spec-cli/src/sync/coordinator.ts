@@ -2434,12 +2434,12 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
             previousDecisionReadPaths = unique([...originalPlan.readPaths, ...originalSelection?.bindings.flatMap(binding => binding.resource.kind === 'path' ? [binding.resource.path] : []) ?? []])
           }
           let behaviorProtocol = stage<{ version: 'code-behavior-draft-v1'; contextTransport?: CodeBehaviorContextTransport }>(store, operation, attempt, 'behavior-draft-protocol')
-          if (behaviorProtocol && Object.hasOwn(behaviorProtocol, 'contextTransport') && behaviorProtocol.contextTransport !== 'git-json-v1' && behaviorProtocol.contextTransport !== 'git-json-v2') fail('behavior_context_transport_unsupported', '持久P0 contextTransport字段存在但不受支持；仅字段缺席允许legacy运输')
+          if (behaviorProtocol && Object.hasOwn(behaviorProtocol, 'contextTransport') && behaviorProtocol.contextTransport !== 'git-json-v1' && behaviorProtocol.contextTransport !== 'git-json-v2' && behaviorProtocol.contextTransport !== 'git-json-v3') fail('behavior_context_transport_unsupported', '持久P0 contextTransport字段存在但不受支持；仅字段缺席允许legacy运输')
           if (!behaviorProtocol && options.plan.agentWorkflow && !attempt.dispatchPlans.some(dispatch => dispatch.purpose.startsWith('code_behavior_'))) {
-            behaviorProtocol = { version: 'code-behavior-draft-v1', contextTransport: 'git-json-v2' }
+            behaviorProtocol = { version: 'code-behavior-draft-v1', contextTransport: 'git-json-v3' }
             saveStage(store, fence, 'behavior-draft-protocol', behaviorProtocol)
           }
-          p0StatusOnly = behaviorProtocol?.contextTransport === 'git-json-v2'
+          p0StatusOnly = behaviorProtocol?.contextTransport === 'git-json-v2' || behaviorProtocol?.contextTransport === 'git-json-v3'
           const repairDiagnostics: NonNullable<import('./code-behavior.js').CodeBehaviorInput['repairDiagnostics']>[number][] = []
           if (!p0StatusOnly) {
             for (const sourceAttempt of retryDraftSources(store, operation, attempt!.number).reverse()) {
