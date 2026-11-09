@@ -61,9 +61,12 @@ export const STAGE_READING_INSTRUCTIONS = '工作目录就是本阶段固定Git�
 export type StageDraftBinding = Pick<ElaborationDraft, 'ownerDigest' | 'sourceInputId' | 'schemaDigest' | 'path'>
 export type StageDraftMaterialRequest = { binding: StageDraftBinding; worktree: StageWorktree; inputDigest: string; existingDraft?: ElaborationDraft; allowStoppedGitDraft?: true; readonlyOverlay?: { path: string; mode: string; oid: string }[] }
 
+const stoppedDraftBoundaryMessage = '已停物理草稿的owner/seed、只读文件或index发生越界变化'
+export class StoppedPhysicalDraftStatusError extends Error {}
+
 /** 调用者先认证原Native与正式停止。已提交材料须显式准入，观察不签发Native结果。 */
 export function readStoppedPhysicalDraft(commonDir: string, worktreePath: string, seed: StageWorktree, binding: StageDraftBinding, options?: { allowCommitted: boolean }): { source: string; observedHeadCommit: string; observedTree: string; indexSha256: string; committedOid?: string } | null {
-  const invalid = (): never => { throw new Error('已停物理草稿的owner/seed、只读文件或index发生越界变化') }
+  const invalid = (): never => { throw new Error(stoppedDraftBoundaryMessage) }
   const git = (...args: string[]): Buffer => sourceGit(worktreePath, ['--no-optional-locks', ...args])
   if (seed.mode !== 'edit' || !/^[a-f0-9]{64}$/.test(binding.ownerDigest) || binding.path !== `.spex-sync-drafts/${binding.ownerDigest}.json`
     || realpathSync(git('rev-parse', '--show-toplevel').toString().trim()) !== realpathSync(worktreePath)
@@ -82,7 +85,7 @@ export function readStoppedPhysicalDraft(commonDir: string, worktreePath: string
   if (rows.some(row => /^!! \.spex-sync-drafts(?:\/|$)/iu.test(row))) invalid()
   if (ignoredOnly) {
     if (observedHeadCommit !== seed.baseCommit || observedTree !== seed.tree) invalid()
-  } else if (rows.some(row => !row.startsWith('!! ') && (!/^(?:\?\?|[ AM]{2}) /.test(row) || row.slice(3) !== binding.path))) invalid()
+  } else if (rows.some(row => !row.startsWith('!! ') && (!/^(?:\?\?|[ AM]{2}) /.test(row) || row.slice(3) !== binding.path))) throw new StoppedPhysicalDraftStatusError(stoppedDraftBoundaryMessage)
   const indexPath = resolve(worktreePath, git('rev-parse', '--git-path', 'index').toString().trim()), indexSha256 = contentHash(readFileSync(indexPath))
   const index = git('ls-files', '--stage', '-z').toString('utf8').split('\0').filter(Boolean).map(row => {
     const match = /^(\d{6}) ([a-f0-9]+) 0\t(.+)$/s.exec(row)
