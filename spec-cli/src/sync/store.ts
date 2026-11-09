@@ -144,11 +144,17 @@ export class SyncStore {
   }
   private baselineSelection(tx: ProtocolTransaction, source: WorktreeIdentity, resources: BaselineResource[]): BaselineSelectionResult {
     const exact = [...new Map(resources.map(resource => [resourceKey(resource), resource])).values()].sort((a, b) => resourceKey(a).localeCompare(resourceKey(b)))
+    const sourceKey = identityKey(source)
+    const legacyPaths = exact.some(resource => resource.kind === 'path')
+      ? tx.query("SELECT resource_key,legacy_reason FROM sync_baseline_heads WHERE source_key=? AND legacy_reason IS NOT NULL AND resource_key LIKE 'path:%'", sourceKey) : []
+    const headRows = exact.length
+      ? tx.query('SELECT resource_key,pair_id,legacy_reason FROM sync_baseline_heads WHERE source_key=? AND resource_key IN (SELECT value FROM json_each(?))', sourceKey, JSON.stringify(exact.map(resourceKey))) : []
+    const heads = new Map(headRows.map(row => [String(row.resource_key), row]))
     const bindings: BaselineBinding[] = []
     for (const resource of exact) {
-      const legacy = resource.kind === 'path' ? tx.query("SELECT resource_key,legacy_reason FROM sync_baseline_heads WHERE source_key=? AND legacy_reason IS NOT NULL AND resource_key LIKE 'path:%'", identityKey(source)).find(row => pathOverlap(resource.path, String(row.resource_key).slice(5))) : undefined
+      const legacy = resource.kind === 'path' ? legacyPaths.find(row => pathOverlap(resource.path, String(row.resource_key).slice(5))) : undefined
       if (legacy) return { failure: { code: 'SYNC_BASELINE_LEGACY_UNKNOWN', message: String(legacy.legacy_reason), kind: 'unsupported', evidenceRefs: [] } }
-      const head = tx.query('SELECT pair_id,legacy_reason FROM sync_baseline_heads WHERE source_key=? AND resource_key=?', identityKey(source), resourceKey(resource))[0]
+      const head = heads.get(resourceKey(resource))
       if (head?.legacy_reason) return { failure: { code: 'SYNC_BASELINE_LEGACY_UNKNOWN', message: String(head.legacy_reason), kind: 'unsupported', evidenceRefs: [] } }
       const pair = head?.pair_id ? parseRecord<BaselinePair>(tx.query('SELECT record_json FROM sync_baseline_pairs WHERE id=?', String(head.pair_id))[0])! : null
       if (head?.pair_id && (!pair || !tx.query("SELECT id FROM sync_apply_journals WHERE receipt_id=? AND status='settled'", pair.receiptId).length)) return { failure: { code: 'SYNC_PUBLICATION_BASE_BINDING', message: 'selected baseline head lacks settled receipt', kind: 'unsupported', evidenceRefs: [] } }

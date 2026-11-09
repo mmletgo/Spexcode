@@ -1794,6 +1794,39 @@ test('P4 精确 frontier 将共享路径字节与独立作者 ID 分开，显式
   } finally { f.cleanup() }
 })
 
+test('全树精确基线的读取次数与缺席路径数无关', async () => {
+  const f = await fixture()
+  try {
+    const path = 'src/含"引号\n的路径.ts'
+    const covered = scope(path, 'RULE-BATCH')
+    const exact = [{ kind: 'path' as const, path }, { kind: 'contract' as const, id: 'RULE-BATCH' }]
+    const initial = f.store.readBaselineSelection(source(), exact)
+    assert.ok('selection' in initial)
+    const ready = f.ready({ ...f.admit(source(), 'batch', covered), baselineSelection: initial.selection })
+    const journal = f.store.beginApply(ready.fence, ready.plan, ready.target)
+    for (const step of journal.steps) f.store.recordApplyStep(ready.fence, journal.id, { ...step, status: 'completed' })
+    const receipt = f.receipt(journal.id, ready.plan)
+    f.store.recordReceipt(journal.id, receipt)
+    f.store.settleApply(journal.id, receipt.id)
+
+    const transaction = f.protocol.withTransaction.bind(f.protocol)
+    let queries = 0
+    f.protocol.withTransaction = body => transaction(tx => body({
+      ...tx,
+      query: (...args) => { queries++; return tx.query(...args) },
+    }))
+    const small = f.store.readBaselineSelection(source(), exact)
+    assert.ok('selection' in small)
+    const smallQueries = queries
+    const absent = Array.from({ length: 1_748 }, (_, index) => ({ kind: 'path' as const, path: `src/module-${index}.ts` }))
+    const large = f.store.readBaselineSelection(source(), [...absent, ...exact, ...exact].reverse())
+    assert.ok('selection' in large)
+    assert.equal(large.selection.bindings.length, absent.length + exact.length)
+    assert.deepEqual(large.selection.bindings.filter(binding => 'bytePair' in binding ? binding.bytePair : binding.intentPair), small.selection.bindings)
+    assert.equal(queries - smallQueries, smallQueries)
+  } finally { f.cleanup() }
+})
+
 test('P4 无关 path/ID 交付不使已冻结选择过期，相同资源 frontier 前进拒绝 beginApply', async () => {
   const f = await fixture()
   try {
