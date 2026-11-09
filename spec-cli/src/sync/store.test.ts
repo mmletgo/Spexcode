@@ -2578,27 +2578,27 @@ test('writer34观察索引正常备份升级、失败原子回滚、保旧行且
   } finally { backup?.close(); f.cleanup() }
 })
 
-test('writer35只追加计划与P0批准来源版本并保留可回滚v34备份', async () => {
+for (const prior of [34, 35] as const) test(`从writer${prior}升级仅追加P0版本并保留可回滚备份`, async () => {
   const f = await fixture()
   let backup: ReturnType<typeof openProtocol> | undefined
   try {
-    const claimed = f.claim(), versions = SYNC_MIGRATIONS.slice(0, 34)
-    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version=35', SYNC_COMPONENT))
+    const claimed = f.claim(), versions = SYNC_MIGRATIONS.slice(0, prior)
+    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>?', SYNC_COMPONENT, prior))
     const read = (protocol: typeof f.protocol) => protocol.withTransaction(tx => ({
       schema: tx.query('SELECT * FROM sqlite_master ORDER BY type,name'),
       business: tx.query('SELECT * FROM sync_operations ORDER BY rowid'),
       attempts: tx.query('SELECT * FROM sync_attempts ORDER BY rowid'),
-      previousRegistry: tx.query('SELECT * FROM schema_migrations WHERE component!=? OR version<=34 ORDER BY component,version', SYNC_COMPONENT),
+      previousRegistry: tx.query('SELECT * FROM schema_migrations WHERE component!=? OR version<=? ORDER BY component,version', SYNC_COMPONENT, prior),
     }))
-    const before = read(f.protocol), backupPath = join(f.root, 'v34-before-p0-reuse.backup')
-    assert.equal(SYNC_MIGRATIONS[34].version, 35)
-    assert.match(SYNC_MIGRATIONS[34].sql, /^SELECT 1;/)
-    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), 35)
+    const before = read(f.protocol), backupPath = join(f.root, `v${prior}-before-p0-guidance.backup`)
+    assert.deepEqual(SYNC_MIGRATIONS.slice(prior).map(({ version }) => version), prior === 34 ? [35, 36] : [36])
+    for (const { sql } of SYNC_MIGRATIONS.slice(prior)) assert.match(sql, /^SELECT 1;/)
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), 36)
     assert.deepEqual(read(f.protocol), before)
     assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, versions), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
     assert.deepEqual(f.store.readAttempt(claimed.attempt.id), claimed.attempt)
     backup = openProtocol(backupPath)
-    assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, versions), 34)
+    assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, versions), prior)
     assert.deepEqual(read(backup), before)
   } finally { backup?.close(); f.cleanup() }
 })
