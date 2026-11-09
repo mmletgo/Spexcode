@@ -2,7 +2,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { chmodSync, cpSync, existsSync, mkdtempSync, rmSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { spawn } from 'node:child_process'
+import childProcess, { spawn, type SpawnOptions } from 'node:child_process'
+import { syncBuiltinESMExports } from 'node:module'
 import { HARNESS_IDENTITIES, verifyDetachedRuntime, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
@@ -1043,13 +1044,15 @@ test('native CLI configuration accepts opaque selections and omits --model for d
   for (const model of ['claude:', 'claude:   ', 'claude:a\0b', 'codex:model']) assert.throws(() => claudeNativeModel(model, 'cli-config-v1'))
 })
 
-for (const [selected, configMode, outcome] of [['default', 'unset', 'success'], ['default', 'empty', 'success'], ['sonnet', 'explicit', 'success'], ['provider/opaque[1m]', 'explicit', 'success'], ['provider/opaque[1m]', 'explicit', 'controlled-success-143'], ['provider/opaque[1m]', 'explicit', 'controlled-cancel-after-term'], ['any/alias + context', 'explicit', 'schema-exhaustion']] as const) test(`native CLI configuration fixture preserves configuration and model observations for ${selected}/${configMode}/${outcome}`, async () => {
+for (const [selected, configMode, outcome] of [['default', 'unset', 'success'], ['default', 'empty', 'success'], ['sonnet', 'explicit', 'success'], ['provider/opaque[1m]', 'explicit', 'success'], ['provider/opaque[1m]', 'explicit', 'controlled-success-143'], ['provider/opaque[1m]', 'explicit', 'controlled-cancel-after-term'], ['provider/opaque[1m]', 'explicit', 'periodic-recovered'], ['provider/opaque[1m]', 'explicit', 'periodic-expired'], ['provider/opaque[1m]', 'explicit', 'periodic-cancelled'], ['provider/opaque[1m]', 'explicit', 'periodic-final-pending'], ['provider/opaque[1m]', 'explicit', 'periodic-error'], ['provider/opaque[1m]', 'explicit', 'periodic-error-stop-unknown'], ['provider/opaque[1m]', 'explicit', 'periodic-result-first'], ['any/alias + context', 'explicit', 'schema-exhaustion']] as const) test(`native CLI configuration fixture preserves configuration and model observations for ${selected}/${configMode}/${outcome}`, async t => {
   const directory = mkdtempSync(join(tmpdir(), 'spex-claude-native-config-')), bin = join(directory, 'bin'), config = selected === 'default' ? join(directory, 'home', '.claude') : join(directory, 'native-config'), workspace = join(directory, 'worktree'), realm = join(directory, 'realm'), root = join(realm, 'native')
   const identityKeys = [...new Set(['SPEXCODE_SESSION_ID', ...HARNESS_IDENTITIES.map(harness => harness.sessionEnvVar)])].filter(Boolean)
   const environmentKeys = [...identityKeys, 'PATH', 'HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_USE_BEDROCK', 'ANTHROPIC_MODEL', 'ANTHROPIC_BASE_URL', 'PUBLIC_CLAUDE_FIXTURE_LOG'] as const
   const before = Object.fromEntries(environmentKeys.map(key => [key, process.env[key]]))
-  const controlled = outcome.startsWith('controlled-'), lateCancel = outcome === 'controlled-cancel-after-term', controller = new AbortController()
+  const periodic = outcome.startsWith('periodic-'), release = join(directory, 'release-result')
+  const controlled = outcome.startsWith('controlled-') || outcome === 'periodic-recovered', lateCancel = outcome === 'controlled-cancel-after-term', controller = new AbortController()
   let fixtureNative: StructuredExecution['claudeNative']
+  const watchdog = periodic ? setTimeout(() => controller.abort(), 45_000) : undefined
   try {
     mkdirSync(bin); mkdirSync(config, { recursive: true }); mkdirSync(workspace)
     writeFileSync(join(config, 'settings.json'), 'UNPARSEABLE_PUBLIC_FIXTURE_SETTINGS')
@@ -1058,15 +1061,107 @@ for (const [selected, configMode, outcome] of [['default', 'unset', 'success'], 
 const fs=require('node:fs'),path=require('node:path'),readline=require('node:readline');
 if(process.argv.includes('--version')){console.log('9.8.7 (Claude Code)');process.exit(0)}
 const exhausted=${JSON.stringify(outcome === 'schema-exhaustion')},output=exhausted?{ok:'bad'}:{ok:true};const args=process.argv.slice(2);fs.writeFileSync(process.env.PUBLIC_CLAUDE_FIXTURE_LOG,JSON.stringify({args,config:process.env.CLAUDE_CONFIG_DIR,provider:process.env.CLAUDE_CODE_USE_BEDROCK,model:process.env.ANTHROPIC_MODEL,baseUrl:process.env.ANTHROPIC_BASE_URL,identity:Object.fromEntries(${JSON.stringify(identityKeys)}.filter(key=>process.env[key]!==undefined).map(key=>[key,process.env[key]])),store:{SPEXCODE_HOME:process.env.SPEXCODE_HOME,SPEX_SESSION_DATABASE_PATH:process.env.SPEX_SESSION_DATABASE_PATH}}));
-const emit=x=>console.log(JSON.stringify(x));readline.createInterface({input:process.stdin}).once('line',line=>{const input=JSON.parse(line),session=input.session_id,user=input.uuid;const projects=path.join(process.env.CLAUDE_CONFIG_DIR||path.join(process.env.HOME,'.claude'),'projects','fixture');fs.mkdirSync(projects,{recursive:true});const history=[{type:'user',sessionId:session,uuid:user,parentUuid:null,promptId:'public-prompt',message:input.message},{type:'api-request',sessionId:session,id:'wire-request',params:{model:'wire-provider/actual-id'}},{type:'assistant',sessionId:session,uuid:'assistant',parentUuid:user,requestRef:'wire-request',message:{role:'assistant',content:[{type:'thinking',thinking:'SYNTHETIC_PRIVATE_THINKING'},{type:'tool_use',id:'final',name:'StructuredOutput',input:output}]}}];if(exhausted)history.push({type:'user',sessionId:session,uuid:'schema-error',parentUuid:'assistant',promptId:'public-prompt',sourceToolAssistantUUID:'assistant',message:{role:'user',content:[{type:'tool_result',tool_use_id:'final',is_error:true,content:'Output does not match required schema: /ok: must be boolean'}]}});fs.writeFileSync(path.join(projects,session+'.jsonl'),history.map(x=>JSON.stringify(x)).join('\\n')+'\\n');emit({type:'system',subtype:'init',session_id:session,model:${JSON.stringify(actualModel)},tools:['Read','Bash','StructuredOutput']});emit({type:'user',uuid:user,session_id:session,message:input.message});emit({type:'result',subtype:exhausted?'error_max_structured_output_retries':'success',is_error:exhausted,session_id:session,user_message_uuid:user,user_message_uuids:[user],...(exhausted?{}:{structured_output:output})});process.exitCode=exhausted?1:0;if(${controlled}){process.stdin.once('end',()=>fs.writeFileSync(${JSON.stringify(join(directory, 'stdin-ended'))},'true'));setInterval(()=>{},1000);process.on('SIGTERM',()=>{if(!${lateCancel})process.exit(143);fs.writeFileSync(${JSON.stringify(join(directory, 'term-received'))},'true');setInterval(()=>{if(fs.existsSync(${JSON.stringify(join(directory, 'allow-exit'))}))process.exit(143)},10)})}});
+const emit=x=>console.log(JSON.stringify(x));
+readline.createInterface({input:process.stdin}).on('line',line=>{
+  const input=JSON.parse(line);
+  if(input.type==='control_request'){
+    fs.writeFileSync(${JSON.stringify(join(directory, 'fixture-interrupted'))},'true');
+    process.exit(0);
+  }
+  if(input.type!=='user')return;
+  const session=input.session_id,user=input.uuid;const projects=path.join(process.env.CLAUDE_CONFIG_DIR||path.join(process.env.HOME,'.claude'),'projects','fixture');fs.mkdirSync(projects,{recursive:true});const history=[{type:'user',sessionId:session,uuid:user,parentUuid:null,promptId:'public-prompt',message:input.message},{type:'api-request',sessionId:session,id:'wire-request',params:{model:'wire-provider/actual-id'}},{type:'assistant',sessionId:session,uuid:'assistant',parentUuid:user,requestRef:'wire-request',message:{role:'assistant',content:[{type:'thinking',thinking:'SYNTHETIC_PRIVATE_THINKING'},{type:'tool_use',id:'final',name:'StructuredOutput',input:output}]}}];if(exhausted)history.push({type:'user',sessionId:session,uuid:'schema-error',parentUuid:'assistant',promptId:'public-prompt',sourceToolAssistantUUID:'assistant',message:{role:'user',content:[{type:'tool_result',tool_use_id:'final',is_error:true,content:'Output does not match required schema: /ok: must be boolean'}]}});fs.writeFileSync(path.join(projects,session+'.jsonl'),history.map(x=>JSON.stringify(x)).join('\\n')+'\\n');emit({type:'system',subtype:'init',session_id:session,model:${JSON.stringify(actualModel)},tools:['Read','Bash','StructuredOutput']});emit({type:'user',uuid:user,session_id:session,message:input.message});const finish=()=>{emit({type:'result',subtype:exhausted?'error_max_structured_output_retries':'success',is_error:exhausted,session_id:session,user_message_uuid:user,user_message_uuids:[user],...(exhausted?{}:{structured_output:output})});process.exitCode=exhausted?1:0;if(${controlled}){process.stdin.once('end',()=>fs.writeFileSync(${JSON.stringify(join(directory, 'stdin-ended'))},'true'));setInterval(()=>{},1000);process.on('SIGTERM',()=>{if(!${lateCancel})process.exit(143);fs.writeFileSync(${JSON.stringify(join(directory, 'term-received'))},'true');setInterval(()=>{if(fs.existsSync(${JSON.stringify(join(directory, 'allow-exit'))}))process.exit(143)},10)})}};
+  if(${periodic}){
+    const waiting=setInterval(()=>{
+      if(fs.existsSync(${JSON.stringify(release)})){
+        clearInterval(waiting);
+        finish();
+      }
+    },10);
+  }else finish();
+});
 `)
     chmodSync(cli, 0o755)
     process.env.PATH = `${bin}:${before.PATH}`; process.env.HOME = join(directory, 'home'); if (configMode === 'unset') delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = configMode === 'empty' ? '' : config; process.env.CLAUDE_CODE_USE_BEDROCK = '1'; process.env.ANTHROPIC_MODEL = 'native-user-default'; process.env.ANTHROPIC_BASE_URL = 'https://public-provider.invalid/arbitrary-route'; process.env.PUBLIC_CLAUDE_FIXTURE_LOG = log
     for (const key of identityKeys) process.env[key] = `PUBLIC_PARENT_${key}`
     const schema = { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false }
-    let execution: StructuredExecution = { ...structuredExecutionPolicy({ schema, inputDigest: 'fixture', purpose: 'native-config-fixture', timeoutMs: controlled ? null : 10000, model: `claude:${selected}`, worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'read' } }), nativeConfiguration: 'cli-config-v1' }
+    let execution: StructuredExecution = { ...structuredExecutionPolicy({ schema, inputDigest: 'fixture', purpose: 'native-config-fixture', timeoutMs: controlled || periodic ? null : 10000, model: `claude:${selected}`, worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'read' } }), nativeConfiguration: 'cli-config-v1' }
     const callbacks = { signal: controller.signal, onThread: async (threadId: string) => { execution = { ...execution, threadId } }, onTurn: async (turnId: string) => { execution = { ...execution, turnId } }, onNative: async (claudeNative: NonNullable<StructuredExecution['claudeNative']>) => { fixtureNative = claudeNative; execution = { ...execution, claudeNative } } }
+    let rejectedProbes = 0, finalProbes = 0, heldForResult = false
+    const samplingError = new Error('fixture periodic observer exception')
+    const observations: { status: string; elapsedMs: number }[] = []
+    if (periodic) {
+      const spawnOriginal = spawn
+      t.mock.method(childProcess, 'spawn', (file: string, args: readonly string[], options: SpawnOptions) => {
+        if (file === '/bin/ps' && args[1] === 'uid=,pid=,ppid=,lstart=' && execution.turnId) {
+          const resultPath = join(root, 'result.json')
+          const expired = observations.some(({ status }) => status === 'expired')
+          if (existsSync(resultPath)) finalProbes++
+          if (outcome === 'periodic-result-first' && !heldForResult) {
+            heldForResult = true
+            writeFileSync(release, 'true')
+            return spawnOriginal(process.execPath, ['-e', `
+const { existsSync } = require('node:fs')
+const { execFileSync } = require('node:child_process')
+const waiting = setInterval(() => {
+  if (!existsSync(process.argv[1])) return
+  clearInterval(waiting)
+  process.stdout.write(execFileSync('/bin/ps', process.argv.slice(2)))
+}, 5)
+`, resultPath, ...args], options)
+          }
+          if (!rejectedProbes || outcome === 'periodic-expired' && !expired || outcome === 'periodic-final-pending' || outcome === 'periodic-error-stop-unknown') {
+            rejectedProbes++
+            if (outcome === 'periodic-error-stop-unknown' && rejectedProbes > 1) throw new Error('fixture later stop observation exception')
+            if (outcome === 'periodic-error' || outcome === 'periodic-error-stop-unknown' || outcome === 'periodic-result-first') throw samplingError
+            return spawnOriginal(process.execPath, ['-e', 'process.exit(7)'], options)
+          }
+        }
+        return spawnOriginal(file, args, options)
+      })
+      syncBuiltinESMExports()
+      const warn = console.warn
+      t.mock.method(console, 'warn', (label: string, data: string) => {
+        if (label !== 'spex claude periodic observation') { warn(label, data); return }
+        const observation = JSON.parse(data) as { status: string; elapsedMs: number }
+        assert.deepEqual(Object.keys(observation).sort(), ['elapsedMs', 'status'])
+        observations.push(observation)
+        if (observation.status === 'pending' && outcome === 'periodic-cancelled') controller.abort()
+        if (observation.status === 'recovered' || observation.status === 'pending' && outcome === 'periodic-final-pending') writeFileSync(release, 'true')
+      })
+    }
     const pending = claudeStructuredTurn(realm, 'native', 'public native config task', execution, callbacks, workspace)
+    if (periodic && outcome !== 'periodic-recovered' && outcome !== 'periodic-result-first') {
+      if (outcome === 'periodic-expired') {
+        await assert.rejects(pending, { code: 'failed', message: 'native worktree process observation remains unproven' })
+        assert(rejectedProbes > 1)
+        assert.deepEqual(observations.map(({ status }) => status), ['pending', 'expired'])
+        assert(observations[1].elapsedMs >= 10_000 && observations[1].elapsedMs < 12_000)
+      } else if (outcome === 'periodic-cancelled') {
+        await assert.rejects(pending, { code: 'cancelled' })
+        assert.deepEqual(observations.map(({ status }) => status), ['pending'])
+        assert(existsSync(join(directory, 'fixture-interrupted')))
+      } else if (outcome === 'periodic-final-pending') {
+        await assert.rejects(pending, { code: 'cancellation_pending' })
+        assert.deepEqual(observations.map(({ status }) => status), ['pending'])
+        assert(existsSync(join(root, 'result.json')))
+        assert(finalProbes > 0, 'the final stop must take a fresh observation')
+      } else if (outcome === 'periodic-error-stop-unknown') {
+        await assert.rejects(pending, { code: 'cancellation_pending', message: samplingError.message })
+        assert(rejectedProbes > 1)
+        assert.deepEqual(observations, [])
+      } else {
+        await assert.rejects(pending, { code: 'failed', message: samplingError.message, cause: samplingError })
+        assert.deepEqual(observations, [])
+      }
+      assert.equal(existsSync(join(root, 'interrupt-request.json')), outcome === 'periodic-cancelled')
+      assert(!existsSync(join(root, 'completed.json')))
+      if (outcome === 'periodic-expired' || outcome === 'periodic-error') {
+        const { code, signal, stopped } = JSON.parse(readFileSync(join(root, 'exit.json'), 'utf8')) as { code: number | null; signal: string; stopped: boolean }
+        assert.deepEqual({ code, signal, stopped }, { code: null, signal: 'SIGTERM', stopped: true })
+      }
+      console.log(JSON.stringify({ scenario: outcome, observations, rejectedProbes, finalProbes }))
+      return
+    }
     if (lateCancel) {
       const outcome = pending.then(value => ({ value }), error => ({ error: error as { code: string } }))
       const term = join(directory, 'term-received'), ready = Date.now() + 15000
@@ -1102,6 +1197,14 @@ const emit=x=>console.log(JSON.stringify(x));readline.createInterface({input:pro
       return
     }
     const result = await pending
+    if (periodic) {
+      assert.equal(rejectedProbes, 1)
+      assert(finalProbes > 0)
+      assert.deepEqual(observations.map(({ status }) => status), outcome === 'periodic-result-first' ? [] : ['pending', 'recovered'])
+      assert(!existsSync(join(directory, 'fixture-interrupted')))
+      assert(!existsSync(join(root, 'interrupt-request.json')))
+      console.log(JSON.stringify({ scenario: outcome, observations, rejectedProbes, finalProbes }))
+    }
     if (controlled) {
       const { code, signal, stopped } = JSON.parse(readFileSync(join(root, 'exit.json'), 'utf8')) as { code: number; signal: string | null; stopped: boolean }
       assert.deepEqual({ code, signal, stopped }, { code: 143, signal: null, stopped: true })
@@ -1141,7 +1244,9 @@ const emit=x=>console.log(JSON.stringify(x));readline.createInterface({input:pro
     writeFileSync(join(root, 'plan.json'), JSON.stringify({ ...JSON.parse(planBytes.toString('utf8')), historyDigest: createHash('sha256').update(JSON.stringify(changedHistory.history)).digest('hex') }))
     await assert.rejects(claudeStructuredTurn(realm, 'native', 'public native config task', execution, noDispatch, workspace), { code: 'stale_result' })
   } finally {
-    if (controlled && fixtureNative?.pid && fixtureNative.receiptFile && verifyDetachedRuntime(fixtureNative.pid, fixtureNative.receiptFile).ok) {
+    if (watchdog) clearTimeout(watchdog)
+    if (periodic) { t.mock.restoreAll(); syncBuiltinESMExports() }
+    if ((controlled || periodic) && fixtureNative?.pid && fixtureNative.receiptFile && verifyDetachedRuntime(fixtureNative.pid, fixtureNative.receiptFile).ok) {
       try { process.kill(-fixtureNative.pid, 'SIGKILL') } catch (error) { assert.equal((error as NodeJS.ErrnoException).code, 'ESRCH') }
     }
     for (const key of environmentKeys) if (before[key] === undefined) delete process.env[key]; else process.env[key] = before[key]
