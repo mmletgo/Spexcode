@@ -339,11 +339,12 @@ export function assertZCodeStoppedDraftSource(prompt: string, execution: ZCodeSt
 }
 
 /** 同一原生 session/input/query/turn 和实际模型选择证明正常工具执行的终态。 */
-async function settleWorktreeResult(plan: NativePlan, prompt: string, execution: ZCodeStructuredExecution, deadline?: number): Promise<WorktreeNativeResult> {
+async function settleWorktreeResult(plan: NativePlan, prompt: string, execution: ZCodeStructuredExecution, freshStopDeadline?: number): Promise<WorktreeNativeResult> {
   verifyPlan(plan, plan.root, prompt, execution)
   const model = plan.model
   if (!model) throw new StructuredSessionError('stale_result', 'ZCode worktree plan has no actual model selection')
-  if (execution.state !== 'completed' && !(await ownedProcessesStopped(plan, false, deadline))) throw new StructuredSessionError('cancellation_pending', 'ZCode worktree native or unknown orphan stop remains unproven')
+  // 本次调用写 exit 前已做最终停止观察。未结算的冷重放不能借用这次观察。
+  if (freshStopDeadline === undefined && execution.state !== 'completed' && !(await ownedProcessesStopped(plan))) throw new StructuredSessionError('cancellation_pending', 'ZCode worktree native or unknown orphan stop remains unproven')
   const read = (name: string): unknown => JSON.parse(readFileSync(join(plan.root, name), 'utf8'))
   const terminal = read('terminal.json') as NativeEvent, events = read('events.json') as NativeEvent[], messages = read('messages.json') as Array<{ info?: Record<string, unknown>; parts?: Array<Record<string, unknown>> }>
   const exit = read('exit.json') as StopEvidence, send = read('send.json')
@@ -374,7 +375,7 @@ async function settleWorktreeResult(plan: NativePlan, prompt: string, execution:
   const completed = { plan, terminal, events, messages, exit, send, result }
   const path = join(plan.root, 'completed.json')
   if (execution.state === 'completed' && (!existsSync(path) || execution.threadId !== result.threadId || execution.turnId !== result.turnId || execution.resultDigest !== digest(output))) throw new StructuredSessionError('stale_result', 'ZCode worktree durable completed identity differs')
-  if (deadline !== undefined && Date.now() >= deadline) throw new StructuredSessionError('cancellation_pending', 'ZCode completion exceeded the original stop deadline')
+  if (freshStopDeadline !== undefined && Date.now() >= freshStopDeadline) throw new StructuredSessionError('cancellation_pending', 'ZCode completion exceeded the original stop deadline')
   writeJson(path, completed, true)
   return result
 }
@@ -717,5 +718,5 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
   }
   if (abortRequested) throw new StructuredSessionError(nativeStopped ? timedOut ? 'timeout' : 'cancelled' : 'cancellation_pending', 'ZCode cancellation revoked result publication')
   if (resultError) throw resultError
-  return worktree ? settleWorktreeResult(plan, prompt, { ...execution, zcodeNative: native() }, stopAt) : settleResult(plan, prompt, execution)
+  return worktree ? settleWorktreeResult(plan, prompt, { ...execution, zcodeNative: native() }, nativeStopped ? stopAt : undefined) : settleResult(plan, prompt, execution)
 }
