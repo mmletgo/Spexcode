@@ -6965,6 +6965,59 @@ for (const partitioned of [false, true]) for (const legacyP0 of partitioned ? [f
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
 
+test('P0正式retry只重新派发未独审通过的分区，保留原模型和Git独审证明', async t => {
+  const importPath = '.spec/project/import-contract/spec.md', importSpec = original.replaceAll('export-job', 'import-job').replaceAll('EXPORT', 'IMPORT').replaceAll('export-contract', 'import-contract').replaceAll('src/export.js', 'src/import.js').replaceAll('tests/export.test.mjs', 'tests/import.test.mjs')
+  const f = await fixture(t, { maxAttempts: 2, maxCalls: 24, maxRepairs: 1, timeoutMs: 120_000 }, false, original, 'project', original, {
+    version: 'sync-coordinator-v2', direction: 'code_to_spec', agentWorkflow: 'native-worktree-v1', sourcePaths: ['src'], writePaths: ['.spec'],
+    targets: [{ nodeId: 'export-contract', path: contractPath }, { nodeId: 'import-contract', path: importPath }],
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 32768, maxParallel: 1 }, commitTrigger: { before: null, paths: ['src/export.js', 'src/import.js'] },
+  }, undefined, 'code', 'claude:MiniMax-M3.1-Flash', true, { [importPath]: importSpec, 'src/import.js': 'export class ImportService {}\n', 'tests/import.test.mjs': 'import assert from "node:assert/strict"\n' })
+  let store = f.store, active = f.operation, approved = ''
+  const calls: { operation: string; partition: string; purpose: string; model?: string }[] = []
+  f.options.runner = async request => {
+    if (!request.purpose.startsWith('code_behavior_')) throw Object.assign(new Error('完整P0已组装'), { code: 'unsupported' })
+    const attempt = store.readAttempt(store.readOperation(active.id).currentAttemptId!)
+    const task = nativeTask(request, f.input.source.commonDir) as { requiredChangedPaths: string[]; partition: { id: string } }
+    const partition = task.partition.id
+    calls.push({ operation: active.id, partition, purpose: request.purpose, model: request.model })
+    if (active.id === f.operation.id && approved && approved !== partition) throw Object.assign(new Error('另一分区真实停止，首区已独审'), { code: 'failed' })
+    const reviewed = request.purpose === 'code_behavior_review' ? readCodeBehaviorContext(request, f.input.source.commonDir).pendingAnalysis! : null
+    const domain = task.requiredChangedPaths.some(path => path.includes('import')) ? 'IMPORT' : 'EXPORT'
+    const output = reviewed ? { inputDigest: request.inputDigest, analysisDigest: reviewed.analysisDigest, verdict: 'accept', checkedPaths: task.requiredChangedPaths, checkedChangeIds: reviewed.analysis.changes.map(change => change.id), findings: [] }
+      : { changes: task.requiredChangedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: [`RULE-${domain}-05`], ruleIds: [`RULE-${domain}-05`], originalIntent: '保留原业务', previousBehavior: '原业务', sourceBehavior: '原业务', deliveryBehavior: '原业务', evidence: path, counterexample: '保留权限' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    const worktree = committedDraftFixture(f, request, output, join(f.parent, `formal-p0-${calls.length}`))
+    if (reviewed && active.id === f.operation.id) approved = partition
+    const dispatch = attempt.dispatchPlans.find(dispatch => dispatch.key === request.requestKey)!, receipt = { summary: '分区原Git草稿' }
+    return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `formal-${request.requestKey}`, turnId: 'turn', output: receipt, resultDigest: contentHash(JSON.stringify(receipt)), worktree }
+  }
+  const first = await runSyncOperation(store, active.id, f.options)
+  assert.equal(first.operation.phase, 'failed')
+  assert.ok(approved)
+  const old = first.operation, [prior] = store.listAttempts(old.id), key = `partition:${approved}:analysis`
+  const commonDir = f.input.source.commonDir
+  const stages = (operation: typeof old, attempt: typeof prior) => readSyncCheckpoints(store, operation, attempt).json.map(item => item.value as { stage?: string; resultRef: import('./operation-types.js').BlobRef })
+  const accepted = stages(old, prior).find(stage => stage.stage === key)!
+  assert.ok(accepted)
+  assert.equal(stages(old, prior).some(stage => stage.stage === 'analysis'), false)
+  const bytes = JSON.stringify({ operation: store.readOperation(old.id), attempts: store.listAttempts(old.id) })
+  const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
+  store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) }); f.useStore(store)
+  active = store.admitAndEnqueue(await prepareSyncAdmission(f.input, f.plan, { ingressKey: 'partial-approved-p0-retry', rootCauseId: 'partial-approved-p0-retry', retryOf: old.id, model: 'claude:default', origin: old.origin, budget: old.budget, managedRoot: f.managedRoot, baselineSelection: store.readBusinessBaselineSelection(old.id), executionScope: old.scope }))
+  active = store.ackDispatch(f.input.source.repositoryId, active.dispatchMessageId); f.useOperation(active)
+  const outcome = await runSyncOperation(store, active.id, f.options)
+  const retried = calls.filter(call => call.operation === active.id)
+  assert.equal(retried.some(call => call.partition === approved), false, '已有真实独审的分区必须零重派')
+  assert.deepEqual(retried.map(call => call.purpose), ['code_behavior_analyze', 'code_behavior_review'])
+  assert.ok(retried.every(call => call.model === 'claude:default'))
+  assert.equal(outcome.failure?.message, '完整P0已组装')
+  const current = store.readAttempt(outcome.operation.currentAttemptId!), saved = stages(outcome.operation, current)
+  assert.deepEqual(saved.find(stage => stage.stage === key)?.resultRef, accepted.resultRef)
+  const provenance = saved.find(stage => stage.stage === `${key}:provenance`)!
+  assert.deepEqual(JSON.parse(readEvidence(commonDir, provenance.resultRef).toString()), { fromOperationId: old.id, fromAttemptId: prior.id, resultRef: accepted.resultRef })
+  assert.equal(saved.some(stage => stage.stage === `${key}:continuation`), false)
+  assert.equal(JSON.stringify({ operation: store.readOperation(old.id), attempts: store.listAttempts(old.id) }), bytes)
+})
+
 // A1格式拒绝、A2局部accept但兄弟再失败、A3只续失败兄弟；不能把跨attempt的原analyze trace丢掉。
 test('Native P0三attempt保留已审兄弟，analysis与review沿精确Git/Native provenance承接', async t => {
   const importPath = '.spec/project/import-contract/spec.md', importSpec = original.replaceAll('export-job', 'import-job').replaceAll('EXPORT', 'IMPORT').replaceAll('export-contract', 'import-contract').replaceAll('src/export.js', 'src/import.js').replaceAll('tests/export.test.mjs', 'tests/import.test.mjs')

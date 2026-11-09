@@ -36,6 +36,8 @@ P1精确后置门禁可对已审refactor分类提出非权威回审：只接同o
 
 分区本次分析路径由原 partition.changedPaths 联合完整不可变组合证据中、精确命中本区 source/factSourcePaths、writePaths 或 target 文件角色且可读取的真实冲突推导；shared readPaths 和宽目录授权不授予 owner，单独的可读角色、未来 writer 也不制造实际变化。proposal.changes.paths 必须逐项属于该本次冻结集合，resolution 仍须满足原精确写权限。独审前按同一集合拒绝越界内容，以 behavior_analysis_invalid 保留 partitionId、expectedChangedPaths、invalidPaths 和完整原 proposal，沿既有按区 repairDiagnostics 反馈。局部只要求自身组合冲突的整合或具体业务发现；原完整全局证据由 [[sync-partition-execution]] 在最终合并逐项闭合。guidanceContractVersion v7 同时约束生成与独审并进入唯一输入摘要，旧v6及更早/无版本accept不被新请求缓存承接；已有reserved请求、旧分析/计划/ref和全部旧CAS原字节不回填或改签，摘要不匹配沿现有固定请求门拒绝，正式新attempt才形成新请求。原输出schema、partition_binding及写权限门禁保持。
 
+一次 P0 轮次的分区共享经完整核验的不可变树、输入快照与组合证据。每区按实际 OID 批读本区正文，仍保完整仓库自由读取及原核验门。Native worktree 不构造仅旧 frozen-reader 消费的正文运输账本；相同 path/mode/OID 投影复用相同原始 tree/seed，逻辑输入、原生请求、独审和 Git 验证绑定保持。事实来源在派发后按实际引用的冻结 OID 重验 UTF-8 字节。下一轮独立读取和核验。
+
 Native worktree分区分析brief复用本区业务约束：每个facts.source只给一个完整text；newNodes只能来自本区unownedSourcePaths和本次schema候选，候选为空或maxItems为0时返回[]；Root/接口分区不能替兄弟源码分区提出叶。此提示不收窄Native worktree自由读取，也不要求frozen-reader或逐字消费证明。
 
 AC提案的每个变化依据若位于本区writePaths之外，且按 [[sync-contract-evolution]] 同一业务变化、REQ raw变化及精确作者差量判据在冻结旧/当前图中没有真实变化，则P1无权使其变化；独审前以behavior_analysis_invalid携带目标AC、该来源ID/owner/path及完整proposal，沿原分区修复诊断重新分析和独审，不继续以同一不可能授权反复细化。只读但已真实变化的来源、可写的未来依据（包括旧AC来源链外的新依据）仍由原P1和独审完整核验；不机械限制旧来源闭包，不扩写权、不静默过滤已审授权。未变covers义务继续保留，但不是AC变化授权；拒绝候选仅为诊断，不是用户意图。

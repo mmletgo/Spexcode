@@ -282,22 +282,22 @@ function composeSelectedInput(input: InputSnapshot, selection: FrozenBaselineSel
 }
 
 /** 重读 hash 校验后的证据，逐资源的真实对象仍由 selection 再计算并校验。 */
-export function readCompositionEvidence(input: InputSnapshot, composed: ComposedInputRef, selection: FrozenBaselineSelection): SelectedCompositionEvidence {
-  verifyBaselineSelection(input, selection)
+export function readCompositionEvidence(input: InputSnapshot, composed: ComposedInputRef, selection: FrozenBaselineSelection, treeCache?: TreeReadCache): SelectedCompositionEvidence {
+  verifyBaselineSelection(input, selection, treeCache)
   if (!composed.compositionEvidenceBlob || composed.sourceInputId !== input.id || composed.baselineSelectionDigest !== selection.digest) throw new Error('SYNC_COMPOSITION_BINDING: selection or evidence missing')
   const evidence = JSON.parse(readEvidence(input.source.commonDir, composed.compositionEvidenceBlob).toString('utf8')) as SelectedCompositionEvidence
   if (evidence.version !== 'selected-composition-v1' || evidence.sourceInputId !== input.id || evidence.baselineSelectionDigest !== selection.digest) throw new Error('SYNC_COMPOSITION_BINDING: evidence identity')
-  const commonDir = input.source.commonDir, entries = readTree(commonDir, composed.tree)
+  const commonDir = input.source.commonDir, entries = readTree(commonDir, composed.tree, undefined, treeCache)
   if (contentHash(JSON.stringify(entries)) !== composed.contentDigest || !readEvidence(commonDir, composed.manifestBlob).equals(Buffer.from(JSON.stringify({ version: 1, entries })))) throw new Error('SYNC_COMPOSITION_BINDING: tree or manifest')
   const entriesCache = new Map<string, TreeEntry[]>()
-  const actualEntries = (snapshot: InputSnapshot): TreeEntry[] => { let value = entriesCache.get(snapshot.id); if (!value) { value = verifySnapshot(snapshot); entriesCache.set(snapshot.id, value) }; return value }
+  const actualEntries = (snapshot: InputSnapshot): TreeEntry[] => { let value = entriesCache.get(snapshot.id); if (!value) { value = verifySnapshot(snapshot, treeCache); entriesCache.set(snapshot.id, value) }; return value }
   for (const paths of [evidence.executionPaths, evidence.contextPaths]) {
     if (!Array.isArray(paths) || canonical([...new Set(paths)].sort()) !== canonical(paths)) throw new Error('SYNC_COMPOSITION_BINDING: execution/context paths missing or duplicated')
     paths.forEach(validateRepositoryPath)
   }
   if (evidence.executionPaths.some(path => !selection.bindings.some(binding => binding.resource.kind === 'path' && binding.resource.path === path)) || evidence.contextPaths.some(path => evidence.executionPaths.includes(path))) throw new Error('SYNC_COMPOSITION_BINDING: execution/context scope differs')
   const physical = new Map(actualEntries(input).map(entry => [entry.path, entry])), composedFiles = new Map(entries.map(entry => [entry.path, entry]))
-  const head = new Map(readTree(commonDir, objectGit(commonDir, ['rev-parse', `${input.headCommit}^{tree}`]).toString().trim()).map(entry => [entry.path, entry]))
+  const head = new Map(readTree(commonDir, objectGit(commonDir, ['rev-parse', `${input.headCommit}^{tree}`]).toString().trim(), undefined, treeCache).map(entry => [entry.path, entry]))
   for (const path of new Set([...physical.keys(), ...composedFiles.keys(), ...head.keys(), ...evidence.contextPaths])) {
     if (evidence.executionPaths.includes(path)) continue
     const expected = evidence.contextPaths.includes(path) ? physical.get(path) : head.get(path)
