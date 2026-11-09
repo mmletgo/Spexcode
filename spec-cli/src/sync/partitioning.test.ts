@@ -14,7 +14,7 @@ function contract(nodeId: string, path: string, code: string[], items: Contract[
   return { schema: 'sync-v1', nodeId, path, rawSource: `${nodeId} intent`, expandedSpec: `${nodeId} contract`, code, related: [], items }
 }
 
-function requirement(id: string, nodeId: string, path: string, dependsOn: string[] = []): Contract['items'][number] {
+function requirement(id: string, nodeId: string, path: string, dependsOn: string[] = []): Extract<Contract['items'][number], { kind: 'REQ' }> {
   return { kind: 'REQ', id, nodeId, path, line: 1, source: { kind: 'user', ref: 'raw' }, dependsOn, goal: id, constraints: '', success: id }
 }
 
@@ -263,6 +263,77 @@ test('unowned same-directory paths split into byte-bounded discovery groups', ()
   assert.ok(result.partitions.every(partition => partition.targets.length === 0 && partition.readBytes <= partition.readLimitBytes))
   assert.deepEqual(result.partitions.flatMap(partition => partition.changedPaths).sort(), ['src/new/one.ts', 'src/new/three.ts', 'src/new/two.ts'])
   assert.ok(result.partitions.every(partition => partition.contextNodeIds.includes('root')))
+})
+
+test('v2 initial discovery packs read-only sibling modules without splitting original groups or dropping checks', () => {
+  const root = rawSpec('root', []), config = '.spec/spexcode.json', oracle = 'tests/oracle.test.ts'
+  const alpha = 'src/alpha/main.ts', peer = 'src/alpha/peer.ts', beta = 'src/beta/main.ts'
+  const oversized = 'src/large/main.ts', writer = 'src/write/main.ts'
+  const scriptA = 'scripts/a.ts', scriptB = 'scripts/b.ts', other = 'packages/other.ts'
+  const files = new Map([
+    [rootPath, root], [config, '{}'], [oracle, 'oracle'],
+    [alpha, 'alpha'], [peer, 'peer'], [beta, 'beta'], [oversized, '雪'.repeat(16)], [writer, 'writer'],
+    [scriptA, 'a'], [scriptB, 'b'], [other, 'other'],
+  ])
+  const maxReadBytes = Buffer.byteLength(root, 'utf8') + 32
+  const frozen: SyncCoordinatorPlan = {
+    ...plan(), version: 'sync-coordinator-v2', direction: 'code_to_spec',
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes, maxParallel: 1 },
+    targets: [{ nodeId: 'root', path: rootPath }],
+    readPaths: ['.spec', 'src', 'scripts', 'packages', 'tests'],
+    writePaths: [rootPath, 'src', 'scripts', 'packages'], sourcePaths: ['src', scriptA, scriptB, other],
+    executionScope: { paths: [rootPath, writer], contractIds: [], flowIds: [] },
+    mandatoryTests: [{ verificationId: 'VERIFY-ORACLE', testPath: oracle, testId: 'ORACLE-1' }],
+  }
+  const input = { plan: frozen, files, contracts: [], changedPaths: [rootPath, alpha, peer, beta, oversized, writer, scriptA, scriptB, other], maxReadBytes }
+  const legacy = planSyncPartitions(input)
+  const nextPlan: SyncCoordinatorPlan = { ...frozen, partitionPolicy: { ...frozen.partitionPolicy, version: 'sync-partition-policy-v2' } }
+  const result = planSyncPartitions({ ...input, plan: nextPlan })
+  const reordered = planSyncPartitions({ ...input, plan: nextPlan, files: new Map([...files].reverse()), changedPaths: [...input.changedPaths].reverse() })
+  const containing = (result: ReturnType<typeof planSyncPartitions>, path: string) => result.partitions.find(partition => partition.changedPaths.includes(path))!
+
+  assert.equal(legacy.partitions.length, 8)
+  assert.equal(result.partitions.length, 6)
+  assert.deepEqual(result, reordered)
+  assert.deepEqual(result.partitions.flatMap(partition => partition.changedPaths).sort(), [...input.changedPaths].sort())
+  assert.deepEqual(result.expectedPaths, legacy.expectedPaths)
+  assert.deepEqual(result.dependencies, legacy.dependencies)
+  assert.deepEqual(containing(result, alpha).changedPaths, [alpha, peer, beta])
+  assert.deepEqual(containing(result, scriptA).changedPaths, [scriptA, scriptB])
+  for (const path of [rootPath, oversized, writer, other]) assert.deepEqual(containing(result, path), containing(legacy, path))
+  for (const path of [alpha, scriptA]) {
+    const local = containing(result, path)
+    assert.deepEqual(local.targets, [])
+    assert.deepEqual(local.writePaths, [])
+    assert.deepEqual(local.readPaths, [rootPath, config, ...local.changedPaths, oracle].sort())
+    assert.deepEqual(projectSyncPartition(nextPlan, local).mandatoryTests, frozen.mandatoryTests)
+    assert.ok(local.readBytes <= maxReadBytes)
+  }
+  const workset = (result: ReturnType<typeof planSyncPartitions>) => result.partitions.reduce((sum, partition) => sum + partition.readBytes, 0)
+  assert.equal(workset(legacy) - workset(result), 2 * Buffer.byteLength(`${root}{}oracle`, 'utf8'))
+})
+
+test('v2 keeps real non-target owners and nearest governance neighborhoods in their original partitions', () => {
+  const input = fixture()
+  const historicalPath = 'historical/old.ts', peer = 'historical/neighbor.ts', nextPeer = 'historical/another.ts'
+  const inactive = contract('previous', '.spec/project/previous/spec.md', [], [
+    { ...requirement('REQ-PREVIOUS', 'previous', '.spec/project/previous/spec.md'), source: { kind: 'code', ref: historicalPath } },
+  ])
+  input.files.set(historicalPath, 'formerly governed')
+  input.files.set(peer, 'ownerless one')
+  input.files.set(nextPeer, 'ownerless two')
+  const frozen: SyncCoordinatorPlan = {
+    ...input.plan, version: 'sync-coordinator-v2', direction: 'code_to_spec',
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 },
+    sourcePaths: ['src', historicalPath, peer, nextPeer],
+    readPaths: [...input.plan.readPaths, historicalPath, peer, nextPeer],
+  }
+  const original = { ...input, plan: frozen, contracts: [...input.contracts, inactive], changedPaths: [...input.changedPaths, historicalPath, peer, nextPeer] }
+  const legacy = planSyncPartitions(original)
+  const current = planSyncPartitions({ ...original, plan: { ...frozen, partitionPolicy: { ...frozen.partitionPolicy, version: 'sync-partition-policy-v2' } } })
+  const retained = legacy.partitions.filter(partition => !partition.changedPaths.includes(peer) && !partition.changedPaths.includes(nextPeer))
+  assert.deepEqual(current.partitions.filter(partition => !partition.changedPaths.includes(peer)), retained)
+  assert.deepEqual(current.partitions.find(partition => partition.changedPaths.includes(peer))?.changedPaths, [nextPeer, peer])
 })
 
 test('an indivisible shared target remains combined when its total context exceeds budget', () => {
