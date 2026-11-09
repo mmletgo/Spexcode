@@ -43,9 +43,11 @@ P1追加A正常Git拒稿→B新物理EPIPE无witness→C原bytes续改并独审�
 
 ZCode停止材料回归复用真实Git/私有SQLite及正式adapter.stop/资源恢复：旧cancelling→cancelled与新failed+exactstop均在新fence续较新正常提交的原bytes，existing较旧认证draft不能遮蔽它，原业务诊断、已accept兄弟和预算保持。v3 explicit/default另以真实receipt核无messages的只读投影；session/turn/input/query/messageId/model/workspace/stop/seed/source/tests/schema/owner/request/fence错配不授材料，cancelled终态仅无进度skip，有新稿拒绝。P0和P1分别覆盖exit.json单独ENOENT：暂停首次资源、正式recover后移除exit再resume，候选须在物理/Git读取前跳过；精确对照原attempt/plan/checkpoint refs确认它没有形成新provenance，P1没有候选或验证。present-but-invalid exit、坏JSON及缺plan/send仍拒绝；已认证历史材料、错误与兄弟结果保持。旧record/Native文件、原attempt/checkpoint/resource逐字不变，不追加冷停止观察，不冒称真实模型、远端EPIPE修复或交付。
 
-P0 历史 ZCode 结果未发布的回归使用真实 Git、私有 SQLite 和正式停止与归档。原 Native 已成功封存、正式观察到失败、最终结算为 cancelled 时，下一 attempt 跳过该来源并用无旧稿的 seed 派发。封存被改、exit 缺失或未曾正式观察失败时不得派发。原归档引用、Native 字节、原 attempt 和资源保持。尚未结算的 RPC 资源应返回 recovery_required，等待结算并保持后续派发为零。
+P0 历史 ZCode 结果未发布的回归使用真实 Git、私有 SQLite 和正式停止与归档。原 Native 已成功封存、正式观察到失败、最终结算为 cancelled 时，下一 attempt 跳过该来源并用无旧稿的 seed 派发。封存被改、exit 缺失或未曾正式观察失败时不得派发。原归档引用、Native 字节、原 attempt 和资源保持。尚未结算的 RPC 资源应返回 recovery_required，等待结算并保持后续派发为零。新 P0 的停止材料引用保原状态码与来源引用。损坏的旧终态 JSON 仍明确拒绝，正式失败摘要不携解析原文。
 
-P0 context运输回归在真实Git/私有SQLite核首次冻结git-json-v1、已有checkpoint缺席字段继续legacy，以及reserved原plan与checkpoint原bytes不改。字段存在但null、空串或未知版本在派发前明确unsupported，零runner/零dispatch。旧Native原final迁入下一精确draft，context/schema按各自角色只读；legacy→file、file→file的正式retryOf、后置分类回审、续审及完整业务finding沿同一原件认证，P1任务消费者保持原协议。模型、权限、source/tests/index、业务摘要与独审门保持；受控Native接缝不冒称真实模型或EPIPE修复。
+新 P0 冷恢复回归校验失败诊断正文缺席于 Git context、Native 请求、continuation 与失败证据。业务返修通过真实原审查的 Git 引用读取拒因，经过中断与承接副本仍须指向原派发。原 JSON、已校验分析与兄弟批准来源保持。
+
+P0 context运输回归在真实Git/私有SQLite核首次冻结git-json-v2、已冻结git-json-v1保持原样、已有checkpoint缺席字段继续legacy，以及reserved原plan与checkpoint原bytes不改。字段存在但null、空串或未知版本在派发前明确unsupported，零runner/零dispatch。旧Native原final迁入下一精确draft，context/schema按各自角色只读；legacy→file、file→file的正式retryOf、后置分类回审、续审及完整业务finding沿同一原件认证，P1任务消费者保持原协议。模型、权限、source/tests/index、业务摘要与独审门保持；受控Native接缝不冒称真实模型或EPIPE修复。
 
 P1范围冲突回归用真实Git/SQLite证明：冻结owner旧文案repair仅重审同candidate，多个attempt保留原generation真实dispatch/summary/Git身份；原Native请求或candidate摘要损坏时零后续派发。认证且removed/stopped的失败小回执与failedWorktree仍能精确续改原Git稿，不要求成功generation trace或继承accept。同attempt已有父接口accept且本owner为空cancelled时，正式pause/resume仍回到此前同owner局部诊断，不误取aggregate末轮。受控runner不冒称真实模型、Docker或Tiny闭环完成。
 
@@ -154,7 +156,7 @@ P3 code来源的真实Git/SQLite回归核独立analysis/review先于细化与生
 
 公开计划无精确资源选择的生命周期回归保留目录准入范围，真实新增治理叶、移动和退役仍经既有独审与Docker，精确P4范围门禁不被放宽。
 
-真实 Git/SQLite 加明确 native 接缝复现显式 retryOf 丢失旧行为失败诊断：连续两代同绑定重试的分析及独审收到全部原 code/message，完整旧 proposal/review 仍为未批准数据，不派 P1 或产生 receipt。不同 input/policy/readset 的准入继续拒绝，协调器读取旧链时再核读集合；祖先读集合较旧时，新分析/独审继续但不接收该祖先诊断，当前操作的新失败仍完整传给下一次分析和独审。P4 边界通过真实 claim/bind/startElaboration/expandContractScope、同冻结计划重算读集合和 bindComposedInput 重绑，再持久保存 scope_context_expanded；祖先 SQLite 原摘要不动，不模拟 readOperation，下一次协调仍分析和独审。既有 P4 合法作用域扩展回归保持。每个操作仍保正式准入预算、deadline、调用上限和 attempt 数，未修改预算策略；不是实际模型或 Docker 业务通过证明。
+旧已冻结运输的真实 Git/SQLite 与明确 native 接缝回归复现显式 retryOf 丢失旧行为失败诊断：连续两代同绑定重试的分析及独审收到全部原 code/message，完整旧 proposal/review 仍为未批准数据，不派 P1 或产生 receipt。不同 input/policy/readset 的准入继续拒绝，协调器读取旧链时再核读集合；祖先读集合较旧时，新分析/独审继续但不接收该祖先诊断，当前操作的新失败仍完整传给下一次分析和独审。P4 边界通过真实 claim/bind/startElaboration/expandContractScope、同冻结计划重算读集合和 bindComposedInput 重绑，再持久保存 scope_context_expanded；祖先 SQLite 原摘要不动，不模拟 readOperation，下一次协调仍分析和独审。既有 P4 合法作用域扩展回归保持。每个操作仍保正式准入预算、deadline、调用上限和 attempt 数，未修改预算策略；不是实际模型或 Docker 业务通过证明。
 
 固定模型覆盖行为/P1/P2六种实际请求、独立会话创建键与调用计费；SQLite旧版重启后的accepted P1在换模型显式retry仍继承且不再细化原AC。遵循 [[sync-model-selection]]。
 

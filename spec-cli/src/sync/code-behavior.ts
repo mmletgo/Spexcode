@@ -26,6 +26,8 @@ const change = object({ kind: { type: 'string', enum: ['refactor', 'allowed_chan
 export const CODE_BEHAVIOR_SCHEMA = object({ changes: { type: 'array', items: change }, facts: { type: 'array', items: object({ source: string, text: string }) }, acceptanceChanges: { type: 'array', items: object({ id: string, ruleIds: { ...strings, minItems: 1 }, source: string, reason: string }) }, newNodes: { type: 'array', items: object({ codePath: string, parentNodeId: string, basis: string }) }, resolutions: { type: 'array', items: object({ path: string, content: { type: ['string', 'null'] }, mode: { type: ['string', 'null'], enum: ['100644', '100755', '120000', null] } }) } })
 export const CODE_BEHAVIOR_REVIEW_SCHEMA = object({ inputDigest: string, analysisDigest: string, verdict: { type: 'string', enum: ['accept', 'repair'] }, checkedPaths: strings, checkedChangeIds: strings, findings: { type: 'array', description: '仅列需要修正的问题；verdict=accept时必须为空数组，不写通过说明或肯定评价。', items: object({ message: string, evidence: string, counterexample: string }) } })
 export const CODE_BEHAVIOR_GUIDANCE_VERSION = 'code-behavior-guidance-v7'
+export const CODE_BEHAVIOR_FAILURE_STATUS = 'P0 行为校验未通过'
+export type CodeBehaviorContextTransport = 'git-json-v1' | 'git-json-v2'
 
 /** 后置门禁只质疑原分类；原件、真实行和代码差量不授予新业务权限。 */
 export type CodeBehaviorPostGateReview = {
@@ -33,7 +35,7 @@ export type CodeBehaviorPostGateReview = {
   findings: { finding: ContractFinding; before: ContractItem; after: ContractItem; changedPaths: string[] }[]
   codeDiff: string
 }
-export type CodeBehaviorInput = { contextTransport?: 'git-json-v1'; postGateReview?: readonly CodeBehaviorPostGateReview[]; draftProtocol?: 'code-behavior-draft-v1'; partition?: { id: string; changedPaths: readonly string[]; factSourcePaths: readonly string[]; authorizedParentSpecPaths?: readonly string[] }; model?: string; snapshot: InputSnapshot; baseline: BaselinePair | null; baselineSelection?: FrozenBaselineSelection; composed: ComposedInputRef; readSetDigest: string; policyDigest: string; plan: SyncCoordinatorPlan; requestKey: string; timeoutMs: number | null; signal?: AbortSignal; origin?: 'initial' | 'spec' | 'code' | 'combined' | 'reconcile' | 'decision'; decision?: { request: SyncDecisionInput; previous: CodeBehaviorEvidence; previousComposed?: ComposedInputRef; previousReadPaths?: readonly string[] }; repairDiagnostics?: readonly { code: string; message: string }[] }
+export type CodeBehaviorInput = { contextTransport?: CodeBehaviorContextTransport; postGateReview?: readonly CodeBehaviorPostGateReview[]; draftProtocol?: 'code-behavior-draft-v1'; partition?: { id: string; changedPaths: readonly string[]; factSourcePaths: readonly string[]; authorizedParentSpecPaths?: readonly string[] }; model?: string; snapshot: InputSnapshot; baseline: BaselinePair | null; baselineSelection?: FrozenBaselineSelection; composed: ComposedInputRef; readSetDigest: string; policyDigest: string; plan: SyncCoordinatorPlan; requestKey: string; timeoutMs: number | null; signal?: AbortSignal; origin?: 'initial' | 'spec' | 'code' | 'combined' | 'reconcile' | 'decision'; decision?: { request: SyncDecisionInput; previous: CodeBehaviorEvidence; previousComposed?: ComposedInputRef; previousReadPaths?: readonly string[] }; repairDiagnostics?: readonly { code: string; message: string }[] }
 type BehaviorPurpose = 'code_behavior_analyze' | 'code_behavior_review'
 type CompletedBehaviorDraft = { trace: ElaborationTrace; draftOid: string; resultCommit: string; requestRef: BlobRef; receipt: unknown }
 /** 未批准临时稿只记录真实Git身份；readyAnalysis仅省去独审协议失败后的重复分析，不批准独审。 */
@@ -44,7 +46,25 @@ export type CodeBehaviorContinuation = {
   readyAnalysis?: CompletedBehaviorDraft
   reviewResult?: CompletedBehaviorDraft
 }
-export type CodeBehaviorCheckpoints = { loadMaterial?(purpose: BehaviorPurpose, schemaDigest: string, inputDigest: string, request: Pick<ElaborationSessionRequest, 'prompt' | 'worktree'>, existingDraft?: ElaborationDraft): ElaborationDraftMaterial | null | Promise<ElaborationDraftMaterial | null>; load(inputDigest: string): CodeBehaviorContinuation | null; save(value: CodeBehaviorContinuation): void }
+const behaviorStatusErrors = (errors: readonly { code: string }[]) => errors.map(({ code }) => ({ code, message: CODE_BEHAVIOR_FAILURE_STATUS }))
+
+export function codeBehaviorDraftStatus(draft: ElaborationDraft): ElaborationDraft {
+  return { ...draft, errors: behaviorStatusErrors(draft.errors) }
+}
+
+export function codeBehaviorContinuationStatus(continuation: CodeBehaviorContinuation): CodeBehaviorContinuation {
+  const saved = structuredClone(continuation)
+  for (const purpose of ['code_behavior_analyze', 'code_behavior_review'] as const) {
+    const draft = saved.drafts[purpose]
+    if (draft) saved.drafts[purpose] = codeBehaviorDraftStatus(draft)
+    const errors = saved.errors
+    if (errors?.[purpose]) errors[purpose] = behaviorStatusErrors(errors[purpose])
+  }
+  return saved
+}
+
+export type CodeBehaviorReviewReference = { commit: string; path: string }
+export type CodeBehaviorCheckpoints = { loadReviewFeedback?(inputDigest: string): CodeBehaviorReviewReference | null; loadMaterial?(purpose: BehaviorPurpose, schemaDigest: string, inputDigest: string, request: Pick<ElaborationSessionRequest, 'prompt' | 'worktree'>, existingDraft?: ElaborationDraft): ElaborationDraftMaterial | null | Promise<ElaborationDraftMaterial | null>; load(inputDigest: string): CodeBehaviorContinuation | null; save(value: CodeBehaviorContinuation): void }
 type Proposal = { changes: Omit<CodeBehaviorChange, 'id'>[]; facts: CodeBehaviorAnalysis['facts']; acceptanceChanges: Omit<AcceptanceChangeProposal, 'action'>[]; newNodes: { codePath: string; parentNodeId: string; basis: string }[]; resolutions: CodeBehaviorAnalysis['resolutions'] }
 export type CodeBehaviorContext = {
   task: Record<string, unknown>
@@ -86,7 +106,7 @@ export function readCodeBehaviorContext(request: Pick<ElaborationSessionRequest,
     } catch (error) { if (!(error instanceof SyntaxError)) throw error; throw new Error(invalid) }
   }
   const seed = request.worktree, path = task.path, draftPath = /草稿文件=([^\s；]+)/.exec(request.prompt)?.[1]
-  if (task.contextTransport !== 'git-json-v1' || !seed || typeof path !== 'string' || !/^\.spex-sync-drafts\/[a-f0-9]{64}\.context\.json$/.test(path)
+  if ((task.contextTransport !== 'git-json-v1' && task.contextTransport !== 'git-json-v2') || !seed || typeof path !== 'string' || !/^\.spex-sync-drafts\/[a-f0-9]{64}\.context\.json$/.test(path)
     || path !== draftPath?.replace(/\.json$/, '.context.json')
     || task.inputDigest !== request.inputDigest || typeof task.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(task.sha256)
     || objectGit(commonDir, ['rev-parse', '--verify', `${seed.baseCommit}^{tree}`]).toString().trim() !== seed.tree) throw new Error('P0 context指针不匹配冻结请求/seed')
@@ -95,8 +115,10 @@ export function readCodeBehaviorContext(request: Pick<ElaborationSessionRequest,
   const bytes = readObject(commonDir, entry.oid)
   if (!isUtf8Text(bytes) || contentHash(bytes) !== task.sha256) throw new Error('P0 context只读Git文件摘要不匹配')
   const value = JSON.parse(bytes.toString('utf8')) as CodeBehaviorContext & { version: string; inputDigest: string; purpose: string }
-  if (value.version !== 'code-behavior-context-v1' || value.inputDigest !== request.inputDigest || value.purpose !== request.purpose
+  const statusOnly = task.contextTransport === 'git-json-v2'
+  if (value.version !== (statusOnly ? 'code-behavior-context-v2' : 'code-behavior-context-v1') || value.inputDigest !== request.inputDigest || value.purpose !== request.purpose
     || !value.task || typeof value.task !== 'object' || Array.isArray(value.task) || !Array.isArray(value.repairDiagnostics) || !Array.isArray(value.errors)
+    || statusOnly && (value.repairDiagnostics.length > 0 || value.errors.length > 0)
     || (request.purpose === 'code_behavior_review') !== (value.pendingAnalysis !== undefined)) throw new Error('P0 context正文不匹配冻结任务身份')
   return value
 }
@@ -244,12 +266,13 @@ export function selectedAuthoredContractChanges(evidence: ReturnType<typeof read
 
 export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: ElaborationRunner, accepted?: (inputDigest: string) => CodeBehaviorAnalysis | null, checkpoints?: CodeBehaviorCheckpoints): Promise<CodeBehaviorAnalysis> {
   const { signal, ...data } = supplied, input: CodeBehaviorInput = { ...structuredClone(data), signal }
+  const statusOnly = input.contextTransport === 'git-json-v2'
   let continuation: CodeBehaviorContinuation | undefined
-  const persist = (): void => { if (continuation) checkpoints?.save(structuredClone(continuation)) }
+  const persist = (): void => { if (continuation) checkpoints?.save(statusOnly ? codeBehaviorContinuationStatus(continuation) : structuredClone(continuation)) }
   const diagnostic: { proposal?: unknown; analysis?: CodeBehaviorAnalysis; review?: unknown } = {}
   function reject(message: string, details: Record<string, unknown> = {}, code = 'behavior_analysis_invalid', reviewOnly = false): never {
     const formatFailure = ['behavior_output_json', 'behavior_output_schema'].includes(code)
-    const failure = JSON.stringify({ approved: false, message, details, ...(formatFailure ? { drafts: continuation?.drafts } : diagnostic) })
+    const failure = statusOnly ? CODE_BEHAVIOR_FAILURE_STATUS : JSON.stringify({ approved: false, message, details, ...(formatFailure ? { drafts: continuation?.drafts } : diagnostic) })
     if (continuation && !formatFailure) {
       if (reviewOnly) {
         const errors = [{ code, message: failure }]
@@ -570,17 +593,19 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
       diagnostic.proposal = output; traces.push(trace)
       return output
     }
+    const reviewFeedback = statusOnly && purpose === 'code_behavior_analyze' ? checkpoints?.loadReviewFeedback?.(inputDigest) : undefined
     if (continuation && purpose === 'code_behavior_analyze') { delete continuation.drafts.code_behavior_review; delete continuation.reviewResult; delete continuation.readyAnalysis }
-    const repairErrors = material?.errors ?? prior?.errors ?? continuation?.errors?.[purpose] ?? []
-    const repairDiagnostics = material?.repairDiagnostics ? [...new Map([...material.repairDiagnostics, ...input.repairDiagnostics ?? []].map(item => [JSON.stringify(item), item])).values()] : input.repairDiagnostics ?? []
+    const repairErrors = statusOnly ? [] : material?.errors ?? prior?.errors ?? continuation?.errors?.[purpose] ?? []
+    const repairDiagnostics = statusOnly ? [] : material?.repairDiagnostics ? [...new Map([...material.repairDiagnostics, ...input.repairDiagnostics ?? []].map(item => [JSON.stringify(item), item])).values()] : input.repairDiagnostics ?? []
     const contextPath = binding.path.replace(/\.json$/, '.context.json')
-    const contextSource = input.contextTransport ? JSON.stringify({ version: 'code-behavior-context-v1', inputDigest, purpose, task: JSON.parse(context) as Record<string, unknown>, ...(pendingAnalysis ? { pendingAnalysis } : {}), repairDiagnostics, errors: repairErrors }) : undefined
+    const contextSource = input.contextTransport ? JSON.stringify({ version: statusOnly ? 'code-behavior-context-v2' : 'code-behavior-context-v1', inputDigest, purpose, task: JSON.parse(context) as Record<string, unknown>, ...(pendingAnalysis ? { pendingAnalysis } : {}), repairDiagnostics, errors: repairErrors }) : undefined
     const seed = draftMode ? stageWorktree(commonDir, input.snapshot.headCommit, overlayStageTree(commonDir, base!.tree, [{ path: binding.path.replace(/\.json$/, '.schema.json'), source: JSON.stringify(schema) }, ...(source === undefined ? [] : [{ path: binding.path, source }]), ...(contextSource === undefined ? [] : [{ path: contextPath, source: contextSource }])]), 'edit') : base
     if (contextSource !== undefined) {
       prompt = prompt.replace(`\n任务:\n${context}`, `\n任务:\n${JSON.stringify({ contextTransport: input.contextTransport, path: contextPath, sha256: contentHash(contextSource), inputDigest })}`)
       if (pendingAnalysis) prompt = prompt.replace(`\n待审分析:\n${JSON.stringify(pendingAnalysis)}`, '')
     }
-    if (draftMode) prompt += `\n草稿文件=${binding.path}；${material ? material.sourceKind === 'physical_draft' ? '已认证停止的旧工作树中明确未批准的物理草稿已按原字节复制到当前seed；它未提交，不是历史Git稿、Native final或批准；仅续修此文件，正常提交后重新独审。' : material.sourceKind === 'git_draft' ? '认证的原Git分析草稿已按原字节复制到当前seed；沿该原文件核实分类并续修，旧批准不继承。' : material.sourceKind === 'native_output' ? '认证的旧只读Native成功结构化输出已序列化为本轮临时材料；它不是历史Git草稿或新批准，在该文件核实分类并续修。' : '旧Native原输出材料已按认证CAS原字节复制为本轮临时输入，不是既有Git草稿；在该原文件继续修复。' : source === undefined ? '首次实际创建该文件。' : '已有原草稿已复制到当前seed，在原文件继续修改，不从零重答。'}本段只把上文直接返回业务JSON的交付方式改为草稿文件；业务文件仍只读，唯一可写例外为此草稿。结构化业务JSON写入此临时文件，Spec、源码、全部测试、其他owner文件保持不变。只允许正常git add和git commit该草稿并保持clean；无需改正文时可正常commit --allow-empty，保留hooks。${DRAFT_RECEIPT_INSTRUCTIONS} 草稿仅为非权威诊断材料，不是raw、事实、批准或新授权。\n草稿业务schema只读文件=${binding.path.replace(/\.json$/, '.schema.json')}；先读取精确schema并自检，禁止修改schema。${contextSource === undefined ? `原具体错误：${JSON.stringify(repairErrors)}；本轮修复诊断：${JSON.stringify(repairDiagnostics)}` : `读取任务指针指定的完整只读context JSON：task为原任务，repairDiagnostics/errors仅为非权威修复诊断，review的pendingAnalysis为本轮完整待审分析，均须保留各项具体拒因；按原JSON草稿继续修复。context、schema等临时协议文件不属于业务checkedPaths，不修改这些只读文件；仓库仍可自由读取。`}`
+    if (draftMode) prompt += `\n草稿文件=${binding.path}；${material ? material.sourceKind === 'physical_draft' ? '已认证停止的旧工作树中明确未批准的物理草稿已按原字节复制到当前seed；它未提交，不是历史Git稿、Native final或批准；仅续修此文件，正常提交后重新独审。' : material.sourceKind === 'git_draft' ? '认证的原Git分析草稿已按原字节复制到当前seed；沿该原文件核实分类并续修，旧批准不继承。' : material.sourceKind === 'native_output' ? '认证的旧只读Native成功结构化输出已序列化为本轮临时材料；它不是历史Git草稿或新批准，在该文件核实分类并续修。' : '旧Native原输出材料已按认证CAS原字节复制为本轮临时输入，不是既有Git草稿；在该原文件继续修复。' : source === undefined ? '首次实际创建该文件。' : '已有原草稿已复制到当前seed，在原文件继续修改，不从零重答。'}本段只把上文直接返回业务JSON的交付方式改为草稿文件；业务文件仍只读，唯一可写例外为此草稿。结构化业务JSON写入此临时文件，Spec、源码、全部测试、其他owner文件保持不变。只允许正常git add和git commit该草稿并保持clean；无需改正文时可正常commit --allow-empty，保留hooks。${DRAFT_RECEIPT_INSTRUCTIONS} 草稿仅为非权威诊断材料，不是raw、事实、批准或新授权。\n草稿业务schema只读文件=${binding.path.replace(/\.json$/, '.schema.json')}；先读取精确schema并自检，禁止修改schema。${contextSource === undefined ? `原具体错误：${JSON.stringify(repairErrors)}；本轮修复诊断：${JSON.stringify(repairDiagnostics)}` : statusOnly ? '读取任务指针指定的只读context JSON。task为原任务，review的pendingAnalysis为本轮完整待审分析。按原JSON草稿与精确schema继续自检和修复。context、schema等临时协议文件不属于业务checkedPaths。保持这些文件只读，仓库仍可自由读取。' : `读取任务指针指定的完整只读context JSON：task为原任务，repairDiagnostics/errors仅为非权威修复诊断，review的pendingAnalysis为本轮完整待审分析，均须保留各项具体拒因；按原JSON草稿继续修复。context、schema等临时协议文件不属于业务checkedPaths，不修改这些只读文件；仓库仍可自由读取。`}`
+    if (reviewFeedback) prompt += `\n用 git show ${reviewFeedback.commit}:${reviewFeedback.path} 读取本区最近一次真实业务独审的原JSON。沿其具体发现修复原草稿。原审查意见只供返修，不授予批准或新写权。`
     const nativeSchema = draftMode ? DRAFT_RECEIPT_SCHEMA : schema
     const request = { root: input.snapshot.source.canonicalRoot, base: seed?.baseCommit ?? input.snapshot.headCommit, ...(seed ? { worktree: seed } : {}), requestKey: `${input.requestKey}:${purpose}`, inputDigest, purpose, prompt, schema: nativeSchema, timeoutMs: input.timeoutMs, signal, model: syncModel(input), effort: 'high' as const, ...(!worktree && frozenEntries.length ? { frozenEntries } : {}) }
     let result: Awaited<ReturnType<ElaborationRunner>>

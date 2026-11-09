@@ -2837,22 +2837,18 @@ for (const contextTransport of [undefined, 'git-json-v1'] as const) for (const p
 })
 
 
-test('P0 git-json-v1大上下文完整绑定Git文件且相同业务身份23次accepted查找零调用', async t => {
+for (const contextTransport of ['git-json-v1', 'git-json-v2'] as const) test(`P0 ${contextTransport} 绑定Git任务且不改变业务身份和批准复用`, async t => {
   const f = await fixture(t)
   writeFileSync(join(f.root, 'src/export.js'), f.source + '\n// same business context fixture\n')
   const original = await f.input()
   const oldAnalysis = { proposal: { resolutions: [{ path: 'src/export.js', content: '原稿完整业务语义\n'.repeat(1800) }] }, analysis: { findings: [{ evidence: '全部旧证据\n'.repeat(900) }] } }
   const repairDiagnostics = [1, 2].map(round => ({ code: 'behavior_review_failed', message: JSON.stringify({ ...oldAnalysis, review: { round, findings: [{ message: `独立拒因${round}`, evidence: `原审查${round}`, counterexample: `反例${round}` }] } }) }))
-  const input: CodeBehaviorInput = { ...original, draftProtocol: 'code-behavior-draft-v1', contextTransport: 'git-json-v1', plan: { ...original.plan, agentWorkflow: 'native-worktree-v1' }, repairDiagnostics }
+  const input: CodeBehaviorInput = { ...original, draftProtocol: 'code-behavior-draft-v1', contextTransport, plan: { ...original.plan, agentWorkflow: 'native-worktree-v1' }, repairDiagnostics }
   const seen: { purpose: string; requestDigest: string; tree: string; contextSha256: string; bytes: number; promptBytes: number }[] = []
   let checkpoint: CodeBehaviorContinuation | null = null
   const runner: ElaborationRunner = async request => {
     const descriptor = JSON.parse(request.prompt.split('\n任务:\n')[1].split('\n草稿文件=')[0]) as { contextTransport: string; path: string; sha256: string }
-    assert.equal(descriptor.contextTransport, 'git-json-v1', '新context合同要求真实Git文件，旧inline缺席即失败；不模拟EPIPE根因')
-    const { readCodeBehaviorContext } = await import('./code-behavior.js')
-    const context = readCodeBehaviorContext(request, input.snapshot.source.commonDir)
-    assert.deepEqual(context.repairDiagnostics, repairDiagnostics)
-    assert.deepEqual(context.errors, [])
+    assert.equal(descriptor.contextTransport, contextTransport)
     assert.ok(!request.prompt.includes(repairDiagnostics[0].message)); assert.ok(!request.prompt.includes(repairDiagnostics[1].message))
     assert.match(request.prompt, /不属于业务checkedPaths/)
     const seed = request.worktree!, workspace = join(f.root, '..', `context-${seen.length}`)
@@ -2861,7 +2857,17 @@ test('P0 git-json-v1大上下文完整绑定Git文件且相同业务身份23次a
     assert.equal(contentHash(bytes), descriptor.sha256)
     const entry = readTree(input.snapshot.source.commonDir, seed.tree).find(entry => entry.path === descriptor.path)!
     assert.equal(entry.mode, '100644'); assert.deepEqual(readObject(input.snapshot.source.commonDir, entry.oid), bytes)
-    assert.deepEqual(JSON.parse(bytes.toString('utf8')).task, context.task)
+    const visible = JSON.parse(bytes.toString('utf8'))
+    assert.deepEqual(visible.repairDiagnostics, contextTransport === 'git-json-v1' ? repairDiagnostics : [], '新P0任务的Git快照不得包含历史诊断')
+    assert.equal(visible.diagnosticArchive, undefined)
+    if (contextTransport === 'git-json-v2') {
+      assert.doesNotMatch(bytes.toString('utf8'), /原稿完整业务语义|全部旧证据|独立拒因/)
+      assert.equal(readTree(input.snapshot.source.commonDir, seed.tree).filter(entry => entry.path.startsWith('.spex-sync-drafts/')).length, 2)
+    }
+    const context = readCodeBehaviorContext(request, input.snapshot.source.commonDir)
+    assert.deepEqual(context.repairDiagnostics, contextTransport === 'git-json-v1' ? repairDiagnostics : [])
+    assert.deepEqual(context.errors, [])
+    assert.deepEqual(visible.task, context.task)
     assert.throws(() => readCodeBehaviorContext({ ...request, prompt: request.prompt.replace(descriptor.sha256, 'f'.repeat(64)) }, input.snapshot.source.commonDir), /摘要不匹配/)
     assert.throws(() => readCodeBehaviorContext({ ...request, worktree: { ...seed, tree: input.composed.tree } }, input.snapshot.source.commonDir), /seed/)
     const task = context.task as { requiredChangedPaths: string[] }

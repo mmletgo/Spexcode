@@ -294,10 +294,10 @@ for (const [mode, defect] of [['pause', 'archived'], ['native-failure', 'archive
     }
     if (originalRequest) {
       if (defect === 'missing-exit') assert.equal(missingExitInjected, true, 'missing-exit观察必须发生在退出sidecar移除之后')
-      if (!p1 && (defect === 'missing-exit' || completedRpc && ['no-terminal', 'failed-terminal', 'cancelled-terminal'].includes(defect))) {
-        const prior = readCodeBehaviorContext(originalRequest, f.input.source.commonDir), current = readCodeBehaviorContext(request, f.input.source.commonDir)
-        assert.deepEqual(current.errors, completedRpc ? [...prior.errors, { code: 'native_rpc_timeout', message: rpcFailure }] : prior.errors, '跳过无资格材料时保原业务错误及已结算typed RPC诊断')
-        for (const diagnostic of prior.repairDiagnostics) assert(current.repairDiagnostics.some(value => JSON.stringify(value) === JSON.stringify(diagnostic)), '跳过无资格材料时保原诊断')
+      if (!p1) {
+        const current = readCodeBehaviorContext(request, f.input.source.commonDir)
+        assert.deepEqual(current.errors, [])
+        assert.deepEqual(current.repairDiagnostics, [])
       }
       if (rejectedReview) {
         const previous = readCodeBehaviorContext(originalRequest, f.input.source.commonDir), current = readCodeBehaviorContext(request, f.input.source.commonDir)
@@ -310,24 +310,17 @@ for (const [mode, defect] of [['pause', 'archived'], ['native-failure', 'archive
       assert.equal(contentHash(readFileSync(join(workspace, path))), contentHash(older ? priorText : latest), '必须取最新normal Git正文SHA，不能回原seed或旧59010字节')
       if (completedRpc && !p1) {
         assert.doesNotMatch(request.prompt, /untrusted terminal text/)
-        const old = readCodeBehaviorContext(originalRequest, f.input.source.commonDir), current = readCodeBehaviorContext(request, f.input.source.commonDir)
-        assert.deepEqual(current.errors, [...old.errors, { code: 'native_rpc_timeout', message: rpcFailure }], '续稿保原错误并保本次精确RPC诊断')
-        for (const diagnostic of old.repairDiagnostics) assert(current.repairDiagnostics.some(value => JSON.stringify(value) === JSON.stringify(diagnostic)), '续稿保原修复诊断')
+        const current = readCodeBehaviorContext(request, f.input.source.commonDir)
         assert.equal(current.pendingAnalysis, undefined)
         const protectedEntries = (tree: string) => readTree(f.input.source.commonDir, tree).filter(entry => entry.path !== path && entry.path !== path.replace(/\.json$/, '.context.json'))
         assert.deepEqual(protectedEntries(seed.tree), protectedEntries(originalRequest.worktree!.tree))
       }
       if (zcode && !p1 && (defect === 'prior-draft' || dirty)) {
-        const errors = readCodeBehaviorContext(originalRequest, f.input.source.commonDir).errors
-        if (defect === 'prior-draft') assert(errors.some(error => error.code === 'behavior_output_json'))
-        assert.deepEqual(readCodeBehaviorContext(request, f.input.source.commonDir).errors, errors, '更新Git材料不能清空原实际请求的具体业务诊断')
-        const old = readCodeBehaviorContext(originalRequest, f.input.source.commonDir), current = readCodeBehaviorContext(request, f.input.source.commonDir)
-        for (const item of old.repairDiagnostics) assert(current.repairDiagnostics.some(value => JSON.stringify(value) === JSON.stringify(item)), '原修复诊断完整保留')
-        if (onlyReview) assert.deepEqual(current.pendingAnalysis, old.pendingAnalysis, '物理review稿仅续审，原ready分析完整保持')
+        if (defect === 'prior-draft') assert.equal(f.store.listAttempts(f.operation.id)[0].failure?.code, 'behavior_output_json')
+        if (onlyReview) assert.deepEqual(readCodeBehaviorContext(request, f.input.source.commonDir).pendingAnalysis, readCodeBehaviorContext(originalRequest, f.input.source.commonDir).pendingAnalysis, '物理review稿仅续审，原ready分析完整保持')
       }
       assert.match(request.prompt, older ? p1 ? /已有草稿已复制/ : /已有原草稿已复制/ : committedP1 ? /真实Git提交已按原字节复制；该稿未批准/ : dirty ? /未批准的物理草稿/ : /认证的原Git分析草稿/)
-      if (mode === 'missing-final') assert.match(JSON.stringify(readCodeBehaviorContext(request, f.input.source.commonDir)), /missing required structured_output/)
-      else assert.doesNotMatch(request.prompt, /missing required structured_output/, '普通暂停不能伪加缺final分类')
+      assert.doesNotMatch(request.prompt, /missing required structured_output/, '原Native停止分类不复制进新任务')
       continued = true
       if (p1 && !older) {
         if (completedP1Rpc) {
@@ -667,7 +660,10 @@ for (const [mode, defect] of [['pause', 'archived'], ['native-failure', 'archive
       if (['request', 'thread', 'turn', 'stop', 'failed-observation'].includes(defect)) assert.equal(result.failure?.code, 'checkpoint_artifact_binding')
       if (['rpc-proof', 'exit', 'idle', 'closed', 'idle-identity', 'terminal-kind', 'session', 'version', 'model', 'missing-dispatch-session', 'null-dispatch-thread', 'null-dispatch-turn', 'harness-thread'].includes(defect)) assert.equal(result.failure?.code, 'stale_result', JSON.stringify(result.failure))
       if (defect === 'dirty' && !p1) assert.equal(current.failure?.code, 'native_worktree_result_invalid')
-      if (defect === 'terminal-json') assert.match(result.failure!.message, /JSON/)
+      if (defect === 'terminal-json') {
+        if (p1) assert.match(result.failure!.message, /JSON/)
+        else assert.deepEqual(result.failure, { code: 'coordinator_failed', message: 'P0 行为校验未通过', kind: 'unsupported', evidenceRefs: [] })
+      }
       if (['source', 'tests', 'schema'].includes(defect)) assert.match(result.failure!.message, p1 ? /已停物理草稿的owner\/seed、只读文件或index发生越界变化/ : /同步仅允许正常提交指定UTF8草稿文件/)
     }
   }
@@ -720,7 +716,8 @@ for (const [mode, defect] of [['pause', 'archived'], ['native-failure', 'archive
   if (completedRpcResource) {
     assert.equal(provenance.fromAttemptId, completedRpcResource.attemptId)
     assert.deepEqual(provenance.nativePlanRef, completedRpcResource.plan.planBlob); assert.deepEqual(provenance.checkpointRef, completedRpcResource.checkpointRef)
-    assert.deepEqual(provenance.originalFailure, oldAttempts.find(attempt => attempt.id === completedRpcResource.attemptId)!.failure)
+    const originalFailure = oldAttempts.find(attempt => attempt.id === completedRpcResource.attemptId)!.failure!
+    assert.deepEqual(provenance.originalFailure, p1 ? originalFailure : { code: originalFailure.code, kind: originalFailure.kind })
     assert.equal(provenance.oid, execFileSync('git', ['-C', f.root, 'rev-parse', `${latestHead}:${oldDraftPath}`], { encoding: 'utf8' }).trim())
   }
   assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
@@ -6667,6 +6664,7 @@ for (const failureKind of ['format', 'business', 'protocol'] as const) for (cons
   const originalRunner = f.options.runner!, requests: ElaborationSessionRequest[] = []
   let activeStore = f.store, invalid = partitioned ? '{"original":"WRONG_SCHEMA_P0"}' : '{ ORIGINAL_INVALID_P0_JSON\n'
   let originalReview: { oid: string; schemaOid: string; schema: Buffer } | undefined
+  let rejectedReviewRef: string | undefined
   let failed = false
   if (legacyMaterial) {
     const claimed = partitioned ? f.store.claimQueuedAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30_000, expectedRevision: f.store.readOperation(f.operation.id).revision }) : f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30_000, expectedMessageId: f.operation.dispatchMessageId })
@@ -6695,6 +6693,15 @@ for (const failureKind of ['format', 'business', 'protocol'] as const) for (cons
     assert.deepEqual(readTree(f.input.source.commonDir, seed.tree).filter(entry => !entry.path.startsWith('.spex-sync-drafts/')), readTree(f.input.source.commonDir, f.input.immutableTree))
     let text: string
     const produced = await originalRunner({ ...request, prompt: inlineBehaviorPrompt(request, f.input.source.commonDir) })
+    const context = readCodeBehaviorContext(request, f.input.source.commonDir)
+    assert.deepEqual(context.repairDiagnostics, [])
+    assert.deepEqual(context.errors, [])
+    if (businessRepair && attempt.number > 1 && request.purpose === 'code_behavior_analyze') {
+      assert(rejectedReviewRef)
+      assert.ok(request.prompt.includes(`git show ${rejectedReviewRef}`))
+      assert.doesNotMatch(request.prompt, /真实业务遗漏需重做分析/)
+      assert.match(f.git('show', rejectedReviewRef), /真实业务遗漏需重做分析/)
+    }
     if (request.purpose === phase && !failed) {
       if (protocolRepair) {
         const review = structuredClone(produced.output) as { checkedChangeIds: string[] }
@@ -6705,12 +6712,10 @@ for (const failureKind of ['format', 'business', 'protocol'] as const) for (cons
     else {
       if (request.purpose === phase) {
         assert.equal(attempt.number, legacyRounds + 1)
-        if (businessRepair) { assert.equal(existsSync(join(workspace, path)), false); assert.match(JSON.stringify(readCodeBehaviorContext(request, f.input.source.commonDir)), /真实业务遗漏需重做分析/) }
+        if (businessRepair) assert.equal(existsSync(join(workspace, path)), false)
         else {
           assert.equal(readFileSync(join(workspace, path), 'utf8'), invalid)
-          assert.match(JSON.stringify(readCodeBehaviorContext(request, f.input.source.commonDir)), protocolRepair ? /behavior_review_failed/ : legacyMaterial ? /structured_output_format_invalid/ : partitioned ? /behavior_output_schema/ : /behavior_output_json/)
           if (protocolRepair) {
-            assert.match(JSON.stringify(readCodeBehaviorContext(request, f.input.source.commonDir)), /missingChangeIds/); assert.match(JSON.stringify(readCodeBehaviorContext(request, f.input.source.commonDir)), /unknownChangeIds/)
             assert.equal(f.git('rev-parse', `${seed.baseCommit}:${path}`), originalReview!.oid)
             assert.equal(f.git('rev-parse', `${seed.baseCommit}:${path.replace(/\.json$/, '.schema.json')}`), originalReview!.schemaOid)
             assert.deepEqual(readFileSync(join(workspace, path.replace(/\.json$/, '.schema.json'))), originalReview!.schema)
@@ -6723,6 +6728,7 @@ for (const failureKind of ['format', 'business', 'protocol'] as const) for (cons
     }
     mkdirSync(join(workspace, path, '..'), { recursive: true }); writeFileSync(join(workspace, path), text)
     execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '--allow-empty', '-m', 'normal P0 draft'], { stdio: 'pipe' })
+    if (businessRepair && request.purpose === phase && attempt.number === 1) rejectedReviewRef = `${execFileSync('git', ['-C', workspace, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()}:${path}`
     if (protocolRepair && request.purpose === phase && attempt.number === 1) originalReview = { oid: execFileSync('git', ['-C', workspace, 'rev-parse', `HEAD:${path}`], { encoding: 'utf8' }).trim(), schemaOid: f.git('rev-parse', `${seed.baseCommit}:${path.replace(/\.json$/, '.schema.json')}`), schema: readFileSync(join(workspace, path.replace(/\.json$/, '.schema.json'))) }
     const output = { summary: '正常提交真实P0临时JSON' }
     return { ...produced, output, resultDigest: contentHash(JSON.stringify(output)), worktree: nativeWorktreeResult(workspace, seed) }
@@ -6759,6 +6765,8 @@ for (const failureKind of ['format', 'business', 'protocol'] as const) for (cons
   const continuations = stages[0].filter(entry => entry.stage.endsWith('analysis:continuation')).map(entry => JSON.parse(readEvidence(f.input.source.commonDir, entry.resultRef).toString()) as import('./code-behavior.js').CodeBehaviorContinuation)
   if (businessRepair) {
     assert.equal(continuations.at(-1)!.readyAnalysis, undefined)
+    assert.equal(attempts[0].failure?.message, 'P0 行为校验未通过')
+    for (const stage of stages.flat()) assert.doesNotMatch(readEvidence(f.input.source.commonDir, stage.resultRef).toString(), /真实业务遗漏需重做分析/)
     assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
     assert.equal(f.store.listJournals(f.operation.id).length, 0); return
   }
@@ -6772,10 +6780,9 @@ for (const failureKind of ['format', 'business', 'protocol'] as const) for (cons
       const resumed = stages[1].filter(entry => entry.stage.endsWith('analysis:continuation')).map(entry => JSON.parse(readEvidence(f.input.source.commonDir, entry.resultRef).toString()) as import('./code-behavior.js').CodeBehaviorContinuation).at(-1)!
       assert.deepEqual(resumed.readyAnalysis, saved.readyAnalysis)
       assert.equal(resumed.drafts.code_behavior_analyze!.oid, saved.drafts.code_behavior_analyze!.oid)
-      const diagnostic = JSON.parse(saved.drafts.code_behavior_review!.errors[0].message)
-      assert.equal(diagnostic.details.missingChangeIds.length, 1)
-      assert.deepEqual(diagnostic.details.unknownChangeIds, [diagnostic.details.missingChangeIds[0] + 'e'])
-      t.diagnostic(JSON.stringify({ calls: requests.filter(request => request.purpose.startsWith('code_behavior_')).map(request => request.purpose), coldRestart: true, originalReviewSeedOid: originalReview!.oid, originalSchemaSeedOid: originalReview!.schemaOid, originalSchemaSha256: contentHash(originalReview!.schema), analysisTraceUnchanged: true, analysisOidUnchanged: true, details: diagnostic.details }))
+      assert.deepEqual(saved.drafts.code_behavior_review!.errors, [{ code: 'behavior_review_failed', message: 'P0 行为校验未通过' }])
+      assert.ok(JSON.parse(invalid).checkedChangeIds[0].endsWith('e'))
+      t.diagnostic(JSON.stringify({ calls: requests.filter(request => request.purpose.startsWith('code_behavior_')).map(request => request.purpose), coldRestart: true, originalReviewSeedOid: originalReview!.oid, originalSchemaSeedOid: originalReview!.schemaOid, originalSchemaSha256: contentHash(originalReview!.schema), analysisTraceUnchanged: true, analysisOidUnchanged: true }))
     }
   }
   assert.equal(activeStore.listJournals(f.operation.id).length, 0)
@@ -7002,7 +7009,7 @@ for (const [protocolRounds, staleCarry, tamper] of [[1, false, 'none'], [1, true
     targets: [{ nodeId: 'export-contract', path: contractPath }, { nodeId: 'import-contract', path: importPath }],
     partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 32768, maxParallel: 2 }, commitTrigger: { before: null, paths: ['src/export.js', 'src/import.js'] },
   }, undefined, 'code', 'claude:default', true, { [importPath]: importSpec, 'src/import.js': 'export class ImportService {}\n', 'tests/import.test.mjs': 'import assert from "node:assert/strict"\n' })
-  let store = f.store, reopened: ReturnType<typeof openProtocol> | undefined, targetKey = '', siblingKey = '', analysisText = ''
+  let store = f.store, reopened: ReturnType<typeof openProtocol> | undefined, targetKey = '', siblingKey = '', analysisText = '', semanticReviewGitRef = ''
   const realNow = Date.now
   let clockAdvance = 0
   if (staleCarry) { Date.now = () => realNow() + clockAdvance; t.after(() => { Date.now = realNow }) }
@@ -7035,10 +7042,17 @@ for (const [protocolRounds, staleCarry, tamper] of [[1, false, 'none'], [1, true
     const path = /草稿文件=([^\s；]+)/.exec(request.prompt)![1]
     if (domain === 'EXPORT' && attempt.number === rounds && !reviewed) {
       assert.equal(readObject(f.input.source.commonDir, readTree(f.input.source.commonDir, seed.tree).find(entry => entry.path === path)!.oid).toString('utf8'), analysisText, '语义repair必须续原分析JSON，不能从零重答')
-      for (const text of Object.values(finding)) assert.ok(JSON.stringify(readCodeBehaviorContext(request, f.input.source.commonDir)).includes(text), `新分析必须收到完整finding: ${text}`)
+      assert(semanticReviewGitRef)
+      assert.ok(request.prompt.includes(`git show ${semanticReviewGitRef}`))
+      const context = readCodeBehaviorContext(request, f.input.source.commonDir)
+      assert.deepEqual(context.repairDiagnostics, [])
+      assert.deepEqual(context.errors, [])
+      assert.deepEqual(JSON.parse(f.git('show', semanticReviewGitRef)).findings, [finding])
+      assert.ok(!request.prompt.includes(finding.message))
     }
     const carried = domain === 'EXPORT' && attempt.number === staleRound
     const actual = carried ? undefined : committedDraftFixture(f, request, output, join(f.parent, `semantic-p0-${contentHash(request.requestKey)}`))
+    if (domain === 'EXPORT' && attempt.number === semanticRound && reviewed && actual) semanticReviewGitRef = `${actual.headCommit}:${path}`
     if (domain === 'EXPORT' && attempt.number === 1 && !reviewed) analysisText = JSON.stringify(output)
     const fence = { operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }
     try { return await createAttemptRunner(store, fence, { pollMs: 2, runtime: {
@@ -7552,13 +7566,14 @@ test('未采纳settled重验重新派发P0/P1并续原Git稿，坏candidate不�
   assert.notEqual(result.receipt!.actualTree, first.receipt!.actualTree)
 })
 
-for (const frozen of ['new', 'legacy-checkpoint', 'reserved', 'null', 'empty', 'future'] as const) test(`P0 context传输只在首次冻结选择，${frozen}保留旧字段缺席与请求绑定`, async t => {
+for (const frozen of ['new', 'v1', 'legacy-checkpoint', 'reserved', 'null', 'empty', 'future'] as const) test(`P0 context传输只在首次冻结选择，${frozen}保留旧字段缺席与请求绑定`, async t => {
   const f = await fixture(t, { maxAttempts: 1, maxCalls: 8, maxRepairs: 0, timeoutMs: 120_000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, 'code', 'claude:default')
   const claim = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30_000, expectedMessageId: f.operation.dispatchMessageId })
   let originalProtocol: { ref: { sha256: string }; bytes: Buffer } | undefined
   const rejectsTransport = ['null', 'empty', 'future'].includes(frozen)
-  const protocolValue = { version: 'code-behavior-draft-v1', ...(rejectsTransport ? { contextTransport: frozen === 'null' ? null : frozen === 'empty' ? '' : 'git-json-v2' } : {}) }
-  if (frozen === 'legacy-checkpoint' || rejectsTransport) {
+  const expectedTransport = frozen === 'new' ? 'git-json-v2' : frozen === 'v1' ? 'git-json-v1' : undefined
+  const protocolValue = { version: 'code-behavior-draft-v1', ...(frozen === 'v1' ? { contextTransport: 'git-json-v1' } : rejectsTransport ? { contextTransport: frozen === 'null' ? null : frozen === 'empty' ? '' : 'git-json-future' } : {}) }
+  if (frozen === 'legacy-checkpoint' || frozen === 'v1' || rejectsTransport) {
     const value = protocolValue, resultRef = writeEvidence(f.input.source.commonDir, value)
     const ref = writeEvidence(f.input.source.commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: claim.attempt.id, inputId: f.input.id, policyDigest: f.operation.policyDigest, stage: 'behavior-draft-protocol', resultRef })
     f.store.checkpoint(claim.fence, { ...ref, artifacts: syncCheckpointArtifacts(value, resultRef) })
@@ -7570,11 +7585,11 @@ for (const frozen of ['new', 'legacy-checkpoint', 'reserved', 'null', 'empty', '
   f.options.runner = async request => {
     captured = true
     const task = JSON.parse(request.prompt.split('\n任务:\n')[1].split('\n草稿文件=')[0])
-    assert.equal(task.contextTransport, frozen === 'new' ? 'git-json-v1' : undefined)
+    assert.equal(task.contextTransport, expectedTransport)
     assert.equal(request.worktree!.mode, frozen === 'reserved' ? 'read' : 'edit')
     const contexts = readTree(f.input.source.commonDir, request.worktree!.tree).filter(entry => entry.path.endsWith('.context.json'))
-    assert.equal(contexts.length, frozen === 'new' ? 1 : 0)
-    if (frozen !== 'new') assert.ok(request.prompt.includes('原具体错误：[]；本轮修复诊断：[]') || frozen === 'reserved')
+    assert.equal(contexts.length, expectedTransport ? 1 : 0)
+    if (!expectedTransport) assert.ok(request.prompt.includes('原具体错误：[]；本轮修复诊断：[]') || frozen === 'reserved')
     throw Object.assign(new Error('只核冻结合同，不执行任何真实业务agent'), { code: 'unsupported' })
   }
   const result = await runSyncOperation(f.store, f.operation.id, f.options)
@@ -7583,7 +7598,7 @@ for (const frozen of ['new', 'legacy-checkpoint', 'reserved', 'null', 'empty', '
   const attempt = f.store.readAttempt(claim.attempt.id)
   const protocols = attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).filter(wrapper => wrapper.stage === 'behavior-draft-protocol')
   assert.equal(protocols.length, frozen === 'reserved' ? 0 : 1)
-  if (protocols.length) assert.deepEqual(JSON.parse(readEvidence(f.input.source.commonDir, protocols[0].resultRef).toString()), frozen === 'new' ? { version: 'code-behavior-draft-v1', contextTransport: 'git-json-v1' } : protocolValue)
+  if (protocols.length) assert.deepEqual(JSON.parse(readEvidence(f.input.source.commonDir, protocols[0].resultRef).toString()), frozen === 'new' ? { version: 'code-behavior-draft-v1', contextTransport: 'git-json-v2' } : protocolValue)
   if (rejectsTransport) assert.equal(attempt.dispatchPlans.length, 0)
   if (originalProtocol) assert.deepEqual(readEvidence(f.input.source.commonDir, originalProtocol.ref), originalProtocol.bytes)
   if (reserved) assert.equal(JSON.stringify(attempt.dispatchPlans.find(dispatch => dispatch.key === reserved.key)), reservedBytes)
