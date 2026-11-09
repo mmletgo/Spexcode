@@ -20,6 +20,8 @@ code:
 
 受控 ZCode 真实创建/队列/Git 结算复现已接受 turn 的 EPIPE。原公开失败和 exit=0、idle=false、closed=false、acknowledged=false 经正式肯定停止后成为 native_turn_transport_failed，原 canonical/CAS 与完整请求身份在同键冷重放保持，派发数不增加。EACCES 保持普通失败，错 session/turn/input 与未知停止无此资格。
 
+停止证明未知的夹具覆盖缺失退出原件及已有未停止记录，核对资源继续占用、工作树保留、同一失败身份与单次派发。
+
 同一夹具让第二页 `session/events` 超过原 RPC 期限，并先交回原 ID 的迟到回复，再以原游标交付精确的本轮成功终态。校验原消息、idle/close、Git 草稿、正式 removed 和单次 send/计费。同一重读无终态时继续原 stop；重读若看到 `turn.completed` / `cancelled` 则直接核停稳。两者都保留原 typed 超时，输出仍为空。
 
 隔离真实SQLite及受控runtime覆盖新Claude/ZCode worktree冻结nativeConfiguration:cli-config-v1、旧plan与仅reserved缺席、上一代工具策略已冻结但配置仍缺席的完整摘要恢复；schema/prompt/purpose/tree/配置篡改均不得派发。dispatch/requestDigest/plan/payload及callsUsed原绑定保持。同一真实创建/queue/fake CLI集成核新配置进入创建哈希、正常Git提交及冷完成不重发；已认证格式失败确证停止后自动removed，cold replay保原错误而不改为cancelled。此证明使用专用私库与进程级fake CLI，不访问真实provider。
