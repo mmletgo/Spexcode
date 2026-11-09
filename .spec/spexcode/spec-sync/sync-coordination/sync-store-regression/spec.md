@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+writer35 回归验证无 DDL 追加 marker，v34 备份可由原迁移集合读取，原 schema、操作、attempt 和已注册迁移字节保持。旧 writer 对升级后的库明确拒绝。
+
 writer34索引回归核v33→v34先一次online backup、只新增目标索引，全部业务/protocol表和v1–v33 registry原行保持；DDL失败时索引及marker整体回滚，旧v33 writer拒绝升级库，备份可按v33读取，重复启动不再备份。历史marker用例模拟旧schema时同时移除该新增索引，旧schema不变断言仅排除这个由v34独立验证的新增对象。完整commit观察以禁用索引的原SQL重算作对照，覆盖超过500条重复、来源/input/difference/outcome分组、failure/blocked及缺失captureKind/outcome、显式null failure、新写和重开；执行计划使用表达式索引、无历史JSON函数及临时GROUP BY，不用固定耗时阈值替代结构证明。
 
 writer33回归在隔离SQLite保存旧V4 protocol且尚无dispatch，核32→33只追加SELECT1、恰一次online backup；完整旧schema/业务与protocol表及V1–V32 registry原行保持。旧32迁移集合在新库拒绝且不写数据，32备份可由旧writer读取，重复启动幂等。不触用户或生产数据库。

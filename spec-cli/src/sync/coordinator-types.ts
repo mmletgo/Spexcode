@@ -29,7 +29,7 @@ export type SyncCoordinatorPlan = SyncCoordinatorPlanBody & ({ version: 'sync-co
   version: 'sync-coordinator-v2'
   direction: SyncDirection
   commitTrigger?: { before: InputSnapshot | null; paths: readonly string[] }
-  partitionPolicy: { version: 'sync-partition-policy-v1'; maxReadBytes: number; maxParallel: number }
+  partitionPolicy: { version: 'sync-partition-policy-v1' | 'sync-partition-policy-v2'; maxReadBytes: number; maxParallel: number }
 })
 export type SyncAdmissionOptions = {
   ingressKey: string; rootCauseId: string; origin: AdmitSyncInput['origin']; budget: SyncBudget

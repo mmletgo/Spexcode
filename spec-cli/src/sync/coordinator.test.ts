@@ -3193,11 +3193,12 @@ test('v2 code→Spec协调器保留分区证据并跳过代码生成，最终候
 })
 
 
-for (const native of [false, true]) test(`协调器真实只分析P0分区进入P1全局封口 native=${native}`, async t => {
+for (const [native, retry] of [[false, "none"], [true, "none"], [true, "valid"], [true, "foreign"]] as const) test(`协调器真实只分析P0分区进入P1全局封口 native=${native} retry=${retry}`, async t => {
   const testPath = 'tests/independent-smoke.test.mjs'
   const f = await fixture(t, { maxAttempts: 2, maxCalls: 16, maxRepairs: 1, timeoutMs: 120000 }, false, original, 'project', original,
     { version: 'sync-coordinator-v2', direction: 'code_to_spec', sourcePaths: ['src', testPath], commitTrigger: { before: null, paths: [] }, partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, ...(native ? { agentWorkflow: 'native-worktree-v1' as const } : {}) }, undefined, 'code', native ? 'claude:default' : undefined, native,
     { [testPath]: 'import test from "node:test"\ntest("standalone smoke", () => {})\n' }, true)
+  let active = f.operation, firstRun = retry !== 'none', acceptedKey: string | undefined
   f.transform((output, request) => {
     if (request.purpose === 'code_behavior_analyze') {
       const value = output as { changes: { kind: string; paths: string[]; affectedIds: string[]; ruleIds: string[] }[] }
@@ -3212,6 +3213,7 @@ for (const native of [false, true]) test(`协调器真实只分析P0分区进入
   if (native) {
     const runner = f.options.runner!
     f.options.runner = async request => {
+      if (firstRun && request.purpose === 'elaboration_generate') throw Object.assign(new Error('原分区已独审，P1前停止'), { code: 'unsupported' })
       if (request.purpose === 'code_review') {
         f.calls.push(request)
         throw Object.assign(new Error('已达V1真实候选，夹具停止在独审请求'), { code: 'unsupported' })
@@ -3233,6 +3235,12 @@ for (const native of [false, true]) test(`协调器真实只分析P0分区进入
     const checkpoint = f.store.checkpoint.bind(f.store), commonDir = f.input.source.commonDir
     f.store.checkpoint = (fence, ref) => {
       const wrapper = JSON.parse(readEvidence(commonDir, ref).toString())
+      if (retry === 'foreign' && wrapper.stage === acceptedKey && wrapper.operationId === active.id) {
+        const prior = JSON.parse(readEvidence(commonDir, wrapper.resultRef).toString())
+        const resultRef = writeEvidence(commonDir, { ...prior, fromOperationId: active.id })
+        const proof = writeEvidence(commonDir, { ...wrapper, resultRef })
+        return checkpoint(fence, { ...proof, artifacts: syncCheckpointArtifacts(prior, resultRef) })
+      }
       if (wrapper.stage !== 'generation' || f.store.readAttempt(fence.attemptId).number !== 1) return checkpoint(fence, ref)
       const generation = JSON.parse(readEvidence(commonDir, wrapper.resultRef).toString())
       assert.equal(generation.candidateValidated, true)
@@ -3242,10 +3250,27 @@ for (const native of [false, true]) test(`协调器真实只分析P0分区进入
       return checkpoint(fence, { ...original, artifacts: syncCheckpointArtifacts(failedV1, resultRef) })
     }
   }
-  const outcome = await runSyncOperation(f.store, f.operation.id, f.options)
-  assert.equal(outcome.status, 'unsupported', JSON.stringify({ failure: outcome.failure, attempts: f.store.listAttempts(f.operation.id).map(attempt => attempt.failure), calls: f.calls.map(request => request.purpose) }))
+  let callsBeforeRetry = 0
+  if (firstRun) {
+    const initial = await runSyncOperation(f.store, active.id, f.options), old = initial.operation
+    assert.equal(initial.failure?.message, '原分区已独审，P1前停止')
+    const current = f.store.readAttempt(old.currentAttemptId!)
+    const whole = readSyncCheckpoints(f.store, old, current).json.map(item => item.value as { partitionEvidence?: { partitionId: string; changedPaths: string[] }[] }).find(value => value.partitionEvidence?.some(member => member.changedPaths?.includes(testPath)))!
+    acceptedKey = `partition:${whole.partitionEvidence!.find(member => member.changedPaths.includes(testPath))!.partitionId}:analysis:provenance`
+    active = f.store.admitAndEnqueue(await prepareSyncAdmission(f.input, f.plan, { ingressKey: `mixed-p0-retry-${retry}`, rootCauseId: `mixed-p0-retry-${retry}`, retryOf: old.id, model: 'claude:default', origin: old.origin, budget: old.budget, managedRoot: f.managedRoot, baselineSelection: f.store.readBusinessBaselineSelection(old.id), executionScope: old.scope }))
+    active = f.store.ackDispatch(f.input.source.repositoryId, active.dispatchMessageId); f.useOperation(active)
+    firstRun = false; callsBeforeRetry = f.calls.length
+  }
+  const outcome = await runSyncOperation(f.store, active.id, f.options)
+  if (retry !== 'none') assert.ok(!f.calls.slice(callsBeforeRetry).some(request => request.purpose.startsWith('code_behavior_')))
+  if (retry === 'foreign') {
+    assert.match(outcome.failure?.message ?? '', /仅分析分区缺少原正式P0与独审派发证明/)
+    assert.equal(f.calls.length, callsBeforeRetry, '来源错误必须在P1派发前拒绝')
+    return
+  }
+  assert.equal(outcome.status, 'unsupported', JSON.stringify({ failure: outcome.failure, attempts: f.store.listAttempts(active.id).map(attempt => attempt.failure), calls: f.calls.map(request => request.purpose) }))
   assert.equal(outcome.failure?.message, '已达V1真实候选，夹具停止在独审请求')
-  const [attempt] = f.store.listAttempts(f.operation.id), commonDir = f.input.source.commonDir
+  const [attempt] = f.store.listAttempts(active.id), commonDir = f.input.source.commonDir
   const read = readSyncCheckpoints(f.store, outcome.operation, attempt).json
   if (native) {
     assert.ok(outcome.operation.contractScopeExpansions?.some(expansion => expansion.previousBaselineSelectionDigest !== expansion.baselineSelectionDigest))
@@ -3265,12 +3290,12 @@ for (const native of [false, true]) test(`协调器真实只分析P0分区进入
   assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 
   const count = f.calls.length
-  f.store.requestControl(f.operation.id, 'pause')
-  f.store.requestControl(f.operation.id, 'run')
-  const resumed = await runSyncOperation(f.store, f.operation.id, f.options)
+  f.store.requestControl(active.id, 'pause')
+  f.store.requestControl(active.id, 'run')
+  const resumed = await runSyncOperation(f.store, active.id, f.options)
   assert.equal(resumed.failure?.message, '已达V1真实候选，夹具停止在独审请求')
   assert.deepEqual(f.calls.slice(count).map(request => request.purpose), ['code_review'], '同operation恢复保留P0及实际P1，不重复派发')
-  const resumedAttempt = f.store.listAttempts(f.operation.id).at(-1)!
+  const resumedAttempt = f.store.listAttempts(active.id).at(-1)!
   const reread = readSyncCheckpoints(f.store, resumed.operation, resumedAttempt).json.map(item => item.value as { stage?: string; resultRef: { sha256: string } })
   assert.deepEqual(reread.find(value => value.stage === 'elaboration')!.resultRef, resultWrapper.resultRef)
   assert.deepEqual(reread.find(value => value.stage === 'analysis')!.resultRef, analysisWrapper.resultRef)
@@ -7016,6 +7041,17 @@ test('P0正式retry只重新派发未独审通过的分区，保留原模型和G
   assert.deepEqual(JSON.parse(readEvidence(commonDir, provenance.resultRef).toString()), { fromOperationId: old.id, fromAttemptId: prior.id, resultRef: accepted.resultRef })
   assert.equal(saved.some(stage => stage.stage === `${key}:continuation`), false)
   assert.equal(JSON.stringify({ operation: store.readOperation(old.id), attempts: store.listAttempts(old.id) }), bytes)
+
+  const parent = outcome.operation
+  active = store.admitAndEnqueue(await prepareSyncAdmission(f.input, f.plan, { ingressKey: 'partial-approved-p0-second-retry', rootCauseId: 'partial-approved-p0-second-retry', retryOf: parent.id, model: 'zcode:glm-5.3-flash', origin: parent.origin, budget: parent.budget, managedRoot: f.managedRoot, baselineSelection: store.readBusinessBaselineSelection(parent.id), executionScope: parent.scope }))
+  active = store.ackDispatch(f.input.source.repositoryId, active.dispatchMessageId); f.useOperation(active)
+  assert.equal(store.readOperation(old.id).phase, 'superseded')
+  const third = await runSyncOperation(store, active.id, f.options)
+  assert.equal(calls.some(call => call.operation === active.id), false, '第二次正式重试须沿祖先找到各区原始批准')
+  assert.equal(third.failure?.message, '完整P0已组装')
+  const carried = stages(third.operation, store.readAttempt(third.operation.currentAttemptId!))
+  assert.deepEqual(carried.find(stage => stage.stage === key)?.resultRef, accepted.resultRef)
+  assert.deepEqual(JSON.parse(readEvidence(commonDir, carried.find(stage => stage.stage === `${key}:provenance`)!.resultRef).toString()), { fromOperationId: old.id, fromAttemptId: prior.id, resultRef: accepted.resultRef })
 })
 
 // A1格式拒绝、A2局部accept但兄弟再失败、A3只续失败兄弟；不能把跨attempt的原analyze trace丢掉。

@@ -299,7 +299,15 @@ function retryDraftSources(store: SyncStore, operation: SyncOperation, attemptNu
   }
   return sources
 }
-const settledApprovalSource = (store: SyncStore, source: SyncOperation): boolean => ['failed', 'budget_exhausted', 'cancelled'].includes(source.phase) && store.readRetryEligibility(source.id).eligible
+function settledApprovalSource(store: SyncStore, source: SyncOperation): boolean {
+  if (source.phase !== 'superseded') return ['failed', 'budget_exhausted', 'cancelled'].includes(source.phase) && store.readRetryEligibility(source.id).eligible
+  // 正式重试的更早祖先可被新准入替代，原已结算的独审证据仍有来源。
+  return !!source.currentAttemptId
+    && store.listAttempts(source.id).every(attempt => ['failed', 'superseded', 'settled'].includes(attempt.status))
+    && !store.sourceContinuityState(source.input.source.commonDir).leasedOperationIds.includes(source.id)
+    && !store.listRecoverableResources().some(item => item.operation.id === source.id)
+    && store.listJournals(source.id).every(journal => journal.status === 'settled')
+}
 
 /** Git保活本身不证明模型完成；未认证的Native稿不能遮蔽更早合格原稿。 */
 function authenticatedDraftResult(store: SyncStore, owner: SyncOperation, prior: SyncAttempt, key: string, purpose: string, draft?: ElaborationDraft): { result?: ElaborationSessionResult; request?: ElaborationSessionRequest } | null {

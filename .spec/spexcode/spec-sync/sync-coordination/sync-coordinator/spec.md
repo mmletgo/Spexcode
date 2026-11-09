@@ -46,7 +46,7 @@ P1生成的ZCode `session/events` 精确超时也可沿上述已提交材料准�
 
 P0 只在本次 attempt 尚无阶段检查点和 code_behavior saved/reserved 派发时冻结 git-json-v2。已冻结的 git-json-v1、缺席字段及原请求保持精确恢复，未知传输在派发前拒绝。新运输在 Git 任务中保留当前任务和完整独审输入，失败仅持久化状态码、固定说明和必要身份。真实草稿、审查结果、source/tests 保护及资源结算仍依原门核验。
 
-显式 retryOf 只沿正式已结算祖先复用通过独审的局部 P0。冻结来源、输入、原意、计划、读集、业务基线、组合及局部 schema 和范围均一致时，认证原分析与独审、Git 原件和旧模型绑定，保存来源和原 resultRef。新操作只派发未批准分区，允许选择不同模型。原 attempt、调用、草稿及独审不补签。当前重新装配完整 P0；P1 仅分析资格及候选续验回到原操作复验该批准，全部当前封口和验证继续执行。
+显式 retryOf 只沿正式已结算祖先复用通过独审的局部 P0。冻结来源、输入、原意、计划、读集、业务基线、组合及局部 schema 和范围均一致时，认证原分析与独审、Git 原件和旧模型绑定，保存来源和原 resultRef。新操作只派发未批准分区，允许选择不同模型。原 attempt、调用、草稿及独审不补签。更早祖先因新准入被替代时，仍须重新核对已终结 attempt、活租约、资源和 journal 的结算。当前重新装配完整 P0；P1 仅分析资格及候选续验回到原操作复验该批准，全部当前封口和验证继续执行。
 
 P1权限/绑定非法的独审沿[[sync-elaboration]]现有同owner repairDiagnostics重审原合法候选。续审保留原generation trace，不要求新review轮号存在generate；按真实session/thread/turn命中该operation原attempt实际dispatch，再冷验完整保存Native请求、原结果/summary摘要及Git草稿seed/result身份。只有当前局部完整输入与原candidate机械校验保持、原review重新判为越界/绑定非法时才跳过生成；旧seed排除draft的边界、原请求字段缺席、控制attempt跳过判据、预算/资源/取消及全图seal保持。多次续审与后续只读owner返修均追溯同一真实generation来源，不把新审查轮当新生成。
 

@@ -424,6 +424,8 @@ test('首次与未完成基线保持全树bootstrap，before或失败admission�
   const incomplete = projectedSelection({ ...f.baseline, coveredScope: { ...f.baseline.coveredScope, paths: f.baseline.coveredScope.paths.filter(path => path !== f.paths[2]) } }, f.heads.bindings.map(binding => binding.resource))
   for (const [baseline, before] of [[null, null], [f.heads, null], [null, f.before], [incomplete, f.before]] as const) {
     const plan = await buildSyncApplicationPlan(snapshot, 'project', baseline, { direction: 'code_to_spec', commitTrigger: { before, paths: ['src/export.js'] } })
+    assert.ok(plan.version === 'sync-coordinator-v2')
+    assert.equal(plan.partitionPolicy.version, !baseline && !before ? 'sync-partition-policy-v2' : 'sync-partition-policy-v1')
     assert.deepEqual(plan.targets.map(target => target.nodeId), complete)
     const frozen = await context(snapshot, verifySnapshot(snapshot).map(entry => entry.path))
     const partitions = planSyncPartitions({ plan, files: frozen.files, contracts: frozen.contracts, nodes: frozen.nodes, changedPaths: before ? ['src/export.js'] : verifySnapshot(snapshot).map(entry => entry.path) })

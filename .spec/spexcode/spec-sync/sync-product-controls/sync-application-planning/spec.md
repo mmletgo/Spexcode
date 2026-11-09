@@ -56,3 +56,5 @@ mandatoryTests即使由contractImpact引用也只读；executionScope仅纳入�
 
 
 新正式构建返回 sync-coordinator-v2；可信入口显式冻结 direction 与 commitTrigger，直接 Spec 保存默认 spec_to_code。分区策略默认512KiB完整正文工作集及最多4个本操作同时任务，原生session容量仍另行约束。普通提交有真实before时，未治理源码发现从当前与before真实快照取并集且只纳入累计paths；删除的旧源码仍冻结精确readonly路径与当前absence，不能只发现仍存在的文件。治理排除继续沿当前和旧owner，不读取独立已治理节点。首次before:null才全量发现。旧已持久计划不通过此构建器升级；重试/恢复沿原计划与摘要。
+
+可信规划仅为没有前态、没有已采纳基线的新 code→Spec 初始化冻结 sync-partition-policy-v2。它把无目标、无治理归属、无写权的兼容源码发现组合并在现有容量内；旧操作和正式 retryOf 沿原已冻结策略及分区身份重放。

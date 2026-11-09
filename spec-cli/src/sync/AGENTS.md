@@ -62,3 +62,5 @@
 - 全局P1仅分析分区沿正式P0原件和同一冻结计划认证。真实P1与仅分析P0证据分别保存并完全覆盖原计划，封口返修和V1复用重核来源。writer28只追加SELECT1，升级须停稳旧writer、正式结算资源和租约并先做一致online backup；回滚恢复v27一致库及原evidence/Git refs。
 
 - writer33保护P1 V5事实资格；旧V1–V4/缺席、saved/reserved请求不补升级。升级先停稳旧writer/结算资源并做32一致online backup，回滚停新writer并恢复32库及配套evidence/Git refs，禁止删marker。旧批准owner按原source protocol冷验，新返修才绑定V5。
+
+- writer35 钉新初始化分区策略及跨正式 retry 的局部 P0 批准来源。升级停稳旧 writer 并结算资源及租约，保 v34 一致备份。旧分区按原冻结策略继续。回滚恢复对应 v34 库及证据和 Git refs，不删 marker。
