@@ -496,7 +496,7 @@ test('real creation queue runs a fake native CLI in the exact seed worktree, com
   mkdirSync(bin); mkdirSync(home)
   try {
     // Discard this fixture's unused first candidate; production creates its own governed linked worktree.
-    git(f.repo, ['worktree', 'remove', f.path])
+    git(f.repo, ['worktree', 'remove', f.path]); git(f.repo, ['config', '--local', 'core.filemode', 'true'])
     mkdirSync(join(f.repo, '.spec')); writeFileSync(join(f.repo, '.spec/spexcode.json'), JSON.stringify({ mainBranch: 'main', sessions: { maxActive: 1 } }))
     git(f.repo, ['add', '.spec']); git(f.repo, ['commit', '-qm', 'project'])
     const seed = { ...f.seed, baseCommit: git(f.repo, ['rev-parse', 'HEAD']), tree: git(f.repo, ['rev-parse', 'HEAD^{tree}']) }
@@ -515,6 +515,8 @@ if(prompt.startsWith('malformed')){const Ajv=require(${JSON.stringify(createRequ
 
 if(prompt.startsWith('alias')){const copy=path.join(${JSON.stringify(f.root)},'alias-copy');fs.cpSync(process.cwd(),copy,{recursive:true});fs.writeFileSync(path.join(copy,'probe'),'draft');cp.execFileSync('git',['-C',copy,'add','probe']);cp.execFileSync('git',['-C',copy,'commit','-qm','experimental probe']);fs.writeFileSync(path.join(copy,'index-probe'),'staged');cp.execFileSync('git',['-C',copy,'add','index-probe'])}
 if(prompt.startsWith('edit')||prompt.startsWith('dirty')){fs.writeFileSync('value','actual candidate\\n');if(!prompt.startsWith('dirty')){cp.execFileSync('git',['add','value']);cp.execFileSync('git',['commit','-qm','native candidate'])}}
+if(process.platform==='darwin'&&prompt.startsWith('edit')){const probe=cp.spawnSync('/usr/bin/git',['config','core.filemode','core.autocrlf'],{stdio:'ignore'});if(probe.error)throw probe.error;}
+
 send({type:'result',subtype:'success',is_error:false,session_id:session,uuid:'result',user_message_uuid:user.uuid,user_message_uuids:[user.uuid],structured_output:{ok:true}});
 });
 `)
@@ -533,7 +535,7 @@ const pending=await cancelStructuredSession(read.sessionId,{timeoutMs:20});asser
 await assert.rejects(runStructuredSession(make('blocked','edit blocked','edit',500)),{code:'timeout'});assert.equal(JSON.parse(readFileSync(${JSON.stringify(count)},'utf8')).length,1);
 renameSync(receipt+'.held',receipt);const restoredStop=await cancelStructuredSession(read.sessionId,{timeoutMs:1000});assert.equal(restoredStop.nativeStopped,true,JSON.stringify({restoredStop,unknown:JSON.parse(readFileSync(stoppedRecord.structuredExecution.claudeNative.root+'/unattributed-processes.json','utf8'))}));
 
-const edit=await runStructuredSession(make('edit','edit candidate','edit',null));assert.notEqual(edit.worktree.headCommit,seed.baseCommit);assert.equal(git(['rev-parse',edit.worktree.headCommit+'^{tree}']),edit.worktree.tree);assert.equal(readRecord(edit.sessionId).structuredExecution.resultWorktree.tree,edit.worktree.tree);
+const edit=await runStructuredSession(make('edit','edit candidate','edit',null));assert.equal(git(['config','--local','--get','core.filemode']),'true');assert.notEqual(edit.worktree.headCommit,seed.baseCommit);assert.equal(git(['rev-parse',edit.worktree.headCommit+'^{tree}']),edit.worktree.tree);assert.equal(readRecord(edit.sessionId).structuredExecution.resultWorktree.tree,edit.worktree.tree);
 const dirtyFailure=await runStructuredSession(make('dirty','dirty candidate','edit',10000)).then(()=>null,error=>error);const dirtyRecord=dirtyFailure?.sessionId&&readRecord(dirtyFailure.sessionId),unknownFile=dirtyRecord?.structuredExecution?.claudeNative?.root+'/unattributed-processes.json';assert.equal(dirtyFailure?.code,'native_worktree_result_invalid',JSON.stringify({code:dirtyFailure?.code,unknown:unknownFile&&existsSync(unknownFile)?JSON.parse(readFileSync(unknownFile,'utf8')):null}));
 assert.equal(dirtyRecord.structuredExecution.errorCode,'native_worktree_result_invalid');assert.equal(dirtyRecord.structuredExecution.state,'failed');assert.equal(dirtyRecord.structuredExecution.output,undefined);assert.equal(dirtyRecord.structuredExecution.resultWorktree,undefined);assert.equal(existsSync(dirtyRecord.structuredExecution.claudeNative.root+'/completed.json'),true);const beforeReplay=readFileSync(dirtyRecord.structuredExecution.claudeNative.root+'/completed.json');await assert.rejects(runStructuredSession(make('dirty','dirty candidate','edit',10000)),{code:'native_worktree_result_invalid'});assert.deepEqual(readFileSync(dirtyRecord.structuredExecution.claudeNative.root+'/completed.json'),beforeReplay);
 const aliasRequest=make('alias','alias read experiment','read',null),aliasFailure=await runStructuredSession(aliasRequest).then(()=>null,error=>error),aliasRecord=readRecord(aliasFailure.sessionId);assert.equal(aliasFailure.code,'native_worktree_result_invalid');assert.equal(aliasRecord.structuredExecution.errorCode,aliasFailure.code);assert.equal(aliasRecord.structuredExecution.output,undefined);assert.equal(aliasRecord.structuredExecution.resultWorktree,undefined);assert.match(aliasFailure.message,/index-probe/);await assert.rejects(runStructuredSession(aliasRequest),{code:'native_worktree_result_invalid'});

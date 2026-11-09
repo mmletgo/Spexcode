@@ -8,6 +8,14 @@ export type NativeWorktreeRequest = { baseCommit: string; tree: string; mode: 'r
 export type NativeWorktreeResult = { baseCommit: string; baseTree: string; headCommit: string; tree: string; worktreePath: string }
 const git = (cwd: string, args: string[]): string => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
 
+export function nativeWorktreeLaunch(worktreePath: string, cliPath: string, args: string[]): { command: string; args: string[] } {
+  if (process.platform !== 'darwin') return { command: cliPath, args }
+  const commonDir = realpathSync(git(worktreePath, ['rev-parse', '--path-format=absolute', '--git-common-dir']))
+  const config = join(commonDir, 'config')
+  const profile = `(version 1) (allow default) (deny file-write* (literal ${JSON.stringify(config)}) (literal ${JSON.stringify(config + '.lock')}))`
+  return { command: '/usr/bin/sandbox-exec', args: ['-p', profile, cliPath, ...args] }
+}
+
 /** 固定真实 seed 对象，拒绝 ref 或从当前工作区派生输入。 */
 export function assertNativeWorktreeSeed(root: string, seed: NativeWorktreeRequest): void {
   if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(seed.baseCommit) || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(seed.tree) || !['read', 'edit'].includes(seed.mode))

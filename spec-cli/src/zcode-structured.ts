@@ -1,4 +1,4 @@
-import { sampleNativeWorktreeProcesses, nativeWorktreeProcessesStopped } from './native-worktree-runtime.js'
+import { nativeWorktreeLaunch, sampleNativeWorktreeProcesses, nativeWorktreeProcessesStopped } from './native-worktree-runtime.js'
 import { Ajv } from 'ajv'
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
@@ -502,6 +502,7 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
   const resolved = spawnSync('/usr/bin/which', ['zcode'], { env: { PATH: process.env.PATH }, encoding: 'utf8' })
   if (resolved.error || resolved.status !== 0) throw new StructuredSessionError('unsupported', 'ZCode CLI is unavailable')
   const cliPath = realpathSync(resolved.stdout.trim())
+  const worktreeLaunch = worktree ? nativeWorktreeLaunch(worktreePath!, cliPath, []) : undefined
   const cliSha256 = bytesDigest(cliPath), builtinExists = existsSync(zcodeCapability.builtinPath), builtinSha256 = builtinExists ? bytesDigest(zcodeCapability.builtinPath) : undefined
   if (!genericNativeConfiguration && (cliSha256 !== zcodeCapability.cliSha256 || !builtinExists || builtinSha256 !== zcodeCapability.builtinSha256)) throw new StructuredSessionError('unsupported', 'ZCode CLI or public builtin capability digest is unverified')
   mkdirSync(root, { recursive: true, mode: 0o700 })
@@ -518,7 +519,8 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
     writeFileSync(profile, policy, { mode: 0o400 })
   }
   const env: NodeJS.ProcessEnv = { PATH: `${dirname(process.execPath)}:/usr/bin:/bin:/usr/sbin:/sbin`, HOME: home, TMPDIR: `${tmp}/`, ZCODE_DATA_BASE_DIR: home, ZCODE_BUILTIN_PROVIDER_CONFIG_FILE: zcodeCapability.builtinPath, ZCODE_PERSONAL_PROVIDER_CONFIG_FILE: personal }
-  const version = spawnSync(worktree ? cliPath : '/usr/bin/sandbox-exec', worktree ? ['--version'] : ['-f', profile, cliPath, '--version'], { cwd: workspace, env, encoding: 'utf8', timeout: 10000 })
+  const launch = worktreeLaunch ?? { command: '/usr/bin/sandbox-exec', args: ['-f', profile, cliPath] }
+  const version = spawnSync(launch.command, [...launch.args, '--version'], { cwd: workspace, env, encoding: 'utf8', timeout: 10000 })
   const cliVersion = version.stdout.trim()
   if (version.error || version.status !== 0 || !cliVersion || !genericNativeConfiguration && cliVersion !== zcodeCapability.cliVersion) throw new StructuredSessionError('unsupported', 'ZCode CLI version could not be recorded for this runtime')
   if (!worktree) {
@@ -537,7 +539,7 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
   await callbacks.onNative(native()); await callbacks.onTurnStarting?.()
   let launchFailure: Error | undefined
   if (worktree) await sampleNativeWorktreeProcesses(plan)
-  const child: ChildProcessWithoutNullStreams = spawn(worktree ? cliPath : '/usr/bin/sandbox-exec', worktree ? [ 'app-server', '--cwd', workspace] : ['-f', profile, cliPath, 'app-server', '--cwd', workspace], { cwd: workspace, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
+  const child: ChildProcessWithoutNullStreams = spawn(launch.command, [...launch.args, 'app-server', '--cwd', workspace], { cwd: workspace, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
   child.once('error', () => { launchFailure = new StructuredSessionError('cancellation_pending', 'ZCode native process failed during launch') })
   if (!child.pid) throw new StructuredSessionError('failed', 'ZCode isolated process could not start')
   let exited = false

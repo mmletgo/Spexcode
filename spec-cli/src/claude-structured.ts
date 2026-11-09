@@ -1,4 +1,4 @@
-import { NATIVE_PROCESS_OBSERVATION_LIMIT_MS, nativeWorktreeProcessesStopped, sampleNativeWorktreeProcesses } from './native-worktree-runtime.js'
+import { NATIVE_PROCESS_OBSERVATION_LIMIT_MS, nativeWorktreeLaunch, nativeWorktreeProcessesStopped, sampleNativeWorktreeProcesses } from './native-worktree-runtime.js'
 import { Ajv } from 'ajv'
 import { spawn, spawnSync, execFileSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
@@ -534,7 +534,8 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
   const resolved = spawnSync('/usr/bin/which', ['claude'], { encoding: 'utf8' })
   if (resolved.error || resolved.status !== 0) throw new StructuredSessionError('unsupported', 'Claude CLI is unavailable in the current process PATH')
   const cliPath = realpathSync(resolved.stdout.trim())
-  const cliVersion = execFileSync(cliPath, ['--version'], { encoding: 'utf8' }).trim()
+  const worktreeLaunch = worktree ? nativeWorktreeLaunch(worktreePath!, cliPath, []) : undefined
+  const cliVersion = execFileSync(worktreeLaunch?.command ?? cliPath, [...(worktreeLaunch?.args ?? []), '--version'], { encoding: 'utf8' }).trim()
   if (!cliVersion || !nativeConfiguration && cliVersion !== CLI_VERSION) throw new StructuredSessionError('unsupported', 'Claude CLI version has no verified isolated capability identity')
   const binaryDigest = createHash('sha256').update(readFileSync(cliPath)).digest('hex')
   mkdirSync(root, { recursive: true, mode: 0o700 })
@@ -575,7 +576,8 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
   writeFileSync(join(root, 'launch.json'), JSON.stringify({ command: cliPath, args, environmentNames: Object.keys(env), cwd, capability: { cliVersion, binaryDigest, ...(nativeConfiguration ? { configurationSource: 'native' } : { maxReadBytes: 65536, maxResultSizeChars: 500000, maxMcpOutputTokens: 500000 }) } }), { mode: 0o400 })
   await callbacks.onTurnStarting?.()
   if (worktree) await sampleNativeWorktreeProcesses(plan)
-  const child = spawn(worktree ? cliPath : '/usr/bin/sandbox-exec', worktree ? args : ['-f', profile, cliPath, ...args], { cwd, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
+  const launch = worktreeLaunch ?? { command: '/usr/bin/sandbox-exec', args: ['-f', profile, cliPath] }
+  const child = spawn(launch.command, [...launch.args, ...args], { cwd, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
   if (!child.pid) throw new StructuredSessionError('failed', 'Claude isolated process could not start')
   const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => child.once('close', (code, signal) => resolve({ code, signal })))
   child.once('error', () => {})

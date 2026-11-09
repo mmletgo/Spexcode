@@ -68,6 +68,8 @@ NativePlan v1/v2 与缺席 `nativeConfiguration` 的历史请求保持原策略�
 
 明确的 version6/native-worktree-v1 使用创建记录的真实 worktree 作为 workspace/cwd，read 用原生 plan、edit 用原生 build，保留正常内置工具，不设 frozen MCP/只读 Seatbelt 或唯一工具限制。权限请求仅对当前 session 一次批准正常读/搜索/shell，文件修改只批准 edit 模式的本 worktree，且不写 permissionUpdates、不建立读取内容/路径白名单。仅 schema 控制最终 JSON；原 provider/model/effort 快照、唯一 session/input/query/turn、原始 send/messages/events、精确成功终态、idle/close、exit0 与整个自有进程停止仍逐项核实。完成及冷复用不生成或消费 frozenReadProof，也不要求分块读取及逐字 API 消费；旧 frozen policy 及工具门不变。
 
+macOS 的新 worktree 版本探测与 app-server 子进程沿 [[native-worktree-runtime]] 保护实际共享 Git config 及其锁文件；仍使用原生 CLI、同一参数与本机配置。冻结只读和历史结果的认证保持原协议。
+
 同一 v6 worktree 调用收到原子进程 close、且没有 stop 请求、取消、协议错误或原执行错误时，关闭后的首次非终止完整观察一旦确认停止，就在原绝对截止内直接用它写原 exit。未获 close、首检未证停止、进入终止回退、已有取消或失败及旧 frozen 仍按原观察与结算路径。随后本次 worktree 调用直接使用写原 exit 前的同一次新鲜停止观察。只有该次观察确认原进程组、相关后代与任务域未知进程都已结算，才进入同栈完成核验；期间不再排队重复观察，仍在原绝对停止截止内完成核验与发布。取消优先、原 exit、终态、消息、模型与 schema 门不变。
 
 已持久 completed 的 worktree 冷重放核原完成缓存、固定请求、Native 身份、schema/输出和原 exit.stopped/close 证据，不再探测历史 PID/PGID，避免无关复用导致伪 stale；未结算的冷恢复仍必须重新实时证明原进程与后代停止。

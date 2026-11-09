@@ -524,7 +524,7 @@ for (const censusPhase of ['pre-exit', 'post-exit', 'late-protocol-error'] as co
   let preExitCensusCalls = 0, postExitCensusCalls = 0, preExitInjectedCensusCalls = 0, postExitInjectedCensusCalls = 0, coldReplayRequested = false
   const cli = join(bin, 'zcode')
   const rpcFixture = `#!/usr/bin/env node
-const readline=require('node:readline');
+const readline=require('node:readline'),cp=require('node:child_process');
 if(process.argv.includes('--version')){process.stdout.write('99.4.1\\n');process.exit(0)}
 const rl=readline.createInterface({input:process.stdin});let create,send;
 const turnId='fixture-turn',response='{"ok":true}',model=()=>create.model;
@@ -532,7 +532,7 @@ const reply=(id,result)=>process.stdout.write(JSON.stringify({id,result})+'\\n')
 rl.on('line',line=>{const request=JSON.parse(line),params=request.params||{};
 if(request.method==='session/create'){create=params;reply(request.id,{session:{sessionId:create.sessionId,model:create.model}})}
 else if(request.method==='session/read')reply(request.id,{session:{sessionId:create.sessionId,status:'idle',model:model()},settings:{model:{current:model()}},runtime:{pendingRequestIds:[]},projection:{currentTurnId:send?turnId:undefined,pendingPermissions:[],activeToolCalls:[]}})
-else if(request.method==='session/send'){send=params;reply(request.id,{accepted:true,sessionId:create.sessionId})}
+else if(request.method==='session/send'){if(process.platform==='darwin'&&${JSON.stringify(censusPhase)}==='pre-exit'){const probe=cp.spawnSync('/usr/bin/git',['config','core.filemode','core.autocrlf'],{stdio:'ignore'});if(probe.error)throw probe.error;}send=params;reply(request.id,{accepted:true,sessionId:create.sessionId})}
 else if(request.method==='session/events'){const events=[
 {type:'turn.started',payload:{inputId:send.inputId,queryId:send.queryId,messageId:'fixture-user'}},
 {type:'session.updated',payload:{providerId:model().providerId,modelId:model().modelId,toolCount:0}},
@@ -548,6 +548,7 @@ else throw new Error('unexpected fixture RPC')
 `
   writeFileSync(cli, rpcFixture); chmodSync(cli, 0o755)
   execFileSync('git', ['init', '-q'], { cwd: workspace })
+  execFileSync('git', ['config', '--local', 'core.filemode', 'true'], { cwd: workspace })
   execFileSync('git', ['config', 'user.name', 'Fixture'], { cwd: workspace })
   execFileSync('git', ['config', 'user.email', 'fixture@example.invalid'], { cwd: workspace })
   writeFileSync(join(workspace, 'seed.txt'), 'fixture seed\n')
@@ -638,6 +639,10 @@ else throw new Error('unexpected fixture RPC')
     assert.equal(preExitInjectedCensusCalls, 0, 'fresh pre-exit proof must avoid another census')
     assert.equal(outcome.result.turnId, 'fixture-turn')
     assert.equal(outcome.result.text, '{"ok":true}')
+    if (process.platform === 'darwin' && censusPhase === 'pre-exit') {
+      execFileSync('git', ['worktree', 'list', '--porcelain'], { cwd: workspace, stdio: ['ignore', 'pipe', 'pipe'] })
+      assert.equal(execFileSync('git', ['config', '--local', '--get', 'core.filemode'], { cwd: workspace, encoding: 'utf8' }).trim(), 'true')
+    }
     assert.equal(existsSync(completedPath), true)
     const stopObservations = readFileSync(stopObservationsPath, 'utf8').trim().split('\n').map(line => JSON.parse(line) as { nativeStopped: boolean })
     assert(censusPhase === 'pre-exit' ? stopObservations.length === 1 : [1, 2].includes(stopObservations.length))

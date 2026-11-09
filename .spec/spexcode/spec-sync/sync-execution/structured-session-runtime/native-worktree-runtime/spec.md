@@ -16,6 +16,8 @@ related:
 
 执行器使用真实创建记录 worktreePath。完成时 status 必须干净；read 要求 HEAD/tree 均等于 seed，edit 要求 HEAD 是 seed 后代，代理负责正常 add/commit，任何 dirty/提交失败均失败。结果保存 baseCommit/baseTree/headCommit/tree/worktreePath，在冷复用时再次核同一不可变 Git 对象与祖先关系；正式 close 已移除工作区时保留历史 path 而不重建，不信模型文本或旧 frozenReadProof。
 
+macOS 在登记新原生 worktree 进程的启动请求之前解析该工作树实际 Git common directory。版本探测及执行子进程共用同一保护，仅禁止子进程及后代写入共享 config 及其锁文件。读文件、原生认证与模型配置、每个工作树的 index、Git 对象、引用与不写共享配置的带钩子提交保持原能力；共享配置如需更新，由宿主在该执行边界之外处理。其他平台沿原启动和严格结果校验；此启动边界不改签已有原生请求、结果或停止证明。
+
 Native spawn 前保存同 UID 的 PID/start/PPID 基线，只读取进程元数据。receipt 的原生进程组及实际观察到的历史 owned 后代仍须按精确身份停止。新生 PPID1 或失去父链不等于任务归属；只有唯一 worktree/runtime/私有 tmp 的 cwd 等正向任务域证据才登记关联孤儿。关联证据按 PID/start 粘性保存，后续 chdir 不撤销，直到该精确身份消失；cwd 关联本身不授予 kill 权。无正向关联的同 UID 进程仅作 unattributed 诊断，不占任务容量，不按系统服务名设白名单。此边界不声称证明首次观察前已 chdir 脱域的任意系统进程都与任务无关；普通自由读取、编辑与检查能力保持。
 
 macOS按PID查询cwd时使用lsof -b，避开此查询不需要的stat/lstat/readlink；cwd仍取原libproc结果，候选UID与停止身份门保持，其他潜在阻塞继续受原期限和pending规则约束。
