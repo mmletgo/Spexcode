@@ -63,6 +63,8 @@ version5/null 请求沿原 Claude policy、realm 与版本3读取证明执行，
 
 明确的 version6/native-worktree-v1 是独立执行模式：cwd 必须为创建记录的真实 worktree；read 使用原生 plan 权限且完成不许改动，edit 使用正常可写权限与内置文件/Bash 工具，不施加 frozen MCP 唯一工具、restricted/空工具或只读 Seatbelt。仍隔离运行记录，不输出凭据。缺少新配置标记时保持旧认证投影与精确模型语义；原 session/user UUID、原 prompt 回显及 history、成功 structured_output/schema、自然 exit0 或下述精确受控非零退出、专属整组停止共同绑定结果；不要求分块读取或逐字 API 消费证明，也不借用旧 frozenReadProof。冷完成读取原 evidence 并核 Git 结果，不重启 CLI。旧 claude-frozen-read-only-v1 原约束不变。
 
+macOS 的新 worktree 版本探测与执行子进程沿 [[native-worktree-runtime]] 保护实际共享 Git config 及其锁文件；仍使用原生 CLI、同一参数与本机配置。冻结只读和历史结果的认证保持原协议。
+
 新建 worktree 请求显式冻结 `nativeConfiguration: cli-config-v1`，对应 Native plan/version2，不能替已有 saved、reserved 或旧 plan1 补标记或重签。此分支只用 `claude:` 路由执行器：`claude:default` 完全省略 `--model`，由 CLI 现有配置选择；其它非空、无 NUL 的后缀原串作为单个 argv 交给 CLI，接受别名、供应商路径及上下文后缀，不维护模型、供应商、baseurl 或 CLI 版本名册，不拼 shell。CLI 实际 `--version` 和 binaryDigest 只记录本轮观测；旧未完成请求不能借新配置语义在另一 binary 冒充执行。
 
 新分支继承正常进程环境和 CLI 用户/项目/managed 配置解析；仅按现有 harness 身份枚举移除父会话的 SPEXCODE_SESSION_ID 与各 sessionEnvVar，再注入本轮创建记录的 SPEXCODE_SESSION_ID，避免原生 hooks/工具写入父会话。认证、provider/baseurl、SPEXCODE_HOME 和数据库路由等非身份环境仍正常继承；不设置私有 CLAUDE_CONFIG_DIR，不清空 setting-sources，不投影或读取 settings/credentials，不探测、改写、保存或打印认证值和实际 baseurl；CLI 自己沿原认证、替代供应商及路由执行。只隔离本轮 tmp/debug、进程 receipt 与公开证据；read/edit 权限、JSON schema 与原生内置工具模式保持，不添加冻结分块读取约束。配置来源可记为 native，协议缺少所需真实字段仍如实失败。

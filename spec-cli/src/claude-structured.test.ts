@@ -1055,6 +1055,7 @@ for (const [selected, configMode, outcome] of [['default', 'unset', 'success'], 
   const watchdog = periodic ? setTimeout(() => controller.abort(), 45_000) : undefined
   try {
     mkdirSync(bin); mkdirSync(config, { recursive: true }); mkdirSync(workspace)
+    childProcess.execFileSync('git', ['init', '-q'], { cwd: workspace, stdio: 'pipe' })
     writeFileSync(join(config, 'settings.json'), 'UNPARSEABLE_PUBLIC_FIXTURE_SETTINGS')
     const log = join(directory, 'observed.json'), cli = join(bin, 'claude'), actualModel = 'native-provider/resolved-model'
     writeFileSync(cli, `#!${process.execPath}
