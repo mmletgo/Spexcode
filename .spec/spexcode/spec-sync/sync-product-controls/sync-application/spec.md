@@ -151,3 +151,5 @@ resources-only是独立于control(recover)的显式清理入口：要求完整op
 正式 retryOf 也允许完整 settled 但明确未采纳的私有交付：先认证全部 receipt/候选/验证/原输入与当前来源仍干净且冻结 HEAD 不变，再在准入事务绑定父记录与全部 journal。只允许父自身 receipt 导致的相同资源 heads 推进。新操作保持原 input/request/plan/scope/原预算，省略模型保持原请求选择，显式换 requested model 仍沿既有 retry 规则且不限制 CLI 版本/baseURL/模型配置；旧操作及其 receipt 不改写；原业务 selection 由 retryOf 派生用于分析，当前 selection 只作新操作 CAS。已采纳、部分交付、未知证据、来源漂移或第三方 heads 推进拒绝。
 
 resources-only 对未发布且确证从未启动的 owned Native 候选允许显式保留式终止：通过原创建拥有权、物理登记、冻结 fork、未发布与无 generation/owner 门后，v2 preserved receipt 明确 cleanupComplete:false，原场地、分支、index、初始化锁及 prepared receipt 原样保留。正式 terminal→removed 只结算执行容量，不表示场地已删除、交付已合入/采纳或保留责任消失；同键不再创建，后续清理必须识别并继续保留该场地。未知身份、已发布或 Native 停止未证仍 recovery_required；普通 recover 的未知内容删除保护不变。此入口不新建业务操作、不修改原 pause/calls/attempt/failure、不启动模型、会话、watcher 或 queue。
+
+手工 initial 请求可显式 committed，从实际 HEAD tree 冻结输入。Git 清理过滤掩盖的本地字节和暂存改动均不混入。该选项仅适用无受控正文、无 retryOf 的新初始化。同 requestId 只能复用原工作区或提交输入类型。普通手工接入及正式 retryOf 保持原来源语义。

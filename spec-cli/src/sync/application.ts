@@ -36,7 +36,7 @@ import { isSyncSpecPath, readFrozenContracts } from './frozen-contracts.js'
 import { assertSourceAdoptionComplete, fastForwardSource, prepareSourceAdoption, settledReceipt, sourceAdoptionScopeCovers, sourceAdoptionMutexPath, type SourceAdoptionPlan } from './source-adoption.js'
 
 export type SyncScopeCoverage = { includedNodeIds: string[]; contextNodeIds: string[]; missingNodeIds: string[]; excludedNodeIds: string[]; totalNodeCount: number }
-export type SyncSubmitInput = { nodeId: string; requestId: string; origin?: 'spec' | 'initial' | 'code' | 'combined' | 'decision'; patch?: SpecBodyEdit; retryOf?: string; model?: string }
+export type SyncSubmitInput = { nodeId: string; requestId: string; origin?: 'spec' | 'initial' | 'code' | 'combined' | 'decision'; patch?: SpecBodyEdit; retryOf?: string; model?: string; committed?: boolean }
 export type SyncRevertEligibility = { eligible: true } | { eligible: false; reason: { code: string; message: string } }
 export type SyncAdoptEligibility = { eligible: true } | { eligible: false; reason: { code: string; message: string } }
 export type SyncOperationDetail = { operation: SyncOperation; physicalControl: PhysicalControl; attempt: ReturnType<SyncStore['readAttempt']> | null; journals: ReturnType<SyncStore['listJournals']>; stale: boolean; sourceSynced: boolean; canonicalSynced: boolean; adoptionEligibility: SyncAdoptEligibility; revertEligibility: SyncRevertEligibility; retryEligibility: ReturnType<SyncStore['readRetryEligibility']>; decisionEligibility: ReturnType<SyncStore['readDecisionEligibility']>; resources: ReturnType<SyncStore['listRecoverableResources']>[number]['resource'][]; decisionContext: { analysisRef: BlobRef; analysis: CodeBehaviorAnalysis } | null; executionAvailability: { status: 'ready' | 'recovery_required'; failure?: { code: string; message: string } } }
@@ -644,8 +644,10 @@ export class SyncApplication {
     if (input.retryOf !== undefined && (typeof input.retryOf !== 'string' || !input.retryOf.trim())) throw new SyncApplicationError('sync_retry_invalid', '显式重试需要完整旧 operation ID', 400)
     if (input.retryOf && input.patch) throw new SyncApplicationError('sync_retry_changed', '显式重试沿用原正文意图；新的正文修改请发起新请求', 400)
     if (input.origin !== undefined && !['spec', 'initial', 'code', 'combined'].includes(input.origin) && !(input.retryOf && input.origin === 'decision')) throw new SyncApplicationError('sync_origin_unsupported', '输入来源必须为 spec、initial、code 或 combined', 400)
+    if (input.committed !== undefined && typeof input.committed !== 'boolean' || input.committed && (input.origin !== 'initial' || input.retryOf || input.patch)) throw new SyncApplicationError('sync_committed_initial_invalid', '提交快照选项只用于无正文修改、无retryOf的initial新操作', 400)
     const retry = input.retryOf ? this.store.readOperation(input.retryOf) : null
-    let snapshot = await captureInputSnapshot(this.root, { committed: retry?.input.captureKind === 'commit' })
+    const committed = input.committed === true || retry?.input.captureKind === 'commit'
+    let snapshot = await captureInputSnapshot(this.root, { committed })
     this.requireEnabled(snapshot)
     await this.requireNodeAuthorized(snapshot, input.nodeId)
     if (retry) {
@@ -664,6 +666,8 @@ export class SyncApplication {
     const mutex = await this.requestMutex(ingressKey, finiteSyncBudget(settings.budget)?.timeoutMs ?? 30000)
     try {
       const prior = this.store.findOperationByIngressKey(ingressKey), ingress = this.store.findIngressReceipt(ingressKey)
+      const priorInput = ingress?.input ?? prior?.input
+      if (origin === 'initial' && !retry && priorInput && committed !== (priorInput.captureKind === 'commit')) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
       if (prior?.baselineSelection) {
         if (prior.input.captureKind === 'commit' && snapshot.captureKind !== 'commit') snapshot = await captureInputSnapshot(this.root, { committed: true })
         this.requireEnabled(snapshot, prior)

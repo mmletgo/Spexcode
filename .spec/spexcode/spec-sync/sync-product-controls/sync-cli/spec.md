@@ -46,3 +46,5 @@ P4 增加无operation参数的 pause/resume，调用 /automatic/pause|resume 物
 run/verify 接收 --model 并传给正式 HTTP 应用；控制/恢复命令遇到该 flag 明确拒绝。help/guide说明新业务操作显式模型覆盖版本化 `sync.model`，无 prior/retry 时以项目值或 sol 为默认；同 request ID 保持原模型，换模型必须使用 retryOf，合法省略 retry 继承原选择，遵循 [[sync-model-selection]]。
 
 spex sync resources recover <operation-id> --input-id <frozen-input-id>是显式单次离线资源入口，直接调用同一resources-only应用，不启动API、watcher或automatic queue；不接受模型、retry、业务request或HTTP选项。必须提供精确旧输入身份，当前canonicalRoot/commonDir核对仍执行；只输出资源结算及未决journal摘要。busy/资源未证实停止时非零退出并保留资源。普通recover仍走后端且可能恢复已开始journal，语义不变；离线资源清理不表示resume、adopt、业务通过或可忽略source身份变化。
+
+run --origin initial --committed 显式选择实际提交 HEAD。CLI 只对新的 initial 请求发送布尔 committed，遇到其它命令、正文 patch 或 retryOf 时在 HTTP 前拒绝。
