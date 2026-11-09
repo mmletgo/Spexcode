@@ -209,7 +209,7 @@ test('14attempt/1790CAS历史扫描交还控制，同一30秒fence到达首次�
 const zcodeCompletedRpcCases = (['none', 'request', 'thread', 'turn', 'missing-dispatch-session', 'null-dispatch-thread', 'null-dispatch-turn', 'harness-thread', 'rpc-method', 'unsettled', 'failed-observation', 'rpc-proof', 'stop', 'missing-exit', 'exit', 'idle', 'closed', 'idle-identity', 'no-terminal', 'failed-terminal', 'cancelled-terminal', 'terminal-json', 'terminal-kind', 'session', 'dirty', 'source', 'tests', 'schema', 'version', 'model', 'no-commit', 'fence'] as const).map(defect => ['zcode-completed-rpc', defect] as const)
 const zcodeP1CompletedRpcCases = (['none', 'partition', 'rpc-method', 'null-dispatch-thread', 'missing-exit', 'no-terminal', 'failed-terminal', 'cancelled-terminal', 'no-commit', 'dirty', 'source', 'schema'] as const).map(defect => ['zcode-p1-completed-rpc', defect] as const)
 const zcodeP1CommittedCases = (['none', 'ordinary-ignored', 'older-physical'] as const).map(defect => ['zcode-p1-transport-committed', defect] as const)
-const zcodeMaterialCases = [...(['zcode-old', 'zcode-new'] as const).flatMap(mode => (['none', 'prior-draft', 'session', 'send', 'turn', 'input', 'query', 'message', 'model', 'worktree', 'stop', 'seed', 'source', 'tests', 'schema', 'scope', 'request', 'exit', 'terminal', 'no-progress-cancelled', 'progress-cancelled', 'fence'] as const).map(defect => [mode, defect] as const)), ['zcode-new', 'failed-observation'] as const, ...(['none', 'no-commit', 'provider-code'] as const).map(defect => ['zcode-transport-git', defect] as const), ['zcode-p1-transport-dirty', 'none'] as const, ...zcodeP1CommittedCases, ...zcodeP1CompletedRpcCases, ...zcodeCompletedRpcCases, ...(['none', 'prior-draft', 'older-physical', 'staged', 'review', 'session', 'stop', 'seed', 'source', 'tests', 'schema', 'context', 'index', 'scope', 'worktree', 'fence', 'cas', 'missing-exit'] as const).map(defect => ['zcode-dirty', defect] as const), ...(['none', 'prior-draft', 'older-physical', 'missing-exit'] as const).map(defect => ['zcode-p1-dirty', defect] as const)]
+const zcodeMaterialCases = [...(['zcode-old', 'zcode-new'] as const).flatMap(mode => (['none', 'prior-draft', 'session', 'send', 'turn', 'input', 'query', 'message', 'model', 'worktree', 'stop', 'seed', 'source', 'tests', 'schema', 'scope', 'request', 'exit', 'terminal', 'no-progress-cancelled', 'progress-cancelled', 'fence'] as const).map(defect => [mode, defect] as const)), ['zcode-old', 'no-progress-empty-commit-cancelled'] as const, ['zcode-new', 'failed-observation'] as const, ...(['none', 'no-commit', 'provider-code'] as const).map(defect => ['zcode-transport-git', defect] as const), ['zcode-p1-transport-dirty', 'none'] as const, ...zcodeP1CommittedCases, ...zcodeP1CompletedRpcCases, ...zcodeCompletedRpcCases, ...(['none', 'prior-draft', 'older-physical', 'staged', 'review', 'session', 'stop', 'seed', 'source', 'tests', 'schema', 'context', 'index', 'scope', 'worktree', 'fence', 'cas', 'missing-exit'] as const).map(defect => ['zcode-dirty', defect] as const), ...(['none', 'prior-draft', 'older-physical', 'missing-exit'] as const).map(defect => ['zcode-p1-dirty', defect] as const)]
 for (const [mode, defect] of [['pause', 'archived'], ['native-failure', 'archived'], ['zcode-p1-transport-committed', 'archived'], ['native-failure', 'no-progress-143'], ['native-failure', 'no-progress-143-foreign'], ['native-failure', 'no-progress-143-stop'], ['native-failure', 'no-progress-143-process'], ['native-failure', 'progress-143'], ['native-failure', 'none'], ['native-failure', 'prior-draft'], ['native-failure', 'session'], ['native-failure', 'user'], ['native-failure', 'exit'], ['native-failure', 'unknown'], ['native-failure', 'source'], ['native-failure', 'tests'], ['native-failure', 'stop'], ['missing-final', 'none'], ['pause', 'none'], ['pause', 'prior-draft'], ['missing-final', 'prior-draft'], ['pause', 'older-pause'], ['pause', 'not-started'], ['pause', 'no-commit'], ['missing-final', 'session'], ['missing-final', 'user'], ['missing-final', 'exit'], ['missing-final', 'unknown'], ['missing-final', 'completed'], ['pause', 'source'], ['pause', 'tests'], ['pause', 'scope'], ['pause', 'seed'], ['pause', 'thread'], ['pause', 'turn'], ['pause', 'schema'], ['pause', 'worktree'], ['pause', 'stop'], ['pause', 'request'], ...zcodeMaterialCases] as const) test(`旧Native无typed witness的新attempt仅观察最新Git材料，旧原件不补签 mode=${mode}/${defect}`, async t => {
   const completedP1Rpc = mode === 'zcode-p1-completed-rpc', completedRpc = mode === 'zcode-completed-rpc' || completedP1Rpc
   const rpcFailure = `ZCode native RPC timeout (${defect === 'rpc-method' ? 'session/messages' : 'session/events'})`
@@ -357,6 +357,14 @@ for (const [mode, defect] of [['pause', 'archived'], ['native-failure', 'archive
     for (const text of defect === 'not-started' || defect === 'no-commit' || defect.startsWith('no-progress-') ? [] : [priorText, latest]) {
       writeFileSync(join(workspace, path), text)
       if (!dirty) { execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '--allow-empty', '-m', 'normal native draft progress'], { stdio: 'pipe' }) }
+    }
+    if (defect === 'no-progress-empty-commit-cancelled') {
+      execFileSync('git', ['-C', workspace, 'commit', '--allow-empty', '-m', 'cancelled native turn without draft progress'], { stdio: 'pipe' })
+      const emptyCommit = nativeWorktreeResult(workspace, seed)
+      assert.notEqual(emptyCommit.headCommit, seed.baseCommit)
+      assert.equal(emptyCommit.tree, seed.tree)
+      assert.equal(execFileSync('git', ['-C', workspace, 'diff', '--name-only', seed.baseCommit, emptyCommit.headCommit], { encoding: 'utf8' }).trim(), '')
+      assert.equal(existsSync(join(workspace, path)), false)
     }
     if (defect === 'ordinary-ignored') {
       writeFileSync(join(f.input.source.commonDir, 'info/exclude'), '/stopped-runtime-cache/\n')
@@ -564,6 +572,13 @@ for (const [mode, defect] of [['pause', 'archived'], ['native-failure', 'archive
   assert(p1 || completedRpc && defect === 'dirty' ? ['unsupported', 'budget_exhausted'].includes(result.status) : result.status === 'unsupported', JSON.stringify({ status: result.status, failure: result.failure })); assert.equal(continued, materialExpected, JSON.stringify({ result: result.failure, attempts: f.store.listAttempts(f.operation.id).map(attempt => ({ number: attempt.number, failure: attempt.failure, calls: attempt.dispatchPlans.length })) }))
   if (defect === 'no-progress-143') assert.equal(restartedWithoutMaterial, true, '合法owned/stopped但HEAD==seed无JSON须在终态分类前skip，允许新任务')
   if (defect === 'no-progress-cancelled') assert.equal(restartedWithoutMaterial, true, '合法ZCode无进度取消仅跳过，不授新稿或成功')
+  if (defect === 'progress-cancelled') {
+    assert.equal(result.failure?.code, 'stale_result')
+    assert.equal(result.failure?.message, 'stale_result: ZCode新Git材料没有原精确失败终态')
+    assert.equal(restartedWithoutMaterial, false)
+    assert.equal(f.store.listAttempts(f.operation.id).filter(attempt => attempt.number > originalAttemptNumber).flatMap(attempt => attempt.dispatchPlans).length, 0)
+  }
+  if (defect === 'no-progress-empty-commit-cancelled') assert.equal(restartedWithoutMaterial, true, JSON.stringify({ message: 'cancelled ZCode空提交仍须作为无进度跳过并派发新任务', status: result.status, failure: result.failure, attempts: f.store.listAttempts(f.operation.id).map(attempt => ({ number: attempt.number, status: attempt.status, failure: attempt.failure, dispatches: attempt.dispatchPlans.length })) }))
   if (typedTransport && defect === 'no-commit') assert.equal(restartedWithoutMaterial, true, '精确已停EPIPE无真实进度仍应无稿派发')
   if (defect === 'provider-code') assert.equal(result.failure?.code, 'stale_result')
   if (defect.startsWith('no-progress-143-')) assert.equal(restartedWithoutMaterial, false, 'foreign/unknown stop不能借无进度越过认证')
@@ -624,7 +639,13 @@ for (const [mode, defect] of [['pause', 'archived'], ['native-failure', 'archive
     }
   }
   if (older) { assert.equal(observed, undefined, '较旧物理来源即使在新fence晚观察，也不能覆盖更新正常Git稿'); return }
-  if (!materialExpected) { assert.equal(observed, undefined); return }
+  if (!materialExpected) {
+    assert.equal(observed, undefined)
+    if (defect === 'no-progress-empty-commit-cancelled') {
+      assert(f.store.listAttempts(f.operation.id).some(attempt => attempt.number > originalAttemptNumber && attempt.dispatchPlans.some(dispatch => dispatch.purpose === 'code_behavior_analyze')), '无进度空提交应在不复制旧稿/生成provenance后到达下一真实fixture dispatch')
+    }
+    return
+  }
   assert(observed); const provenance = JSON.parse(readEvidence(f.input.source.commonDir, observed.resultRef).toString())
   assert.equal(dirty ? provenance.observedHeadCommit : provenance.resultCommit, latestHead); assert.equal(provenance.sourceKind, committedP1 ? 'stopped_git_draft' : dirty ? 'physical_draft' : 'git_draft'); assert.equal(provenance.approved, false); assert.equal(provenance.observationKind, zcode ? 'native-failure' : mode); assert.equal(provenance.draftSha256, contentHash(latest)); assert(provenance.observedAt > 0)
   if (dirty) { assert.equal(provenance.resultCommit, undefined); assert.equal(provenance.oid, undefined); assert.equal(JSON.parse(readEvidence(f.input.source.commonDir, provenance.materialRef).toString()).source, latest) }

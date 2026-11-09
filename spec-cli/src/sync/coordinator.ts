@@ -1978,7 +1978,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
                 return { source: physical.source, errors: [...context.errors], repairDiagnostics: context.repairDiagnostics, sourceKind: 'physical_draft' }
               }
               const witness = nativeWorktreeResult(proof.record.worktreePath, native.request.worktree!)
-              if (witness.headCommit === native.request.worktree!.baseCommit) return null
+              if (witness.headCommit === native.request.worktree!.baseCommit || zcode && witness.tree === witness.baseTree) return null
               if (zcode && !zcodeFailed) fail('stale_result', 'ZCode新Git材料没有原精确失败终态')
               const format = !zcode && proof.observedFailure ? observeClaudeStoppedWorktreeFailure(prompt, state, proof.record.worktreePath) : undefined
               const draft = captureStageDraft(operation.input.source.commonDir, native.request.worktree!, { worktree: witness }, binding)
