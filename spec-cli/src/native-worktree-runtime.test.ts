@@ -626,8 +626,11 @@ for(const mode of ${JSON.stringify(modes)}){
           chmodSync(path,0o600);writeFileSync(path,bytes);chmodSync(path,0o400);renameSync(path,path+'.held');await assert.rejects(claudeStructuredTurn(realm,id,mode,execution,callbacks,workspace),{code:name==='terminal-stop.json'?'cancellation_pending':'stale_result'});renameSync(path+'.held',path);
         }
       }
-    }else if(mode==='hanging-success'||mode==='term-exit-zero'){
-      assert.equal(outcome.error?.code,'failed');assert.equal(existsSync(join(root,'completed.json')),false);const exit=JSON.parse(readFileSync(join(root,'exit.json'),'utf8'));assert.equal(exit.code,mode==='hanging-success'?null:0);assert.equal(exit.signal,mode==='hanging-success'?'SIGTERM':null);assert.equal(exit.stopped,true);execution.state='failed';await assert.rejects(claudeStructuredTurn(realm,id,mode,execution,callbacks,workspace),error=>['failed','stale_result'].includes(error.code));
+    }else if(mode==='hanging-success'){
+      assert.deepEqual(JSON.parse(outcome.value.text),{items:[]});const exitBytes=readFileSync(join(root,'exit.json')),exit=JSON.parse(exitBytes);assert.equal(exit.code,null);assert.equal(exit.signal,'SIGTERM');assert.equal(exit.stopped,true);assert.equal(JSON.parse(readFileSync(join(root,'terminal-stop.json'),'utf8')).outcome,'sent');
+      const dispatched=readFileSync(count);execution.state='completed';execution.output={items:[]};execution.resultDigest=hash(execution.output);assert.deepEqual(await claudeStructuredTurn(realm,id,mode,execution,callbacks,workspace),outcome.value);assert.deepEqual(readFileSync(count),dispatched);assert.deepEqual(readFileSync(join(root,'exit.json')),exitBytes);
+    }else if(mode==='term-exit-zero'){
+      assert.equal(outcome.error?.code,'failed');assert.equal(existsSync(join(root,'completed.json')),false);const exit=JSON.parse(readFileSync(join(root,'exit.json'),'utf8'));assert.equal(exit.code,0);assert.equal(exit.signal,null);assert.equal(exit.stopped,true);execution.state='failed';await assert.rejects(claudeStructuredTurn(realm,id,mode,execution,callbacks,workspace),error=>['failed','stale_result'].includes(error.code));
     }else if(mode==='cancel-closed'){assert.equal(outcome.error?.code,'cancelled');assert.equal(JSON.parse(readFileSync(join(root,'exit.json'),'utf8')).signal,'SIGTERM')}
     else{
       assert.equal(outcome.error?.code,'cancellation_pending');assert.equal(existsSync(join(root,'exit.json')),false);assert.equal(existsSync(join(root,'completed.json')),false);process.kill(execution.claudeNative.pid,0);
