@@ -690,7 +690,7 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
   const stderrHash = createHash('sha256'); let stderrBytes = 0
   child.stderr.on('data', (bytes: Buffer) => { stderrHash.update(bytes); stderrBytes += bytes.length })
   child.once('error', error => { failure ??= error })
-  let settled: { answer: NativeResult | (() => WorktreeNativeResult) } | { error: unknown }
+  let answer: NativeResult | (() => WorktreeNativeResult)
   let finallyStopped = false
   try {
     child.stdin.write(`${JSON.stringify({ type: 'user', session_id: native.sessionId, uuid: native.userUuid, message: { role: 'user', content: [{ type: 'text', text: prompt }] } })}\n`)
@@ -710,9 +710,8 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
     const history = worktree ? claudeWorktreeHistory(plan, false) : readClaudePublicHistory(nativeHistoryPath(root, native.sessionId), native.sessionId), original = history.find(row => row.type === 'user' && row.uuid === native.userUuid)
     if (!original?.promptId) throw new StructuredSessionError('stale_result', 'Claude original native promptId is missing')
     await callbacks.onNative({ ...native, pid: child.pid, receiptFile: plan.receiptFile, promptId: original.promptId })
-    settled = { answer: await (worktree ? settleClaudeWorktreeResult(plan, prompt, { ...execution, claudeNative: { ...native, pid: plan.pid, receiptFile: plan.receiptFile } }, stopAt, callbacks.signal) : settleClaudeResult(plan, prompt, execution)) }
-  } catch (error) { settled = { error } }
-  finally {
+    answer = await (worktree ? settleClaudeWorktreeResult(plan, prompt, { ...execution, claudeNative: { ...native, pid: plan.pid, receiptFile: plan.receiptFile } }, stopAt, callbacks.signal) : settleClaudeResult(plan, prompt, execution))
+  } finally {
     stopAt ??= Date.now() + 15000
     clearInterval(processCensus); await sampling
     lines.close()
@@ -724,9 +723,7 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
     }
   }
   if (!finallyStopped) throw new StructuredSessionError('cancellation_pending', 'Claude native stop remains unproven')
-  if ('error' in settled && settled.error instanceof StructuredSessionError && settled.error.code === 'cancellation_pending') throw settled.error
   if (worktree && aborted && !failure) throw new StructuredSessionError(timedOut ? 'timeout' : 'cancelled', 'Claude exact process group stopped after cancellation')
-  if ('error' in settled) throw settled.error
   if (failure) throw failure
-  return typeof settled.answer === 'function' ? settled.answer() : settled.answer
+  return typeof answer === 'function' ? answer() : answer
 }
