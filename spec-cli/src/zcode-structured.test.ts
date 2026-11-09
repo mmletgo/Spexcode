@@ -536,7 +536,7 @@ else if(request.method==='session/send'){if(process.platform==='darwin'&&${JSON.
 else if(request.method==='session/events'){const events=[
 {type:'turn.started',payload:{inputId:send.inputId,queryId:send.queryId,messageId:'fixture-user'}},
 {type:'session.updated',payload:{providerId:model().providerId,modelId:model().modelId,toolCount:0}},
-{type:'turn.completed',payload:{inputId:send.inputId,resultType:'success',response}}
+{type:'turn.completed',payload:{inputId:send.inputId,resultType:'success',response,usage:{source:${JSON.stringify(censusPhase === 'pre-exit' ? 'provider' : 'estimate')},inputTokens:1100,outputTokens:134,cacheReadTokens:800,cacheWriteTokens:0,unretained:'SYNTHETIC_USAGE_METADATA'}}}
 ].map((event,index)=>({...event,eventId:'fixture-event-'+index,seq:index+1,sessionId:create.sessionId,turnId}));reply(request.id,{events})}
 else if(request.method==='session/messages')reply(request.id,{hasMore:false,messages:[
 {info:{id:'fixture-user',sessionID:create.sessionId,role:'user',modelSelection:model(),anchor:{turnId},semantics:{kind:'user_prompt'}},parts:[{type:'text',text:send.content}]},
@@ -639,6 +639,12 @@ else throw new Error('unexpected fixture RPC')
     assert.equal(preExitInjectedCensusCalls, 0, 'fresh pre-exit proof must avoid another census')
     assert.equal(outcome.result.turnId, 'fixture-turn')
     assert.equal(outcome.result.text, '{"ok":true}')
+    const expectedUsage = censusPhase === 'pre-exit'
+      ? { source: 'zcode-turn-usage', totalInputTokens: 1100, outputTokens: 134, cacheReadInputTokens: 800, cacheWriteInputTokens: 0 }
+      : undefined
+    assert.deepEqual('nativeTokenUsage' in outcome.result ? outcome.result.nativeTokenUsage : undefined, expectedUsage)
+    for (const name of ['events.json', 'terminal.json', 'completed.json'])
+      assert(!readFileSync(join(root, name), 'utf8').includes('SYNTHETIC_USAGE_METADATA'))
     if (process.platform === 'darwin' && censusPhase === 'pre-exit') {
       execFileSync('git', ['worktree', 'list', '--porcelain'], { cwd: workspace, stdio: ['ignore', 'pipe', 'pipe'] })
       assert.equal(execFileSync('git', ['config', '--local', '--get', 'core.filemode'], { cwd: workspace, encoding: 'utf8' }).trim(), 'true')

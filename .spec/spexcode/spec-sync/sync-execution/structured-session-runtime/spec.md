@@ -20,6 +20,8 @@ related:
 
 ## expanded spec
 
+version6 原生 worktree 结算在既有 structuredExecution 内保存可选 nativeTokenUsage。只接受对应 adapter 在认证同一终态及停止后交付的已报告计数，随 completed 或已认证终态导致的 failed 一次写入；业务/schema/Git 后置拒绝仍保持原结果。无可证终态、取消、超时及历史缺席都不追补。读侧以同一 canonical session 的 thread/turn 与 nativeTokenUsage 为准；该字段不进入业务 output、resultDigest、请求/创建摘要、Sync 证据对象或 Git。无存储 schema 迁移。计数来源及输入口径见 [[claude-structured-runtime]] 和 [[zcode-structured-runtime]]。
+
 本次 ZCodeNativeTurnFailedError 的不可重试 provider 业务拒绝仅在精确原生身份匹配且 exact adapter.stop 确证 nativeStopped 后，以 failed/errorCode=unsupported 保存固定无正文摘要。停止未知仍 cancelling 占容量，不能先持久 unsupported；不授 output、rejectedOutput 或 failedWorktree。run、同键冷读取及 removed 回放保持原码和原 message；旧 native_turn_transport_failed/generic failed 不补读旧 terminal 或追补分类。P0/P1 材料读取对 unsupported 保守跳过，原成功、格式、Git、预算及停止门不变。
 
 本次执行中新认证的 ZCode worktree 原生失败由 [[zcode-structured-runtime]] 保留 failed 首要原因，执行队列复用原 exact adapter.stop；只有独立真实停止证明成立，才以既有 failed+cancellation.nativeStopped 交给资源桥结算 terminal→removed。错误和清理事实分别保存在既有 error/cancellation，不增加持久格式或成功授权；停止未知仍 cancelling，首要失败不被清理诊断遮蔽。该路径不提供 output、rejectedOutput 或 failedWorktree，不扫描或重签历史 failed/cancelling、saved/reserved 请求。成功、schema、Git、独审与显式取消门禁保持；新不同请求只在原资源正式释放后取得容量，同键恢复不发送。

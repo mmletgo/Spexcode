@@ -9,7 +9,7 @@ import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import { detachedRuntimeIsGone, processStartToken, verifyDetachedRuntime, writeDetachedRuntimeReceipt, type ProcessIdentity } from '@spexcode/spec-core'
-import { rejectedFinalOutput, structuredExecutionTimer, StructuredSessionError, structuredExecutionPolicy, structuredSeatbeltProfile, type StructuredExecution } from './session-structured-policy.js'
+import { isNativeTokenCount, rejectedFinalOutput, structuredExecutionTimer, StructuredSessionError, structuredExecutionPolicy, structuredSeatbeltProfile, type NativeTokenUsage, type StructuredExecution } from './session-structured-policy.js'
 import { decodeZCodeJsonText, type ZCodeFrozenReadProof, type ZCodeFrozenWitness } from './zcode-frozen-evidence.js'
 
 export const zcodeCapability = Object.freeze({
@@ -24,9 +24,9 @@ export type ZCodeStructuredExecution = Omit<StructuredExecution, 'version' | 'po
   version: 4 | 5 | 6; policy: 'zcode-frozen-read-only-v1' | 'native-worktree-v1'; zcodeNative?: ZCodeNativeState; frozenReadProof?: ZCodeFrozenReadProof
 }
 type NativeCallbacks = { onThread(id: string): Promise<void>; onTurn(id: string): Promise<void>; onTurnStarting?(): Promise<void>; onNative(state: ZCodeNativeState): Promise<void>; onTimeout?(): Promise<void>; signal?: AbortSignal }
-type WorktreeNativeResult = { threadId: string; turnId: string; text: string; frozenReadProof?: never }
+type WorktreeNativeResult = { threadId: string; turnId: string; text: string; frozenReadProof?: never; nativeTokenUsage?: NativeTokenUsage }
 type NativeResult = { threadId: string; turnId: string; text: string; frozenReadProof: ZCodeFrozenReadProof }
-type NativeEvent = { sessionId: string; turnId?: string; seq: number; eventId: string; type: string; payload: Record<string, unknown> }
+type NativeEvent = { sessionId: string; turnId?: string; seq: number; eventId: string; type: string; payload: Record<string, unknown>; nativeTokenUsage?: NativeTokenUsage }
 type NativeMessage = { info?: Record<string, unknown>; parts?: Array<Record<string, unknown>> }
 type WorktreeCompletionEvidence = { terminal: NativeEvent; events: NativeEvent[]; messages: NativeMessage[]; exit: StopEvidence; send: unknown }
 type NativeModel = { providerId: string; modelId: string; options?: Record<string, unknown> }
@@ -170,6 +170,24 @@ export function zcodeProofEvent(event: NativeEvent): NativeEvent | undefined {
   const keys = ['messageCount', 'providerId', 'modelId', 'temperature', 'maxTokens', 'toolCount', 'iteration']
   if (Object.keys(event.payload).some(key => !keys.includes(key))) throw new StructuredSessionError('stale_result', 'ZCode ModelRequest includes unknown evidence fields')
   return event
+}
+
+function zcodeProviderUsage(value: unknown): NativeTokenUsage | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return
+  const nativeUsage = value as Record<string, unknown>
+  if (nativeUsage.source !== 'provider') return
+
+  const usage: NativeTokenUsage = { source: 'zcode-turn-usage' }
+  for (const [field, nativeField] of [
+    ['totalInputTokens', 'inputTokens'],
+    ['outputTokens', 'outputTokens'],
+    ['cacheReadInputTokens', 'cacheReadTokens'],
+    ['cacheWriteInputTokens', 'cacheWriteTokens'],
+  ] as const) {
+    const count = nativeUsage[nativeField]
+    if (isNativeTokenCount(count)) usage[field] = count
+  }
+  if (Object.keys(usage).length > 1) return usage
 }
 
 /** 正常原生文件工具保持可用，仅旧冻结模式设置唯一 MCP 工具面。 */
@@ -367,18 +385,19 @@ function verifyWorktreeCompletion(plan: NativePlan, model: NativeModel, prompt: 
   if (users.length !== 1 || users[0].info?.id !== starts[0].payload.messageId || (users[0].info?.anchor as Record<string, unknown>)?.turnId !== plan.turnId || digest(users[0].info?.modelSelection) !== digest(model) || users[0].info?.sessionID !== plan.sessionId || users[0].parts?.filter(part => part.type === 'text').map(part => part.text).join('') !== zcodeExecutionPrompt(prompt, execution)) throw new StructuredSessionError('stale_result', 'ZCode worktree original native user/input differs')
   const finals = messages.filter(message => message.info?.role === 'assistant' && (message.info.anchor as Record<string, unknown>)?.turnId === plan.turnId && (message.info.semantics as Record<string, unknown>)?.kind === 'assistant_response')
   if (!finals.length || finals.at(-1)!.info?.providerId !== model.providerId || finals.at(-1)!.info?.modelId !== model.modelId || finals.at(-1)!.parts?.filter(part => part.type === 'text').map(part => part.text).join('') !== terminal.payload.response) throw new StructuredSessionError('stale_result', 'ZCode worktree final assistant identity/response differs')
+  const { nativeTokenUsage } = terminal
   let output: unknown
   try { output = decodeZCodeStructuredText(terminal.payload.response) }
   catch (error) {
     if (strictCompleted && error instanceof StructuredSessionError && error.code === 'structured_output_format_invalid') throw new StructuredSessionError('stale_result', 'ZCode completed worktree terminal response is not one strict JSON document')
-    if (error instanceof StructuredSessionError && error.code === 'structured_output_format_invalid') throw new StructuredSessionError(error.code, error.message, { threadId: plan.sessionId, turnId: plan.turnId, rejectedOutput: rejectedFinalOutput(terminal.payload.response, prompt, execution, { threadId: plan.sessionId, turnId: plan.turnId }) })
+    if (error instanceof StructuredSessionError && error.code === 'structured_output_format_invalid') throw new StructuredSessionError(error.code, error.message, { threadId: plan.sessionId, turnId: plan.turnId, nativeTokenUsage, rejectedOutput: rejectedFinalOutput(terminal.payload.response, prompt, execution, { threadId: plan.sessionId, turnId: plan.turnId }) })
     throw error
   }
   const validate = new Ajv({ allErrors: true }).compile(execution.schema)
   if (!validate(output)) {
     if (strictCompleted) throw new StructuredSessionError('stale_result', 'ZCode completed worktree terminal JSON no longer matches its schema')
     const diagnostics = validate.errors?.map(({ instancePath, schemaPath, keyword, params, message }) => ({ instancePath, schemaPath, keyword, params, message })) ?? []
-    throw new StructuredSessionError('structured_output_format_invalid', `ZCode worktree terminal JSON does not match its schema: ${JSON.stringify(diagnostics)}`, { threadId: plan.sessionId, turnId: plan.turnId, rejectedOutput: rejectedFinalOutput(terminal.payload.response, prompt, execution, { threadId: plan.sessionId, turnId: plan.turnId }) })
+    throw new StructuredSessionError('structured_output_format_invalid', `ZCode worktree terminal JSON does not match its schema: ${JSON.stringify(diagnostics)}`, { threadId: plan.sessionId, turnId: plan.turnId, nativeTokenUsage, rejectedOutput: rejectedFinalOutput(terminal.payload.response, prompt, execution, { threadId: plan.sessionId, turnId: plan.turnId }) })
   }
   const result: WorktreeNativeResult = { threadId: plan.sessionId, turnId: plan.turnId, text: JSON.stringify(output) }
   return { completed: { plan, terminal, events, messages, exit, send, result }, output }
@@ -399,7 +418,7 @@ async function settleWorktreeResult(plan: NativePlan, prompt: string, execution:
   if (execution.state === 'completed' && (!existsSync(path) || execution.threadId !== result.threadId || execution.turnId !== result.turnId || execution.resultDigest !== digest(output))) throw new StructuredSessionError('stale_result', 'ZCode worktree durable completed identity differs')
   if (freshStopDeadline !== undefined && Date.now() >= freshStopDeadline) throw new StructuredSessionError('cancellation_pending', 'ZCode completion exceeded the original stop deadline')
   writeJson(path, completed, true)
-  return result
+  return terminal.nativeTokenUsage ? { ...result, nativeTokenUsage: terminal.nativeTokenUsage } : result
 }
 
 async function settleResult(plan: NativePlan, prompt: string, execution: ZCodeStructuredExecution): Promise<NativeResult> {
@@ -631,11 +650,16 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
       if (!plan.turnId || event.turnId !== plan.turnId) throw new StructuredSessionError('stale_result', 'ZCode evidence event belongs to another turn')
       if (event.type === 'session.updated' && (!plan.model || event.payload.providerId !== plan.model.providerId || event.payload.modelId !== plan.model.modelId || (!worktree && event.payload.toolCount !== 1))) throw new StructuredSessionError('unsupported', 'ZCode actual ModelRequest identity or toolCount differs')
       if (event.type === 'tool.updated' && event.payload.kind === 'scheduled' && !worktree && event.payload.toolName !== zcodeCapability.tool) throw new StructuredSessionError('unsupported', 'ZCode scheduled an uncontrolled tool')
-      events.push(event)
+      let evidence = event
+      if (worktree && event.type === 'turn.completed') {
+        const { usage, ...payload } = event.payload
+        evidence = { ...event, payload, nativeTokenUsage: zcodeProviderUsage(usage) }
+      }
+      events.push(evidence)
       if (['turn.completed', 'turn.failed', 'turn.cancelled'].includes(event.type)) {
         if (event.payload.inputId !== plan.inputId) throw new StructuredSessionError('stale_result', 'ZCode terminal belongs to another original input')
         if (terminal) throw new StructuredSessionError('stale_result', 'ZCode returned multiple terminal events')
-        terminal = event; writeJson(join(root, 'terminal.json'), terminal, true)
+        terminal = evidence; writeJson(join(root, 'terminal.json'), terminal, true)
       }
     }
     writeJson(join(root, 'events.json'), events); writeJson(join(root, 'event-counts.json'), counts)
