@@ -68,7 +68,9 @@ NativePlan v1/v2 与缺席 `nativeConfiguration` 的历史请求保持原策略�
 
 明确的 version6/native-worktree-v1 使用创建记录的真实 worktree 作为 workspace/cwd，read 用原生 plan、edit 用原生 build，保留正常内置工具，不设 frozen MCP/只读 Seatbelt 或唯一工具限制。权限请求仅对当前 session 一次批准正常读/搜索/shell，文件修改只批准 edit 模式的本 worktree，且不写 permissionUpdates、不建立读取内容/路径白名单。仅 schema 控制最终 JSON；原 provider/model/effort 快照、唯一 session/input/query/turn、原始 send/messages/events、精确成功终态、idle/close、exit0 与整个自有进程停止仍逐项核实。完成及冷复用不生成或消费 frozenReadProof，也不要求分块读取及逐字 API 消费；旧 frozen policy 及工具门不变。
 
-已持久 completed 的 worktree 冷重放核原完成缓存、固定请求、Native 身份、schema/输出和原 exit.stopped/close 证据，不再探测历史 PID/PGID，避免无关复用导致伪 stale；running 或未结算仍必须实时证明原进程与后代停止。
+本次 worktree 调用直接使用写原 exit 前最后一次新鲜停止观察。只有该次观察确认原进程组、相关后代与任务域未知进程都已结算，才进入同栈完成核验；期间不再排队重复观察，仍在原绝对停止截止内完成核验与发布。取消优先、原 exit、终态、消息、模型与 schema 门不变。
+
+已持久 completed 的 worktree 冷重放核原完成缓存、固定请求、Native 身份、schema/输出和原 exit.stopped/close 证据，不再探测历史 PID/PGID，避免无关复用导致伪 stale；未结算的冷恢复仍必须重新实时证明原进程与后代停止。
 
 worktree轮询、取消、未结算恢复与finally逐次等待[[native-worktree-runtime]]的异步有界进程观察，同root采样和停止串行，不让慢cwd探针阻塞RPC/取消timer或叠加观察。取消的原15秒与清理的原分段窗口以绝对截止沿排队/观察传递，内部剩余不重置；过期不追加Native信号或真停止原件，最后取消分类消费已保存的同一次fresh停止事实，不在截止后另开采样。探针失败保原未知停止及容量，不据此写成功exit/完成证据；已completed和sealed材料读取继续核原件，不活探历史PID或增加Native杀权。冷取消及清理在等待观察后、实际发TERM前重新核同一原receipt/专属组身份，等待前的proof不能跨异步窗口授信号权。
 

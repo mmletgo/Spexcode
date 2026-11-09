@@ -1,8 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync, spawn } from 'node:child_process'
+import childProcess from 'node:child_process'
+import { execFileSync, spawn, type SpawnOptions } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { processStartToken, verifyDetachedRuntime, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
@@ -509,6 +511,120 @@ test('cold ZCode cancellation rechecks exact receipt after awaited process obser
     assert.equal(stopped.nativeStopped, false)
     kill(child.pid, 0)
   } finally { t.mock.restoreAll(); kill(-child.pid, 'SIGTERM'); await ended; rmSync(directory, { recursive: true, force: true }) }
+})
+
+test('same-stack ZCode completion reuses its fresh stop proof while cold unsettled replay reobserves processes', { timeout: 30_000 }, async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'zcode-worktree-census-repro-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const bin = join(directory, 'bin'), workspace = join(directory, 'workspace'), realm = join(directory, 'realm'), id = 'fixture'
+  const root = join(realm, id), exitPath = join(root, 'exit.json'), completedPath = join(root, 'completed.json')
+  mkdirSync(bin); mkdirSync(workspace); mkdirSync(realm)
+  const originalEnv = { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR }
+  const originalSpawn = childProcess.spawn.bind(childProcess)
+  let preExitCensusCalls = 0, postExitCensusCalls = 0
+  const cli = join(bin, 'zcode')
+  const rpcFixture = `#!/usr/bin/env node
+const readline=require('node:readline');
+if(process.argv.includes('--version')){process.stdout.write('99.4.1\\n');process.exit(0)}
+const rl=readline.createInterface({input:process.stdin});let create,send;
+const turnId='fixture-turn',response='{"ok":true}',model=()=>create.model;
+const reply=(id,result)=>process.stdout.write(JSON.stringify({id,result})+'\\n');
+rl.on('line',line=>{const request=JSON.parse(line),params=request.params||{};
+if(request.method==='session/create'){create=params;reply(request.id,{session:{sessionId:create.sessionId,model:create.model}})}
+else if(request.method==='session/read')reply(request.id,{session:{sessionId:create.sessionId,status:'idle',model:model()},settings:{model:{current:model()}},runtime:{pendingRequestIds:[]},projection:{currentTurnId:send?turnId:undefined,pendingPermissions:[],activeToolCalls:[]}})
+else if(request.method==='session/send'){send=params;reply(request.id,{accepted:true,sessionId:create.sessionId})}
+else if(request.method==='session/events'){const events=[
+{type:'turn.started',payload:{inputId:send.inputId,queryId:send.queryId,messageId:'fixture-user'}},
+{type:'session.updated',payload:{providerId:model().providerId,modelId:model().modelId,toolCount:0}},
+{type:'turn.completed',payload:{inputId:send.inputId,resultType:'success',response}}
+].map((event,index)=>({...event,eventId:'fixture-event-'+index,seq:index+1,sessionId:create.sessionId,turnId}));reply(request.id,{events})}
+else if(request.method==='session/messages')reply(request.id,{hasMore:false,messages:[
+{info:{id:'fixture-user',sessionID:create.sessionId,role:'user',modelSelection:model(),anchor:{turnId},semantics:{kind:'user_prompt'}},parts:[{type:'text',text:send.content}]},
+{info:{id:'fixture-final',sessionID:create.sessionId,role:'assistant',providerId:model().providerId,modelId:model().modelId,anchor:{turnId},semantics:{kind:'assistant_response'}},parts:[{type:'text',text:response}]}
+]})
+else if(request.method==='session/close')reply(request.id,{closed:true})
+else throw new Error('unexpected fixture RPC')
+});
+`
+  writeFileSync(cli, rpcFixture); chmodSync(cli, 0o755)
+  execFileSync('git', ['init', '-q'], { cwd: workspace })
+  execFileSync('git', ['config', 'user.name', 'Fixture'], { cwd: workspace })
+  execFileSync('git', ['config', 'user.email', 'fixture@example.invalid'], { cwd: workspace })
+  writeFileSync(join(workspace, 'seed.txt'), 'fixture seed\n')
+  execFileSync('git', ['add', 'seed.txt'], { cwd: workspace })
+  execFileSync('git', ['commit', '-qm', 'fixture seed'], { cwd: workspace })
+  const baseCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: workspace, encoding: 'utf8' }).trim()
+  const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: workspace, encoding: 'utf8' }).trim()
+  const model = 'zcode:fixture/model', prompt = 'Return the fixed fixture object.'
+  const policy = structuredExecutionPolicy({ schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false }, inputDigest: 'census-input', purpose: 'same-stack-stop-proof', timeoutMs: null, model, worktree: { baseCommit, tree, mode: 'read' }, nativeConfiguration: 'cli-config-v1' })
+  const execution = { ...policy, version: 6, policy: 'native-worktree-v1', nativeConfiguration: 'cli-config-v1' } as ZCodeStructuredExecution
+  let replayExecution = execution
+  const callbacks = {
+    onThread: async (threadId: string) => { replayExecution = { ...replayExecution, threadId } },
+    onTurn: async (turnId: string) => { replayExecution = { ...replayExecution, turnId } },
+    onNative: async (zcodeNative: ZCodeStructuredExecution['zcodeNative']) => { replayExecution = { ...replayExecution, zcodeNative } },
+  }
+  const interceptedSpawn = (command: string, args: readonly string[], options: SpawnOptions) => {
+    if (command === '/bin/ps') {
+      if (existsSync(exitPath)) postExitCensusCalls++
+      else preExitCensusCalls++
+      if (existsSync(exitPath)) return originalSpawn(process.execPath, ['-e', 'process.exitCode=23'], options)
+    }
+    return originalSpawn(command, args, options)
+  }
+  t.mock.method(childProcess, 'spawn', interceptedSpawn)
+  syncBuiltinESMExports()
+  process.env.PATH = `${bin}:${originalEnv.PATH ?? ''}`
+  process.env.HOME = directory
+  process.env.TMPDIR = directory
+  try {
+    const outcome = await zcodeStructuredTurn(realm, id, prompt, execution, callbacks, workspace).then(
+      result => ({ result }),
+      error => ({ error: error as { code?: string; message?: string } }),
+    )
+    if ('error' in outcome) {
+      const exit = JSON.parse(readFileSync(exitPath, 'utf8')) as { code: number | null; signal: string | null; stopped: boolean; acknowledged: boolean; idle: boolean; closed: boolean }
+      const stopObservations = readFileSync(join(root, 'process-stop-observations.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line) as { nativeStopped: boolean })
+      assert.deepEqual({ code: exit.code, signal: exit.signal, stopped: exit.stopped, acknowledged: exit.acknowledged, idle: exit.idle, closed: exit.closed }, { code: 0, signal: null, stopped: true, acknowledged: false, idle: true, closed: true })
+      assert.equal(stopObservations.length, 2)
+      assert(stopObservations.every(observation => observation.nativeStopped))
+      assert.equal(preExitCensusCalls > 0, true)
+      assert.equal(postExitCensusCalls, 1)
+      assert.equal(existsSync(completedPath), false)
+      assert.equal(outcome.error.code, 'cancellation_pending')
+      assert.equal(outcome.error.message, 'native worktree process observation remains unproven')
+      await assert.rejects(zcodeStructuredTurn(realm, id, prompt, replayExecution, callbacks, workspace), error => {
+        assert.equal((error as { code?: string }).code, 'cancellation_pending')
+        assert.equal((error as Error).message, 'native worktree process observation remains unproven')
+        return true
+      })
+      assert.equal(postExitCensusCalls, 2)
+      assert.equal(existsSync(completedPath), false)
+      assert.fail(`fresh same-stack stop proof should settle the warm result; got ${outcome.error.message}`)
+    }
+    assert.equal(postExitCensusCalls, 0, 'same-stack settlement must reuse its fresh process-stop observations')
+    assert.equal(outcome.result.turnId, 'fixture-turn')
+    assert.equal(outcome.result.text, '{"ok":true}')
+    assert.equal(existsSync(completedPath), true)
+    const stopObservations = readFileSync(join(root, 'process-stop-observations.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line) as { nativeStopped: boolean })
+    assert.equal(stopObservations.length, 2)
+    assert(stopObservations.every(observation => observation.nativeStopped))
+    rmSync(completedPath)
+    await assert.rejects(zcodeStructuredTurn(realm, id, prompt, replayExecution, callbacks, workspace), error => {
+      assert.equal((error as { code?: string }).code, 'cancellation_pending')
+      assert.equal((error as Error).message, 'native worktree process observation remains unproven')
+      return true
+    }, 'cold replay without a durable completion marker must perform a fresh process census')
+    assert.equal(postExitCensusCalls, 1)
+    assert.equal(existsSync(completedPath), false)
+  } finally {
+    for (const [key, value] of Object.entries(originalEnv)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    t.mock.restoreAll()
+    syncBuiltinESMExports()
+  }
 })
 
 test('an existing native dispatch cannot be resumed with another send or new process', async () => {
