@@ -1,4 +1,4 @@
-import { nativeWorktreeProcessesStopped, sampleNativeWorktreeProcesses } from './native-worktree-runtime.js'
+import { NATIVE_PROCESS_OBSERVATION_LIMIT_MS, nativeWorktreeProcessesStopped, sampleNativeWorktreeProcesses } from './native-worktree-runtime.js'
 import { Ajv } from 'ajv'
 import { spawn, spawnSync, execFileSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
@@ -594,8 +594,11 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
   }
   let init: ClaudeInit | undefined, echo: ClaudeFrozenWitness['echo'] | undefined, result: ClaudeFrozenWitness['result'] | undefined
   let failure: Error | undefined, work = Promise.resolve(), aborted = false, timedOut = false, interruptId: string | undefined
+  let observationFailure: Error | undefined
+  const pendingObservationFailure = (): StructuredSessionError | undefined => observationFailure
+    && Object.assign(new StructuredSessionError('cancellation_pending', observationFailure.message), { cause: observationFailure })
   let rejectStop: (error: Error) => void = () => {}
-  const stopDeadline = new Promise<never>((_resolve, reject) => { rejectStop = reject })
+  const stopDeadline = new Promise<never>((_resolve, reject) => { rejectStop = error => reject(pendingObservationFailure() ?? error) })
   const killOwnGroup = (): void => {
     if (stopAt !== undefined && Date.now() >= stopAt) { rejectStop(new StructuredSessionError('cancellation_pending', 'Claude native stop deadline expired')); return }
     if (!verifyDetachedRuntime(plan.pid!, plan.receiptFile).ok) return
@@ -635,11 +638,49 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
   callbacks.signal?.addEventListener('abort', abort, { once: true })
   const timer = structuredExecutionTimer(execution.timeoutMs, () => { timedOut = true; interrupt(); void callbacks.onTimeout?.() })
   let sampling: Promise<void> | undefined
+  let observationRecovery: { startedAt: number; firstError: StructuredSessionError } | undefined
+  const reportObservation = (status: 'pending' | 'recovered' | 'expired', startedAt: number): void => {
+    console.warn('spex claude periodic observation', JSON.stringify({ status, elapsedMs: Date.now() - startedAt }))
+  }
+  const stopAfterObservationFailure = (error: unknown): void => {
+    failure ??= Object.assign(new StructuredSessionError('failed', error instanceof Error ? error.message : String(error)), { cause: error })
+    observationFailure = failure
+    armStop()
+  }
   processCensus = worktree ? setInterval(() => {
-    if (sampling) return
-    sampling = sampleNativeWorktreeProcesses(plan, stopAt).catch(error => { failure ??= error as Error; interrupt() }).finally(() => { sampling = undefined })
+    if (sampling || stopAt !== undefined) return
+    const recovery = observationRecovery
+    const deadline = recovery && recovery.startedAt + NATIVE_PROCESS_OBSERVATION_LIMIT_MS
+    if (recovery && Date.now() - recovery.startedAt >= NATIVE_PROCESS_OBSERVATION_LIMIT_MS) {
+      reportObservation('expired', recovery.startedAt)
+      stopAfterObservationFailure(recovery.firstError)
+      return
+    }
+    sampling = sampleNativeWorktreeProcesses(plan, deadline).then(() => {
+      if (recovery && stopAt === undefined) {
+        reportObservation('recovered', recovery.startedAt)
+        observationRecovery = undefined
+      }
+    }, error => {
+      if (stopAt !== undefined) return
+      if (error instanceof StructuredSessionError && error.code === 'cancellation_pending') {
+        if (!recovery) {
+          observationRecovery = { startedAt: Date.now(), firstError: error }
+          reportObservation('pending', observationRecovery.startedAt)
+        }
+      } else stopAfterObservationFailure(recovery?.firstError ?? error)
+    }).finally(() => { sampling = undefined })
   }, 100) : undefined
-  const stoppedProcesses = async (): Promise<boolean> => worktree ? nativeWorktreeProcessesStopped(plan, false, stopAt) : detachedRuntimeIsGone(plan.pid!, plan.receiptFile) && claudeMcpStopped(root)
+  const stoppedProcesses = async (final = false): Promise<boolean> => {
+    let stopped: boolean
+    try { stopped = worktree ? await nativeWorktreeProcessesStopped(plan, false, stopAt) : detachedRuntimeIsGone(plan.pid!, plan.receiptFile) && claudeMcpStopped(root) }
+    catch (error) { throw pendingObservationFailure() ?? error }
+    if (final && !stopped) {
+      const pending = pendingObservationFailure()
+      if (pending) throw pending
+    }
+    return stopped
+  }
   const lines = createInterface({ input: child.stdout })
   let protocolOrdinal = 0
   lines.on('line', line => {
@@ -702,7 +743,8 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
     for (let retry = 0; retry < 100 && !(await stoppedProcesses()); retry++) await new Promise<void>(resolve => setTimeout(resolve, 25))
     const stopped = await stoppedProcesses()
     writeFileSync(join(root, 'exit.json'), JSON.stringify({ ...exit, stopped, stderrBytes, stderrSha256: stderrHash.digest('hex') }), { mode: 0o400 })
-    if (!stopped) throw new StructuredSessionError('cancellation_pending', 'Claude or MCP descendant process group remains unproven')
+    if (!stopped) throw pendingObservationFailure() ?? new StructuredSessionError('cancellation_pending', 'Claude or MCP descendant process group remains unproven')
+    if (observationFailure) throw observationFailure
     if (aborted) throw new StructuredSessionError(timedOut ? 'timeout' : 'cancelled', 'Claude exact process group stopped after cancellation')
     if (failure) throw failure
     if (!init || !echo || !result) throw new StructuredSessionError('failed', `Claude execution is missing native events: ${[!init ? 'init' : '', !echo ? 'user-echo' : '', !result ? 'result' : ''].filter(Boolean).join(', ')}`)
@@ -715,7 +757,7 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
     stopAt ??= Date.now() + 15000
     clearInterval(processCensus); await sampling
     lines.close()
-    try { finallyStopped = await stoppedProcesses() }
+    try { finallyStopped = await stoppedProcesses(true) }
     finally {
       clearTimeout(timer); if (stopTimer) clearTimeout(stopTimer); if (stopLimit) clearTimeout(stopLimit)
       callbacks.signal?.removeEventListener('abort', abort); active.delete(root)

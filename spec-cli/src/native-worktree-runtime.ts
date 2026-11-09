@@ -53,11 +53,13 @@ export type NativeOwnedPlan = { root: string; pid?: number; receiptFile: string;
 
 type NativeProcessRow = ProcessIdentity & { ppid: number }
 
+export const NATIVE_PROCESS_OBSERVATION_LIMIT_MS = 10_000
+
 const observing = new Map<string, Promise<unknown>>()
 const probes = new Map<string, { child: ReturnType<typeof spawn>; closed: boolean }>()
 function observationPending(): StructuredSessionError { return new StructuredSessionError('cancellation_pending', 'native worktree process observation remains unproven') }
 function assertObservationDeadline(deadline: number): void { if (Date.now() >= deadline) throw observationPending() }
-function observeSerially<T>(plan: NativeOwnedPlan, observe: (deadline: number) => Promise<T>, deadline = Date.now() + 10_000): Promise<T> {
+function observeSerially<T>(plan: NativeOwnedPlan, observe: (deadline: number) => Promise<T>, deadline = Date.now() + NATIVE_PROCESS_OBSERVATION_LIMIT_MS): Promise<T> {
   const run = (): Promise<T> => { assertObservationDeadline(deadline); return observe(deadline) }
   const previous = observing.get(plan.root), current = previous ? previous.then(run, run) : Promise.resolve().then(run)
   observing.set(plan.root, current)
@@ -97,7 +99,7 @@ function nativeProcessOutput(plan: NativeOwnedPlan, command: string, args: strin
     }
     child.stdout!.on('data', (chunk: Buffer) => append(chunk, true))
     child.stderr!.on('data', (chunk: Buffer) => append(chunk, false))
-    const timer = setTimeout(stopProbe, Math.min(10_000, Math.max(0, deadline - Date.now())))
+    const timer = setTimeout(stopProbe, Math.min(NATIVE_PROCESS_OBSERVATION_LIMIT_MS, Math.max(0, deadline - Date.now())))
     child.once('error', cause => { failed = true; clearTimeout(timer); reject(Object.assign(observationPending(), { cause })) })
     child.once('close', code => {
       clearTimeout(timer); probe.closed = true
