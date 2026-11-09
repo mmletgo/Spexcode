@@ -150,7 +150,7 @@ app.get('/api/sync/operations/:id', async c => {
 })
 app.post('/api/sync/run', async c => {
   const body = await syncRequestBody(c.req), application = await syncApplication(c.req.query('targetTree'), body.targetTree)
-  return c.json(await application.submit({ nodeId: body.nodeId as string, requestId: body.requestId as string, ...(body.origin === undefined ? {} : { origin: body.origin as SyncSubmitInput['origin'] }), ...(body.retryOf === undefined ? {} : { retryOf: body.retryOf as string }), ...(body.model === undefined ? {} : { model: body.model as string }), ...(body.patch === undefined ? {} : { patch: readSpecBodyEdit(body.patch) }) }))
+  return c.json(await application.submit({ nodeId: body.nodeId as string, requestId: body.requestId as string, ...(body.origin === undefined ? {} : { origin: body.origin as SyncSubmitInput['origin'] }), ...(body.committed === undefined ? {} : { committed: body.committed as boolean }), ...(body.retryOf === undefined ? {} : { retryOf: body.retryOf as string }), ...(body.model === undefined ? {} : { model: body.model as string }), ...(body.patch === undefined ? {} : { patch: readSpecBodyEdit(body.patch) }) }))
 })
 app.post('/api/sync/operations/:id/decide', async c => {
   const body = await syncRequestBody(c.req)

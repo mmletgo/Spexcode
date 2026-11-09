@@ -5,6 +5,8 @@ import { chmodSync, cpSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, r
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { canonicalContractFilterBindings, plantContractFilter } from '../contract-filter.js'
+import { writeManagedBlock } from '../harness-shim.js'
 import { fileURLToPath } from 'node:url'
 import { applyComponentMigrations, openProtocol, type SqlParam } from '@spexcode/session-protocol'
 import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
@@ -324,6 +326,46 @@ test('AC-APPLICATION-02 受控no-op不提交不派发，来源身份与body必�
     assert.equal(f.git(['rev-parse', 'HEAD']), head)
     await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'stale-patch', patch: { startLine: 1, endLine: 1, original: '# Older', replacement: '# Next' } }), /changed since/)
     await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'bad-origin', origin: 'external' as 'spec' }), /输入来源必须/)
+  } finally { f.cleanup() }
+})
+
+test('手工提交初始化只冻结实际HEAD，忽略被Git清理过滤隐藏的工作区正文和暂存改动', async () => {
+  const f = await fixture()
+  try {
+    const managedPath = join(f.root, 'AGENTS.md')
+    writeFileSync(managedPath, 'Author instructions.\n')
+    writeFileSync(join(f.root, '.gitattributes'), 'AGENTS.md filter=spexcode\n')
+    f.git(['add', 'AGENTS.md', '.gitattributes']); f.git(['commit', '-qm', 'fixture clean filter'])
+    await f.application.enable(); await f.application.automaticControl('pause')
+    const head = await captureInputSnapshot(f.root, { committed: true })
+    plantContractFilter(f.root, [{ file: 'AGENTS.md', content: 'Generated fixture contract.' }], canonicalContractFilterBindings(f.root))
+    writeManagedBlock(managedPath, 'Generated fixture contract.')
+    const local = readFileSync(managedPath, 'utf8')
+    f.git(['add', 'AGENTS.md'])
+    assert.equal(f.git(['write-tree']).trim(), head.indexTree)
+    assert.equal(f.git(['status', '--porcelain']), '')
+    const workspace = await f.application.submit({ nodeId: 'demo', requestId: 'workspace-initial', origin: 'initial' })
+    assert.notEqual(workspace.operation?.input.immutableTree, head.immutableTree)
+    await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'workspace-initial', origin: 'initial', committed: true }), /SYNC_IDEMPOTENCY_CONFLICT/)
+    const testPath = 'tests/demo.test.mjs'
+    writeFileSync(join(f.root, testPath), 'export const stagedChange = true\n'); f.git(['add', testPath])
+    const index = f.git(['write-tree']).trim(), calls = f.calls.length
+    assert.notEqual(index, head.indexTree)
+    const request = { nodeId: 'demo', requestId: 'committed-initial', origin: 'initial' as const, committed: true }
+    const first = await f.application.submit(request)
+    assert.ok(first.operation)
+    assert.equal(first.operation.input.captureKind, 'commit')
+    assert.equal(first.operation.input.id, head.id)
+    assert.equal(first.operation.input.immutableTree, head.immutableTree)
+    assert.equal(first.operation.input.indexTree, head.indexTree)
+    assert.equal((await f.application.submit(request)).operation?.id, first.operation.id)
+    const { committed: _committed, ...workspaceRequest } = request
+    await assert.rejects(f.application.submit(workspaceRequest), /SYNC_IDEMPOTENCY_CONFLICT/)
+    await assert.rejects(f.application.submit({ ...workspaceRequest, committed: false }), /SYNC_IDEMPOTENCY_CONFLICT/)
+    assert.equal(f.git(['write-tree']).trim(), index)
+    assert.equal(readFileSync(managedPath, 'utf8'), local)
+    assert.equal(f.calls.length, calls)
+    await assert.rejects(f.application.submit({ ...request, requestId: 'not-initial', origin: 'code' }), /提交快照/)
   } finally { f.cleanup() }
 })
 

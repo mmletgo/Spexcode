@@ -119,3 +119,5 @@ P4 partial→decide使用原P3-DELIVERY keep_intent真实链补强：fresh exact
 配置回归精确接受原有限budget及仅mode=unlimited，拒混合、空或无效mode，单次callTimeoutMs仍有限正整数；无限总期允许独立20分钟调用设置，旧有限调用不得超过总期的断言保持。
 
 v21下真实oracle状态证据从统一typed checkpoint读取接缝提取JSON材料，原status、命令、exit、具体旧断言及source/index字节断言保持；不能因wrapper原子bundle丢失内层验收证据或把raw解析成测试结果。真实Docker门仍按原显式环境标记运行。
+
+手工 committed 初始化回归使用真实 Git clean filter 隐藏本地正文变化，再暂存另一文件。请求冻结原 HEAD 及精确摘要；工作文件、当前 index、幂等和派发门禁保持。
