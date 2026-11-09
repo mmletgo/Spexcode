@@ -20,6 +20,8 @@ related:
 
 ## expanded spec
 
+原生 worktree 只从同一原生 CLI `result.modelUsage` 读取计数。按字段跨全部模型汇总安全非负整数，分别保留未缓存输入、输出、缓存读和缓存创建；缺值、非法值或超安全整数范围的分量缺席，明确的零保留。仅以该轮固定请求的首个原生会话计数范围解释，涵盖 Claude Code query pipeline 报告的模型调用。规范化计数随本轮 result 快照保存，在精确原生终态和停止认证后才交给 [[structured-session-runtime]]。不使用只含主循环的 usage、价格、单消息或旧历史推估，不保留原始 modelUsage、模型分组、价格或其它 provider 字段。
+
 工作区schema拒绝仅在原plan/prompt/model/turn/终态与stop认证后保留不可信final诊断：success的structured_output schema拒绝可保存其原生JSON值的确定JSON表示；重试耗尽仅取最后一份已严格配对、被本schema拒绝的StructuredOutput input，不提取thinking/任意assistant文本。标明native_json表示与原请求/schema身份，仍不填成功output或写completed，原错误分类不变；没有可证final则缺席。
 
 version5/null 请求沿原 Claude policy、realm 与版本3读取证明执行，不装模型调用timeout timer；数字 version3 原样恢复。显式取消的interrupt、ACK及整组/MCP停止证明与独立stop期限保持。

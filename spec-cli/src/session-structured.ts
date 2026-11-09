@@ -65,11 +65,12 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
   const nativeWorktree = execution.version === 6 && execution.policy === 'native-worktree-v1'
   const claude = nativeWorktree && execution.model?.startsWith('claude:') || execution.version === (execution.timeoutMs === null ? 5 : 3) && execution.policy === 'claude-frozen-read-only-v1'
   const zcode = nativeWorktree && execution.model?.startsWith('zcode:') || execution.version === (execution.timeoutMs === null ? 5 : 4) && execution.policy === 'zcode-frozen-read-only-v1'
-  if (digest(structuredExecutionPolicy(execution)) !== digest({ ...execution, threadId: undefined, turnId: undefined, state: undefined, observer: undefined, cancellation: undefined, turnStartRequested: undefined, output: undefined, resultDigest: undefined, error: undefined, errorCode: undefined, frozenReads: undefined, frozenReadProof: undefined, claudeNative: undefined, zcodeNative: undefined, resultWorktree: undefined, failedWorktree: undefined }) || rec.harness !== (zcode ? 'zcode' : claude ? 'claude-headless' : 'codex-headless') || rec.launchCmd !== (zcode ? 'zcode' : claude ? 'claude' : 'codex'))
+  if (digest(structuredExecutionPolicy(execution)) !== digest({ ...execution, threadId: undefined, turnId: undefined, state: undefined, observer: undefined, cancellation: undefined, turnStartRequested: undefined, output: undefined, resultDigest: undefined, nativeTokenUsage: undefined, error: undefined, errorCode: undefined, frozenReads: undefined, frozenReadProof: undefined, claudeNative: undefined, zcodeNative: undefined, resultWorktree: undefined, failedWorktree: undefined }) || rec.harness !== (zcode ? 'zcode' : claude ? 'claude-headless' : 'codex-headless') || rec.launchCmd !== (zcode ? 'zcode' : claude ? 'claude' : 'codex'))
     throw new StructuredSessionError('unsupported', 'structured session no longer has the trusted fixed executor policy')
   const controller = new AbortController(); activeControllers.set(id, controller)
   let finish: () => void = () => {}
   activeFinished.set(id, new Promise<void>((resolvePromise) => { finish = resolvePromise }))
+  let nativeTokenUsage: StructuredExecution['nativeTokenUsage']
   let failedStage: { worktree?: NativeWorktreeResult; stop: { nativeStopped: boolean; acknowledged: boolean; nativeStatus?: string; error?: string } } | undefined
   const update = async (change: Partial<StructuredExecution>): Promise<void> => {
     await withRecordLock(id, async () => {
@@ -117,7 +118,7 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
       },
     }
     const prompt = readFileSync(sessionArtifactPath(id, 'launch'), 'utf8')
-    let result: { threadId: string; turnId: string; text: string; frozenReadProof?: FrozenReadProof }
+    let result: { threadId: string; turnId: string; text: string; frozenReadProof?: FrozenReadProof; nativeTokenUsage?: StructuredExecution['nativeTokenUsage'] }
     try { result = zcode
       ? await zcodeStructuredTurn(requiredRealmRoot(execution), id, prompt, execution as Parameters<typeof zcodeStructuredTurn>[3], { ...callbacks, onNative: async native => update({ zcodeNative: native }) }, nativeWorktree ? rec.worktreePath : undefined)
       : claude
@@ -149,6 +150,7 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
       }
       throw error
     }
+    nativeTokenUsage = result.nativeTokenUsage
     if (zcode && !nativeWorktree) {
       const model = zcodeNativeModel(execution.model)
       if (result.frozenReadProof?.version !== 4 || result.frozenReadProof.providerId !== model.providerId || result.frozenReadProof.modelId !== model.modelId) throw new StructuredSessionError('stale_result', 'ZCode result has no exact native provider/model witness')
@@ -160,7 +162,7 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
     const validate = new Ajv({ allErrors: true }).compile(execution.schema)
     if (!validate(output)) throw new StructuredSessionError('failed', `structured output does not match JSON schema: ${JSON.stringify(validate.errors)}`)
     const resultWorktree = nativeWorktree ? nativeWorktreeResult(rec.worktreePath, execution.worktree!) : undefined
-    await update({ state: 'completed', ...(resultWorktree ? { resultWorktree } : {}), threadId: result.threadId, turnId: result.turnId, output, resultDigest: digest(output), ...(result.frozenReadProof ? { frozenReadProof: result.frozenReadProof } : {}) })
+    await update({ state: 'completed', ...(nativeTokenUsage ? { nativeTokenUsage } : {}), ...(resultWorktree ? { resultWorktree } : {}), threadId: result.threadId, turnId: result.turnId, output, resultDigest: digest(output), ...(result.frozenReadProof ? { frozenReadProof: result.frozenReadProof } : {}) })
     return 'completed'
   } catch (error) {
     // A disconnected transport is recoverable from the same exact thread/turn. Preserve the running state
@@ -176,13 +178,14 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
       await update({ state: 'cancelling', ...(error.code === 'native_rpc_timeout' ? { errorCode: error.code } : {}), cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: false, acknowledged: false, error: error.message }, error: error.message })
       return 'cancelling'
     }
+    if (error instanceof StructuredSessionError) nativeTokenUsage ??= error.nativeTokenUsage
     const rejectedOutput = error instanceof StructuredSessionError ? error.rejectedOutput : undefined
     if (rejectedOutput) assertRejectedOutput(rejectedOutput, readFileSync(sessionArtifactPath(id, 'launch'), 'utf8'), execution, { threadId: pendingStop?.threadId, turnId: pendingStop?.turnId })
     const state = error instanceof StructuredSessionError && (error.code === 'cancelled' || error.code === 'timeout') ? error.code : 'failed'
     const errorCode = error instanceof ZCodeNativeTurnFailedError && (error.code === 'native_turn_transport_failed' || error.code === 'unsupported') && failedStage?.stop.nativeStopped
       ? error.code
       : error instanceof StructuredSessionError && (error.code === 'structured_output_retries_exhausted' || error.code === 'structured_output_format_invalid' || error.code === 'native_worktree_result_invalid') ? error.code : undefined
-    await update({ state, ...(rejectedOutput ? { rejectedOutput } : {}), ...(failedStage ? { ...(failedStage.worktree ? { failedWorktree: failedStage.worktree } : {}), cancellation: { reason: 'cancelled', requestedAt: Date.now(), ...failedStage.stop } } : {}), error: error instanceof Error ? error.message : String(error), ...(errorCode ? { errorCode } : {}) })
+    await update({ state, ...(state === 'failed' && nativeTokenUsage ? { nativeTokenUsage } : {}), ...(rejectedOutput ? { rejectedOutput } : {}), ...(failedStage ? { ...(failedStage.worktree ? { failedWorktree: failedStage.worktree } : {}), cancellation: { reason: 'cancelled', requestedAt: Date.now(), ...failedStage.stop } } : {}), error: error instanceof Error ? error.message : String(error), ...(errorCode ? { errorCode } : {}) })
     return state
   } finally { activeControllers.delete(id); activeFinished.delete(id); finish() }
 }
