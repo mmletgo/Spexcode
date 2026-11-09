@@ -697,7 +697,8 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
     child.stdin.end()
     let exit = await Promise.race([closed, sleep(3000).then(() => undefined)])
     stopAt = Date.now() + 3000
-    if (!exit || !(await ownedProcessesStopped(plan, false, stopAt))) {
+    const stoppedOnClose = !!exit && await ownedProcessesStopped(plan, false, stopAt)
+    if (!stoppedOnClose) {
       if (verifyDetachedRuntime(plan.pid!, plan.receiptFile).ok) {
         await sampleOwnedProcesses(plan, stopAt)
         if (verifyDetachedRuntime(plan.pid!, plan.receiptFile).ok && Date.now() < stopAt) try { process.kill(-plan.pid!, 'SIGTERM') } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error }
@@ -705,7 +706,8 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
       while (Date.now() < stopAt && !(await ownedProcessesStopped(plan, true, stopAt))) await sleep(50)
       exit ??= await Promise.race([closed, sleep(100).then(() => undefined)])
     }
-    const stopped = Date.now() < stopAt && await ownedProcessesStopped(plan, false, stopAt)
+    const reuseCloseStop = worktree && stoppedOnClose && !stopSent && !abortRequested && protocolError === undefined && resultError === undefined
+    const stopped = Date.now() < stopAt && (reuseCloseStop || await ownedProcessesStopped(plan, false, stopAt))
     writeJson(join(root, 'exit.json'), { code: exit?.code ?? null, signal: exit?.signal ?? null, stopped, acknowledged, idle, closed: closeAcknowledged, stderrBytes, stderrSha256: stderrHash.digest('hex') } satisfies StopEvidence, true)
     nativeStopped = stopped
     if (!stopped) { child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy(); child.unref(); if (!(resultError instanceof ZCodeNativeTurnFailedError) && !(resultError instanceof StructuredSessionError && resultError.code === 'native_rpc_timeout')) resultError = new StructuredSessionError('cancellation_pending', 'ZCode app/MCP process stop is unproven') }
