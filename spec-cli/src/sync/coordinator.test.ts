@@ -660,7 +660,10 @@ for (const [mode, defect] of [['pause', 'archived'], ['native-failure', 'archive
       if (['request', 'thread', 'turn', 'stop', 'failed-observation'].includes(defect)) assert.equal(result.failure?.code, 'checkpoint_artifact_binding')
       if (['rpc-proof', 'exit', 'idle', 'closed', 'idle-identity', 'terminal-kind', 'session', 'version', 'model', 'missing-dispatch-session', 'null-dispatch-thread', 'null-dispatch-turn', 'harness-thread'].includes(defect)) assert.equal(result.failure?.code, 'stale_result', JSON.stringify(result.failure))
       if (defect === 'dirty' && !p1) assert.equal(current.failure?.code, 'native_worktree_result_invalid')
-      if (defect === 'terminal-json') assert.match(result.failure!.message, /JSON/)
+      if (defect === 'terminal-json') {
+        if (p1) assert.match(result.failure!.message, /JSON/)
+        else assert.deepEqual(result.failure, { code: 'coordinator_failed', message: 'P0 行为校验未通过', kind: 'unsupported', evidenceRefs: [] })
+      }
       if (['source', 'tests', 'schema'].includes(defect)) assert.match(result.failure!.message, p1 ? /已停物理草稿的owner\/seed、只读文件或index发生越界变化/ : /同步仅允许正常提交指定UTF8草稿文件/)
     }
   }
@@ -713,7 +716,8 @@ for (const [mode, defect] of [['pause', 'archived'], ['native-failure', 'archive
   if (completedRpcResource) {
     assert.equal(provenance.fromAttemptId, completedRpcResource.attemptId)
     assert.deepEqual(provenance.nativePlanRef, completedRpcResource.plan.planBlob); assert.deepEqual(provenance.checkpointRef, completedRpcResource.checkpointRef)
-    assert.deepEqual(provenance.originalFailure, oldAttempts.find(attempt => attempt.id === completedRpcResource.attemptId)!.failure)
+    const originalFailure = oldAttempts.find(attempt => attempt.id === completedRpcResource.attemptId)!.failure!
+    assert.deepEqual(provenance.originalFailure, p1 ? originalFailure : { code: originalFailure.code, kind: originalFailure.kind })
     assert.equal(provenance.oid, execFileSync('git', ['-C', f.root, 'rev-parse', `${latestHead}:${oldDraftPath}`], { encoding: 'utf8' }).trim())
   }
   assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
