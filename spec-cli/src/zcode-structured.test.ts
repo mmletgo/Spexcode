@@ -513,15 +513,15 @@ test('cold ZCode cancellation rechecks exact receipt after awaited process obser
   } finally { t.mock.restoreAll(); kill(-child.pid, 'SIGTERM'); await ended; rmSync(directory, { recursive: true, force: true }) }
 })
 
-test('same-stack ZCode completion reuses its fresh stop proof while cold unsettled replay reobserves processes', { timeout: 30_000 }, async t => {
+for (const censusPhase of ['pre-exit', 'post-exit', 'late-protocol-error'] as const) test(`same-stack ZCode completion reuses its fresh stop proof while cold unsettled replay reobserves processes: ${censusPhase}`, { timeout: 30_000 }, async t => {
   const directory = mkdtempSync(join(tmpdir(), 'zcode-worktree-census-repro-'))
   t.after(() => rmSync(directory, { recursive: true, force: true }))
   const bin = join(directory, 'bin'), workspace = join(directory, 'workspace'), realm = join(directory, 'realm'), id = 'fixture'
-  const root = join(realm, id), exitPath = join(root, 'exit.json'), completedPath = join(root, 'completed.json')
+  const root = join(realm, id), exitPath = join(root, 'exit.json'), completedPath = join(root, 'completed.json'), stopObservationsPath = join(root, 'process-stop-observations.jsonl')
   mkdirSync(bin); mkdirSync(workspace); mkdirSync(realm)
   const originalEnv = { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR }
   const originalSpawn = childProcess.spawn.bind(childProcess)
-  let preExitCensusCalls = 0, postExitCensusCalls = 0
+  let preExitCensusCalls = 0, postExitCensusCalls = 0, preExitInjectedCensusCalls = 0, postExitInjectedCensusCalls = 0, coldReplayRequested = false
   const cli = join(bin, 'zcode')
   const rpcFixture = `#!/usr/bin/env node
 const readline=require('node:readline');
@@ -542,7 +542,7 @@ else if(request.method==='session/messages')reply(request.id,{hasMore:false,mess
 {info:{id:'fixture-user',sessionID:create.sessionId,role:'user',modelSelection:model(),anchor:{turnId},semantics:{kind:'user_prompt'}},parts:[{type:'text',text:send.content}]},
 {info:{id:'fixture-final',sessionID:create.sessionId,role:'assistant',providerId:model().providerId,modelId:model().modelId,anchor:{turnId},semantics:{kind:'assistant_response'}},parts:[{type:'text',text:response}]}
 ]})
-else if(request.method==='session/close')reply(request.id,{closed:true})
+else if(request.method==='session/close'){reply(request.id,{closed:true});if (${JSON.stringify(censusPhase)}==='late-protocol-error')process.stdout.write('malformed-native-rpc\\n')}
 else throw new Error('unexpected fixture RPC')
 });
 `
@@ -566,9 +566,22 @@ else throw new Error('unexpected fixture RPC')
   }
   const interceptedSpawn = (command: string, args: readonly string[], options: SpawnOptions) => {
     if (command === '/bin/ps') {
-      if (existsSync(exitPath)) postExitCensusCalls++
-      else preExitCensusCalls++
-      if (existsSync(exitPath)) return originalSpawn(process.execPath, ['-e', 'process.exitCode=23'], options)
+      if (existsSync(exitPath)) {
+        postExitCensusCalls++
+        if (coldReplayRequested || censusPhase === 'post-exit') {
+          postExitInjectedCensusCalls++
+          return originalSpawn(process.execPath, ['-e', 'process.exitCode=23'], options)
+        }
+      } else {
+        preExitCensusCalls++
+        if (censusPhase !== 'post-exit' && !coldReplayRequested && preExitInjectedCensusCalls === 0 && existsSync(stopObservationsPath)) {
+          const observations = readFileSync(stopObservationsPath, 'utf8').trim().split('\n').map(line => JSON.parse(line) as { nativeStopped: boolean })
+          if (observations.length === 1 && observations[0].nativeStopped) {
+            preExitInjectedCensusCalls++
+            return originalSpawn(process.execPath, ['-e', 'process.exitCode=23'], options)
+          }
+        }
+      }
     }
     return originalSpawn(command, args, options)
   }
@@ -583,39 +596,61 @@ else throw new Error('unexpected fixture RPC')
       error => ({ error: error as { code?: string; message?: string } }),
     )
     if ('error' in outcome) {
+      assert.equal(outcome.error.code, 'cancellation_pending')
+      if (censusPhase !== 'post-exit') {
+        assert.equal(existsSync(stopObservationsPath), true)
+        const stopObservations = readFileSync(stopObservationsPath, 'utf8').trim().split('\n').map(line => JSON.parse(line) as { nativeStopped: boolean })
+        assert.equal(stopObservations.length, 1)
+        assert.equal(stopObservations[0].nativeStopped, true)
+        assert.equal(preExitInjectedCensusCalls, 1, '注入须等同root首条真实positive stop observation后执行')
+        assert.equal(postExitCensusCalls, 0)
+        assert.equal(existsSync(exitPath), false, '下一次stop census应在exit sidecar写入前失败')
+        assert.equal(existsSync(completedPath), false)
+        assert.equal(outcome.error.message, 'ZCode native cleanup or stop evidence could not be settled')
+        if (censusPhase === 'late-protocol-error') return
+        assert.fail(`fresh same-stack stop proof should settle before another pre-exit census; got ${outcome.error.message}`)
+      }
       const exit = JSON.parse(readFileSync(exitPath, 'utf8')) as { code: number | null; signal: string | null; stopped: boolean; acknowledged: boolean; idle: boolean; closed: boolean }
-      const stopObservations = readFileSync(join(root, 'process-stop-observations.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line) as { nativeStopped: boolean })
+      const stopObservations = readFileSync(stopObservationsPath, 'utf8').trim().split('\n').map(line => JSON.parse(line) as { nativeStopped: boolean })
       assert.deepEqual({ code: exit.code, signal: exit.signal, stopped: exit.stopped, acknowledged: exit.acknowledged, idle: exit.idle, closed: exit.closed }, { code: 0, signal: null, stopped: true, acknowledged: false, idle: true, closed: true })
       assert.equal(stopObservations.length, 2)
       assert(stopObservations.every(observation => observation.nativeStopped))
       assert.equal(preExitCensusCalls > 0, true)
       assert.equal(postExitCensusCalls, 1)
+      assert.equal(postExitInjectedCensusCalls, 1)
       assert.equal(existsSync(completedPath), false)
-      assert.equal(outcome.error.code, 'cancellation_pending')
       assert.equal(outcome.error.message, 'native worktree process observation remains unproven')
+      coldReplayRequested = true
       await assert.rejects(zcodeStructuredTurn(realm, id, prompt, replayExecution, callbacks, workspace), error => {
         assert.equal((error as { code?: string }).code, 'cancellation_pending')
         assert.equal((error as Error).message, 'native worktree process observation remains unproven')
         return true
       })
       assert.equal(postExitCensusCalls, 2)
+      assert.equal(postExitInjectedCensusCalls, 2)
       assert.equal(existsSync(completedPath), false)
       assert.fail(`fresh same-stack stop proof should settle the warm result; got ${outcome.error.message}`)
     }
+    if (censusPhase === 'late-protocol-error') assert.fail('终态后的原生协议错误不能复用本轮停止观察')
+    const exit = JSON.parse(readFileSync(exitPath, 'utf8')) as { code: number | null; signal: string | null; stopped: boolean; acknowledged: boolean; idle: boolean; closed: boolean }
+    assert.deepEqual({ code: exit.code, signal: exit.signal, stopped: exit.stopped, acknowledged: exit.acknowledged, idle: exit.idle, closed: exit.closed }, { code: 0, signal: null, stopped: true, acknowledged: false, idle: true, closed: true })
     assert.equal(postExitCensusCalls, 0, 'same-stack settlement must reuse its fresh process-stop observations')
+    assert.equal(preExitInjectedCensusCalls, 0, 'fresh pre-exit proof must avoid another census')
     assert.equal(outcome.result.turnId, 'fixture-turn')
     assert.equal(outcome.result.text, '{"ok":true}')
     assert.equal(existsSync(completedPath), true)
-    const stopObservations = readFileSync(join(root, 'process-stop-observations.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line) as { nativeStopped: boolean })
-    assert.equal(stopObservations.length, 2)
+    const stopObservations = readFileSync(stopObservationsPath, 'utf8').trim().split('\n').map(line => JSON.parse(line) as { nativeStopped: boolean })
+    assert(censusPhase === 'pre-exit' ? stopObservations.length === 1 : [1, 2].includes(stopObservations.length))
     assert(stopObservations.every(observation => observation.nativeStopped))
     rmSync(completedPath)
+    coldReplayRequested = true
     await assert.rejects(zcodeStructuredTurn(realm, id, prompt, replayExecution, callbacks, workspace), error => {
       assert.equal((error as { code?: string }).code, 'cancellation_pending')
       assert.equal((error as Error).message, 'native worktree process observation remains unproven')
       return true
     }, 'cold replay without a durable completion marker must perform a fresh process census')
     assert.equal(postExitCensusCalls, 1)
+    assert.equal(postExitInjectedCensusCalls, 1)
     assert.equal(existsSync(completedPath), false)
   } finally {
     for (const [key, value] of Object.entries(originalEnv)) {
