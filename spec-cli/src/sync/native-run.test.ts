@@ -353,11 +353,18 @@ for (const historical of [false, true, 'tool-policy-only', 'configured-high'] as
   } finally { coldProtocol.close(); f.cleanup() }
 })
 
-test('native intent precedes run, published queued session is created with unknown thread, result binds exact identity and replays', async () => {
+test('native intent precedes run, published queued session is created with unknown thread, result binds exact identity and replays', async t => {
   const f = await fixture()
   try {
-    let calls = 0, finish: (value: StructuredSessionResult) => void = () => {}
-    const run = f.runner({ ...f.runtimeBase, run: async request => {
+    let calls = 0, writes = 0, runningObservations = 0, finish: (value: StructuredSessionResult) => void = () => {}
+    const bind = f.store.bindSession.bind(f.store)
+    f.store.bindSession = (...args) => { writes++; return bind(...args) }
+    const readRecord = (id: string): NativeRunRecord | null => {
+      const record = f.runtimeBase.readRecord(id)
+      if (record?.structuredExecution?.state === 'running') runningObservations++
+      return record
+    }
+    const run = f.runner({ ...f.runtimeBase, readRecord, run: async request => {
       calls++
       assert.equal(f.resource().phase, 'planned')
       assert.equal(f.checkpoint().nativeCallRequested, true)
@@ -376,8 +383,11 @@ test('native intent precedes run, published queued session is created with unkno
     record.status = 'active'; record.harnessSessionId = 'actual-thread'; record.structuredExecution = { ...record.structuredExecution!, state: 'running', threadId: 'actual-thread', turnId: 'actual-turn', turnStartRequested: true }
     await waitUntil(() => f.store.readAttempt(f.claimed.attempt.id).currentSession?.turnId === 'actual-turn')
     assert.equal(f.checkpoint().nativeStarted, true)
+    await waitUntil(() => runningObservations >= 8)
     const result = completed(record); finish(result)
     assert.deepEqual(await pending, result)
+    t.diagnostic(JSON.stringify({ runningObservations, bindings: writes }))
+    assert.equal(writes, 2, '只写已发布及真实thread/turn两次身份变化')
     assert.equal(f.resource().phase, 'removed')
     assert.deepEqual(f.checkpoint().result, result)
     f.store.requestControl(f.claimed.operation.id, 'cancel')

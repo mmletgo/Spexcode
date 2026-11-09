@@ -234,6 +234,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
       try { store.reserveDispatch(fence, { key: request.requestKey, purpose: request.purpose, requestDigest }); return true }
       catch (error) { if (error instanceof SyncStoreError && error.code === 'SYNC_FENCE_EXPIRED') return false; throw error }
     }
+    let boundSession = dispatch.session
     const observe = (): NativeRunRecord | null => {
       const record = runtime.readRecord(expectedSessionId)
       if (!record) return null
@@ -245,7 +246,10 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
         const next: NativeRunCheckpoint = { ...checkpoint, phase: 'created' as const, nativeState: state.state ?? 'queued', nativeStarted: !!state.turnId, session }
         if (hash(next) !== hash(checkpoint)) save(next)
       }
-      if (!controller.signal.aborted && authority()) store.bindSession(fence, request.requestKey, session)
+      if ((!boundSession || boundSession.sessionId !== session.sessionId || boundSession.threadId !== session.threadId || boundSession.turnId !== session.turnId) && !controller.signal.aborted && authority()) {
+        store.bindSession(fence, request.requestKey, session)
+        boundSession = session
+      }
       return record
     }
     let outcome: { ok: true; result: ElaborationSessionResult } | { ok: false; error: unknown } | undefined
