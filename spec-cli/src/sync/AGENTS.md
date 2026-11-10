@@ -45,7 +45,7 @@
 
 - v22登记owner Git草稿续修与已证停止RPC故障的显式准入。草稿只存Git对象身份，不借raw权限；旧缺席字段不追补，已接受候选仍须原绑定。只有现有停止协议确证并结算资源后，运行中的有效fence才能续修，用户暂停/取消和未知停止不自动重启。 缺final的typed格式失败可独立保Git；旧无witness及安全暂停稿只在新有效attempt按原request/owner/seed/schema、完整source/tests对象及正式stop/removed观察最新正常Git，旧record/checkpoint不补签，普通暂停不赋格式码。 明确已停CLI错误终态只授未批准Git材料，不借格式或success角色；可选native-protocol.jsonl只记安全元数据，冷验不追补。
 
-- 新P0首次冻结git-json-v3，沿v2正文与失败状态，仅在分析提示追加只读当前草稿覆盖自检。格式失败续原JSON/schema，业务拒绝引用真实独审原件。v1/v2、缺席字段和saved/reserved按原绑定恢复。业务摘要、批准复用及正式检查保持。writer36只追加SELECT1，升级先停稳结算并online backup，回滚恢复一致v35库及evidence/Git refs。
+- 新P0首次冻结git-json-v4，沿v2正文与失败状态和v3分析自检，独审提示追加只读冻结树路径自检。格式失败续原JSON/schema，业务拒绝引用真实独审原件。v1/v2/v3、缺席字段和saved/reserved按原绑定恢复。业务摘要、批准复用及正式检查保持。writer37只追加SELECT1，升级先停稳结算并online backup，回滚恢复一致v36库及evidence/Git refs。
 
 - writer23围栏保护新P0持久协议；升级前停稳旧writer/结算或保留资源，正常online backup迁移，回滚恢复一致旧库及evidence，不删marker。新P0按attempt显式冻结code-behavior-draft-v1，analyze/review复用stage-worktree的同owner/purpose Git草稿与只读schema；格式失败续原JSON，review格式、引用绑定或覆盖协议错误保已校验分析与完整拒因，仅续原review；完整合法独审的业务finding/repair仍续原analysis并重新独审。旧reserved不补协议；认证旧Native CAS仅作新seed临时材料，不伪造历史Git稿。仅认证且命中原变更owner/affectedIds的P1后置语义质疑才触发新analysis与独审；格式失败继续原文件及失败环节，不改kind或扩授权。
 
