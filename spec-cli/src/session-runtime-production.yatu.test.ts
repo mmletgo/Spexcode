@@ -149,6 +149,12 @@ test('YATU: CLI-created parent/child state survives backend restart and delivers
     assert.equal((await secondBinding.json() as { bindingGeneration: number }).bindingGeneration, 2)
     const stale = await bind('start-3', 1)
     assert.equal(stale.status, 409)
+    const stopParent = await request(`/api/sessions/${encodeURIComponent(parent.id)}/stop`, { method: 'POST' })
+    const stopParentBody = await stopParent.json() as { ok: boolean }
+    assert.equal(stopParent.status, 200, JSON.stringify(stopParentBody))
+    assert.deepEqual(stopParentBody, { ok: true })
+    const retainedParent = await request(`/api/sessions/${encodeURIComponent(parent.id)}`)
+    assert.equal(retainedParent.status, 200, await retainedParent.text())
     const publish = await request(`/api/session-runtime/${encodeURIComponent(child.id)}/publish`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ kind: 'fixture.notification.v1', body: 'after-restart' }),
     })
