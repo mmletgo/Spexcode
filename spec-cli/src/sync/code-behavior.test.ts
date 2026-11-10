@@ -9,6 +9,7 @@ import { isHostPrivatePath } from './candidate.js'
 import { isUtf8Text } from './composition.js'
 import { analyzeCodeBehavior, CODE_BEHAVIOR_REVIEW_SCHEMA, CODE_BEHAVIOR_SCHEMA, deriveBehaviorAuthorization, packBehaviorBodies, readCodeBehaviorContext, referenceCodeBehaviorMetadata, type FrozenBehaviorBody } from './code-behavior.js'
 import type { CodeBehaviorInput, CodeBehaviorContinuation } from './code-behavior.js'
+import { behaviorMaterialTaskMatches } from './coordinator.js'
 import { nativeWorktreeResult } from '../native-worktree-runtime.js'
 import { readStageDraft } from './stage-worktree.js'
 import { adoptedDeliveryPaths, composeInputSnapshots, readCompositionEvidence, type IntentObject, type IntentResidual, type SelectedCompositionEvidence } from './composition.js'
@@ -1048,16 +1049,35 @@ test('Native P0 派发区分符号链接覆盖和新增事实来源', async t =>
     plan: { ...prepared.plan, agentWorkflow: 'native-worktree-v1' },
   }
   const dispatched = new Error('已检查真实派发请求')
+  const commonDir = input.snapshot.source.commonDir
+  let materialTask: Parameters<typeof behaviorMaterialTaskMatches>[1] | undefined
   await assert.rejects(analyzeCodeBehavior(input, async request => {
     assert.equal(request.purpose, 'code_behavior_analyze')
-    const { task, errors, repairDiagnostics } = readCodeBehaviorContext(request, input.snapshot.source.commonDir)
+    const { task, errors, repairDiagnostics } = readCodeBehaviorContext(request, commonDir)
     assert.deepEqual(task.factSourcePaths, factSourcePaths)
     assert.deepEqual(task.requiredChangedPaths, [link])
     assert.deepEqual(errors, []); assert.deepEqual(repairDiagnostics, [])
     assert.equal(readTree(input.snapshot.source.commonDir, request.worktree!.tree).find(entry => entry.path === link)?.mode, '120000')
     assert.ok(request.prompt.includes(`本区符号链接=${JSON.stringify([link])}`), '本轮提示必须明确指出不可作新增事实的冻结链接')
     assert.match(request.prompt, /已有草稿.*change\.evidence/)
+    assert.ok(materialTask)
+    const previous = { ...request, prompt: request.prompt
+      .replace('本区owned冻结UTF-8普通文件；符号链接不能作为新增事实来源，同一source', '本区owned冻结文件；同一source')
+      .replace(`本区符号链接=${JSON.stringify([link])}。这些路径仍按原范围覆盖。修正已有草稿中由这些链接产生的新增facts，将链接本身的证据写入对应change.evidence。`, '') }
+    assert.notEqual(previous.prompt, request.prompt)
+    assert.equal(behaviorMaterialTaskMatches(request, materialTask, commonDir), true)
+    assert.equal(behaviorMaterialTaskMatches(previous, materialTask, commonDir), true, '原事实提示版本的真实冻结上下文仍可续稿')
+    assert.equal(behaviorMaterialTaskMatches({ ...previous, prompt: previous.prompt.replace('不受factSourcePaths限制', '不受任何范围限制') }, materialTask, commonDir), false)
+    assert.equal(behaviorMaterialTaskMatches({ ...request, prompt: request.prompt.replace(`本区符号链接=${JSON.stringify([link])}`, '本区符号链接=["src/export.js"]') }, materialTask, commonDir), false)
+    assert.equal(behaviorMaterialTaskMatches(previous, { ...materialTask, prompt: materialTask.prompt.replace('"requiredChangedPaths":["src/CLAUDE.md"]', '"requiredChangedPaths":["src/export.js"]') }, commonDir), false)
     throw dispatched
+  }, undefined, {
+    load: () => null,
+    save: () => {},
+    loadMaterial: (purpose, _schemaDigest, inputDigest, request) => {
+      materialTask = { ...request, purpose, inputDigest }
+      return null
+    },
   }), error => error === dispatched)
 })
 
