@@ -35,7 +35,11 @@ export function codeBehaviorReviewSchema(inputDigest: string, analysisDigest: st
 export type CodeBehaviorApprovalBinding = { analysisSchemaDigest: string; changedPaths: readonly string[] }
 export const CODE_BEHAVIOR_GUIDANCE_VERSION = 'code-behavior-guidance-v7'
 export const CODE_BEHAVIOR_FAILURE_STATUS = 'P0 行为校验未通过'
-export type CodeBehaviorContextTransport = 'git-json-v1' | 'git-json-v2' | 'git-json-v3'
+const CONTEXT_TRANSPORTS = ['git-json-v1', 'git-json-v2', 'git-json-v3', 'git-json-v4'] as const
+export type CodeBehaviorContextTransport = typeof CONTEXT_TRANSPORTS[number]
+export function isCodeBehaviorContextTransport(value: unknown): value is CodeBehaviorContextTransport {
+  return CONTEXT_TRANSPORTS.some(transport => transport === value)
+}
 
 /** 后置门禁只质疑原分类；原件、真实行和代码差量不授予新业务权限。 */
 export type CodeBehaviorPostGateReview = {
@@ -114,7 +118,7 @@ export function readCodeBehaviorContext(request: Pick<ElaborationSessionRequest,
     } catch (error) { if (!(error instanceof SyntaxError)) throw error; throw new Error(invalid) }
   }
   const seed = request.worktree, path = task.path, draftPath = /草稿文件=([^\s；]+)/.exec(request.prompt)?.[1]
-  if ((task.contextTransport !== 'git-json-v1' && task.contextTransport !== 'git-json-v2' && task.contextTransport !== 'git-json-v3') || !seed || typeof path !== 'string' || !/^\.spex-sync-drafts\/[a-f0-9]{64}\.context\.json$/.test(path)
+  if (!isCodeBehaviorContextTransport(task.contextTransport) || !seed || typeof path !== 'string' || !/^\.spex-sync-drafts\/[a-f0-9]{64}\.context\.json$/.test(path)
     || path !== draftPath?.replace(/\.json$/, '.context.json')
     || task.inputDigest !== request.inputDigest || typeof task.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(task.sha256)
     || objectGit(commonDir, ['rev-parse', '--verify', `${seed.baseCommit}^{tree}`]).toString().trim() !== seed.tree) throw new Error('P0 context指针不匹配冻结请求/seed')
@@ -282,7 +286,7 @@ export function selectedAuthoredContractChanges(evidence: ReturnType<typeof read
 
 export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: ElaborationRunner, accepted?: (inputDigest: string, binding: CodeBehaviorApprovalBinding) => CodeBehaviorAnalysis | null, checkpoints?: CodeBehaviorCheckpoints, verified?: BehaviorReadBasis): Promise<CodeBehaviorAnalysis> {
   const { signal, ...data } = supplied, input: CodeBehaviorInput = { ...structuredClone(data), signal }
-  const statusOnly = input.contextTransport === 'git-json-v2' || input.contextTransport === 'git-json-v3'
+  const statusOnly = input.contextTransport !== undefined && input.contextTransport !== 'git-json-v1'
   let continuation: CodeBehaviorContinuation | undefined
   const persist = (): void => { if (continuation) checkpoints?.save(statusOnly ? codeBehaviorContinuationStatus(continuation) : structuredClone(continuation)) }
   const diagnostic: { proposal?: unknown; analysis?: CodeBehaviorAnalysis; review?: unknown } = {}
@@ -640,7 +644,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     }
     if (draftMode) prompt += `\n草稿文件=${binding.path}；${material ? material.sourceKind === 'physical_draft' ? '已认证停止的旧工作树中明确未批准的物理草稿已按原字节复制到当前seed；它未提交，不是历史Git稿、Native final或批准；仅续修此文件，正常提交后重新独审。' : material.sourceKind === 'git_draft' ? '认证的原Git分析草稿已按原字节复制到当前seed；沿该原文件核实分类并续修，旧批准不继承。' : material.sourceKind === 'native_output' ? '认证的旧只读Native成功结构化输出已序列化为本轮临时材料；它不是历史Git草稿或新批准，在该文件核实分类并续修。' : '旧Native原输出材料已按认证CAS原字节复制为本轮临时输入，不是既有Git草稿；在该原文件继续修复。' : source === undefined ? '首次实际创建该文件。' : '已有原草稿已复制到当前seed，在原文件继续修改，不从零重答。'}本段只把上文直接返回业务JSON的交付方式改为草稿文件；业务文件仍只读，唯一可写例外为此草稿。结构化业务JSON写入此临时文件，Spec、源码、全部测试、其他owner文件保持不变。只允许正常git add和git commit该草稿并保持clean；无需改正文时可正常commit --allow-empty，保留hooks。${DRAFT_RECEIPT_INSTRUCTIONS} 草稿仅为非权威诊断材料，不是raw、事实、批准或新授权。\n草稿业务schema只读文件=${binding.path.replace(/\.json$/, '.schema.json')}；先读取精确schema并自检，禁止修改schema。${contextSource === undefined ? `原具体错误：${JSON.stringify(repairErrors)}；本轮修复诊断：${JSON.stringify(repairDiagnostics)}` : statusOnly ? '读取任务指针指定的只读context JSON。task为原任务，review的pendingAnalysis为本轮完整待审分析。按原JSON草稿与精确schema继续自检和修复。context、schema等临时协议文件不属于业务checkedPaths。保持这些文件只读，仓库仍可自由读取。' : `读取任务指针指定的完整只读context JSON：task为原任务，repairDiagnostics/errors仅为非权威修复诊断，review的pendingAnalysis为本轮完整待审分析，均须保留各项具体拒因；按原JSON草稿继续修复。context、schema等临时协议文件不属于业务checkedPaths，不修改这些只读文件；仓库仍可自由读取。`}`
     if (reviewFeedback) prompt += `\n用 git show ${reviewFeedback.commit}:${reviewFeedback.path} 读取本区最近一次真实业务独审的原JSON。沿其具体发现修复原草稿。原审查意见只供返修，不授予批准或新写权。`
-    if (input.contextTransport === 'git-json-v3' && purpose === 'code_behavior_analyze') prompt += `
+    if ((input.contextTransport === 'git-json-v3' || input.contextTransport === 'git-json-v4') && purpose === 'code_behavior_analyze') prompt += `
 初始化时即使基线与 HEAD 的 Git 内容相同，task.requiredChangedPaths 仍须全部在 changes[].paths 中归类。可把同一行为的多条实际路径放在一项。每条 task.unownedSourcePaths 要有 newNodes，或有真实重大未知/冲突的对应项。
 在续修开头对已有草稿运行下方只读检查，提交前对最终草稿再运行。按输出的具体路径补足分析和归属。两组列表为空后提交。检查仅输出当前漏项，独审仍核业务事实及归属，禁止为通过检查虚构 GAP。
 node - ${contextPath} ${binding.path} <<'SPEX_P0_COVERAGE'
@@ -659,6 +663,22 @@ const missingOwnerPaths = task.unownedSourcePaths.filter(path => !ownerOrGap.has
 console.log(JSON.stringify({ missingChangedPaths, missingOwnerPaths }, null, 2))
 if (missingChangedPaths.length || missingOwnerPaths.length) process.exitCode = 1
 SPEX_P0_COVERAGE`
+    if (input.contextTransport === 'git-json-v4' && purpose === 'code_behavior_review') prompt += `
+在续审开头对已有评审稿运行下方只读检查，提交前再次检查。checkedPaths 只记录已实际独立检查的冻结文件。输出中的路径须重新核对，改用真实已检查文件的精确仓库相对路径；只读了目录、临时文件或不存在的路径时，先检查真正相关的文件。全部必审路径、业务证据、拒因和独立审查继续按原要求完成。
+node - ${contextPath} ${binding.path} ${worktree!.tree} <<'SPEX_P0_REVIEW_PATHS'
+const { readFileSync } = require('node:fs')
+const { execFileSync } = require('node:child_process')
+const { task } = JSON.parse(readFileSync(process.argv[2], 'utf8'))
+const { checkedPaths } = JSON.parse(readFileSync(process.argv[3], 'utf8'))
+const readable = new Set()
+for (const tree of new Set([process.argv[4], ...task.historicalRoles.map(role => role.tree)])) {
+  const paths = execFileSync('git', ['--no-replace-objects', 'ls-tree', '-r', '--full-tree', '--name-only', '-z', tree], { encoding: 'utf8', maxBuffer: 128 * 1024 * 1024 })
+  for (const path of paths.split(String.fromCharCode(0))) if (path) readable.add(path)
+}
+const invalidCheckedPaths = checkedPaths.filter(path => !readable.has(path))
+console.log(JSON.stringify({ invalidCheckedPaths }, null, 2))
+if (invalidCheckedPaths.length) process.exitCode = 1
+SPEX_P0_REVIEW_PATHS`
     const nativeSchema = draftMode ? DRAFT_RECEIPT_SCHEMA : schema
     const request = { root: input.snapshot.source.canonicalRoot, base: seed?.baseCommit ?? input.snapshot.headCommit, ...(seed ? { worktree: seed } : {}), requestKey: `${input.requestKey}:${purpose}`, inputDigest, purpose, prompt, schema: nativeSchema, timeoutMs: input.timeoutMs, signal, model: syncModel(input), effort: 'high' as const, ...(frozenEntries?.length ? { frozenEntries } : {}) }
     let result: Awaited<ReturnType<ElaborationRunner>>

@@ -14,7 +14,7 @@ code:
 
 ## expanded spec
 
-writer34/35 升级回归验证只追加无 DDL 的缺失 marker，备份可由各自原迁移集合读取，原 schema、操作、attempt 和已注册迁移字节保持。旧 writer 对升级后的库明确拒绝。
+writer34/35/36 升级回归验证只追加无 DDL 的缺失 marker，备份可由各自原迁移集合读取，原 schema、操作、attempt 和已注册迁移字节保持。旧 writer 对升级后的库明确拒绝。
 
 批量基线回归使用含引号、换行和 Unicode 的已结算路径及同一合约的真实 pair。加入 1,748 个缺席路径与重复键后，结果仍保留相同 pair、精确缺席及原排序，查询次数与小集合相同。
 
