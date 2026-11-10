@@ -4323,6 +4323,10 @@ async function closeSessionUnlocked(id: string, source: CloseSource, wakeQueue =
   if (!wt) return false
   if (wt.rec.launchReadinessPending)
     throw new ResourceConflict(`refusing to close ${id}: a resume transaction is pending; revalidate or cancel that transaction first`)
+  const execution = wt.rec.structuredExecution
+  if (execution?.worktree && execution.state !== 'completed'
+    && (!['failed', 'cancelled', 'timeout'].includes(execution.state ?? '') || execution.cancellation?.nativeStopped !== true))
+    throw new ResourceConflict(`refusing to close ${id}: exact native worktree execution has not settled`)
   let unboundStopped = false
   if (!retirementReason(wt.rec) && !wt.rec.archived && wt.rec.status !== 'queued') {
     const harness = harnessById(wt.rec.harness || defaultHarness.id)
