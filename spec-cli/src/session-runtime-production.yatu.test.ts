@@ -136,14 +136,17 @@ test('YATU: CLI-created parent/child state survives backend restart and delivers
     const replay = await request(`/api/session-runtime/${encodeURIComponent(child.id)}/replay`)
     assert.equal(replay.status, 200)
     assert.equal((await replay.json() as { status: string }).status, 'active')
+    const fixtureRuntimeNamespace = 'yatu-fixture-runtime'
     const bind = async (startToken: string, expectedGeneration?: number) => request(`/api/session-runtime/${encodeURIComponent(parent.id)}/bind`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ namespace: 'spex-governed', runtimeKind: 'fixture', nativeSessionId: 'parent-native', nativeStartToken: startToken, ...(expectedGeneration === undefined ? {} : { expectedGeneration }) }),
+      body: JSON.stringify({ namespace: fixtureRuntimeNamespace, runtimeKind: 'fixture', nativeSessionId: 'parent-native', nativeStartToken: startToken, ...(expectedGeneration === undefined ? {} : { expectedGeneration }) }),
     })
     const firstBinding = await bind('start-1')
     if (firstBinding.status !== 200) assert.fail(await firstBinding.text())
+    assert.equal((await firstBinding.json() as { bindingGeneration: number }).bindingGeneration, 1)
     const secondBinding = await bind('start-2', 1)
     if (secondBinding.status !== 200) assert.fail(await secondBinding.text())
+    assert.equal((await secondBinding.json() as { bindingGeneration: number }).bindingGeneration, 2)
     const stale = await bind('start-3', 1)
     assert.equal(stale.status, 409)
     const publish = await request(`/api/session-runtime/${encodeURIComponent(child.id)}/publish`, {
@@ -153,7 +156,7 @@ test('YATU: CLI-created parent/child state survives backend restart and delivers
     const deliveredKinds: string[] = []
     for (;;) {
       const delivered = await request(`/api/session-runtime/${encodeURIComponent(parent.id)}/dequeue`, {
-        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ namespace: 'spex-governed', expectedGeneration: 2 }),
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ namespace: fixtureRuntimeNamespace, expectedGeneration: 2 }),
       })
       if (delivered.status !== 200) assert.fail(await delivered.text())
       const message = await delivered.json() as { kind: string } | null
