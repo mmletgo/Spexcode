@@ -11,5 +11,5 @@ export function syncModelBinding(model?: string): { model?: string } {
 
 /** 仅选择CLI执行器；模型和别名交给原生配置解析，不设模型允许名册。 */
 export function assertWorktreeSyncModel(model: string): void {
-  if (!(model.startsWith('claude:') && model.length > 7) && !(model.startsWith('zcode:') && model.length > 6)) throw Object.assign(new Error('native-worktree同步需要选择claude:或zcode:执行器；可用default沿用CLI配置或指定模型，不自动切换执行器'), { code: 'unsupported' })
+  if (!['claude:', 'zcode:', 'grok:'].some(prefix => model.startsWith(prefix) && model.length > prefix.length)) throw Object.assign(new Error('native-worktree同步需要选择claude:、zcode:或grok:执行器；可用default沿用CLI配置或指定模型'), { code: 'unsupported' })
 }
