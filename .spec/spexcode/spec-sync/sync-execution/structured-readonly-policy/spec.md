@@ -27,7 +27,7 @@ related:
 
 可选 zcodeToolPolicy 仅对明确 ZCode worktree read 接受 version1 与精准 ExitPlanMode denylist，随固定策略进入创建摘要；纯策略构造只保留显式字段，不给旧请求补默认。新建/恢复的选择由 [[structured-session-runtime]] 和 [[sync-native-run]] 冻结，原生 plan/send 版本边界由 [[zcode-structured-runtime]] 校验；不改变结构化 version6 或其它 provider。
 
-新显式 worktree:{baseCommit,tree,mode} 采用独立 version6/native-worktree-v1，数字或 null 期限都保持该版本。固定 schema/inputDigest/purpose/timeoutMs/model/effort/worktree 参与创建哈希，resultWorktree 仅为终态观察；不能同时携 frozenContext/readerRuntime，不产生 frozenReadProof。仅明确 Claude、ZCode 或 Grok 的原生命名空间可用；无前缀/default/Codex 模型明确 unsupported，带命名空间的 default 仅在上述 cli-config-v1 路由可用。realm 固定为 structured-native-worktree-v1/claude 或 /zcode，禁止借旧只读 realm/证明；正常文件工具与 Git 结果边界见 [[native-worktree-runtime]]，两个执行器的正常模式分别由 [[claude-structured-runtime]]、[[zcode-structured-runtime]] 规定。下述 version1–5 的冻结策略完整保留，不因新增模式而放宽。
+新显式 worktree:{baseCommit,tree,mode} 采用独立 version6/native-worktree-v1，数字或 null 期限都保持该版本。固定 schema/inputDigest/purpose/timeoutMs/model/effort/worktree 参与创建哈希，resultWorktree 仅为终态观察；不能同时携 frozenContext/readerRuntime，不产生 frozenReadProof。仅明确 Claude、ZCode 或 Grok 的原生命名空间可用；无前缀/default/Codex 模型明确 unsupported，带命名空间的 default 仅在上述 cli-config-v1 路由可用。各执行器使用固定的 structured-native-worktree-v1/claude、/zcode 或 /grok realm。正常文件工具与 Git 结果边界见 [[native-worktree-runtime]]。各执行器的正常模式分别由 [[claude-structured-runtime]]、[[zcode-structured-runtime]] 和 [[grok-structured-runtime]] 规定。下述 version1–5 的冻结策略完整保留，不因新增模式而放宽。
 
 `grok:<选择>` 必须使用本机 CLI 配置的 version6 工作树策略。固定只读历史没有 Grok 路由。
 
