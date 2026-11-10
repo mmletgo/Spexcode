@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+v39 只追加 SELECT 1 writer marker，保护 P0 首次派发前冻结的原正常提交草稿。旧 writer 不得重新选择新请求的原料。升级先正式停稳旧 writer 并结算，再正常 online backup 和组件事务。回滚先停稳新 writer 并结算，再恢复一致 v38 备份及配套证据和 Git refs。
+
 v38 只追加 SELECT 1 writer marker，保护从未领取的提交快照初始化被替换后的接入规则。旧业务记录、迁移和索引保持原样。升级先正式停稳旧 writer 并结算资源与租约，再正常 online backup 和组件事务。回滚先停稳新 writer 并结算，再恢复一致 v37 备份及配套证据和 Git refs。
 
 v37 只追加 SELECT 1 writer marker，保护派发前冻结的 P0 独审路径自检。升级先正式停稳旧 writer 并结算资源与租约，再正常 online backup 和组件事务。旧 writer 在写入和派发前拒绝。回滚先停稳新 writer 并结算，再恢复一致 v36 备份及配套证据和 Git refs。

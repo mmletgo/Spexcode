@@ -41,6 +41,8 @@ P1追加A正常Git拒稿→B新物理EPIPE无witness→C原bytes续改并独审�
 
 新增真实Git/私有SQLite/正式ZCode stop场景：EPIPE前仅有untracked invalidJSON且HEAD==seed，旧clean门重复失败，修复后新seed保原bytes；tracked/staged亦然。核较新physical承接较旧认证稿、旧physical晚观察不覆盖更新Git、review仅续审保ready及原诊断、P1物理稿续改正常commit后独立accept；source/tests/schema/context/index/owner/session/stop/seed/root/fence/CAS反例拒绝。原record/checkpoint/Native文件/raw index/HEAD/源draft逐字保持；只证明受控真实机制，不替代现场模型恢复。
 
+已停止的 P0 分析正常提交与普通 ignored 缓存并存时，旧协调器在下一派发前拒绝。新协调器从同一真实 Git 对象冻结未批准草稿，复核新 seed 精确字节与原 Git、索引、Native 原件。新请求保留后冷重启 SQLite 并改变旧工作树，正式续入的请求与保留摘要逐字一致，仍仅一份材料证明。托管投影及伪造保护文件反例沿 [[sync-stage-worktree]] 的相同提交验证器。
+
 ZCode停止材料回归复用真实Git/私有SQLite及正式adapter.stop/资源恢复：旧cancelling→cancelled与新failed+exactstop均在新fence续较新正常提交的原bytes，existing较旧认证draft不能遮蔽它，原业务诊断、已accept兄弟和预算保持。v3 explicit/default另以真实receipt核无messages的只读投影；session/turn/input/query/messageId/model/workspace/stop/seed/source/tests/schema/owner/request/fence错配不授材料，cancelled终态仅无进度skip，有新稿拒绝。P0和P1分别覆盖exit.json单独ENOENT：暂停首次资源、正式recover后移除exit再resume，候选须在物理/Git读取前跳过；精确对照原attempt/plan/checkpoint refs确认它没有形成新provenance，P1没有候选或验证。present-but-invalid exit、坏JSON及缺plan/send仍拒绝；已认证历史材料、错误与兄弟结果保持。旧record/Native文件、原attempt/checkpoint/resource逐字不变，不追加冷停止观察，不冒称真实模型、远端EPIPE修复或交付。
 
 P0 历史 ZCode 结果未发布的回归使用真实 Git、私有 SQLite 和正式停止与归档。原 Native 已成功封存、正式观察到失败、最终结算为 cancelled 时，下一 attempt 跳过该来源并用无旧稿的 seed 派发。封存被改、exit 缺失或未曾正式观察失败时不得派发。原归档引用、Native 字节、原 attempt 和资源保持。尚未结算的 RPC 资源应返回 recovery_required，等待结算并保持后续派发为零。新 P0 的停止材料引用保原状态码与来源引用。损坏的旧终态 JSON 仍明确拒绝，正式失败摘要不携解析原文。
