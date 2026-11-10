@@ -1037,6 +1037,30 @@ test('Native P0全树事实来源复用batch原字节且不逐blob重读', async
   assert.equal(pointReads.length, 0, 'P0事实来源全树已经batch核验，不得逐blob重读')
 })
 
+test('Native P0 派发区分符号链接覆盖和新增事实来源', async t => {
+  const f = await fixture(t), link = 'src/CLAUDE.md'
+  symlinkSync('export.js', join(f.root, link))
+  git(f.root, 'add', link); git(f.root, 'commit', '-m', 'freeze a governed-directory link')
+  const prepared = await f.input(), factSourcePaths = ['src/export.js', link]
+  const input: CodeBehaviorInput = {
+    ...prepared, draftProtocol: 'code-behavior-draft-v1', contextTransport: 'git-json-v4',
+    partition: { id: 'native-fact-link', changedPaths: [link], factSourcePaths },
+    plan: { ...prepared.plan, agentWorkflow: 'native-worktree-v1' },
+  }
+  const dispatched = new Error('已检查真实派发请求')
+  await assert.rejects(analyzeCodeBehavior(input, async request => {
+    assert.equal(request.purpose, 'code_behavior_analyze')
+    const { task, errors, repairDiagnostics } = readCodeBehaviorContext(request, input.snapshot.source.commonDir)
+    assert.deepEqual(task.factSourcePaths, factSourcePaths)
+    assert.deepEqual(task.requiredChangedPaths, [link])
+    assert.deepEqual(errors, []); assert.deepEqual(repairDiagnostics, [])
+    assert.equal(readTree(input.snapshot.source.commonDir, request.worktree!.tree).find(entry => entry.path === link)?.mode, '120000')
+    assert.ok(request.prompt.includes(`本区符号链接=${JSON.stringify([link])}`), '本轮提示必须明确指出不可作新增事实的冻结链接')
+    assert.match(request.prompt, /已有草稿.*change\.evidence/)
+    throw dispatched
+  }), error => error === dispatched)
+})
+
 for (const kind of ['binary', 'invalid-utf8', 'symlink', 'private'] as const) test(`Native P0事实来源仍拒绝${kind}`, async t => {
   const f = await fixture(t), path = kind === 'private' ? 'context/.env' : `context/${kind}`
   mkdirSync(join(f.root, 'context'))

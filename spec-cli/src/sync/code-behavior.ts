@@ -727,7 +727,14 @@ SPEX_P0_REVIEW_PATHS`
     turns.set(purpose, { threadId: result.threadId, turnId: result.turnId, proof: result.frozenReadProof })
     return output
   }
-  const partitionFactInstructions = input.partition ? `分区code facts边界：新增事实的source必须是 code:<path>#<非空anchor>，且path精确等于partition.factSourcePaths中的本区owned冻结文件；同一source只给一个完整text。共享只读测试和依赖应在change.evidence中引用，不得作为新增facts.source。若source与plan.facts中的source和text逐字一致，则按原可信事实规则复用，不受factSourcePaths限制。${input.partition.authorizedParentSpecPaths !== undefined && !readonlyCodeToSpec ? '新治理叶的parentNodeId只能对应partition.authorizedParentSpecPaths内已授权、已读取且有raw的父Spec；它可以只作为本区只读context，不要求成为本区target；codePath仍只能从本区unownedSourcePaths中选择。该父目录授权仅生成Spec叶，不授予源码或测试写权。' : ''}` : ''
+  const partitionFactPaths = input.partition?.factSourcePaths
+  const linkedFactPaths = worktree && partitionFactPaths
+    ? sourceEntries.filter(({ mode, path }) => mode === '120000' && partitionFactPaths.includes(path)).map(({ path }) => path)
+    : []
+  const linkedFactInstructions = linkedFactPaths.length
+    ? `本区符号链接=${JSON.stringify(linkedFactPaths)}。这些路径仍按原范围覆盖。修正已有草稿中由这些链接产生的新增facts，将链接本身的证据写入对应change.evidence。`
+    : ''
+  const partitionFactInstructions = input.partition ? `分区code facts边界：新增事实的source必须是 code:<path>#<非空anchor>，且path精确等于partition.factSourcePaths中的本区owned冻结UTF-8普通文件；符号链接不能作为新增事实来源，同一source只给一个完整text。共享只读测试和依赖应在change.evidence中引用，不得作为新增facts.source。若source与plan.facts中的source和text逐字一致，则按原可信事实规则复用，不受factSourcePaths限制。${linkedFactInstructions}${input.partition.authorizedParentSpecPaths !== undefined && !readonlyCodeToSpec ? '新治理叶的parentNodeId只能对应partition.authorizedParentSpecPaths内已授权、已读取且有raw的父Spec；它可以只作为本区只读context，不要求成为本区target；codePath仍只能从本区unownedSourcePaths中选择。该父目录授权仅生成Spec叶，不授予源码或测试写权。' : ''}` : ''
   const partitionNewNodeInstructions = input.partition
     ? '分区newNodes范围：只为本区unownedSourcePaths中schema列出的源码候选提出newNodes，并遵守本次schema的codePath/parentNodeId范围与maxItems；候选为空或schema.maxItems为0时必须返回[]。Root/接口分区不能替兄弟源码分区提出newNodes。'
     : ''
