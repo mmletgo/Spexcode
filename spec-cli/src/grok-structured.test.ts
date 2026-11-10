@@ -14,7 +14,7 @@ const schema = { type: 'object', properties: { marker: { type: 'string' } }, req
 const finalText = '{"marker":"终态"}'
 const sha256 = (text: string): string => createHash('sha256').update(text).digest('hex')
 
-type Scenario = 'success' | 'wrong-session' | 'wrong-cwd' | 'missing-request' | 'duplicate-terminal' | 'missing-terminal' | 'wrong-format' | 'bad-schema' | 'hang' | 'read'
+type Scenario = 'success' | 'wrong-session' | 'wrong-cwd' | 'missing-request' | 'duplicate-terminal' | 'missing-terminal' | 'wrong-format' | 'bad-schema' | 'hang' | 'read' | 'split-settlement-window' | 'cancel-during-settlement'
 
 function fixture(t: TestContext, scenario: Scenario, model = 'grok:default') {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'spex-grok-fixture-')))
@@ -36,7 +36,7 @@ function fixture(t: TestContext, scenario: Scenario, model = 'grok:default') {
   const requestId = randomUUID()
   writeFileSync(cli, String.raw`#!${process.execPath}
 const assert = require('node:assert/strict')
-const { execFileSync } = require('node:child_process')
+const { execFileSync, spawn } = require('node:child_process')
 const { readFileSync, writeFileSync } = require('node:fs')
 const { dirname, join } = require('node:path')
 const args = process.argv.slice(2)
@@ -78,7 +78,14 @@ if (scenario === 'hang') {
   process.once('SIGTERM', () => { clearInterval(stay); finish() })
 }
 writeFileSync(join(dirname(promptFile), 'fixture-started.json'), JSON.stringify({ args, prompt: readFileSync(promptFile, 'utf8') }), { flag: 'wx' })
-if (scenario !== 'hang') finish()
+if (scenario === 'split-settlement-window' || scenario === 'cancel-during-settlement') {
+  const splitWindow = scenario === 'split-settlement-window'
+  const descendantDelay = splitWindow ? 18000 : 4000
+  const descendant = spawn(process.execPath, ['-e', 'setTimeout(() => {}, ' + descendantDelay + ')'], { stdio: 'ignore' })
+  descendant.unref()
+  setTimeout(finish, 400)
+  setTimeout(() => {}, splitWindow ? 13000 : 900)
+} else if (scenario !== 'hang') finish()
 `, { mode: 0o700 })
 
   const prompt = nativeWorktreePrompt('保留原始输入\n\n第二行 \t ', worktree)
@@ -131,6 +138,40 @@ test('Grok runs once in the exact worktree and replays original result and stop 
   await assert.rejects(f.run(f.state(), replayCallbacks, f.prompt, f.workspace + '-wrong'), { code: 'stale_result' })
   rmSync(join(f.sessionRoot, 'process-stop-observations.jsonl'))
   await assert.rejects(f.run(f.state(), replayCallbacks), { code: 'stale_result' })
+})
+
+test('Grok gives a closed successful terminal a full independent process settlement window', { timeout: 30_000 }, async t => {
+  const f = fixture(t, 'split-settlement-window')
+  try {
+    const result = await f.run()
+    assert.equal(result.turnId, f.requestId)
+    assert.equal(result.text, finalText)
+    assert.equal(existsSync(join(f.sessionRoot, 'settlement.json')), true)
+  } finally {
+    let stopped = await stopGrokStructuredTurn(f.state(), 5_000)
+    if (!stopped.nativeStopped) {
+      await delay(3_000)
+      stopped = await stopGrokStructuredTurn(f.state(), 5_000)
+    }
+    assert.equal(stopped.nativeStopped, true)
+  }
+})
+
+test('Grok cancellation during process settlement still suppresses the result', { timeout: 10_000 }, async t => {
+  const f = fixture(t, 'cancel-during-settlement')
+  const controller = new AbortController()
+  const rejected = assert.rejects(f.run(f.state(), { ...f.callbacks, signal: controller.signal }), { code: 'cancelled' })
+  const observations = join(f.sessionRoot, 'process-stop-observations.jsonl')
+  try {
+    await waitForFixture(observations)
+    const first = JSON.parse(readFileSync(observations, 'utf8').split('\n')[0]) as { nativeStopped: boolean }
+    assert.equal(first.nativeStopped, false)
+  } finally {
+    controller.abort()
+    await rejected
+  }
+  assert.equal(existsSync(join(f.sessionRoot, 'result.json')), false)
+  assert.equal(existsSync(join(f.sessionRoot, 'settlement.json')), false)
 })
 
 test('Grok read uses native plan mode, removes plan exit and leaves the original seed clean', async t => {

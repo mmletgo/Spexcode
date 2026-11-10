@@ -302,11 +302,16 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
     }, 250)
     const ended = await Promise.race([Promise.all([closed, observed]), expiry])
     armStop()
-    stopped = await waitForStop(owned, deadline!, callbacks.signal?.aborted === true || timedOut)
-    if (!stopped || !ended) throw pending('Grok native close and process-group stop remain unproven')
+    if (!ended) throw pending('Grok native close and process-group stop remain unproven')
+    clearTimeout(stopTimer)
+    const [exit, output] = ended
+    const interrupted = callbacks.signal?.aborted === true || timedOut
+    const successfulExit = !observerFailure && !processFailed && output?.terminal.stopReason === 'end_turn' && exit.code === 0 && exit.signal === null
+    const stopDeadline = successfulExit && !interrupted ? Date.now() + STOP_MS : deadline!
+    stopped = await waitForStop(owned, stopDeadline, interrupted)
+    if (!stopped) throw pending('Grok native close and process-group stop remain unproven')
     if (callbacks.signal?.aborted || timedOut || existsSync(join(root, 'cancel.json'))) throw Object.assign(cancelled(timedOut), timeoutFailure === undefined ? {} : { cause: timeoutFailure })
     if (observerFailure) throw observerFailure
-    const [exit, output] = ended
     if (processFailed || !output) throw pending('Grok native result was not fully observed')
     if (output.terminal.stopReason !== 'end_turn' || exit.code !== 0 || exit.signal !== null) throw new StructuredSessionError('failed', 'Grok native turn did not complete successfully')
     const turnId = output.terminal.requestId
