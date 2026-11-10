@@ -428,8 +428,17 @@ export class SyncStore {
           return finish(existing, 'duplicate')
         }
       }
-      const compatible = compatibleIds.map(id => this.operation(tx, id)).find(operation => this.compatibleSelection(tx, operation, input.baselineSelection!))
-      const sameInput = compatible ?? parseRecord<SyncOperation>(tx.query('SELECT record_json FROM sync_operations WHERE normalized_semantic_digest=? ORDER BY rowid DESC LIMIT 1', semanticDigest)[0])
+      const replaceUnclaimedInitial = !observation && input.origin === 'initial' && input.input.captureKind === 'commit' && !input.retryOf && !input.requestBlob && !input.delivery
+      let supersededInitial: SyncOperation | undefined
+      const retainMatch = (operation: SyncOperation): boolean => {
+        if (!replaceUnclaimedInitial || operation.input.captureKind !== 'commit' || operation.phase !== 'superseded' || operation.control !== 'run' || operation.currentAttemptId || operation.callsUsed !== 0 || operation.delivery || syncDeadlineExpired(operation.deadlineAtMs, this.now())) return true
+        const newDelivery = operation.deliveryPlan.canonicalRoot !== input.deliveryPlan.canonicalRoot || operation.deliveryPlan.branch !== input.deliveryPlan.branch
+        if (!newDelivery || operation.deliveryPlan.baseCommit !== input.deliveryPlan.baseCommit || syncModel(operation) !== syncModel(input) || operation.impactDigest !== input.impactDigest || operation.readSetDigest !== input.readSetDigest || digest(operation.scope) !== digest(payload.scope) || operation.baselineSelection?.digest !== input.baselineSelection?.digest) return true
+        if (!supersededInitial || supersededInitial.generation < operation.generation) supersededInitial = operation
+        return false
+      }
+      const compatible = compatibleIds.map(id => this.operation(tx, id)).find(operation => this.compatibleSelection(tx, operation, input.baselineSelection!) && retainMatch(operation))
+      const sameInput = compatible ?? tx.query('SELECT record_json FROM sync_operations WHERE normalized_semantic_digest=? ORDER BY rowid DESC LIMIT ?', semanticDigest, replaceUnclaimedInitial ? -1 : 1).map(row => parseRecord<SyncOperation>(row)!).find(retainMatch)
       if (sameInput) { tx.exec("UPDATE sync_operations SET ingress_aliases_json=json_insert(ingress_aliases_json,'$[#]',?) WHERE id=?", input.ingressKey, sameInput.id); this.saveIngressReceipt(tx, input, sameInput.id, payloadDigest); return finish(sameInput, 'duplicate') }
       if (input.baselineSelection) this.assertSelection(tx, input.input.source, input.baselineSelection, scopeResources(input.scope))
       if (input.retryOf) {
@@ -449,7 +458,7 @@ export class SyncStore {
         if (!eligibility.eligible) fail(eligibility.reason!.code, eligibility.reason!.message)
       }
       const older = tx.query('SELECT record_json FROM sync_operations WHERE repository_id=? AND source_root=?', input.input.source.repositoryId, input.input.source.canonicalRoot).map(row => parseRecord<SyncOperation>(row)!)
-      const predecessor = observation && input.baselineSelection && !input.retryOf ? older.filter(operation => identityKey(operation.input.source) === identityKey(input.input.source) && digest(canonicalScope(operation.scope)) === digest(canonicalScope(input.scope)) && !TERMINAL.has(operation.phase)).sort((a,b) => (b.dispatchAnchor?.firstEnqueueSeq ?? 0) - (a.dispatchAnchor?.firstEnqueueSeq ?? 0))[0] : undefined
+      const predecessor = supersededInitial ?? (observation && input.baselineSelection && !input.retryOf ? older.filter(operation => identityKey(operation.input.source) === identityKey(input.input.source) && digest(canonicalScope(operation.scope)) === digest(canonicalScope(input.scope)) && !TERMINAL.has(operation.phase)).sort((a,b) => (b.dispatchAnchor?.firstEnqueueSeq ?? 0) - (a.dispatchAnchor?.firstEnqueueSeq ?? 0))[0] : undefined)
       const inheritedAnchor = predecessor ? predecessor.dispatchAnchor ?? {
         scope: physicalScope(predecessor.input.source), firstMessageId: predecessor.dispatchMessageId,
         firstEnqueueSeq: Number(tx.query('SELECT enqueue_seq FROM protocol_messages WHERE message_id=?', predecessor.dispatchMessageId)[0].enqueue_seq),

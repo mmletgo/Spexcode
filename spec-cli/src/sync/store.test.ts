@@ -1865,6 +1865,66 @@ test('P4 物理暂停跨分支及重启保留，仍收件和观察，run revisio
   } finally { f.cleanup() }
 })
 
+for (const withSelection of [true, false]) test(`提交观察替换零执行显式初始化后同输入仍可接入（selection=${withSelection}）`, async () => {
+  const f = await fixture()
+  try {
+    const full = { paths: ['src/a.ts', 'src/b.ts'], contractIds: [], flowIds: [] }, changed = { ...full, paths: ['src/a.ts'] }
+    const selected = f.store.readBaselineSelection(source(), full.paths.map(path => ({ kind: 'path', path })))
+    const changedSelection = f.store.readBaselineSelection(source(), [{ kind: 'path', path: 'src/a.ts' }])
+    assert.ok('selection' in selected && 'selection' in changedSelection)
+    const input = { ...f.input(), captureKind: 'commit' as const }
+    const initial: AdmitSyncInput = { ...f.admit(source(), input.id, full), origin: 'initial', input, model: 'claude:default', ...(withSelection ? { baselineSelection: selected.selection } : {}) }
+    f.store.requestPhysicalControl(source(), 'pause', 0)
+    const first = f.store.admitAndEnqueue(initial)
+    f.store.requestPhysicalControl(source(), 'run', 1)
+    const observation = f.store.observeAndAdmit({ input, configRef: f.put({ config: 'commit' }), selection: changedSelection.selection, latestDifferenceDigest: 'commit-change' }, { ...initial, ingressKey: 'observed-commit', origin: 'code', scope: changed, baselineSelection: changedSelection.selection, deliveryPlan: { ...initial.deliveryPlan, branch: 'observed' } }, { controlRevision: 2, selectionDigest: changedSelection.selection.digest })
+    assert.ok('operation' in observation)
+    const old = f.store.ackDispatch('repo', first.dispatchMessageId)
+    assert.equal(old.phase, 'superseded')
+    assert.equal(old.currentAttemptId, null)
+    f.store.ackDispatch('repo', observation.operation.dispatchMessageId)
+    f.store.requestControl(observation.operation.id, 'pause')
+    f.tick(10)
+
+    assert.equal(f.store.admitAndEnqueue({ ...initial, ingressKey: 'same-payload' }).id, first.id)
+    const fresh: AdmitSyncInput = { ...initial, ingressKey: 'new-explicit', rootCauseId: 'new-explicit', budget: { mode: 'unlimited' }, deliveryPlan: { ...initial.deliveryPlan, branch: 'new-delivery' } }
+    assert.throws(() => f.store.admitAndEnqueue({ ...fresh, model: 'zcode:default' }), /SYNC_MODEL_RETRY_REQUIRED/)
+    const admitted = f.store.admitAndEnqueue(fresh)
+    assert.notEqual(admitted.id, first.id)
+    assert.equal(admitted.phase, 'queued')
+    assert.equal(admitted.retryOf, undefined)
+    assert.equal(admitted.deadlineAtMs, first.deadlineAtMs)
+    assert.deepEqual(admitted.budget, first.budget)
+    assert.equal(admitted.dispatchAnchor?.budgetRootOperationId, first.id)
+    assert.deepEqual(admitted.input, input)
+    assert.deepEqual(admitted.scope, full)
+    assert.deepEqual(f.store.readOperation(first.id), old)
+    assert.equal(f.store.admitAndEnqueue(initial).id, first.id)
+    assert.equal(f.store.admitAndEnqueue({ ...fresh, ingressKey: 'another-explicit', deliveryPlan: { ...fresh.deliveryPlan, branch: 'another-delivery' } }).id, admitted.id)
+    const ack = f.store.ackDispatch('repo', admitted.dispatchMessageId)
+    assert.equal(f.store.nextQueued('repo')?.id, admitted.id)
+    const claimed = f.store.claimQueuedAttempt({ operationId: ack.id, source: input.source, scope: full, leaseMs: 1000, expectedRevision: ack.revision })
+    assert.equal(claimed.attempt.operationId, admitted.id)
+    assert.deepEqual(f.store.readBudgetUsage(admitted.id), { budgetRootOperationId: first.id, callsUsed: 0, attemptsUsed: 1, repairFailures: 0 })
+  } finally { f.cleanup() }
+})
+
+for (const hadAttempt of [true, false]) test(`提交初始化被替换后保留已有领取或已过期输入的去重（hadAttempt=${hadAttempt}）`, async () => {
+  const f = await fixture()
+  try {
+    const budget = { maxAttempts: 4, maxCalls: 4, maxRepairs: 2, timeoutMs: 100 }
+    const initial: AdmitSyncInput = { ...f.admit(), origin: 'initial', input: { ...f.input(), captureKind: 'commit' }, budget }
+    const first = hadAttempt ? f.claim(initial).operation : f.store.admitAndEnqueue(initial)
+    if (!hadAttempt) {
+      f.tick(budget.timeoutMs + 1)
+      assert.equal(f.store.recordBudgetExhaustion(first.id).phase, 'budget_exhausted')
+    }
+    f.store.admitAndEnqueue({ ...f.admit(source(), 'later'), origin: 'code' })
+    assert.equal(f.store.readOperation(first.id).phase, 'superseded')
+    assert.equal(f.store.admitAndEnqueue({ ...initial, ingressKey: 'new-explicit', deliveryPlan: { ...initial.deliveryPlan, branch: 'new-delivery' } }).id, first.id)
+  } finally { f.cleanup() }
+})
+
 test('commit观察历史折叠普通重复但保留接入消费事实，不受500条展示上限且重开隔离来源', async () => {
   const f = await fixture()
   try {
@@ -2578,7 +2638,7 @@ test('writer34观察索引正常备份升级、失败原子回滚、保旧行且
   } finally { backup?.close(); f.cleanup() }
 })
 
-for (const prior of [34, 35, 36] as const) test(`从writer${prior}升级仅追加P0版本并保留可回滚备份`, async () => {
+for (const prior of [34, 35, 36, 37] as const) test(`从writer${prior}升级仅追加围栏并保留可回滚备份`, async () => {
   const f = await fixture()
   let backup: ReturnType<typeof openProtocol> | undefined
   try {
@@ -2590,10 +2650,10 @@ for (const prior of [34, 35, 36] as const) test(`从writer${prior}升级仅追�
       attempts: tx.query('SELECT * FROM sync_attempts ORDER BY rowid'),
       previousRegistry: tx.query('SELECT * FROM schema_migrations WHERE component!=? OR version<=? ORDER BY component,version', SYNC_COMPONENT, prior),
     }))
-    const before = read(f.protocol), backupPath = join(f.root, `v${prior}-before-p0-guidance.backup`)
-    assert.deepEqual(SYNC_MIGRATIONS.slice(prior).map(({ version }) => version), [35, 36, 37].filter(version => version > prior))
+    const before = read(f.protocol), backupPath = join(f.root, `v${prior}-before-upgrade.backup`)
+    assert.deepEqual(SYNC_MIGRATIONS.slice(prior).map(({ version }) => version), [35, 36, 37, 38].filter(version => version > prior))
     for (const { sql } of SYNC_MIGRATIONS.slice(prior)) assert.match(sql, /^SELECT 1;/)
-    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), 37)
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), 38)
     assert.deepEqual(read(f.protocol), before)
     assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, versions), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
     assert.deepEqual(f.store.readAttempt(claimed.attempt.id), claimed.attempt)
