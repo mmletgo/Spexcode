@@ -20,6 +20,8 @@ sourceContinuityState仅在既有assertSchema事务只读汇总同commonDir的�
 
 共享身份属于 [[sync-operation-types]]。admitAndEnqueue 将冻结 operation、稳定派发计划与现有 protocol 的 sync.dispatch.v1 control envelope 原子写入，注册唯一 coordinator 地址；消息不是普通 Agent 文本。稳定接入 payload 包含输入内容与物理身份、policy/impact/readSet 摘要，capture 时间不参与；同键不同 payload 拒绝。claimAttempt 独立保存 attempt 与 sessionCreateKey（不超过128字符），在同一事务领取所有实际 path/规则写集合及可选 exact FIFO dequeue。dequeue 后仍由未完 attempt 恢复。
 
+提交快照的显式初始化若被替换且从未领取，新请求可在同一冻结输入、范围、基线选择和模型下，以新交付计划入队。它继承前驱的队列锚、预算族和原截止时间，旧操作及旧 ingress 仍可查询。已领取、已有调用或交付、已过期及精确旧 payload 继续去重。若同语义已有其他可复用操作，先复用它。自动观察和正式 retry 的准入不变。
+
 额外的受控用户请求通过 requestBlob 单独持久绑定，接入前验存在和内容摘要，并纳入 payload 去重与 pinnedBlobRefs。同一实际来源快照上的不同用户编辑不能误归并为同一次操作。没有额外请求的历史操作及自动文件事件保留原摘要语义；请求正文仅在 evidence blob 中，不改来源快照或复制入数据库正文。
 
 bindComposedInput 同时核对 operation.requestBlob 与 composed.requestBlob 的内容寻址身份，存在或缺失都必须一致；错误请求、漏叠加请求或把请求附到自动文件操作不能取得生成输入绑定。请求证据读取和 hash 核验在 SQL 事务外完成。

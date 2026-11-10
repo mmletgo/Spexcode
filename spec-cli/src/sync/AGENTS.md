@@ -47,6 +47,8 @@
 
 - 新P0首次冻结git-json-v4，沿v2正文与失败状态和v3分析自检，独审提示追加只读冻结树路径自检。格式失败续原JSON/schema，业务拒绝引用真实独审原件。v1/v2/v3、缺席字段和saved/reserved按原绑定恢复。业务摘要、批准复用及正式检查保持。writer37只追加SELECT1，升级先停稳结算并online backup，回滚恢复一致v36库及evidence/Git refs。
 
+- writer38保护提交快照初始化的接入：被替换且从未领取时，新显式请求用新交付计划入队，继承原预算、截止时间及队列锚。旧请求身份、已有领取和自动观察去重保持。升级先停稳结算并 online backup，回滚恢复一致 v37 库及证据和 Git refs。
+
 - writer23围栏保护新P0持久协议；升级前停稳旧writer/结算或保留资源，正常online backup迁移，回滚恢复一致旧库及evidence，不删marker。新P0按attempt显式冻结code-behavior-draft-v1，analyze/review复用stage-worktree的同owner/purpose Git草稿与只读schema；格式失败续原JSON，review格式、引用绑定或覆盖协议错误保已校验分析与完整拒因，仅续原review；完整合法独审的业务finding/repair仍续原analysis并重新独审。旧reserved不补协议；认证旧Native CAS仅作新seed临时材料，不伪造历史Git稿。仅认证且命中原变更owner/affectedIds的P1后置语义质疑才触发新analysis与独审；格式失败继续原文件及失败环节，不改kind或扩授权。
 
 - 完整初始化资格不等于所有源码曾被写过：未写path可用精确已采纳owner Spec、正式settled receipt、scope及三份对象一致证明只读初始化，缺binding/null保持；已有非null头不fallback，未审owner/源码漂移拒绝。规划回归：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/planning.test.ts`。
