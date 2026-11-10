@@ -77,6 +77,8 @@ macOS 的新 worktree 版本探测与执行子进程沿 [[native-worktree-runtim
 
 worktree 停止与未结算重放共用 [[native-worktree-runtime]] 的正向任务域边界及 boundaryVersion2 追加观察，保留原 failed exit/unknown 原件。进程观察沿同一异步有界接缝等待；100ms采样仅保一个在途任务，首个终态/取消/协议失败窗口固定原15秒绝对截止并停止定时采样，既有10秒终止timer不变；finally等待在途采样结算，再在同一截止内核最终停止与清理流。普通采样整次最多10秒，停止后不再领新采样预算；不能以最后一次观察重置停止期限。收尾不得留下迟到写入或未处理的Promise拒绝；sealed缺final认证的原receipt门与已completed冷读不活探历史PID的语义保持。旧 Claude plan 缺 workspace 时，stop/replay/settle 都从原不可变 launch.cwd 归一，域缺失明确 pending，不以 stale→failed 释放真实任务孤儿。
 
+v6 Claude 原生工作树在登记实际启动意图之前完成强制的同 UID 进程基线采样。历史记录已先登记意图时，正式停止仅在同一 canonical 会话保留精确的采样失败、原计划与准备记录一致、现场仅有启动前准备产物且没有进程、原生请求或终态见证时，证明该次启动未发生。此证明只结算既有资源，不产生结果或信号授权。已有启动见证的会话按原身份门禁处理。
+
 已启动的 v6 Claude 周期采样遇到首个 cancellation_pending 时保留运行状态、容量和已证实的进程关联。按原 100ms 单在途节奏在同一 10 秒绝对截止内重观察，连续 pending 共用首次截止，完整健康样本结束本段恢复。原生 result 或显式取消立即启用原停止门并接管结算。其后到达的在途周期采样回报交由新鲜停止验证处理。运行中恢复到期或其它采样异常保留首诊断，按精确 receipt 的原终止窗口收尾。已证实停止才进入原失败结算，停止不明时以 cancellation_pending 保留首诊断与资源债务。内部失败收尾不记外部 interrupt。诊断仅输出固定周期观察标签、pending/recovered/expired 与 elapsedMs，不写协议错误或正文。
 
 原生 worktree v6 的 error_max_structured_output_retries 在原请求/Native session/user/promptId、实际 model、exit1/is_error 与真实停止均绑定后，依据原 history 中精确 StructuredOutput 调用及配对 schema 错误，返回同一 structured_output_retries_exhausted。诊断复用原安全字段提取，不规范化或补填业务 JSON、不创建 completed/读取证明/Git 结果。原生同 promptId 的结构输出 enforce 元消息不是新业务用户；正常内置工具不受旧 frozen 白名单及逐字消费证明限制。旧冻结失败认证仍完整保留；普通失败、身份差异、停止不明或 completed 原件篡改不取得此分类。既有 runtime 持久 code、协调 repairDiagnostics、新 attempt 与独审/资源结算接缝保持。

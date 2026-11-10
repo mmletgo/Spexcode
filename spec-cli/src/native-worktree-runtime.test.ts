@@ -478,6 +478,37 @@ test('ZCode authenticated worktree schema mismatch is typed for repair without p
   } finally { f.close() }
 })
 
+test('Claude stops a recorded pre-launch census failure without claiming unknown native ownership', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'spex-claude-preflight-stop-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const policy = structuredExecutionPolicy({ ...request, model: 'claude:default', nativeConfiguration: 'cli-config-v1' })
+  const native = { version: 2 as const, root, sessionId: 'fixture-session', userUuid: 'fixture-user' }
+  const receiptFile = join(root, 'process.json')
+  const error = 'native worktree process observation remains unproven'
+  const execution: StructuredExecution = {
+    ...policy, claudeNative: native, turnStartRequested: true, state: 'cancelling', error,
+    cancellation: { reason: 'cancelled', requestedAt: 1, nativeStopped: false, acknowledged: false, error: 'Claude launch/process identity differs' },
+  }
+  const capability = { cliVersion: 'fixture-cli', binaryDigest: 'c'.repeat(64) }
+  const cliPath = '/fixture/claude', launchFile = join(root, 'launch.json')
+  writeFileSync(join(root, 'plan.json'), JSON.stringify({ ...native, ...capability, cliPath, receiptFile, workspace: root, policyDigest: hash(policy) }))
+  writeFileSync(launchFile, JSON.stringify({ command: cliPath, cwd: root, capability }))
+  assert.equal((await stopClaudeStructuredTurn({ ...execution, error: 'unknown origin' })).nativeStopped, false)
+  assert.deepEqual(await stopClaudeStructuredTurn(execution), { nativeStopped: true, acknowledged: false, nativeStatus: 'notStarted' })
+  writeFileSync(launchFile, JSON.stringify({ command: cliPath, cwd: join(root, 'different'), capability }))
+  assert.equal((await stopClaudeStructuredTurn(execution)).nativeStopped, false)
+  writeFileSync(launchFile, JSON.stringify({ command: cliPath, cwd: root, capability }))
+  for (const name of ['process-baseline.json', 'owned-processes.json', 'process.json', 'init.json', 'exit.json', 'completed.json', 'terminal-stop-request.json', 'interrupt-request.json']) {
+    const marker = join(root, name)
+    writeFileSync(marker, '{}')
+    assert.equal((await stopClaudeStructuredTurn(execution)).nativeStopped, false, name)
+    rmSync(marker)
+  }
+  assert.equal((await stopClaudeStructuredTurn({ ...execution, threadId: 'real-thread' })).nativeStopped, false)
+  assert.equal((await stopClaudeStructuredTurn({ ...execution, claudeNative: { ...native, promptId: 'original-prompt' } })).nativeStopped, false)
+  assert.equal(existsSync(receiptFile), false)
+})
+
 test('unknown worktree process ownership cannot be declared stopped', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'spex-native-worktree-pending-')), root = join(directory, 'native')
   mkdirSync(root)
@@ -604,7 +635,7 @@ process.on('unhandledRejection',error=>unhandled.push(error?.code??'unknown'));
 for(const mode of ${JSON.stringify(modes)}){
   scope={psProbes:0,cwdProbes:0,excludedNonFixtureRows:0};
   const execution={...structuredExecutionPolicy({schema,inputDigest:mode,purpose:'lifecycle',timeoutMs:null,model:'claude:MiniMax-M3.1-Flash',worktree:{...seed,mode:'read'}}),state:'running'},id=randomUUID(),root=join(realm,id),controller=new AbortController(),start=armed.length;
-  const callbacks={signal:controller.signal,onThread:async value=>{execution.threadId=value},onTurn:async value=>{execution.turnId=value},onTurnStarting:async()=>{execution.turnStartRequested=true},onNative:async value=>{execution.claudeNative=value}};
+  const callbacks={signal:controller.signal,onThread:async value=>{execution.threadId=value},onTurn:async value=>{execution.turnId=value},onTurnStarting:async()=>{assert(existsSync(join(root,'process-baseline.json')));assert(existsSync(join(root,'owned-processes.json')));assert(!existsSync(join(root,'process.json')));execution.turnStartRequested=true},onNative:async value=>{execution.claudeNative=value}};
   const flight=claudeStructuredTurn(realm,id,mode,execution,callbacks,workspace).then(value=>({value}),error=>({error}));
   try{
     const ready=Date.now()+${probeMs};while(!existsSync(join(root,'stdin-ended'))&&Date.now()<ready)await sleep(10);assert(existsSync(join(root,'stdin-ended')),'stdin must have ended after the terminal result');

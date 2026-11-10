@@ -1,4 +1,4 @@
-import { NATIVE_PROCESS_OBSERVATION_LIMIT_MS, nativeWorktreeLaunch, nativeWorktreeProcessesStopped, sampleNativeWorktreeProcesses } from './native-worktree-runtime.js'
+import { NATIVE_PROCESS_OBSERVATION_LIMIT_MS, NATIVE_PROCESS_OBSERVATION_PENDING, nativeWorktreeLaunch, nativeWorktreeProcessesStopped, sampleNativeWorktreeProcesses } from './native-worktree-runtime.js'
 import { Ajv } from 'ajv'
 import { spawn, spawnSync, execFileSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
@@ -502,7 +502,19 @@ export async function stopClaudeStructuredTurn(execution: StructuredExecution, t
   if (!existsSync(path)) return { nativeStopped: false, acknowledged: false, error: 'Claude exact launch plan is missing' }
   const plan = JSON.parse(readFileSync(path, 'utf8')) as NativePlan
   if (plan.root !== native.root || plan.sessionId !== native.sessionId || plan.userUuid !== native.userUuid || plan.policyDigest !== hash(structuredExecutionPolicy(execution))) return { nativeStopped: false, acknowledged: false, error: 'Claude fixed launch policy or native identity differs' }
-  if (!execution.turnStartRequested && !execution.threadId && !execution.turnId && !plan.pid) return { nativeStopped: true, acknowledged: false, nativeStatus: 'notStarted' }
+  const unstarted = !execution.threadId && !execution.turnId && !plan.pid && !native.pid && !native.receiptFile
+  if (unstarted && !execution.turnStartRequested) return { nativeStopped: true, acknowledged: false, nativeStatus: 'notStarted' }
+  const historicalPrelaunchFailure = unstarted && execution.version === 6 && execution.policy === 'native-worktree-v1' && execution.worktree && plan.workspace
+    && execution.state === 'cancelling' && execution.cancellation?.nativeStopped === false && execution.error === NATIVE_PROCESS_OBSERVATION_PENDING
+    && plan.version === native.version && plan.receiptFile === join(native.root, 'process.json') && existsSync(join(native.root, 'launch.json'))
+    && !native.promptId && !plan.resolvedModel && !plan.historyPath && !plan.historyDigest && !active.has(native.root)
+    && readdirSync(native.root).every(name => ['plan.json', 'launch.json', 'tmp', 'debug', 'cwd', 'claude-home'].includes(name))
+  if (historicalPrelaunchFailure) {
+    const launch = JSON.parse(readFileSync(join(native.root, 'launch.json'), 'utf8')) as { command: string; cwd: string; capability?: { cliVersion: string; binaryDigest: string } }
+    if (plan.cliPath && plan.cliVersion && /^[a-f0-9]{64}$/.test(plan.binaryDigest) && launch.command === plan.cliPath && launch.cwd === plan.workspace
+      && launch.capability?.cliVersion === plan.cliVersion && launch.capability?.binaryDigest === plan.binaryDigest)
+      return { nativeStopped: true, acknowledged: false, nativeStatus: 'notStarted' }
+  }
   if (!plan.pid || plan.pid !== native.pid || plan.receiptFile !== native.receiptFile) return { nativeStopped: false, acknowledged: false, error: 'Claude launch/process identity differs' }
   if (Date.now() >= deadline) return { nativeStopped: false, acknowledged: false, error: 'Claude native stop deadline expired' }
   const local = active.get(native.root)
@@ -595,8 +607,9 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
   await callbacks.onNative(native)
   const args = worktree ? claudeWorktreeArgs({ sessionId: native.sessionId, model, schema: execution.schema, effort: execution.effort, mode: execution.worktree!.mode, ...(nativeConfiguration ? { nativeConfiguration } : {}) }) : claudeStructuredArgs({ sessionId: native.sessionId, model, mcpConfig, schema: execution.schema, effort: execution.effort })
   writeFileSync(join(root, 'launch.json'), JSON.stringify({ command: cliPath, args, environmentNames: Object.keys(env), cwd, capability: { cliVersion, binaryDigest, ...(nativeConfiguration ? { configurationSource: 'native' } : { maxReadBytes: 65536, maxResultSizeChars: 500000, maxMcpOutputTokens: 500000 }) } }), { mode: 0o400 })
-  await callbacks.onTurnStarting?.()
   if (worktree) await sampleNativeWorktreeProcesses(plan)
+  if (callbacks.signal?.aborted) throw new StructuredSessionError('cancelled', 'Claude native launch cancelled before spawn')
+  await callbacks.onTurnStarting?.()
   const launch = worktreeLaunch ?? { command: '/usr/bin/sandbox-exec', args: ['-f', profile, cliPath] }
   const child = spawn(launch.command, [...launch.args, ...args], { cwd, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
   if (!child.pid) throw new StructuredSessionError('failed', 'Claude isolated process could not start')

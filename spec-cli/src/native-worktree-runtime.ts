@@ -62,10 +62,11 @@ export type NativeOwnedPlan = { root: string; pid?: number; receiptFile: string;
 type NativeProcessRow = ProcessIdentity & { ppid: number }
 
 export const NATIVE_PROCESS_OBSERVATION_LIMIT_MS = 10_000
+export const NATIVE_PROCESS_OBSERVATION_PENDING = 'native worktree process observation remains unproven'
 
 const observing = new Map<string, Promise<unknown>>()
 const probes = new Map<string, { child: ReturnType<typeof spawn>; closed: boolean }>()
-function observationPending(): StructuredSessionError { return new StructuredSessionError('cancellation_pending', 'native worktree process observation remains unproven') }
+function observationPending(): StructuredSessionError { return new StructuredSessionError('cancellation_pending', NATIVE_PROCESS_OBSERVATION_PENDING) }
 function assertObservationDeadline(deadline: number): void { if (Date.now() >= deadline) throw observationPending() }
 function observeSerially<T>(plan: NativeOwnedPlan, observe: (deadline: number) => Promise<T>, deadline = Date.now() + NATIVE_PROCESS_OBSERVATION_LIMIT_MS): Promise<T> {
   const run = (): Promise<T> => { assertObservationDeadline(deadline); return observe(deadline) }
