@@ -2776,7 +2776,9 @@ async function prepareSession(prompt: string, parentage: CreateParentage, launch
         try {
           const lname = context.structuredExecution ? context.structuredExecution.policy === 'native-worktree-v1' ? 'structured-native-worktree' : 'structured-read-only' : launcher ?? defaultLauncher(mainRoot())
           chosen = context.structuredExecution
-            ? (context.structuredExecution.policy === 'zcode-frozen-read-only-v1' || context.structuredExecution.policy === 'native-worktree-v1' && context.structuredExecution.model?.startsWith('zcode:'))
+            ? context.structuredExecution.policy === 'native-worktree-v1' && context.structuredExecution.model?.startsWith('grok:')
+              ? { name: lname, harness: 'grok-structured', cmd: 'grok', headless: true, configDir: null }
+              : (context.structuredExecution.policy === 'zcode-frozen-read-only-v1' || context.structuredExecution.policy === 'native-worktree-v1' && context.structuredExecution.model?.startsWith('zcode:'))
               ? { name: lname, harness: 'zcode', cmd: 'zcode', headless: true, configDir: null }
               : (context.structuredExecution.policy === 'claude-frozen-read-only-v1' || context.structuredExecution.policy === 'native-worktree-v1' && context.structuredExecution.model?.startsWith('claude:'))
               ? { name: lname, harness: 'claude-headless', cmd: 'claude', headless: true, configDir: null }
@@ -4321,6 +4323,10 @@ async function closeSessionUnlocked(id: string, source: CloseSource, wakeQueue =
   if (!wt) return false
   if (wt.rec.launchReadinessPending)
     throw new ResourceConflict(`refusing to close ${id}: a resume transaction is pending; revalidate or cancel that transaction first`)
+  const execution = wt.rec.structuredExecution
+  if (execution?.worktree && execution.state !== 'completed'
+    && (!['failed', 'cancelled', 'timeout'].includes(execution.state ?? '') || execution.cancellation?.nativeStopped !== true))
+    throw new ResourceConflict(`refusing to close ${id}: exact native worktree execution has not settled`)
   let unboundStopped = false
   if (!retirementReason(wt.rec) && !wt.rec.archived && wt.rec.status !== 'queued') {
     const harness = harnessById(wt.rec.harness || defaultHarness.id)

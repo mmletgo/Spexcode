@@ -13,12 +13,12 @@ test('cli-config-v1显式进入固定策略及创建摘要，旧缺席不补', (
   assert.notEqual(JSON.stringify(current), JSON.stringify(structuredExecutionPolicy(request)))
 })
 
-for (const model of ['claude:default', 'claude:deployment@2026/alias β', 'zcode:default', 'zcode:custom provider/opaque:model@2026/alias β']) test(`cli-config-v1路由不透明原生选择 ${model}`, () => {
+for (const model of ['claude:default', 'claude:deployment@2026/alias β', 'zcode:default', 'zcode:custom provider/opaque:model@2026/alias β', 'grok:default', 'grok:opaque/alias@2026 β']) test(`cli-config-v1路由不透明原生选择 ${model}`, () => {
   const policy = structuredExecutionPolicy({ ...configured, model })
-  assert.equal(structuredRealmRoot(policy, '/runtime'), `/runtime/structured-native-worktree-v1/${model.startsWith('zcode:') ? 'zcode' : 'claude'}`)
+  assert.equal(structuredRealmRoot(policy, '/runtime'), `/runtime/structured-native-worktree-v1/${model.split(':')[0]}`)
 })
 
-for (const change of [{ nativeConfiguration: 'unknown' }, { model: 'claude:' }, { model: 'zcode:' }, { model: 'zcode:provider/' }, { model: 'default' }, { worktree: undefined }]) test(`cli-config-v1严格拒绝错误边界 ${JSON.stringify(change)}`, () => {
+for (const change of [{ nativeConfiguration: 'unknown' }, { model: 'claude:' }, { model: 'zcode:' }, { model: 'zcode:provider/' }, { model: 'grok:' }, { model: 'grok: ' }, { model: 'default' }, { worktree: undefined }]) test(`cli-config-v1严格拒绝错误边界 ${JSON.stringify(change)}`, () => {
   assert.throws(() => structuredExecutionPolicy({ ...configured, ...change } as typeof configured), { code: 'unsupported' })
 })
 
@@ -30,7 +30,7 @@ test('旧frozen realm不得取得新原生配置，旧ZCode精确路由保持', 
   assert.equal(structuredRealmRoot({ ...old, version: 6, policy: 'native-worktree-v1', worktree: request.worktree, frozenContext: undefined, model: 'zcode:default' }, '/runtime'), null)
 })
 
-for (const model of ['claude:default', 'zcode:default']) test(`新配置冻结只认new边界且不替旧缺席补字段 ${model}`, () => {
+for (const model of ['claude:default', 'zcode:default', 'grok:default']) test(`新配置冻结只认new边界且不替旧缺席补字段 ${model}`, () => {
   const value = { ...request, model }
   assert.equal(pinNativeConfiguration(value, null), 'cli-config-v1')
   assert.equal(pinNativeConfiguration(value, {}), undefined)

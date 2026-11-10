@@ -9,6 +9,7 @@ import { spawnDetachedRuntime } from './runtime-ownership.js'
 import { ensureCodexCurrentGeneration, type CodexGenerationEndpoint } from './codex-runtime-generations.js'
 import type { FrozenContextRef, FrozenReadProof, FrozenReadReceipt } from './frozen-context.js'
 import type { NativeWorktreeRequest, NativeWorktreeResult } from './native-worktree-runtime.js'
+import type { GrokNativeState } from './grok-structured.js'
 import { withDeliveryLocks } from './delivery-lock.js'
 
 export type FrozenReaderRuntime = { cliVersion: string; catalogDigest: string; catalogPath: string } & ({ version: 1 } | { version: 2; toolOutputTokenLimit: number })
@@ -64,11 +65,13 @@ export type StructuredExecution = {
   readerRuntime?: FrozenReaderRuntime
   claudeNative?: { version: 1 | 2; root: string; sessionId: string; userUuid: string; pid?: number; receiptFile?: string; promptId?: string }
   zcodeNative?: { version: 1 | 2 | 3; root: string; sessionId: string; inputId: string; pid?: number; receiptFile?: string; turnId?: string }
+  grokNative?: GrokNativeState
 }
 
 /** 只识别原生路由形状；模型与别名是否可用由CLI实际初始化确认。 */
-function nativeConfigurationHarness(model?: string): 'claude' | 'zcode' | null {
+function nativeConfigurationHarness(model?: string): 'claude' | 'zcode' | 'grok' | null {
   if (model?.startsWith('claude:') && model.length > 7) return 'claude'
+  if (model?.startsWith('grok:') && model.slice(5).trim() && !model.includes('\0')) return 'grok'
   if (model === 'zcode:default') return 'zcode'
   if (model?.startsWith('zcode:')) {
     const separator = model.indexOf('/', 6)
@@ -125,10 +128,12 @@ export function structuredRealmRoot(execution: unknown, root = runtimeRoot()): s
 export function structuredExecutionPolicy(request: Pick<StructuredExecution, 'schema' | 'inputDigest' | 'purpose' | 'timeoutMs' | 'model' | 'effort' | 'frozenContext' | 'readerRuntime' | 'worktree' | 'zcodeToolPolicy' | 'nativeConfiguration'>): StructuredExecution {
   const claude = request.model?.startsWith('claude:') === true
   const zcode = request.model?.startsWith('zcode:') === true
+  const grok = request.model?.startsWith('grok:') === true
+  if (grok && (!request.worktree || request.nativeConfiguration !== 'cli-config-v1')) throw new StructuredSessionError('unsupported', 'Grok Build requires the native CLI worktree policy')
   if (request.nativeConfiguration !== undefined && (request.nativeConfiguration !== 'cli-config-v1' || !request.worktree || !nativeConfigurationHarness(request.model) || request.frozenContext || request.readerRuntime)) throw new StructuredSessionError('unsupported', 'native CLI configuration requires a v6 Claude/ZCode worktree request')
   if (request.zcodeToolPolicy !== undefined && (!zcode || request.worktree?.mode !== 'read' || !isDeepStrictEqual(request.zcodeToolPolicy, zcodeReadToolPolicy))) throw new StructuredSessionError('unsupported', 'ZCode structured tool policy requires the exact noninteractive read policy')
   if (request.worktree) {
-    if ((!claude && !zcode) || request.frozenContext || request.readerRuntime) throw new StructuredSessionError('unsupported', 'native worktree requires an explicit Claude/ZCode model and no frozen reader policy')
+    if ((!claude && !zcode && !grok) || request.frozenContext || request.readerRuntime) throw new StructuredSessionError('unsupported', 'native worktree requires an explicit Claude/ZCode/Grok model and no frozen reader policy')
     return { version: 6, policy: 'native-worktree-v1', schema: request.schema, inputDigest: request.inputDigest, purpose: request.purpose, timeoutMs: request.timeoutMs, model: request.model, ...(request.effort ? { effort: request.effort } : {}), worktree: request.worktree, ...(request.nativeConfiguration ? { nativeConfiguration: request.nativeConfiguration } : {}), ...(request.zcodeToolPolicy ? { zcodeToolPolicy: request.zcodeToolPolicy } : {}) }
   }
   return { version: request.timeoutMs === null ? 5 : zcode ? 4 : claude ? 3 : request.frozenContext ? 2 : 1, policy: zcode ? 'zcode-frozen-read-only-v1' : claude ? 'claude-frozen-read-only-v1' : request.frozenContext ? 'codex-frozen-read-only-v2' : 'codex-read-only-v1',

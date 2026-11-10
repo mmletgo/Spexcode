@@ -17,6 +17,7 @@ import { codexHarness, codexHeadlessHarness } from './codex-harness.js'
 import { buildShim, cleanHarness, listenerAt, noLaunchEnv, pexec, SPEX } from './harness-shim.js'
 import { sessionHost } from './session-host.js'
 import type { ListenerProbe } from './harness-shim.js'
+import type { StructuredExecution } from './session-structured-policy.js'
 export { buildShim, cleanHarness, headlessTurnFailureShell, listenerAt, noLaunchEnv, paneTreeRuns, procSnapshot, sessionIdentityEnvVars, writeManagedBlock, removeManagedBlock, unappendManagedBlock, writeManagedJsonHooks, removeManagedJsonHooks, sharedShimHasHostContent, GENERATED_MARK, isGeneratedArtifact } from './harness-shim.js'
 export type { ListenerProbe } from './harness-shim.js'
 
@@ -1138,8 +1139,52 @@ export const opencodeHeadlessHarness: Harness = {
   interrupt: (rec) => interruptViaRendezvous(rec.session, 'opencode-headless', { settle: true }),
 }
 
-// every adapter — materialize iterates this to write each harness's artifacts in one pass.
+const structuredGrokOnly = (): never => { throw new Error('Grok Build is available through native worktree synchronization') }
+
+const grokStructuredHarness: Harness = {
+  id: 'grok-structured',
+  dispatchId: 'grok-structured',
+  headless: true,
+  runtimeOwnership: 'leaf',
+  events: [],
+  ownsRendezvous: false,
+  paneTitleIsSelfSummary: false,
+  transcript: unsupportedTranscript('grok-structured'),
+  launchCmd: structuredGrokOnly,
+  baseCmd: (cmd = 'grok') => cmd,
+  sessionIdArg: (id) => `--session-id ${id}`,
+  sessionEnvVar: harnessIdentity('grok-structured').sessionEnvVar,
+  launchEnv: noLaunchEnv,
+  shimFile: structuredGrokOnly,
+  shimScope: 'tree',
+  worktreeHookAnchor: () => null,
+  contractFiles: () => [],
+  skillDir: () => null,
+  agentDir: () => null,
+  shim: structuredGrokOnly,
+  shimOwnership: 'exclusive',
+  writeTrust: () => [],
+  slashCommands: () => [],
+  liveness: sessionHomeLiveness,
+  exactNativeTargetId: (rec) => rec.harnessSessionId ?? null,
+  deliver: async () => ({ ok: false, error: 'Grok structured worktree requests are immutable' }),
+  cleanupRuntime: async () => {},
+  coldPreflight: async (rec) => {
+    const execution = (rec as typeof rec & { structuredExecution?: StructuredExecution }).structuredExecution
+    const stopped = execution?.state === 'completed' || execution?.cancellation?.nativeStopped === true
+    if (execution?.version !== 6 || execution.policy !== 'native-worktree-v1' || !execution.model?.startsWith('grok:') || !stopped)
+      return { ok: false, reason: 'exact Grok native execution has not settled' }
+    return { ok: true, alreadyCold: true }
+  },
+  clean: () => {},
+  removeTrust: () => {},
+  resumeArg: structuredGrokOnly,
+}
+
+// Materialization iterates the harnesses with ordinary launch and delivery support.
 export const HARNESSES: readonly Harness[] = [claudeHarness, codexHarness, opencodeHarness, piHarness, zcodeHarness, claudeHeadlessHarness, opencodeHeadlessHarness, piHeadlessHarness, codexHeadlessHarness]
+
+export const RUNTIME_HARNESSES: readonly Harness[] = [...HARNESSES, grokStructuredHarness]
 
 // the legacy/default adapter for old records and config defaults. New launches derive harness from a launcher.
 export const defaultHarness: Harness = claudeHarness
@@ -1147,7 +1192,7 @@ export const defaultHarness: Harness = claudeHarness
 // the registry lookup as DATA. A sweep over records nobody is currently asking about (a removed plugin, a
 // renamed id) must report an unresolvable harness rather than abort, so it resolves through this.
 export function harnessByIdOrNull(id: string): Harness | null {
-  return HARNESSES.find((x) => x.id === id) ?? null
+  return RUNTIME_HARNESSES.find((x) => x.id === id) ?? null
 }
 
 // resolve an adapter by id (the detector). Throws on an unknown id — fail loud, never silently default.
@@ -1167,6 +1212,12 @@ export function harnessById(id: string): Harness {
 export type Launcher = { name: string; harness: string; cmd: string; headless: boolean; configDir: string | null }
 export type LauncherDefault = { default: string | null; error: string | null }
 
+function configuredLauncherHarness(id: string): Harness {
+  const harness = harnessById(id)
+  if (harness === grokStructuredHarness) return structuredGrokOnly()
+  return harness
+}
+
 // the complete configured named launchers from .spec/spexcode.json, as a stable name-sorted list (for CLI/session
 // resolution and downstream projections). Picking a launcher is the ONLY launch choice; the old separate
 // harness pick is gone.
@@ -1174,7 +1225,7 @@ export function launcherList(root = mainCheckout()): Launcher[] {
   const m = readConfig(root).sessions?.launchers || {}
   return Object.keys(m)
     .map((name) => {
-      const harness = harnessById(m[name].harness || defaultHarness.id)
+      const harness = configuredLauncherHarness(m[name].harness || defaultHarness.id)
       return { name, harness: harness.id, cmd: m[name].cmd, headless: harness.headless, configDir: m[name].configDir || null }
     })
     .filter((launcher) => sessionHost().kind === 'tmux-host' || launcher.headless)
@@ -1207,7 +1258,7 @@ export function resolveLauncher(name: string, root = mainCheckout()): Launcher {
   const l = readConfig(root).sessions?.launchers?.[name]
   if (!l) throw new Error(`unknown launcher '${name}' (configured: ${launcherList(root).map((x) => x.name).join(', ') || 'none'})`)
   if (!l.cmd) throw new Error(`launcher '${name}' is missing cmd`)
-  const harness = harnessById(l.harness || defaultHarness.id)   // validate the harness id fail-loud
+  const harness = configuredLauncherHarness(l.harness || defaultHarness.id)
   if (sessionHost().kind === 'process-host' && !harness.headless)
     throw new Error(`launcher '${name}' uses ${harness.id}, which requires an attachable tmux host; process-host offers headless adapters only`)
   return { name, harness: harness.id, cmd: l.cmd, headless: harness.headless, configDir: l.configDir || null }

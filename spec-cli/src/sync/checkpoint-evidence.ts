@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from 'node:util'
 import { assertRejectedOutput, structuredExecutionPolicy, type RejectedStructuredOutput, type StructuredExecution } from '../session-structured-policy.js'
 import { nativeWorktreePrompt } from '../native-worktree-runtime.js'
+import { assertGrokRejectedFinalSource } from '../grok-structured.js'
 import { sessionIdForCreateKey } from '../sessions.js'
 import { readRecord } from '../session-record.js'
 import { contentHash, readEvidence } from './snapshot.js'
@@ -82,12 +83,16 @@ export function authenticateNativeFailure(store: SyncStore, operation: SyncOpera
 
 /** 原文另核其packet、SHA及CAS字节；Git材料不借raw权限。 */
 export function authenticateNativeRejectedFinal(store: SyncStore, operation: SyncOperation, origin: SyncAttempt, key: string, failure: NonNullable<ElaborationResult['failure']>, packet: RejectedStructuredOutput, readNativeRecord: typeof readRecord = readRecord): StructuredExecution {
-  const { plan, state } = authenticateNativeFailure(store, operation, origin, key, failure, readNativeRecord)
+  const { plan, record, state } = authenticateNativeFailure(store, operation, origin, key, failure, readNativeRecord)
   const prompt = plan.request.worktree ? nativeWorktreePrompt(plan.request.prompt, plan.request.worktree) : plan.request.prompt
   if (failure.threadId !== packet.threadId || failure.turnId !== packet.turnId) fail('raw的原失败身份不匹配')
   assertRejectedOutput(packet, prompt, structuredExecutionPolicy(plan.request), packet)
   if (!state.rejectedOutput || !isDeepStrictEqual({ ...state.rejectedOutput, ref: undefined }, { ...packet, ref: undefined })) fail('raw没有canonical Native record的精确原final认证')
   if (packet.ref && readEvidence(operation.input.source.commonDir, packet.ref).toString('utf8') !== packet.text) fail('raw原CAS字节不匹配typed失败原文')
+  if (plan.request.model?.startsWith('grok:')) {
+    if (record.harness !== 'grok-structured') fail('Grok拒绝结果没有原结构化执行器身份')
+    assertGrokRejectedFinalSource(prompt, state, record.worktreePath)
+  }
   return state
 }
 

@@ -2090,6 +2090,42 @@ test('public close files queued and unbound rows without entering the unrelated 
     assert.equal(existsSync(sessionRecordPath(unboundDirty.id)), true, 'dirty unbound residue retains its record')
     assert.equal(existsSync(unboundDirty.path), false, 'dirty unbound residue removes its filed worktree')
 
+    const baseCommit = execFileSync('git', ['-C', main, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+    const tree = execFileSync('git', ['-C', main, 'rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).trim()
+    const grokPolicy = {
+      version: 6, policy: 'native-worktree-v1', model: 'grok:default', nativeConfiguration: 'cli-config-v1',
+      schema: { type: 'object' }, inputDigest: tree, purpose: 'close-native-worktree', timeoutMs: null,
+      worktree: { baseCommit, tree, mode: 'read' },
+    }
+    for (const status of ['error', OWNED_QUEUE_RAW_STATUS]) {
+      const target = prepare(`grok-${status}`)
+      const recordPath = sessionRecordPath(target.id)
+      const raw = JSON.parse(readFileSync(recordPath, 'utf8'))
+      const structuredExecution = {
+        ...grokPolicy, state: status === 'error' ? 'cancelling' : 'running',
+        turnStartRequested: true, observer: null,
+        grokNative: { version: 1, root: join(home, 'unproven-grok'), sessionId: '12345678-1234-4234-8234-123456789abc' },
+      }
+      const original = `${JSON.stringify({ ...raw, status, harness: 'grok-structured', launch_cmd: 'grok', structured_execution: structuredExecution }, null, 2)}\n`
+      writeFileSync(recordPath, original)
+      if (status === 'error') transitionFixtureState(target.id, 'error', null, null)
+      await assert.rejects(closeSession(target.id), /exact native worktree execution has not settled/)
+      assert.equal(existsSync(target.path), true)
+      assert.equal(readFileSync(recordPath, 'utf8'), original)
+      assert.throws(() => execFileSync('git', ['-C', main, 'rev-parse', '--verify', '--quiet', `refs/spex-archive/${target.id}`]))
+    }
+
+    const cancelled = prepare('grok-cancelled')
+    const cancelledPath = sessionRecordPath(cancelled.id)
+    const beforeCancel = JSON.parse(readFileSync(cancelledPath, 'utf8'))
+    writeFileSync(cancelledPath, `${JSON.stringify({ ...beforeCancel, harness: 'grok-structured', launch_cmd: 'grok', structured_execution: grokPolicy }, null, 2)}\n`)
+    const { cancelStructuredSession } = await import('./session-structured.js')
+    const stopped = await cancelStructuredSession(cancelled.id, { wakeQueue: false })
+    assert.equal(stopped.nativeStopped, true)
+    assert.equal(stopped.nativeStatus, 'notStarted')
+    assert.equal(await closeSession(cancelled.id), true)
+    assert.equal(existsSync(cancelled.path), false)
+
     const dirty = prepare('dirty')
     writeFileSync(join(dirty.path, 'uncommitted.txt'), 'owned work\n')
     assert.equal(await closeSession(dirty.id), true)

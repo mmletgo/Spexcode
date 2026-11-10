@@ -45,6 +45,8 @@ learning which harness answered. A harness with no non-interactive mode declares
 launcher by name; substituting a different harness would run the work under credentials and a model the user
 did not choose.
 
+[[grok-structured-runtime]] registers a runtime identity for structured worktree execution and settled close. Materialization and configured launchers use the ordinary harness registry.
+
 ## acceptance
 
 An adapter is accepted by LIVE BEHAVIOR, never by artifact inspection: pi's stop-gate bridge shipped with every

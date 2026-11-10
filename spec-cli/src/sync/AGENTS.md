@@ -55,7 +55,7 @@
 
 - 完整初始化资格不等于所有源码曾被写过：未写path可用精确已采纳owner Spec、正式settled receipt、scope及三份对象一致证明只读初始化，缺binding/null保持；已有非null头不fallback，未审owner/源码漂移拒绝。规划回归：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/planning.test.ts`。
 
-- 新Claude/ZCode native-worktree请求只在真正新记录/资源冻结nativeConfiguration:cli-config-v1；原saved及仅reserved请求缺席保持并核完整原摘要。default/不透明模型由原生CLI配置与每轮init核实，不维护CLI版本/模型名册。新sync请求在冻结前省略内部默认high，已有Native原件按原effort或缺席冷验，standalone显式effort保持；派发和coordinator原件重验共用pinSyncNativeRequest。writer24只追加SELECT1；升级停稳旧backend/queue并结算资源、online backup后迁移，回滚停新writer并恢复升级前一致DB及evidence，禁止删marker或改签旧plan。针对回归：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/session-native-configuration.test.ts spec-cli/src/sync/native-run.test.ts spec-cli/src/sync/store.test.ts`。
+- 新 Claude、ZCode 和 Grok native-worktree 请求只在真正新记录/资源冻结nativeConfiguration:cli-config-v1；原saved及仅reserved请求缺席保持并核完整原摘要。default/不透明模型由原生 CLI 配置与每轮原生证据核实，不维护CLI版本/模型名册。新sync请求在冻结前省略内部默认high，已有Native原件按原effort或缺席冷验，standalone显式effort保持；派发和coordinator原件重验共用pinSyncNativeRequest。writer24只追加SELECT1；升级停稳旧backend/queue并结算资源、online backup后迁移，回滚停新writer并恢复升级前一致DB及evidence，禁止删marker或改签旧plan。针对回归：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/session-native-configuration.test.ts spec-cli/src/sync/native-run.test.ts spec-cli/src/sync/store.test.ts`。
 
 - ZCode最新失败Git稿沿既有严格较新来源/currentfence材料接缝；旧cancelled/新failed均核formalstop+removed全值及原公开Native身份，冷观察不改旧原件或读success history，不附failedWorktree/授自动重试。P0 已封存却未发布的历史候选只在原失败、正式结算及当前fence认证后复验封存并跳过，不能作为续修材料。writer26保护新准入，升级先停旧writer/结算资源、online backup，回滚恢复一致v25库及evidence/Git refs。定向材料回归：`npx tsx --import ./scripts/test-home.mjs --test --test-name-pattern='mode=zcode-' spec-cli/src/sync/coordinator.test.ts`。
 
