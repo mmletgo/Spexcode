@@ -114,18 +114,18 @@ function testCaseTitles(source: string): string[] {
     for (const origin of origins.get(binding) ?? []) if (!mutated.has(origin)) { mutated.add(origin); invalidate(origin) }
   }
   for (const binding of mutated) invalidate(binding)
-  const value = (node: Syntax | undefined, overrides: Map<Binding, Value>, at: number, resolving = new Set<Binding>()): Value => {
+  const value = (node: Syntax | undefined, overrides: Map<Binding, Value>, at: number, resolving = new Set<Binding>(), allowTitlePrefix = false): Value => {
     if (!node) return unknownValue
     const scope = scopes.get(node)!
     if (['StringLiteral', 'NumericLiteral', 'BooleanLiteral'].includes(node.type)) return node.value
     if (node.type === 'NullLiteral') return null
-    if (['TSAsExpression', 'TSTypeAssertion', 'TSSatisfiesExpression', 'TSNonNullExpression', 'ParenthesizedExpression'].includes(node.type)) return value(node.expression, overrides, at, resolving)
+    if (['TSAsExpression', 'TSTypeAssertion', 'TSSatisfiesExpression', 'TSNonNullExpression', 'ParenthesizedExpression'].includes(node.type)) return value(node.expression, overrides, at, resolving, allowTitlePrefix)
     if (node.type === 'Identifier') {
       const binding = lookup(scope, node.name)
       if (!binding || mutated.has(binding) || resolving.has(binding)) return unknownValue
       if (overrides.has(binding)) return overrides.get(binding)!
       if (!binding.init || binding.start > at) return unknownValue
-      return value(binding.init, overrides, binding.start, new Set([...resolving, binding]))
+      return value(binding.init, overrides, binding.start, new Set([...resolving, binding]), allowTitlePrefix)
     }
     if (node.type === 'ArrayExpression') {
       const entries = node.elements.map((entry: Syntax) => value(entry, overrides, at, resolving)) as Value[]
@@ -155,7 +155,11 @@ function testCaseTitles(source: string): string[] {
       if (title === null) return unknownValue
       for (let i = 0; i < node.expressions.length; i++) {
         const part = value(node.expressions[i], overrides, at, resolving), tail = node.quasis[i + 1].value.cooked
-        if (part === unknownValue || typeof part === 'object' && part !== null || tail === null) return unknownValue
+        if (tail === null) return unknownValue
+        if (part === unknownValue || typeof part === 'object' && part !== null) {
+          // The unknown suffix can extend the trailing token.
+          return allowTitlePrefix ? title.replace(/(^|[^A-Z0-9-])[A-Z0-9-]+$/, '$1') : unknownValue
+        }
         title += String(part) + tail
       }
       return title
@@ -178,7 +182,7 @@ function testCaseTitles(source: string): string[] {
       if (callee.type === 'Identifier') {
         const binding = lookup(scopes.get(callee)!, callee.name)
         if (binding?.test && !mutated.has(binding)) {
-          const title = value(node.arguments[0], overrides, node.start)
+          const title = value(node.arguments[0], overrides, node.start, undefined, true)
           if (typeof title === 'string') titles.add(title)
         }
       }
