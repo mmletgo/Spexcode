@@ -18,6 +18,8 @@ P0至P5按完整需求交付，不以阶段演示、局部测试或可修改的�
 
 [[sync-model-selection]] 在新操作准入时固定功能组选择的原生 CLI 与模型。[[cursor-structured-runtime]] 使用真实 Cursor 会话执行任务。原独审、验证、Git 交付和采纳门禁适用于所有执行器；恢复沿用原操作与原会话证据。
 
+正式重试由 [[sync-coordinator]] 冷验同一冻结计划下已批准的 P1 局部分区。新修复证据优先于同 owner 的旧批准，未采纳交付的首次重验仍需取得新批准。
+
 同步已结算且clean的completed与确证停止failed/cancelled任务，沿[[sync-native-run]]逐任务复用正式[[archive]]回收执行目录/Git登记，保原result/error、branch/ref、会话历史与JSON。后续材料消费经原Native/CAS/owner/schema/保护面认证临时恢复同一checkout，读原稿后回收本次创建目录，零Native/队列唤醒；业务schema后置拒绝不能导致从零重做。dirty/未知停止保留，pending不改批准/计费，不新增持久清理状态、全局扫描或后台恢复用户goal。
 
 已审只读事实返修的原因果不因pending清空而丢失，普通恢复沿最新已认证正文和原独审输入继续。旧cleared checkpoint只从同attempt原历史冷验，不补旧原件。原诊断属于请求绑定，只有无新修复输入且完整原件一致时承接，不能忽略字段来复用旧审查。

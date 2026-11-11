@@ -318,6 +318,8 @@ Claude Code、ZCode、Grok Build 和 Cursor CLI 共用版本化的 native-worktr
 
 新请求冻结 `nativeConfiguration: cli-config-v1`。Cursor 通过 ACP 启动独立会话，只读任务确认 `ask` 模式后派发，编辑任务保留正常 Git 提交。原请求终态、结构化结果、Git 对象和原进程停止证据共同构成交付门禁。v24 保护原生配置身份，v41 保护 Cursor 原件和停止协议。旧受限只读请求按原策略恢复。升级先正式停止旧执行器并结算资源，再备份和迁移。回滚恢复一致备份和原证据。
 
+同冻结输入及分区计划的正式重试可继承已结算祖先中独审通过的 P1 叶分区和父接口。原模型的生成、只读审查、Git 对象和完整阶段输入须全部可认证。较新的同 owner 修复证据优先，未采纳交付的首次重验仍执行新分析和独审。
+
 ZCode 新只读结构化请求保留 SDK plan 模式，仅通过已有 per-send toolDenylist 移除 ExitPlanMode，并明确本轮直接交完整 schema JSON、不申请计划审批。精准工具策略在新资源/新建记录时冻结，NativePlan v2 与原 send/请求摘要共同核验；旧已持久请求（包括尚无 Native session/send 的资源）保持原字段缺席、原提示和工具集。结构化 policy6、工作流v1、正常读取/Bash 与 Git seed/clean 门不变，edit/frozen/Claude不变。sync v19 writer marker 沿原在线备份与事务升级拒绝旧writer，回滚须恢复升级前一致备份及原证据。
 
 资源桥通过内部创建键传递的已冻结工具字段或缺席，在首次创建入口保持并严格校验；已有记录优先核原记录。只有 dispatch 已登记、resource 未落盘的冷恢复也按完整原请求摘要保持旧缺席或新已冻结 policy，原创建键与计费不变，任何输入变化仍由完整性门拒绝。
