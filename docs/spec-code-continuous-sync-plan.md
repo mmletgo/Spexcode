@@ -314,7 +314,9 @@ writer20沿原online backup/事务拒旧writer，1–19 checksum不改。原enab
 
 每区复用现有原生会话、创建事务和资源桥，在独立 worktree 运行。所有阶段都允许正常文件读取与搜索；分析、细化和审查使用只输出结果的任务，构建者直接修改实现与测试并正常提交。无需冻结 reader 或逐字 API 消费证明；JSON 只约束需要机器处理的结果格式。实际 Native 身份、终态、错误、停止与工作树 Git 对象仍需持久保存。 成功任务的原result/commit/tree已持久保存且工作树仍clean时，逐任务复用正式close保archive/ref与session记录后回收物理worktree及Git登记；原branch、Native对话、结果和JSON字节继续冷重放，后续业务schema拒绝仍沿原稿续修。已精确证实停止且clean的失败/取消目录也正式close；未来材料消费沿原Native/CAS/owner/schema/保护面认证临时恢复同一checkout，读取原稿后finally再次回收，零Native/队列启动。dirty、未知停止和identity漂移仍保留；close失败明确留pending原因且不改原结果或错误，不额外烧模型调用。removed仍是执行资源已结算，自动回收不添加全局扫描器或第二套持久状态。
 
-Claude Code 与 ZCode 共用明确版本化的 native-worktree 执行策略，绑定任务、seed commit/tree 和结果身份。新任务优先使用 Claude Code；没有显式模型及项目选择时不传模型参数，沿用用户 CLI 的原生认证、base URL、模型和供应商配置。显式模型或别名原样传递，CLI 版本、可执行文件摘要和模型名不作为产品允许名册；必要协议缺失或原生配置不可用时报告实际错误。请求选择和每轮真实 CLI/解析后模型分别记录，恢复按原始快照认证，不用今天配置改写历史或编造实际端点；控制器不读取、输出或改写凭据。新请求显式冻结nativeConfiguration:cli-config-v1，sync v24 writer保护前置创建/资源摘要，旧saved/reserved缺席保持原语义。旧受限只读请求按原策略恢复，原 MCP/读取证明不能补签为新工作树结果。升级先停止旧执行器并确认资源结算，正式备份/迁移；回滚恢复一致备份和原证据，旧 writer 必须拒绝新策略。
+Claude Code、ZCode、Grok Build 和 Cursor CLI 共用版本化的 native-worktree 执行策略，绑定任务、seed commit/tree 和结果身份。新操作可由宿主的 `llm_manager` 功能组按登记顺序选出具体 CLI 和模型。操作级与项目级显式选择优先，宿主未启用选路时沿用 Claude Code。默认模型由 CLI 的原生认证、base URL、模型和供应商配置解析，显式模型或别名原样传递。必要协议或原生配置不可用时报告实际错误。请求选择和每轮真实 CLI 及可取得的模型分别记录，恢复按原始快照认证，凭据由各 CLI 管理。
+
+新请求冻结 `nativeConfiguration: cli-config-v1`。Cursor 通过 ACP 启动独立会话，只读任务确认 `ask` 模式后派发，编辑任务保留正常 Git 提交。原请求终态、结构化结果、Git 对象和原进程停止证据共同构成交付门禁。v24 保护原生配置身份，v41 保护 Cursor 原件和停止协议。旧受限只读请求按原策略恢复。升级先正式停止旧执行器并结算资源，再备份和迁移。回滚恢复一致备份和原证据。
 
 ZCode 新只读结构化请求保留 SDK plan 模式，仅通过已有 per-send toolDenylist 移除 ExitPlanMode，并明确本轮直接交完整 schema JSON、不申请计划审批。精准工具策略在新资源/新建记录时冻结，NativePlan v2 与原 send/请求摘要共同核验；旧已持久请求（包括尚无 Native session/send 的资源）保持原字段缺席、原提示和工具集。结构化 policy6、工作流v1、正常读取/Bash 与 Git seed/clean 门不变，edit/frozen/Claude不变。sync v19 writer marker 沿原在线备份与事务升级拒绝旧writer，回滚须恢复升级前一致备份及原证据。
 

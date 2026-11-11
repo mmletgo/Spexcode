@@ -27,6 +27,8 @@ partitionEvidence容器中的rounds是原局部结果的副本，不能以聚合
 
 Grok 的格式拒绝须另核 [[grok-structured-runtime]] 的原生终态和确切停止证明。其失败稿继续走同一不可信原文和 Git 材料边界。
 
+Cursor 的格式拒绝沿 [[cursor-structured-runtime]] 核对原 ACP 会话和 prompt 请求身份、原响应终态及进程停止证明，再接入同一草稿返修。
+
 同一store当前operation内可按commonDir与SHA复用纯JSON解码（包括语法拒绝），不得缓存stage、typed/raw或Native认证结论。每次扫描以传入的当前checkpointRefs建立独立读取快照，逐份重新读取并核CAS摘要；同次root/artifact/inspect共享已核字节与解码，下一次仍重新认证全部可达typed/失败来源、资源及canonical record。切换operation或commonDir清除纯解码作用域；返回独立对象，调用者修改不能污染后续扫描。当前refs改变、CAS损坏、role或原生状态变化仍按原门禁拒绝。
 
 失败请求/dispatch/payload、原failed观察与canonical身份共用一个认证前缝，原文packet/SHA/CAS仍另核；Git材料不借raw权限。后续正式cancelled的原nativeStopped由真实provider回执解释，不硬编码provider的nativeStatus字符串。新Git材料分支另外要求removed checkpoint.stop与canonical cancellation的session/thread/turn/state、nativeStopped、acknowledged、nativeStatus和error原值完全一致；旧raw不因新增Git门槛被要求改签其历史checkpoint。

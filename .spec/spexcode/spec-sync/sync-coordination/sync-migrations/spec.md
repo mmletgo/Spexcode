@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+v41 追加 SELECT 1 writer marker，保护 Cursor 原生 ACP 工作树操作及停止证明。部署前正式停稳 v40 writer 并结算资源，保留一致在线备份。回滚先停稳新 writer，再恢复 v40 备份与对应证据和 Git 引用。
+
 v40 追加 SELECT 1 writer marker，保护 Grok 原生工作树操作及其停止证据。部署前正式停稳 v39 writer 并结算资源，再保留一致的在线备份。回滚须先停稳新 writer，再恢复 v39 备份及对应证据和 Git 引用。
 
 v39 只追加 SELECT 1 writer marker，保护 P0 首次派发前冻结的原正常提交草稿。旧 writer 不得重新选择新请求的原料。升级先正式停稳旧 writer 并结算，再正常 online backup 和组件事务。回滚先停稳新 writer 并结算，再恢复一致 v38 备份及配套证据和 Git refs。

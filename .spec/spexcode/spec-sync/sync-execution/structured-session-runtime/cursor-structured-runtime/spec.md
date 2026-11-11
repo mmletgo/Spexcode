@@ -1,6 +1,6 @@
 ---
 title: Cursor CLI 原生工作树执行
-status: pending
+status: active
 code:
   - spec-cli/src/cursor-structured.ts
 related:

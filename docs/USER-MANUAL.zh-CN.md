@@ -639,7 +639,9 @@ spex sync show <操作ID>
 
 没有变化的保存不会反复启动新工作。同一请求标识和相同内容的重复提交会关联原操作；同一标识不能换成另一份需求。终端需要重放原请求时，保留并复用 `--request-id`；省略它时会生成新的请求标识。系统也可能把相同意图关联到已有操作；如果原操作失败或取消，重复保存不能当成已重新执行。
 
-原生工作树同步默认沿用本机 Claude Code 配置。显式指定 `--model zcode:default` 或 `--model grok:default` 可以使用对应 CLI 的本机默认配置。切换一个已结束操作的执行器时，使用正式的 `--retry-of`，沿用原冻结输入和验收条件。
+登记 `SPEX_LLM_MANAGER_PYTHON` 和 `SPEX_LLM_MANAGER_CLI_CONFIG` 后，新原生工作树同步可以按宿主的 CLI 功能组选路。项目可设 `sync.model` 为 `llm-manager`，也可在发起操作时指定 `--model llm-manager`。功能组按登记顺序选择已就绪路线。将 Cursor 放在首位即可优先使用本机 Cursor CLI。
+
+手动 `--model` 优先于项目设置。项目未指定模型时沿用宿主功能组，未登记功能组时使用本机 Claude Code 配置。可用 `--model cursor:default`、`--model zcode:default` 或 `--model grok:default` 直接选择对应 CLI 的本机配置。切换已结束操作的执行器时，使用 `--retry-of`，沿用原冻结输入和验收条件。
 
 ### 14.4 从代码修改开始
 

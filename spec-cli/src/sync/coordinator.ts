@@ -380,7 +380,8 @@ function settledElaborationReview(store: SyncStore, operation: SyncOperation, pr
   if (rejection) authenticateRejection(prior, key, failure, rejection, checkpoint)
   const transportMatches = rejection
     ? state.state === 'failed' && (request.model?.startsWith('zcode:') && record.harness === 'zcode' || request.model?.startsWith('claude:') && record.harness === 'claude'
-      || request.model?.startsWith('grok:') && record.harness === 'grok-structured' && state.grokNative?.sessionId === session.threadId && state.grokNative?.turnId === session.turnId)
+      || request.model?.startsWith('grok:') && record.harness === 'grok-structured' && state.grokNative?.sessionId === session.threadId && state.grokNative?.turnId === session.turnId
+      || request.model?.startsWith('cursor:') && record.harness === 'cursor-structured' && state.cursorNative?.sessionId === session.threadId && state.cursorNative?.requestId === session.turnId)
     : request.model?.startsWith('zcode:') && isZCodeEventsRpcTimeout(state) && record.harness === 'zcode' && state.zcodeNative?.sessionId === session.threadId && state.zcodeNative.turnId === session.turnId && !state.rejectedOutput
   const boundInput = ({ purpose, prompt, schema, worktree }: ElaborationSessionRequest): string => contentHash(JSON.stringify({ inputDigest: result.inputDigest, purpose, prompt, schema, worktree }))
   if (resource.attemptId !== prior.id || resource.generation !== prior.generation || plan.schemaVersion !== 1 || checkpoint.schemaVersion !== 1

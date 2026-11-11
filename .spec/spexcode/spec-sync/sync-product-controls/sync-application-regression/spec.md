@@ -121,3 +121,5 @@ P4 partial→decide使用原P3-DELIVERY keep_intent真实链补强：fresh exact
 v21下真实oracle状态证据从统一typed checkpoint读取接缝提取JSON材料，原status、命令、exit、具体旧断言及source/index字节断言保持；不能因wrapper原子bundle丢失内层验收证据或把raw解析成测试结果。真实Docker门仍按原显式环境标记运行。
 
 手工 committed 初始化回归使用真实 Git clean filter 隐藏本地正文变化，再暂存另一文件。请求冻结原 HEAD 及精确摘要；工作文件、当前 index、幂等和派发门禁保持。
+
+隔离 Git/SQLite 准入用例核 `llm-manager` 路由进程仅收宿主配置路径和允许的 CLI 厂商，无继承环境。实际选择持久进入 operation 与工具描述。重复请求不重新选路，正式 retryOf 可以沿同输入和政策选另一个就绪 CLI，非 CLI 路由拒绝准入。
