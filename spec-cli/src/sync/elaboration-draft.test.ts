@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createRequire, syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
@@ -89,6 +90,30 @@ for (const failure of ['syntax', 'schema'] as const) test(`P1真实Git草稿${fa
   assert.deepEqual(readTree(f.commonDir, f.requests[2].worktree!.tree).filter(entry => entry.path.startsWith('.spex-sync-drafts/')), [])
   assert.ok(result.changes.every(change => change.path.startsWith('.spec/')))
   assert.deepEqual(readTree(f.commonDir, last.draft!.resultTree).filter(entry => !entry.path.startsWith('.spec/') && !entry.path.startsWith('.spex-sync-drafts/')), readTree(f.commonDir, f.snapshot.immutableTree).filter(entry => !entry.path.startsWith('.spec/')))
+})
+
+test('P1候选消费已核验Git字节，冷验草稿只读一次原seed树', async t => {
+  const f = await fixture(t)
+  const protectedOids = ['src/export.js', 'tests/export.test.mjs'].map(path => git(f.root, 'rev-parse', `HEAD:${path}`))
+  const childProcess = createRequire(import.meta.url)('node:child_process') as typeof import('node:child_process'), original = childProcess.execFileSync
+  const calls: string[][] = []
+  childProcess.execFileSync = ((...args: Parameters<typeof execFileSync>) => {
+    if (args[0] === 'git') calls.push(args[1] as string[])
+    return Reflect.apply(original, childProcess, args)
+  }) as typeof execFileSync
+  syncBuiltinESMExports()
+  try {
+    const result = await elaborate(f.input, { runner: f.run(() => JSON.stringify(rows)) })
+    assert.equal(result.status, 'complete', JSON.stringify(result.failure))
+    const perBlobReads = calls.filter(args => args.includes('cat-file') && protectedOids.includes(args.at(-1)!))
+    assert.equal(perBlobReads.length, 0, '原源码和测试直接使用完整树扫描中的已核验字节')
+
+    const draft = result.rounds.at(-1)!.draft!
+    calls.length = 0
+    assert.equal(readStageDraft(f.commonDir, draft, draft), JSON.stringify(rows))
+    assert.equal(calls.filter(args => args.includes('ls-tree') && args.at(-1) === draft.seed.tree).length, 1)
+    assert.equal(calls.filter(args => args.includes('ls-tree') && args.at(-1) === draft.resultTree).length, 1)
+  } finally { childProcess.execFileSync = original; syncBuiltinESMExports() }
 })
 
 test('Native P1续修AC.test坏稿只用真实已有测试ID和可信VERIFY', async t => {
