@@ -48,3 +48,5 @@ run/verify 接收 --model 并传给正式 HTTP 应用；控制/恢复命令遇�
 spex sync resources recover <operation-id> --input-id <frozen-input-id>是显式单次离线资源入口，直接调用同一resources-only应用，不启动API、watcher或automatic queue；不接受模型、retry、业务request或HTTP选项。必须提供精确旧输入身份，当前canonicalRoot/commonDir核对仍执行；只输出资源结算及未决journal摘要。busy/资源未证实停止时非零退出并保留资源。普通recover仍走后端且可能恢复已开始journal，语义不变；离线资源清理不表示resume、adopt、业务通过或可忽略source身份变化。
 
 run --origin initial --committed 显式选择实际提交 HEAD。CLI 只对新的 initial 请求发送布尔 committed，遇到其它命令、正文 patch 或 retryOf 时在 HTTP 前拒绝。
+
+仅 `run --record-unverified-coverage` 可显式登记未执行覆盖。后端核实操作为代码→规格且已有可信保护测试。普通 `verify` 和独立 `check` 沿默认严格规则，`show` 在正式验证通过后显示未执行的契约 ID。

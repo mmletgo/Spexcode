@@ -286,13 +286,16 @@ export function validateContractGraph(graph: ContractGraph, context: ContractVal
     }
   }
   for (const [kind, values] of [['REQ', reqs], ['RULE', rules], ['AC', acs], ['FLOW', flows], ['STEP', steps]] as const) {
-    if (!values.length) report('incomplete-contract', `完成范围缺少 ${kind}；高层输入可以继续细化`, undefined)
+    if (!values.length && (kind !== 'AC' || !context.recordUnverifiedAcceptance)) report('incomplete-contract', `完成范围缺少 ${kind}；高层输入可以继续细化`, undefined)
   }
   const coverage = projectContractCoverage(graph)
   for (const req of reqs) if (!flows.some((flow) => flow.req.includes(req.id))) report('missing-requirement-flow', `${req.id} 缺少主流程`, req)
   for (const item of [...reqs, ...rules, ...transitions]) {
     const row = coverage.items.find((candidate) => candidate.id === item.id)!
-    if (!row.acceptanceIds.length) report('missing-acceptance', `${item.id} 缺少可执行 AC 绑定`, item)
+    if (!row.acceptanceIds.length) {
+      if (!row.blockedBy.length && context.recordUnverifiedAcceptance?.(item.id)) report('acceptance-not-executed', `${item.id} 未绑定可执行 AC，本轮没有该义务的验收运行证据`, item, undefined, 'warning')
+      else report('missing-acceptance', `${item.id} 缺少可执行 AC 绑定`, item)
+    }
     if (!row.code.length) report('missing-implementation', `${item.id} 缺少 code 治理映射；related 不能计覆盖`, item)
   }
   for (const gap of coverage.gaps) report(gap.kind === 'conflict' ? 'unresolved-conflict' : 'unresolved-gap', `${gap.id} 阻塞依赖范围`, graph.items.get(gap.id), gap.affectedIds)

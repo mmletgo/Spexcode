@@ -51,6 +51,7 @@ export interface VerificationConfig {
   exportDigest: string
   runnerDigest: string
   policy: VerificationPolicy
+  maskedVolumePaths?: string[]
   transport?: VerificationTransportPlan
 }
 export interface VerificationTestResult {

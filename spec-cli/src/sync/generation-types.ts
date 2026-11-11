@@ -30,6 +30,7 @@ export type GenerationInput = {
   facts: readonly ElaborationFact[]
   existingAcceptance: readonly Acceptance[]
   mandatoryTests: SyncCoordinatorPlan['mandatoryTests']
+  recordUnverifiedCoverage?: true
   verifications: readonly SyncCoordinatorPlan['verifications'][number]['definition'][]
   /** 已结算失败产物和诊断；修复上下文不是新的业务事实或通过证据。 */
   /** 仅引用同组已认证格式拒绝或Native成功但字段无效的原件；原JSON仍为未批准诊断，不进入业务候选。 */

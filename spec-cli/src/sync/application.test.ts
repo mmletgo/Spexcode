@@ -2249,6 +2249,48 @@ test('新原生操作缺省优先Claude配置，重放和省略retry保持原请
   } finally { await f.application.stopService(); f.cleanup() }
 })
 
+test('原生只读同步的未执行覆盖授权在同输入正式重试中绑定，并随重试继承', async () => {
+  const config: SyncSettings = { ...settings, testPaths: ['generated-tests'], readPaths: ['tests', 'package.json'], mandatoryTests: [{ verificationId: 'VERIFY-DEMO-01', testPath: 'tests/demo.test.mjs', testId: 'DEMO-01' }] }
+  const f = await fixture(config, undefined, true)
+  try {
+    governDemoCode(f)
+    await f.application.enable()
+    await f.application.automaticControl('pause')
+    for (const origin of ['spec', 'combined'] as const) {
+      await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'coverage-refused', origin, recordUnverifiedCoverage: true }), { code: 'sync_coverage_invalid', status: 400 })
+    }
+    const strict = (await f.application.submit({ nodeId: 'demo', requestId: 'strict-initial', origin: 'initial', committed: true })).operation!
+    assert.equal(strict.recordUnverifiedCoverage, undefined)
+    await f.application.control(strict.id, 'cancel')
+    const request = { nodeId: 'demo', requestId: 'explicit-coverage-retry', retryOf: strict.id, recordUnverifiedCoverage: true } as const
+    const enabled = (await f.application.submit(request)).operation!
+    assert.equal(enabled.recordUnverifiedCoverage, true)
+    assert.deepEqual(enabled.input, strict.input)
+    assert.equal(enabled.policyDigest, strict.policyDigest)
+    assert.equal(enabled.readSetDigest, strict.readSetDigest)
+    assert.deepEqual(enabled.scope, strict.scope)
+    assert.equal(f.application.store.findIngressReceipt(enabled.ingressKey)?.recordUnverifiedCoverage, true)
+    assert.equal((await f.application.submit(request)).operation!.id, enabled.id)
+    await assert.rejects(f.application.submit({ ...request, recordUnverifiedCoverage: undefined }), { code: 'SYNC_IDEMPOTENCY_CONFLICT' })
+    await f.application.control(enabled.id, 'cancel')
+    const inherited = (await f.application.submit({ nodeId: 'demo', requestId: 'inherited-coverage', retryOf: enabled.id })).operation!
+    assert.equal(inherited.recordUnverifiedCoverage, true)
+    assert.equal(f.calls.length, 0)
+    await f.application.control(inherited.id, 'cancel')
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+
+test('没有冻结保护测试时拒绝未执行覆盖授权', async () => {
+  const f = await fixture(settings, undefined, true)
+  try {
+    governDemoCode(f)
+    await f.application.enable()
+    await f.application.automaticControl('pause')
+    await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'missing-protected-tests', origin: 'initial', committed: true, recordUnverifiedCoverage: true }), { code: 'sync_coverage_invalid', status: 400 })
+    assert.equal(f.calls.length, 0)
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+
 test('llm_manager 只在正式新准入解析，固定 CLI 选择并防止重放时换路', async t => {
   const f = await fixture({ ...settings, model: undefined }, undefined, true)
   const command = join(f.temp, 'route-python'), config = join(f.temp, 'route.json'), calls = join(f.temp, 'route-calls')

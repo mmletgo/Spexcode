@@ -410,6 +410,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
       authorizedChanges: [...(input.authorizedChanges ?? []).filter(change => !analysis?.analysis.authorizedChanges.some(local => local.id === change.id) && (change.action === 'restore' || ids.has(change.id))), ...(analysis ? deriveBehaviorAuthorization(analysis.analysis, analysis.ref) : [])],
       implementationWritePaths: input.implementationWritePaths?.length === 0 ? [] : partition.writePaths, readonlyTestPaths: input.readonlyTestPaths?.filter(path => within(path, readPaths)),
       phase: interfaceSeed ? 'interface_seed' : undefined,
+      recordUnverifiedCoverage: interfaceSeed ? undefined : input.recordUnverifiedCoverage,
     }
     let cacheDraft: ElaborationDraft | undefined
     const reusableCache = (cachedInput: ElaborationInput, cached: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>): boolean => {

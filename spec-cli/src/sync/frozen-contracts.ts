@@ -18,14 +18,14 @@ export type FrozenContracts = {
 export const isSyncSpecPath = (path: string): boolean => path.startsWith('.spec/') && path.endsWith('/spec.md') && !path.split('/').includes(PLUGIN_INSTANCE_ROOT)
 
 /** 使用现有节点身份与契约解析器读取固定文本；root 只表示来源，不读取它的工作文件。 */
-export async function readFrozenContracts(root: string, input: ReadonlyMap<string, string>, inventory?: ReadonlySet<string>): Promise<FrozenContracts> {
+export async function readFrozenContracts(root: string, input: ReadonlyMap<string, string>, inventory?: ReadonlySet<string>, recordUnverifiedAcceptance?: (id: string) => boolean): Promise<FrozenContracts> {
   const files = new Map(input), paths = inventory && new Set(inventory)
   const sources = new Map([...files].filter(([path]) => isSyncSpecPath(path)))
   const nodes = await loadSpecs(root, { history: null, drift: null, snapshot: { tip: 'HEAD', files: sources } })
   const parsed = nodes.map(node => parseContract({ nodeId: node.id, path: node.path, source: sources.get(node.path)! }))
   const contracts = parsed.flatMap(result => result.contract ? [result.contract] : [])
   const graph = buildContractGraph(contracts)
-  const findings = [...parsed.flatMap(result => result.findings), ...validateContractGraph(graph, { mode: 'final', files, nodeIds: new Set(nodes.map(node => node.id)) })]
+  const findings = [...parsed.flatMap(result => result.findings), ...validateContractGraph(graph, { mode: 'final', files, nodeIds: new Set(nodes.map(node => node.id)), recordUnverifiedAcceptance })]
   if (paths) {
     const directories = new Set([...paths].flatMap(path => path.split('/').slice(0, -1).map((_part, index, parts) => parts.slice(0, index + 1).join('/'))))
     findings.push(...specRelationFindings(nodes, path => paths.has(path) || directories.has(path.replace(/\/+$/, ''))).map(finding => ({ code: finding.rule, severity: finding.level === 'error' ? 'error' as const : 'warning' as const, nodeId: finding.spec!, path: nodes.find(node => node.id === finding.spec)!.path, message: finding.msg })))

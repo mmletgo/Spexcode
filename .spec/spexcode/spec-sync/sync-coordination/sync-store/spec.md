@@ -130,3 +130,5 @@ sync.history 请求采用固定输入、目标真实交付及完整成组差量�
 SyncCheckpointRef可含typed artifacts，单次checkpoint在事务外校验wrapper及全部材料CAS后原子登记wrapper与保活引用；pinnedBlobRefs递归保留原resultRef、全部JSON材料及原始raw。旧flat refs不改写或删除，不以role授予stage权。
 
 完整未采纳 settled 交付的正式 retryOf 先在事务外认证真实 Git 与全部 settledReceipt，准入事务再核父完整记录及 journal 摘要未变、历史资源已清空、当前 attempt 已结算。selection 只允许同资源集逐项保持原 binding 或推进为该父实际 journal 的 source BaselinePair；pair 的原输入、receipt 与覆盖必须逐项一致，第三方推进拒绝。子保存当前 CAS selection，业务组合及阶段仍沿 retryOf 派生的原 selection，bindComposedInput 仅接受该认证业务摘要；claim/fence/verification/apply 始终核子当前 CAS。没有新持久字段，不改旧记录或资源头。
+
+显式 `recordUnverifiedCoverage` 参与持久操作与接入收据身份，原冻结政策摘要和只读范围保持。默认观察不能接管同一冻结提交的手动选择；正式验证仅接受本轮覆盖范围内唯一的 REQ、RULE、TR 未执行 ID。

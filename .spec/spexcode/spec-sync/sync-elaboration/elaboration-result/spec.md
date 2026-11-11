@@ -86,3 +86,5 @@ ReadonlySpecRepair的candidate_review来源保留真实generationRef、各分区
 单体P1同样允许越过上述纯控制中断：同operation不可变计划下，readInput由相同composed、selection及冻结读集合唯一派生上下文，真实来源whole wrapper仍精确核readSet和完整inputDigest；已有P0时须保同一analysisRef，没有P0则双方均须缺席。单体不要求不存在的partition-plan，不新增checkpoint或补写历史绑定。
 
 ReadonlySpecRepair可用kind:partition_seal标记全局封口反馈；generationRef在此分支指原失败partitioned_final aggregate，acceptedRef仍指其真实已审局部，candidateDigest绑定原partitionSeal候选，findings仅含error。该诊断进入新局部输入/请求摘要，不修改历史accept、原意、作者授权或预算。
+
+显式只读未执行覆盖的 `acceptance-not-executed` 发现保留在局部检查和全局 seal 中，独审绑定同一候选；它提供声明 ID 和测试缺口，真实执行仍由 V3 记录。

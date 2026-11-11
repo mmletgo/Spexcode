@@ -293,3 +293,5 @@ P0已结算ZCode `native_rpc_timeout` 的已完成后取`session/events`超时�
 原failed资源观察不等于精准missing-final资格。原正式cancelled/stopped、removed及完整request/owner/input/seed/schema/path/source/tests/Git/当前fence门均通过时，实际原root的exit1/is_error:true同形错误投影可在新attempt将最新正常Git记为native-failure未批准材料；不要求错误发生前未封存的history，不判success/format，不补旧record/raw/final或退回更早稿。真正exit0/false缺字段仍沿原sealed认证，未知错误形状与foreign身份仍失败；普通pause和更晚来源才覆盖prior的规则保持。
 
 原request/plan/init/echo/正式stop、source/schema与当前fence均认证后，实际干净HEAD仍等于原seed的无进度候选先沿既有分支跳过，再判断输出终态形状；不将无JSON的exit143旧失败误判为missing-final阻断新任务。该skip不代表成功或格式资格，foreign身份、未知停止/进程与真实新提交仍不得借此越过认证；exit143已有新稿不取得本轮明确exit1错误材料资格。
+
+原生 `code_to_spec` 的明确运行选项 `recordUnverifiedCoverage` 只允许有原冻结 mandatory 测试的只读操作。P1 局部独审与全局封口列出未执行声明，V1 在真实候选按同一 ID 校验，V2 继续独立审查，V3 执行所有真实 AC 与全部冻结 mandatory 测试，V4 核对原授权与真实源。通过结果另外保存 `unexecutedContractIds`，这些业务声明不计入已运行测试。跨覆盖选择只可重用原已审代码分析与真实接口，完整候选续验须相同选择。

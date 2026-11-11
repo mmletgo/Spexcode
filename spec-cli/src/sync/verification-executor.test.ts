@@ -169,6 +169,21 @@ test('AC-VERIFIER-11 scratch 默认和 false 均 noexec，只有显式 true 允�
   }
 })
 
+test('镜像卷与验证挂载重叠时在创建前拒绝', async () => {
+  const input = await request(); const engine = fake()
+  const driver: VerificationDriver = async (argv, maxBytes) => {
+    const response = await engine.driver(argv, maxBytes)
+    if (argv[0] !== 'image') return response
+    const image = JSON.parse(response.stdout)
+    image[0].Config.Volumes = { '/candidate/overlay': {} }
+    return ok(JSON.stringify(image))
+  }
+  const result = await executeVerification(input, { driver, onCheckpoint: async () => assert.fail('冲突卷不能取得运行检查点') })
+  assert.equal(result.status, 'unsupported')
+  assert.match(result.reason!, /卷路径与验证挂载冲突/)
+  assert.ok(!engine.calls.some(call => call[1] === 'create'))
+})
+
 test('AC-VERIFIER-12 scratch 执行能力拒绝非布尔值，不能因 truthy 放宽政策', async () => {
   for (const scratchExecutable of ['true', 1, null]) {
     const input = await request(); const engine = fake()

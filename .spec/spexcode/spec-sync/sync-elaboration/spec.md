@@ -170,3 +170,5 @@ Native每轮生成复用与历史受限路径相同的repairContext，收到上�
 Native完整叶生成提示明确区分引用类型：FLOW.req只引用REQ，并直接承接各级实际适用祖先REQ，AC.covers也直接承接这些祖先REQ；实际适用祖先RULE由AC.covers直接承接，或经本叶TR.rules引用并由对应AC覆盖该TR。不能将REQ/RULE合写为FLOW.req的合法集合，不引用兄弟或不适用义务。interface_seed仍不展开FLOW/AC；Legacy有效模板、schema、reference-kind硬门、原AC授权与独审范围保持。
 
 readonlySpecRepair的partition_seal分支复用已接受局部诊断接缝，绑定真实失败aggregate与其局部原件，仅传severity:error和历史JSON/review；保留原业务写权限，不强制改变implementationWritePaths。父仍仅审接口，真实full owner修复适用承接，原raw、稳定ID及作者AC/VERIFY授权门保持；旧accept不成为失败seed或全局批准。
+
+明确许可的原生代码→规格可记录缺少本轮真实可运行测试的业务义务。P1 在 REQ、RULE 和 TR 保留原子义务、条件与可观察结果，已知实际绑定照常核对。局部独审与全局封口以冻结旧覆盖保护已有 AC，确无可绑定测试的义务由程序记为未执行。业务未知、实现缺陷、错误测试绑定继续阻断。父接口阶段的原独审协议沿用。

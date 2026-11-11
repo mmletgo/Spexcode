@@ -25,7 +25,7 @@ import { SyncApplication } from './application.js'
 import * as continuationCoordinator from './coordinator.js'
 import { acceptedCandidateReviewSource, isSyncInputCurrent, prepareSyncAdmission, readCurrentSyncAnalysis, readonlySpecRepairStalled, recoverSyncOperationResources, runSyncOperation, syncPlanDigest } from './coordinator.js'
 import type { SyncCoordinatorOptions, SyncCoordinatorPlan } from './coordinator-types.js'
-import type { SyncAttempt, SyncOperation } from './operation-types.js'
+import type { BlobRef, SyncAttempt, SyncOperation } from './operation-types.js'
 import { migrateSyncStore, SYNC_COMPONENT, SYNC_MIGRATIONS, syncCoordinatorAddress } from './migrations.js'
 import { dockerVerificationDriver, verificationExportDigest } from './verification-executor.js'
 import type { VerificationCheckpoint, VerificationCommandResult, VerificationDriver, VerificationRequest } from './verification-executor-types.js'
@@ -1602,6 +1602,72 @@ test('租约heartbeat贯穿长调用，取消不派发下一阶段，重入不�
 })
 
 const docker = { skip: process.env.SPEX_DOCKER_VERIFICATION_TEST !== '1', timeout: 240000 }
+
+for (const oraclePasses of [true, false]) test(`代码→规格记录未执行声明仍执行原生 Docker 保护测试 oraclePasses=${oraclePasses}`, docker, async t => {
+  const raw = original.slice(0, original.indexOf('## expanded spec')).replace('contract-schema: sync-v1\n', '')
+  const oraclePath = 'tests/independent-oracle.test.mjs', verificationId = 'VERIFY-INDEPENDENT-01', testId = 'ORACLE-INDEPENDENT-01'
+  const oracle = `import test from 'node:test'\nimport assert from 'node:assert/strict'\nimport { ExportService } from '../src/export.js'\ntest('${testId} frozen oracle', () => assert.equal(typeof ExportService, '${oraclePasses ? 'function' : 'object'}'))\n`
+  const f = await fixture(t, { maxAttempts: 1, maxCalls: 6, maxRepairs: 0, timeoutMs: 120000 }, false, raw, 'project', original,
+    { version: 'sync-coordinator-v2', agentWorkflow: 'native-worktree-v1', direction: 'code_to_spec', writePaths: ['.spec'], sourcePaths: ['src'], partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 } },
+    undefined, 'code', 'claude:default', true, { [oraclePath]: oracle }, true)
+  const { environment } = f.plan.verifications[0]
+  const image = process.env.SPEX_READONLY_COVERAGE_TEST_IMAGE ?? environment.image
+  const plan = { ...f.plan, verifications: [{ environment: { ...environment, image }, definition: { id: verificationId, command: ['node', '--test', oraclePath], cwd: '.', timeoutMs: 30_000 } }], mandatoryTests: [{ verificationId, testPath: oraclePath, testId }] }
+  f.store.requestControl(f.operation.id, 'cancel')
+  const selection = f.store.readBusinessBaselineSelection(f.operation.id)!
+  const admission = await prepareSyncAdmission(f.input, plan, { ingressKey: 'coverage-only', rootCauseId: 'coverage-only', origin: 'code', model: 'claude:default', budget: f.operation.budget, managedRoot: f.managedRoot, baselineSelection: selection, executionScope: f.operation.scope, recordUnverifiedCoverage: true })
+  const admitted = f.store.admitAndEnqueue(admission)
+  const operation = f.store.ackDispatch(f.input.source.repositoryId, admitted.dispatchMessageId)
+  f.useOperation(operation)
+  await f.realTools()
+  f.transform((output, request) => {
+    if (request.purpose === 'code_behavior_analyze') {
+      for (const change of (output as { changes: { affectedIds: string[]; ruleIds: string[] }[] }).changes) {
+        change.affectedIds = []; change.ruleIds = []
+      }
+    }
+    if (request.purpose === 'elaboration_generate') for (const change of (output as GeneratedElaboration).changes) {
+      change.tables.AC = []; change.tables.VERIFY = []
+    }
+    return output
+  })
+  const runner = f.options.runner!
+  f.options.runner = async request => {
+    if (request.purpose === 'code_generate') assert.fail('只读同步不得生成实现')
+    if (request.purpose === 'code_review') {
+      f.calls.push(request)
+      assert.match(request.prompt, /未执行|缺少可运行测试/)
+      const { inputId, candidateDigest, requiredIds } = JSON.parse(request.prompt.split('候选绑定:\n')[1].split('\n')[0]) as { inputId: string; candidateDigest: string; requiredIds: string[] }
+      const output = { inputId, candidateDigest, verdict: 'accept', checkedIds: requiredIds, findings: [] }
+      const attempt = f.store.readAttempt(f.store.readOperation(operation.id).currentAttemptId!)
+      const dispatch = attempt.dispatchPlans.find(item => item.key === request.requestKey)!
+      return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `review-${dispatch.sessionCreateKey}`, turnId: 'turn-1', output, resultDigest: contentHash(JSON.stringify(output)) }
+    }
+    const result = await runner(request.purpose.startsWith('code_behavior_') ? { ...request, prompt: inlineBehaviorPrompt(request, f.input.source.commonDir) } : request)
+    if (!request.worktree || !/草稿文件=/.test(request.prompt)) return result
+    const worktree = committedDraftFixture(f, request, result.output, join(f.parent, `coverage-draft-${f.calls.length}`))
+    const output = { summary: '已提交草稿' }
+    return { ...result, output, resultDigest: contentHash(JSON.stringify(output)), worktree }
+  }
+  const outcome = await runSyncOperation(f.store, operation.id, { ...f.options, plan, readCurrentPlan: () => plan })
+  assert.equal(outcome.status, oraclePasses ? 'workspace_synced' : 'failed', JSON.stringify({ failure: outcome.failure, calls: f.calls.map(request => request.purpose) }))
+  const attempt = f.store.readAttempt(outcome.operation.currentAttemptId!)
+  assert.ok(attempt.candidate)
+  const protectedEntries = (tree: string) => readTree(f.input.source.commonDir, tree).filter(entry => !entry.path.startsWith('.spec/'))
+  assert.deepEqual(protectedEntries(attempt.candidate.tree), protectedEntries(f.input.immutableTree))
+  const v3 = readSyncCheckpoints(f.store, outcome.operation, attempt).json.map(entry => entry.value as { stage?: string; resultRef: BlobRef }).find(value => value.stage === `v3:${verificationId}`)!
+  const dockerResult = JSON.parse(readEvidence(f.input.source.commonDir, v3.resultRef).toString())
+  assert.equal(dockerResult.status, oraclePasses ? 'passed' : 'failed')
+  assert.equal(dockerResult.evidence.environment.driver, 'docker')
+  if (!oraclePasses) { assert.equal(f.store.listJournals(operation.id).length, 0); return }
+  const verification = JSON.parse(readEvidence(f.input.source.commonDir, attempt.verification!.resultBlob).toString()) as import('./operation-types.js').VerificationResultBlob
+  assert.deepEqual(verification.layers.map(layer => [layer.layer, layer.verdict]), ['V1', 'V2', 'V3', 'V4'].map(layer => [layer, 'pass']))
+  assert.ok(verification.unexecutedContractIds?.includes('REQ-EXPORT-01'))
+  assert.deepEqual(dockerResult.evidence.tests.map((item: { testId: string }) => item.testId), [testId])
+  const deliveredCommit = outcome.receipt?.actualCommit
+  assert.ok(deliveredCommit)
+  assert.deepEqual(protectedEntries(deliveredCommit), protectedEntries(f.input.immutableTree))
+})
 
 test('P4精确queued经已审null扩展、四层Docker验证与真实receipt保持原始index', docker, async t => {
   const f = await fixture(t); await f.realTools()

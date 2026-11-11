@@ -44,3 +44,5 @@ SSH 断开不证明 worker 或 Docker CLI 停止。[[verification-remote-helper]
 测试 ID 与源码和 AC 的受保护绑定由上层政策核对，本执行器不把测试声明或模型总结当作业务覆盖证明。上层通过 `onCheckpoint` 存储 evidence blob；执行器没有第二数据库/队列。私有副本和检查点在外部 scratch 中保留，由上层按已结算证据的保留政策回收。
 
 针对性验证见 `spec-cli/src/sync/AGENTS.md`。故障注入覆盖回执、持久失败、身份拒绝、断连和伪报告；真实 Docker 覆盖子进程、只读写拒绝、源树/凭据/socket 不可见、无网络、超时、取消及创建窗口恢复。scratch 场景在同一冻结镜像中直接 spawn tmpfs 内 755 脚本，分别确认缺省 EACCES 和显式 true 成功。
+
+可信固定镜像的安全绝对卷路径由独立只读、noexec、nosuid、nodev 的小型 tmpfs 遮盖。创建参数和启动前 inspect 共同核对这些精确挂载，实际 Docker volume 一律拒绝。碰到候选、报告器、既定 scratch 或系统保留挂载的路径，预检拒绝。原 `/tmp` 写范围和预算保持。
