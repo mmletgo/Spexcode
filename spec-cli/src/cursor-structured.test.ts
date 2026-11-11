@@ -1,21 +1,22 @@
 import test, { type TestContext } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import childProcess, { execFileSync, type SpawnOptions } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { processStartToken } from '@spexcode/spec-core'
 import { assertCursorRejectedFinalSource, cursorStructuredTurn, stopCursorStructuredTurn, type CursorStructuredExecution } from './cursor-structured.js'
-import { nativeWorktreePrompt, nativeWorktreeResult } from './native-worktree-runtime.js'
+import { NATIVE_PROCESS_OBSERVATION_LIMIT_MS, nativeWorktreePrompt, nativeWorktreeResult } from './native-worktree-runtime.js'
 import { StructuredSessionError, structuredExecutionPolicy } from './session-structured-policy.js'
 
 const schema = { type: 'object', properties: { marker: { type: 'string' } }, required: ['marker'], additionalProperties: false }
 const finalText = '{"marker":"终态"}'
 const sha256 = (text: string): string => createHash('sha256').update(text).digest('hex')
 const readJson = <T>(path: string): T => JSON.parse(readFileSync(path, 'utf8')) as T
-type Scenario = 'edit' | 'edit-sticky' | 'external-exit' | 'read' | 'bad-json' | 'bad-schema' | 'duplicate-terminal' | 'wrong-id' | 'auth' | 'rpc-error' | 'cancel' | 'cancel-blocked' | 'read-wrong-mode' | 'read-mode-refused'
+type Scenario = 'edit' | 'edit-sticky' | 'external-exit' | 'read' | 'bad-json' | 'bad-schema' | 'duplicate-terminal' | 'wrong-id' | 'auth' | 'rpc-error' | 'cancel' | 'cancel-blocked' | 'read-wrong-mode' | 'read-mode-refused' | 'periodic'
 
 function fixture(t: TestContext, scenario: Scenario, model = 'cursor:default') {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'spex-cursor-fixture-')))
@@ -50,7 +51,7 @@ const edit = !scenario.startsWith('read')
 assert.deepEqual(args.slice(0, 5), ['--workspace', cwd, '--sandbox', 'enabled', '--trust'])
 assert.equal(args.at(-1), 'acp')
 if (!edit) assert.deepEqual(args.slice(5, 7), ['--mode', 'ask'])
-let promptId, pendingPermission
+let promptId, pendingPermission, releasePoll
 let currentModeId = 'agent'
 if (scenario === 'edit-sticky') {
   setInterval(() => {}, 1000)
@@ -115,6 +116,14 @@ createInterface({ input: process.stdin, crlfDelay: Infinity }).on('line', line =
     }
     writeFileSync(join(root, 'fixture-started.json'), JSON.stringify({ args, promptId, sessionId, descendant, prompt: packet.params.prompt }), { flag: 'wx' })
     if (scenario === 'cancel' || scenario === 'cancel-blocked') return
+    if (scenario === 'periodic') {
+      releasePoll = setInterval(() => {
+        if (!existsSync(join(root, 'fixture-release'))) return
+        clearInterval(releasePoll)
+        finish()
+      }, 15)
+      return
+    }
     if (scenario === 'read') {
       assert.equal(readFileSync(join(cwd, 'seed.txt'), 'utf8'), 'immutable seed\n')
       permission('edit', join(cwd, 'seed.txt'), 'fixture-reject', () => permission('read', join(cwd, 'seed.txt'), 'fixture-allow', finish))
@@ -131,7 +140,10 @@ createInterface({ input: process.stdin, crlfDelay: Infinity }).on('line', line =
     assert.equal(packet.id, undefined)
     assert(promptId)
     writeFileSync(join(root, 'fixture-cancel.json'), JSON.stringify({ sessionId, promptId }), { flag: 'wx' })
-    if (scenario === 'cancel') reply(promptId, { stopReason: 'cancelled' })
+    if (scenario === 'cancel' || scenario === 'periodic') {
+      clearInterval(releasePoll)
+      reply(promptId, { stopReason: 'cancelled' })
+    }
     if (scenario === 'cancel-blocked') {
       const wait = setInterval(() => {
         if (!existsSync(join(root, 'fixture-release'))) return
@@ -167,9 +179,133 @@ const denyDispatch = async (): Promise<never> => assert.fail('original dispatch 
 const replayCallbacks = { onNative: denyDispatch, onThread: denyDispatch, onTurn: denyDispatch, onTurnStarting: denyDispatch }
 
 async function until(check: () => boolean): Promise<void> {
-  const deadline = Date.now() + 5_000
-  while (!check() && Date.now() < deadline) await delay(25)
+  const deadline = performance.now() + 5_000
+  while (!check() && performance.now() < deadline) await delay(25)
   assert(check(), 'isolated ACP fixture did not reach the expected phase')
+}
+
+type Probe = { script: string; args?: string[] }
+const failingProbe: Probe = { script: 'exit 2' }
+
+function censusProbes(t: TestContext, f: ReturnType<typeof fixture>, script: (ordinal: number) => Probe | undefined) {
+  const originalSpawn = childProcess.spawn
+  let count = 0
+  t.mock.method(childProcess, 'spawn', (file: string, args: string[], options: SpawnOptions) => {
+    const replacement = file === '/bin/ps' && existsSync(f.started) ? script(++count) : undefined
+    return replacement === undefined ? originalSpawn(file, args, options)
+      : originalSpawn('/bin/sh', ['-c', replacement.script, 'cursor-fixture-probe', ...(replacement.args ?? [])], options)
+  })
+  syncBuiltinESMExports()
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports() })
+  return () => count
+}
+
+test('Cursor recovers one transient census fault without replacing the original live prompt', { timeout: 10_000 }, async t => {
+  const f = fixture(t, 'periodic'), cancel = join(f.sessionRoot, 'fixture-cancel.json')
+  const association = join(f.sessionRoot, 'task-related-processes.json')
+  const probes = censusProbes(t, f, ordinal => ordinal === 1 ? failingProbe : undefined)
+  const flight = f.run().then(result => ({ result }), error => ({ error }))
+  try {
+    await until(() => existsSync(f.started))
+    const baseline = statSync(association).mtimeMs
+    await until(() => probes() >= 2 && statSync(association).mtimeMs > baseline || existsSync(cancel))
+  } finally {
+    writeFileSync(join(f.sessionRoot, 'fixture-release'), '')
+    await flight
+  }
+  const outcome = await flight
+  const latest = readFileSync(join(f.sessionRoot, 'process-stop-observations.jsonl'), 'utf8').trimEnd().split('\n').at(-1)!
+  assert.equal((JSON.parse(latest) as { nativeStopped: boolean }).nativeStopped, true)
+  if ('error' in outcome) throw outcome.error
+  const invocation = readJson<{ sessionId: string; promptId: string }>(f.started)
+  assert.deepEqual(outcome.result, { threadId: invocation.sessionId, turnId: invocation.promptId, text: finalText })
+  assert.equal(existsSync(cancel), false)
+  assert.deepEqual(await f.run(f.state(), replayCallbacks), outcome.result)
+})
+
+for (const exactStop of [true, false]) {
+  test(`Cursor bounds sustained periodic faults and ${exactStop ? 'settles a proven stop as failure' : 'keeps an unproven stop pending'}`, { timeout: 10_000 }, async t => {
+    const f = fixture(t, 'periodic'), cancel = join(f.sessionRoot, 'fixture-cancel.json')
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() })
+    let stopProbes = 0, restoreProbes = false
+    const probes = censusProbes(t, f, () => {
+      if (!existsSync(cancel)) return failingProbe
+      stopProbes++
+      return exactStop || restoreProbes ? undefined : failingProbe
+    })
+    const flight = f.run().then(result => ({ result }), error => ({ error }))
+    try {
+      await until(() => probes() >= 2)
+      assert.equal(existsSync(cancel), false)
+      t.mock.timers.tick(NATIVE_PROCESS_OBSERVATION_LIMIT_MS + 1)
+      await until(() => existsSync(cancel) && stopProbes > 0)
+      if (!exactStop) t.mock.timers.tick(NATIVE_PROCESS_OBSERVATION_LIMIT_MS * 2)
+      const outcome = await flight
+      assert('error' in outcome && outcome.error instanceof StructuredSessionError)
+      assert.equal(outcome.error.code, exactStop ? 'failed' : 'cancellation_pending')
+      if (exactStop) {
+        assert.equal(outcome.error.message, 'Cursor periodic native process observation did not recover')
+        assert(outcome.error.cause instanceof StructuredSessionError)
+        assert.equal(outcome.error.cause.code, 'cancellation_pending')
+      } else assert.equal(existsSync(join(f.sessionRoot, 'process-stop-observations.jsonl')), false)
+      assert.equal(existsSync(join(f.sessionRoot, 'settlement.json')), false)
+      restoreProbes = true
+      assert.deepEqual(await stopCursorStructuredTurn(f.state()), { nativeStopped: true, acknowledged: false, nativeStatus: 'stopped' })
+      await assert.rejects(f.run(f.state(), replayCallbacks), { code: 'cancellation_pending' })
+    } finally {
+      writeFileSync(join(f.sessionRoot, 'fixture-release'), '')
+      await flight
+    }
+  })
+}
+
+test('Cursor stops the original turn immediately after a non-transient census fault', { timeout: 10_000 }, async t => {
+  const f = fixture(t, 'periodic'), cancel = join(f.sessionRoot, 'fixture-cancel.json')
+  const fault = new Error('fixture non-transient spawn fault')
+  let activeProbes = 0
+  censusProbes(t, f, () => {
+    if (!existsSync(cancel) && ++activeProbes === 1) throw fault
+    return undefined
+  })
+  const outcome = await f.run().then(result => ({ result }), error => ({ error }))
+  assert('error' in outcome && outcome.error instanceof StructuredSessionError)
+  assert.equal(outcome.error.code, 'failed')
+  assert.equal(outcome.error.cause, fault)
+  assert.equal(activeProbes, 1)
+  assert.equal((await stopCursorStructuredTurn(f.state())).nativeStopped, true)
+  assert.equal(existsSync(join(f.sessionRoot, 'settlement.json')), false)
+})
+
+for (const action of ['terminal', 'cancel'] as const) {
+  test(`Cursor ${action} supersedes a late failed recovery probe for the same turn`, { timeout: 10_000 }, async t => {
+    const f = fixture(t, 'periodic'), controller = new AbortController()
+    const gate = join(f.sessionRoot, 'fixture-probe-release'), release = join(f.sessionRoot, 'fixture-release')
+    const held: Probe = { script: 'while [ ! -f "$1" ]; do /bin/sleep .025; done; exit 2', args: [gate] }
+    const probes = censusProbes(t, f, ordinal => ordinal === 1 ? failingProbe : ordinal === 2 ? held : undefined)
+    const flight = f.run(f.state(), { ...f.callbacks, signal: controller.signal }).then(result => ({ result }), error => ({ error }))
+    try {
+      await until(() => probes() >= 2)
+      if (action === 'terminal') writeFileSync(release, '')
+      else controller.abort()
+      await until(() => processStartToken(f.state().cursorNative!.pid!) === null)
+      assert.equal(existsSync(join(f.sessionRoot, 'process-stop-observations.jsonl')), false)
+    } finally {
+      writeFileSync(release, '')
+      writeFileSync(gate, '')
+      await flight
+    }
+    const outcome = await flight
+    if (action === 'terminal') {
+      const invocation = readJson<{ sessionId: string; promptId: string }>(f.started)
+      assert.deepEqual(outcome, { result: { threadId: invocation.sessionId, turnId: invocation.promptId, text: finalText } })
+      assert.equal(existsSync(join(f.sessionRoot, 'fixture-cancel.json')), false)
+    } else {
+      assert('error' in outcome && outcome.error instanceof StructuredSessionError)
+      assert.equal(outcome.error.code, 'cancelled')
+      assert.equal((await stopCursorStructuredTurn(f.state())).acknowledged, true)
+      assert.equal(existsSync(join(f.sessionRoot, 'settlement.json')), false)
+    }
+  })
 }
 
 test('Cursor ACP binds native session, exact client request, reported model and real Git draft', async t => {
