@@ -38,6 +38,10 @@ test('AC-SYNC-CLI-01 sync help说明真实后端与阶段范围，错误flag和�
   assert.equal(scopedPause.code, 1); assert.match(scopedPause.stderr, /物理暂停请省略节点选项/)
   const verifyPatch = await cli(['sync', 'verify', 'demo', '--patch-file', 'unread.json'])
   assert.equal(verifyPatch.code, 1); assert.match(verifyPatch.stderr, /只用于 sync run/)
+  for (const args of [['verify', 'demo'], ['run', 'demo', '--origin', 'spec'], ['run', 'demo', 'false', '--origin', 'code'], ['run', 'demo', '--origin', 'code', '--patch-file', 'unread.json']]) {
+    const coverage = await cli(['sync', ...args, '--record-unverified-coverage'])
+    assert.equal(coverage.code, 1); assert.match(coverage.stderr, /--record-unverified-coverage 只用于/)
+  }
   const misplaced = await cli(['sync', 'recover', 'op-1', '--retry-of', 'op-1'])
   assert.equal(misplaced.code, 1); assert.match(misplaced.stderr, /只用于 sync run/)
   const stopId = await cli(['sync', 'stop-writer', '--request-id', 'unneeded'])
@@ -98,6 +102,9 @@ test('AC-SYNC-CLI-02 CLI run/status/control 走相同持久服务HTTP且保留�
     assert.equal(adopted.code, 0, adopted.stderr)
     assert.deepEqual(requests[13], { method: 'POST', url: '/api/sync/operations/op-1/adopt', body: { targetTree: workspace.replace(/\/$/, '') } })
 
+    const coverage = await cli(['sync', 'run', 'demo', '--retry-of', 'op-1', '--record-unverified-coverage', '--request-id', 'coverage-1', '--api', api])
+    assert.equal(coverage.code, 0, coverage.stderr)
+    assert.deepEqual(requests[14], { method: 'POST', url: '/api/sync/run', body: { targetTree: workspace.replace(/\/$/, ''), nodeId: 'demo', requestId: 'coverage-1', retryOf: 'op-1', recordUnverifiedCoverage: true } })
   } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())) }
 })
 test('sync run和verify传递--model，resume/recover不接受模型切换', async () => {

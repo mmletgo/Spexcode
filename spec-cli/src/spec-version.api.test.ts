@@ -194,6 +194,11 @@ test('/api/specs/:id/version and /diff answer only for the node\'s own versions,
     assert.equal(activation.status, 200, await activation.text())
     const enabled = await (await fetch(`${base}/api/sync/settings`)).json(); assert.equal(enabled.enabled, true)
     for (const retryOf of [42, '', null]) assert.equal((await post('/api/sync/run', { nodeId: 'alpha', requestId: 'invalid-retry', retryOf })).status, 400)
+    for (const [route, recordUnverifiedCoverage] of [['run', false], ['run', 'true'], ['verify', true]] as const) {
+      const refused = await post(`/api/sync/${route}`, { nodeId: 'alpha', requestId: 'invalid-coverage', origin: 'code', recordUnverifiedCoverage })
+      assert.equal(refused.status, 400)
+      assert.equal((await refused.json()).code, 'sync_coverage_invalid')
+    }
     const unknownRetry = await post('/api/sync/run', { nodeId: 'alpha', requestId: 'unknown-retry', retryOf: 'unknown' })
     assert.equal(unknownRetry.status, 404, 'explicit retry identity must reach the application instead of starting ordinary work')
     assert.equal((await post('/api/specs/alpha/body', patch)).status, 400, 'enabled save requires stable request identity')

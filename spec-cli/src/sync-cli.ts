@@ -11,7 +11,7 @@ export async function runSyncCli(argv: readonly string[]): Promise<void> {
   if (verb === 'check') return (await import('./sync/conformance-cli.js')).runConformanceCli(argv.slice(1))
   const continuityValues = ['--revision', '--enabled-digest', '--old-common-dev', '--old-root-dev', '--old-git-dev']
   const values = new Set(['--node', '--request-id', '--model', '--retry-of', '--patch-file', '--limit', '--config-digest', '--api', '--port', '--password', '--origin', '--input-id', '--analysis', '--findings', '--choice', '--rule', ...continuityValues])
-  const allowed = new Set([...values, '--json', '--insecure', '--committed'])
+  const allowed = new Set([...values, '--json', '--insecure', '--committed', '--record-unverified-coverage'])
   const positional: string[] = []
   const flags = new Map<string, string>()
   for (let at = 1; at < argv.length; at++) {
@@ -34,6 +34,9 @@ export async function runSyncCli(argv: readonly string[]): Promise<void> {
   if (verb !== 'run' && flags.has('--retry-of')) throw usage('--retry-of 只用于 sync run')
   const committed = argv.includes('--committed')
   if (committed && (verb !== 'run' || flags.get('--origin') !== 'initial' || flags.has('--retry-of') || flags.has('--patch-file'))) throw usage('--committed 只用于无 --retry-of 和 --patch-file 的 sync run --origin initial')
+  const recordUnverifiedCoverage = argv.includes('--record-unverified-coverage')
+  const coverageOrigin = flags.get('--origin')
+  if (recordUnverifiedCoverage && (verb !== 'run' || flags.has('--patch-file') || positional.length > (flags.has('--node') ? 0 : 1) || (coverageOrigin ? !['initial', 'code'].includes(coverageOrigin) : !flags.has('--retry-of')))) throw usage('--record-unverified-coverage 只用于无正文差量的 sync run --origin initial 或 code，也可用于这类操作的 --retry-of')
   const targetTree = repoRoot(), query = new URLSearchParams({ targetTree })
   let result: unknown
   if (verb === 'source-continuity') {
@@ -66,7 +69,7 @@ export async function runSyncCli(argv: readonly string[]): Promise<void> {
     const patchFile = flags.get('--patch-file')
     if (retryOf && patchFile) throw usage('--retry-of 沿用原正文意图，不能同时指定 --patch-file')
     const patch = patchFile ? readSpecBodyEdit(JSON.parse(readFileSync(patchFile, 'utf8')) as unknown) : undefined
-    result = await clientSyncRequest(verb === 'verify' ? '/verify' : '/run', { targetTree, nodeId: stripRefSigil(nodeId), requestId: flags.get('--request-id') ?? randomUUID(), ...(retryOf ? { retryOf, ...(flags.has('--origin') ? { origin: flags.get('--origin') } : {}) } : { origin: flags.get('--origin') ?? 'spec' }), ...(flags.has('--model') ? { model: flags.get('--model') } : {}), ...(patch ? { patch } : {}), ...(committed ? { committed } : {}) })
+    result = await clientSyncRequest(verb === 'verify' ? '/verify' : '/run', { targetTree, nodeId: stripRefSigil(nodeId), requestId: flags.get('--request-id') ?? randomUUID(), ...(retryOf ? { retryOf, ...(flags.has('--origin') ? { origin: flags.get('--origin') } : {}) } : { origin: flags.get('--origin') ?? 'spec' }), ...(flags.has('--model') ? { model: flags.get('--model') } : {}), ...(patch ? { patch } : {}), ...(committed ? { committed } : {}), ...(recordUnverifiedCoverage ? { recordUnverifiedCoverage } : {}) })
   } else if (verb === 'decide') {
     if (positional.length !== 1 || !['--input-id', '--analysis', '--findings', '--choice'].every(flag => flags.has(flag))) throw usage('decide 需要 operation ID、--input-id、--analysis、--findings 与 --choice')
     const choice = flags.get('--choice')!
