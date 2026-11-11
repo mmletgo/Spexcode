@@ -17,6 +17,56 @@ import { fileURLToPath } from 'node:url'
 const seed = { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'edit' as const }
 const request = { schema: { type: 'object' }, inputDigest: 'input', purpose: 'worktree-test', timeoutMs: null, model: 'claude:MiniMax-M3.1-Flash', worktree: seed }
 
+function nativeIdentityFixture(t: test.TestContext) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'spex-native-identity-')))
+  const receiptFile = join(root, 'process.json'), baseline = join(root, 'process-baseline.json'), owned = join(root, 'owned-processes.json')
+  const start = () => {
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' })
+    assert(child.pid)
+    const pid = child.pid, closed = new Promise<void>(resolve => child.once('close', () => resolve()))
+    t.after(async () => {
+      if (child.exitCode === null && child.signalCode === null) process.kill(-pid, 'SIGTERM')
+      await closed
+    })
+    const identity = writeDetachedRuntimeReceipt(pid, receiptFile)
+    return { pid, identity }
+  }
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  return { root, receiptFile, baseline, owned, start }
+}
+
+test('native stop cannot adopt a reused PID absent from its original ownership census', async t => {
+  const f = nativeIdentityFixture(t)
+  await sampleNativeWorktreeProcesses(f)
+  const { pid, identity } = f.start()
+  const receipt = JSON.parse(readFileSync(f.receiptFile, 'utf8')) as { startToken: string }
+  const previousStart = process.platform === 'linux' ? String(Number(identity.startToken) - 1) : 'Sat Nov 1 00:00:00 2025'
+  writeFileSync(f.receiptFile, JSON.stringify({ ...receipt, startToken: previousStart }))
+  const plan = { ...f, pid }
+  await sampleNativeWorktreeProcesses(plan)
+  assert.deepEqual(JSON.parse(readFileSync(f.owned, 'utf8')), [])
+  assert.equal(await nativeWorktreeProcessesStopped(plan, true), false)
+  assert.equal(processStartToken(pid), identity.startToken)
+  assert.deepEqual(JSON.parse(readFileSync(f.owned, 'utf8')), [])
+})
+
+test('Linux historical lstart baseline keeps its original bytes and gains no stop or kill authority', { skip: process.platform !== 'linux' }, async t => {
+  const f = nativeIdentityFixture(t)
+  const { pid, identity } = f.start()
+  const lstart = execFileSync('/bin/ps', ['-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8' }).trim().replace(/\s+/g, ' ')
+  assert.notEqual(lstart, identity.startToken)
+  const oldBaseline = JSON.stringify([{ pid, ppid: process.pid, startToken: lstart }])
+  const oldOwned = JSON.stringify([{ pid, startToken: lstart }])
+  writeFileSync(f.baseline, oldBaseline); writeFileSync(f.owned, oldOwned)
+  const plan = { ...f, pid }
+  await assert.rejects(sampleNativeWorktreeProcesses(plan), { code: 'cancellation_pending' })
+  await assert.rejects(nativeWorktreeProcessesStopped(plan, true), { code: 'cancellation_pending' })
+  assert.equal(processStartToken(pid), identity.startToken)
+  assert.equal(readFileSync(f.baseline, 'utf8'), oldBaseline)
+  assert.equal(readFileSync(f.owned, 'utf8'), oldOwned)
+  assert.equal(existsSync(join(f.root, 'process-stop-observations.jsonl')), false)
+})
+
 function controlledCwdProbe(t: test.TestContext, slow: boolean) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'spex-controlled-cwd-'))), platform = Object.getOwnPropertyDescriptor(process, 'platform')!
   const execute = childProcess.execFile, executeSync = childProcess.spawnSync, launch = childProcess.spawn, kill = process.kill

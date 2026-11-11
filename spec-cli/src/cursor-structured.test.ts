@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameS
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
+import { processStartToken } from '@spexcode/spec-core'
 import { assertCursorRejectedFinalSource, cursorStructuredTurn, stopCursorStructuredTurn, type CursorStructuredExecution } from './cursor-structured.js'
 import { nativeWorktreePrompt, nativeWorktreeResult } from './native-worktree-runtime.js'
 import { StructuredSessionError, structuredExecutionPolicy } from './session-structured-policy.js'
@@ -108,7 +109,7 @@ createInterface({ input: process.stdin, crlfDelay: Infinity }).on('line', line =
     promptId = packet.id
     let descendant
     if (scenario === 'cancel') {
-      const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+      const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { cwd: dirname(dirname(root)), detached: true, stdio: 'ignore' })
       descendant = child.pid
       child.unref()
     }
@@ -273,15 +274,21 @@ for (const scenario of ['duplicate-terminal', 'wrong-id'] as const) {
   })
 }
 
-test('Cursor sends ACP cancel to the original session and proves the native descendant also stopped', { timeout: 10_000 }, async t => {
+test('Cursor sends ACP cancel and proves an owned descendant outside its process group and worktree stopped', { timeout: 10_000 }, async t => {
   const f = fixture(t, 'cancel')
   const controller = new AbortController()
   const rejected = assert.rejects(f.run(f.state(), { ...f.callbacks, signal: controller.signal }), { code: 'cancelled' })
   try {
     await until(() => existsSync(f.started))
     const invocation = readJson<{ sessionId: string; promptId: string; descendant: number }>(f.started)
+    const descendantStart = processStartToken(invocation.descendant)
+    assert(descendantStart)
+    t.after(() => {
+      if (processStartToken(invocation.descendant) === descendantStart) process.kill(-invocation.descendant, 'SIGTERM')
+    })
     const owned = join(f.sessionRoot, 'owned-processes.json')
     await until(() => readJson<Array<{ pid: number }>>(owned).some(item => item.pid === invocation.descendant))
+    assert(readJson<Array<{ pid: number; startToken: string }>>(owned).some(item => item.pid === invocation.descendant && item.startToken === descendantStart.replace(/\s+/g, ' ')))
     const native = f.state().cursorNative!
     const wrong = await stopCursorStructuredTurn({ ...f.state(), cursorNative: { ...native, pid: native.pid! + 1 } }, 100)
     assert.equal(wrong.nativeStopped, false)
