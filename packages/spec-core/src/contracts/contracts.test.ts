@@ -355,6 +355,23 @@ test('封闭const数据及for-of绑定组成的真实测试标题可静态归因
   }
 })
 
+test('动态测试标题只采信边界确定的静态用例前缀', () => {
+  const graph = buildContractGraph([parse()])
+  const fake = new Map(files)
+  for (const [source, declared] of [
+    ["import { SUITES } from './suites.js'; for (const id of ['AC-EXPORT-01']) { const suite = SUITES.find(entry => entry.id === id); test(`${id} ${suite.module} targets`, () => {}); }", true],
+    ["const ID = 'AC-EXPORT-01'; const title = `${ID} ${dynamic()} targets`; test(title, () => {});", true],
+    ["const ID = 'AC-EXPORT-01'; test(`${ID}${dynamic()} targets`, () => {});", false],
+    ["const ID = 'AC-EXPORT-01'; test(`${dynamic()} ${ID} targets`, () => {});", false],
+    ["test(`AC-EXPORT-01-OTHER ${dynamic()} targets`, () => {});", false],
+    ["const titles = { 'case ': 'AC-EXPORT-01 targets' }; test(titles[`case ${dynamic()}`], () => {});", false],
+    ["const ids = ['AC-EXPORT-01']; ids.pop(); test(`${ids[0]} ${dynamic()} targets`, () => {});", false],
+  ] as const) {
+    fake.set('tests/export.test.mjs', source)
+    assert.equal(!validateContractGraph(graph, { files: fake }).some(finding => finding.code === 'missing-test-case' && finding.itemId === 'AC-EXPORT-01'), declared, source)
+  }
+})
+
 test('Vitest each注册不抹去同一TSX文件中的直接it标题', () => {
   const graph = buildContractGraph([parse()])
   const fake = new Map(files)
@@ -428,7 +445,6 @@ test('动态或错绑定标题、未使用ID及作用域阴影不计测试声明
     "const ID = 'AC-EXPORT-01'; const example = `test('${ID}', () => {})`;",
     "// const ID = 'AC-EXPORT-01';\ntest(`${ID} candidate`, () => {});",
     "const ID = makeId('AC-EXPORT-01'); test(`${ID} candidate`, () => {});",
-    "const ID = 'AC-EXPORT-01'; test(`${ID} ${dynamic()} candidate`, () => {});",
     "const IDS = ['AC-EXPORT-01']; test(`${IDS[missing]} candidate`, () => {});",
     "const SUITES = [{ id: 'AC-EXPORT-01' }]; for (const other of SUITES) test(`${suite.id} candidate`, () => {});",
     "const ID = 'AC-EXPORT-01'; { const ID = dynamic(); test(`${ID} candidate`, () => {}); }",
