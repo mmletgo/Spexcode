@@ -8,7 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { Ajv } from 'ajv'
 import { detachedRuntimeIsGone, verifyDetachedRuntime, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
 import { sessionIdentityEnvVars } from './harness-shim.js'
-import { NATIVE_PROCESS_OBSERVATION_LIMIT_MS, nativeWorktreeLaunch, nativeWorktreeProcessesStopped, sampleNativeWorktreeProcesses } from './native-worktree-runtime.js'
+import { nativeWorktreeLaunch, periodicNativeWorktreeSampler, sampleNativeWorktreeProcesses, waitForNativeWorktreeProcessesStopped } from './native-worktree-runtime.js'
 import { assertRejectedOutput, rejectedFinalOutput, StructuredSessionError, structuredExecutionPolicy, structuredExecutionTimer, type StructuredExecution } from './session-structured-policy.js'
 
 export type CursorNativeState = { version: 1; root: string; sessionId?: string; requestId?: string; pid?: number; receiptFile?: string }
@@ -165,18 +165,15 @@ function signalOwnedGroup(plan: OwnedLaunch): boolean {
 }
 
 async function waitForStop(plan: OwnedLaunch, deadline: number, terminate: boolean): Promise<boolean> {
+  const receiptMatches = (): boolean => sha256(readEvidence(plan.root, 'process.json')) === plan.receiptDigest
   try {
     if (terminate) {
-      if (sha256(readEvidence(plan.root, 'process.json')) !== plan.receiptDigest) return false
+      if (!receiptMatches()) return false
       const receipt = read<{ startToken: string }>(plan.root, 'process.json')
       const owned = read<Array<{ pid: number; startToken: string }>>(plan.root, 'owned-processes.json')
       if (!Array.isArray(owned) || !owned.some(identity => identity?.pid === plan.pid && identity.startToken === receipt.startToken.replace(/\s+/g, ' '))) return false
     }
-    while (Date.now() < deadline) {
-      if (sha256(readEvidence(plan.root, 'process.json')) !== plan.receiptDigest) return false
-      if (await nativeWorktreeProcessesStopped(plan, terminate, deadline)) return true
-      await delay(Math.min(25, Math.max(0, deadline - Date.now())))
-    }
+    return await waitForNativeWorktreeProcessesStopped(plan, deadline, terminate, receiptMatches)
   } catch (error) {
     if (!(error instanceof StructuredSessionError && ['cancellation_pending', 'stale_result'].includes(error.code))) throw error
   }
@@ -382,8 +379,7 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
   let terminalSeen = false, cancelSent = false, interrupted = false, timedOut = false, stopped = false
   let failure: unknown, timeoutFailure: unknown, deadline: number | undefined, expire!: () => void
   let stopTimer: ReturnType<typeof setTimeout> | undefined, forceTimer: ReturnType<typeof setTimeout> | undefined
-  let census: ReturnType<typeof setInterval> | undefined, sampling: Promise<void> | undefined
-  let observationRecovery: { deadline: number; error: StructuredSessionError } | undefined
+  let census: ReturnType<typeof setInterval> | undefined
   const expiry = new Promise<null>(resolveExpiry => { expire = () => resolveExpiry(null) })
   const armStop = (): void => {
     if (deadline !== undefined) return
@@ -471,22 +467,10 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
       gate.end('start\n')
       send({ id: 1, method: 'initialize', params: { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false } } })
     } else shutdown()
+    const sample = periodicNativeWorktreeSampler(launched, () => deadline !== undefined, observationFault)
     census = setInterval(() => {
       if (!interrupted && existsSync(cancelPath)) abort()
-      if (sampling || deadline !== undefined) return
-      const recovery = observationRecovery
-      if (recovery && Date.now() >= recovery.deadline) {
-        observationFault(recovery.error)
-        return
-      }
-      sampling = sampleNativeWorktreeProcesses(owned!, recovery?.deadline).then(() => {
-        observationRecovery = undefined
-      }, error => {
-        if (deadline !== undefined) return
-        if (error instanceof StructuredSessionError && error.code === 'cancellation_pending') {
-          observationRecovery ??= { deadline: Date.now() + NATIVE_PROCESS_OBSERVATION_LIMIT_MS, error }
-        } else observationFault(error)
-      }).finally(() => { sampling = undefined })
+      sample()
     }, 250)
 
     const ended = await Promise.race([Promise.all([closed, observed]), expiry])

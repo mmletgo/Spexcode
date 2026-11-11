@@ -2,6 +2,7 @@ import { spawn, execFileSync } from 'node:child_process'
 import { appendFileSync, existsSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from 'node:fs'
 import { open, readFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import { detachedRuntimeIsGone, hostProcessAdapter, parseProcStat, processStartToken, verifyDetachedRuntime, type ProcessIdentity } from '@spexcode/spec-core'
 import { StructuredSessionError } from './session-structured-policy.js'
 
@@ -173,6 +174,23 @@ function readProcessBaseline(root: string): NativeProcessRow[] {
 export function sampleNativeWorktreeProcesses(plan: NativeOwnedPlan, deadline?: number): Promise<void> {
   return observeSerially(plan, limit => sampleProcesses(plan, limit), deadline)
 }
+
+/** 周期观测失败可在同一轮内复查，启动和最终停止仍各自取得原始证明。 */
+export function periodicNativeWorktreeSampler(plan: NativeOwnedPlan, stopping: () => boolean, onFailure: (error: unknown) => void): () => void {
+  let sampling = false, recovery: { deadline: number; error: StructuredSessionError } | undefined
+  return () => {
+    if (sampling || stopping()) return
+    if (recovery && Date.now() >= recovery.deadline) { onFailure(recovery.error); return }
+    sampling = true
+    void sampleNativeWorktreeProcesses(plan, recovery?.deadline).then(() => { recovery = undefined }, error => {
+      if (stopping()) return
+      if (error instanceof StructuredSessionError && error.code === 'cancellation_pending')
+        recovery ??= { deadline: Date.now() + NATIVE_PROCESS_OBSERVATION_LIMIT_MS, error }
+      else onFailure(error)
+    }).finally(() => { sampling = false })
+  }
+}
+
 async function sampleProcesses(plan: NativeOwnedPlan, deadline: number): Promise<void> {
   await captureOwnedProcesses(plan, deadline)
   if (plan.pid) {
@@ -280,6 +298,17 @@ function persistNativeOrphanObservation(plan: NativeOwnedPlan, observation: Nati
 export function nativeWorktreeProcessesStopped(plan: NativeOwnedPlan, terminate = false, deadline?: number): Promise<boolean> {
   return observeSerially(plan, limit => processesStopped(plan, terminate, limit), deadline)
 }
+
+/** 终止窗口内的暂态探针故障允许复验，每次仍要求原 receipt 和新鲜停止证明。 */
+export async function waitForNativeWorktreeProcessesStopped(plan: NativeOwnedPlan, deadline: number, terminate: boolean, receiptMatches: () => boolean): Promise<boolean> {
+  while (Date.now() < deadline && receiptMatches()) {
+    try { if (await nativeWorktreeProcessesStopped(plan, terminate, deadline)) return true }
+    catch (error) { if (!(error instanceof StructuredSessionError && error.code === 'cancellation_pending')) throw error }
+    await delay(Math.min(25, Math.max(0, deadline - Date.now())))
+  }
+  return false
+}
+
 async function processesStopped(plan: NativeOwnedPlan, terminate: boolean, deadline: number): Promise<boolean> {
   const path = join(plan.root, 'owned-processes.json')
   if (!plan.pid || !existsSync(path) || !existsSync(join(plan.root, 'process-baseline.json'))) return false
