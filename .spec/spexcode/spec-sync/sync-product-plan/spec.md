@@ -12,7 +12,11 @@ code:
 
 P0至P5按完整需求交付，不以阶段演示、局部测试或可修改的通过记录替代最终验收；产品授权和操作入口必须与实施契约一致。
 
+原生同步可按宿主配置的 CLI 功能组选路。宿主可以优先使用 Cursor CLI，并沿用本机已配置的连接与模型。
+
 ## expanded spec
+
+[[sync-model-selection]] 在新操作准入时固定功能组选择的原生 CLI 与模型。[[cursor-structured-runtime]] 使用真实 Cursor 会话执行任务。原独审、验证、Git 交付和采纳门禁适用于所有执行器；恢复沿用原操作与原会话证据。
 
 同步已结算且clean的completed与确证停止failed/cancelled任务，沿[[sync-native-run]]逐任务复用正式[[archive]]回收执行目录/Git登记，保原result/error、branch/ref、会话历史与JSON。后续材料消费经原Native/CAS/owner/schema/保护面认证临时恢复同一checkout，读原稿后回收本次创建目录，零Native/队列唤醒；业务schema后置拒绝不能导致从零重做。dirty/未知停止保留，pending不改批准/计费，不新增持久清理状态、全局扫描或后台恢复用户goal。
 
