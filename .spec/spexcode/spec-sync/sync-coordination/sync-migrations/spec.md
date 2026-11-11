@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+v42 追加 SELECT 1 writer marker，保护正式重试继承的 P1 分区批准及其原派发证据。旧 writer 在写入或派发前拒绝。升级先正式停稳旧 writer、结算资源并在线备份，再在原迁移事务追加。原迁移 SQL、历史操作和证据保持原字节。回滚先停稳新 writer，再恢复本次升级前的一致备份和对应证据与 Git 引用。
+
 v41 追加 SELECT 1 writer marker，保护 Cursor 原生 ACP 工作树操作及停止证明。部署前正式停稳 v40 writer 并结算资源，保留一致在线备份。回滚先停稳新 writer，再恢复 v40 备份与对应证据和 Git 引用。
 
 v40 追加 SELECT 1 writer marker，保护 Grok 原生工作树操作及其停止证据。部署前正式停稳 v39 writer 并结算资源，再保留一致的在线备份。回滚须先停稳新 writer，再恢复 v39 备份及对应证据和 Git 引用。
