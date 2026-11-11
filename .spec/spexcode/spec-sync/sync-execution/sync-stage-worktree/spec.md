@@ -29,7 +29,7 @@ P0分析与P1完整生成的`ac-test-flow-binding-v2`、`ac-test-flow-review-bin
 
 上述提交观察用 `ls-files` 枚举未跟踪和 ignored 项，完整验证索引与受控物理文件，无需由 Git 执行内容过滤器。存在字节差异时，只有冻结HEAD属性精确使用 `filter=spexcode` 的 [[content-filter]] 已知路径可用投影证明。验证原 canonical shim、commands、bindings，再按 [[content-filter]] 仅从冻结 seed 重建可信完整托管投影。两次读取的完整物理字节都须匹配该重建结果。改写 host、同时修改物理托管块和旧 payload、任意源码或测试差异均拒绝。
 
-P1草稿复用同一stageWorktree/verifyStageResult和原生v6 edit执行，不增加执行器。生成只能正常提交指定的`.spex-sync-drafts/<ownerDigest>.json` UTF-8普通文件，精确业务schema作为同seed只读sidecar供Agent读取与自检，仍只有主draft可写；真实seed→result diff若包含schema、Spec、源码、测试、其他owner或symlink即拒绝；只有summary且未形成真实提交也拒绝。程序从提交的精确path/OID读取字节，在JSON解析前以`refs/spex-sync/drafts/<ownerDigest>/<resultCommit>`保活，syntax-invalid同样保留。冷恢复重核seed commit/tree、真实result commit/tree、owner/schema/path/OID/ref及写范围。当前source与已审祖先始终重新建立seed，只overlay旧owner草稿字节，不继承旧工作树；临时文件不进入独审seed、业务candidate或交付。
+P1草稿复用同一stageWorktree/verifyStageResult和原生v6 edit执行，不增加执行器。生成只能正常提交指定的`.spex-sync-drafts/<ownerDigest>.json` UTF-8普通文件，精确业务schema作为同seed只读sidecar供Agent读取与自检，仍只有主draft可写；真实seed→result diff若包含schema、Spec、源码、测试、其他owner或symlink即拒绝；只有summary且未形成真实提交也拒绝。程序从提交的精确path/OID读取字节，在JSON解析前以`refs/spex-sync/drafts/<ownerDigest>/<resultCommit>`保活，syntax-invalid同样保留。冷恢复重核seed commit/tree、真实result commit/tree、owner/schema/path/OID/ref及写范围。同一次冷验从一份完整核验的seed树确定schema与写范围。当前source与已审祖先始终重新建立seed，只overlay旧owner草稿字节，不继承旧工作树；临时文件不进入独审seed、业务candidate或交付。
 
 P0/P1草稿业务JSON与Native final回执是两份不同内容：业务JSON只写入指定Git草稿文件；Native final只返回符合`DRAFT_RECEIPT_SCHEMA`的单一JSON对象，形如`{"summary":"..."}`，前后不附说明或Markdown代码围栏。
 

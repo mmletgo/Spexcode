@@ -200,16 +200,16 @@ function censusProbes(t: TestContext, f: ReturnType<typeof fixture>, script: (or
   return () => count
 }
 
-test('Cursor settles a proven stopped gate even when the canonical launch binding was never published', { timeout: 10_000 }, async t => {
+for (const failedProbe of [1, 2]) test(`Cursor settles a proven stopped gate after initial census probe ${failedProbe}`, { timeout: 10_000 }, async t => {
   const f = fixture(t, 'read'), launchFile = join(f.sessionRoot, 'launch.json'), release = join(f.sessionRoot, 'fixture-probe-release')
   const heldFailure = { script: 'while [ ! -f "$1" ]; do /bin/sleep .025; done; exit 2', args: [release] }
-  const probes = censusProbes(t, f, ordinal => ordinal === 2 ? heldFailure : undefined, launchFile)
+  const probes = censusProbes(t, f, ordinal => ordinal === failedProbe ? heldFailure : undefined, launchFile)
   let reserved: CursorStructuredExecution | undefined
   const callbacks = { ...f.callbacks, onTurnStarting: async () => { await f.callbacks.onTurnStarting!(); reserved = f.state() } }
   const flight = f.run(f.state(), callbacks).then(result => ({ result }), error => ({ error }))
   let originalLaunch: string, pid: number
   try {
-    await until(() => probes() >= 2)
+    await until(() => probes() >= failedProbe)
     assert(reserved && !reserved.cursorNative?.pid && reserved.turnStartRequested)
     originalLaunch = readFileSync(launchFile, 'utf8')
     pid = (JSON.parse(originalLaunch) as { pid: number }).pid
@@ -228,11 +228,13 @@ test('Cursor settles a proven stopped gate even when the canonical launch bindin
   writeFileSync(launchFile, originalLaunch)
   chmodSync(launchFile, 0o400)
   const ownership = join(f.sessionRoot, 'owned-processes.json'), observedLeader = readFileSync(ownership)
-  writeFileSync(ownership, '[]')
+  assert.equal((JSON.parse(observedLeader.toString()) as unknown[]).length, failedProbe - 1)
+  writeFileSync(ownership, '{}')
   assert.equal((await stopCursorStructuredTurn(cold)).nativeStopped, false)
   writeFileSync(ownership, observedLeader)
   assert.equal((await stopCursorStructuredTurn({ ...cold, cursorNative: { ...cold.cursorNative!, pid } })).nativeStopped, false)
   assert.deepEqual(await stopCursorStructuredTurn(cold), { nativeStopped: true, acknowledged: false, nativeStatus: 'stopped' })
+  assert.deepEqual(readFileSync(ownership), observedLeader)
   assert.equal(cold.cursorNative?.pid, undefined)
   const lastStop = readFileSync(join(f.sessionRoot, 'process-stop-observations.jsonl'), 'utf8').trimEnd().split('\n').at(-1)!
   assert.equal((JSON.parse(lastStop) as { nativeStopped: boolean }).nativeStopped, true)

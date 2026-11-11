@@ -6,7 +6,7 @@ import { createInterface } from 'node:readline'
 import type { Readable, Writable } from 'node:stream'
 import { setTimeout as delay } from 'node:timers/promises'
 import { Ajv } from 'ajv'
-import { detachedRuntimeIsGone, verifyDetachedRuntime, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
+import { detachedRuntimeIsGone, verifyDetachedRuntime, writeDetachedRuntimeReceipt, type ProcessIdentity } from '@spexcode/spec-core'
 import { sessionIdentityEnvVars } from './harness-shim.js'
 import { nativeWorktreeLaunch, periodicNativeWorktreeSampler, sampleNativeWorktreeProcesses, waitForNativeWorktreeProcessesStopped } from './native-worktree-runtime.js'
 import { assertRejectedOutput, rejectedFinalOutput, StructuredSessionError, structuredExecutionPolicy, structuredExecutionTimer, type StructuredExecution } from './session-structured-policy.js'
@@ -168,9 +168,8 @@ function signalOwnedGroup(plan: OwnedLaunch): boolean {
   return true
 }
 
-function hasObservedLaunchLeader(plan: OwnedLaunch): boolean {
+function hasObservedLaunchLeader(plan: OwnedLaunch, owned = read<ProcessIdentity[]>(plan.root, 'owned-processes.json')): boolean {
   const receipt = read<{ startToken: string }>(plan.root, 'process.json')
-  const owned = read<Array<{ pid: number; startToken: string }>>(plan.root, 'owned-processes.json')
   return Array.isArray(owned) && owned.some(identity => identity?.pid === plan.pid && identity.startToken === receipt.startToken.replace(/\s+/g, ' '))
 }
 
@@ -186,8 +185,10 @@ async function waitForStop(plan: OwnedLaunch, deadline: number, terminate: boole
 }
 
 async function waitForGatedStop(plan: OwnedLaunch, deadline: number): Promise<boolean> {
-  return Date.now() < deadline && detachedRuntimeIsGone(plan.pid, plan.receiptFile)
-    && hasObservedLaunchLeader(plan) && await waitForStop(plan, deadline, false)
+  if (Date.now() >= deadline || !detachedRuntimeIsGone(plan.pid, plan.receiptFile)) return false
+  const owned = read<ProcessIdentity[]>(plan.root, 'owned-processes.json')
+  if (!Array.isArray(owned) || (owned.length > 0 && !hasObservedLaunchLeader(plan, owned))) return false
+  return waitForStop(plan, deadline, false)
 }
 
 const activeInterrupts = new Map<string, () => void>()
