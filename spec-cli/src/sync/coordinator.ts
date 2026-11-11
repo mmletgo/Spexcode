@@ -1881,19 +1881,22 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       }
       const renderedRepairAttempt = (prior: SyncAttempt): boolean => ['failed', 'superseded', 'settled'].includes(prior.status) && prior.failure?.kind === 'repairable' && canonical(prior.composedInput) === canonical(view.composed)
       // 同一原round既供P1完整定位，也供精确P0分类质疑；候选仍只是拒绝诊断。
-      const renderedElaborationSource = (owner: SyncOperation, prior: SyncAttempt, key: string, checkpoints?: ReturnType<typeof readSyncCheckpoints>): { result: SavedElaboration; resultRef: BlobRef; round: ElaborationResult['rounds'][number] } | null => {
+      const renderedElaborationSource = (owner: SyncOperation, prior: SyncAttempt, key: string, checkpoints?: ReturnType<typeof readSyncCheckpoints>, matchesFinding?: (finding: ContractFinding) => boolean): { result: SavedElaboration; resultRef: BlobRef; round: ElaborationResult['rounds'][number] } | null => {
         if (!renderedRepairAttempt(prior)) return null
         const source = partitionStage<SavedElaboration>(store, owner, prior, key, undefined, checkpoints), round = source?.result.rounds.at(-1)
-        if (!source || source.result.reviewPassed || source.result.phase === 'partitioned_final' || source.result.status !== 'exhausted' || source.result.failure?.code !== 'repair_budget_exhausted' || !round?.candidate || !round.findings.some(finding => finding.severity === 'error')) return null
+        if (!source || source.result.reviewPassed || source.result.phase === 'partitioned_final' || source.result.status !== 'exhausted' || source.result.failure?.code !== 'repair_budget_exhausted' || !round?.candidate || !round.findings.some(finding => finding.severity === 'error' && (!matchesFinding || matchesFinding(finding)))) return null
         if (round.candidate.inputDigest !== source.result.inputDigest || round.candidateDigest !== contentHash(JSON.stringify(round.candidate))) fail('review_retry_binding', '已生成P1候选的原输入或摘要失配，不能回退为重新生成')
-        if (!elaborationGenerationSource(store, owner, prior, round)) fail('review_retry_binding', '已生成P1候选的原Native请求/结果绑定失配，不能回退为重新生成')
-        if (owner.id !== operation.id) {
-          if (round.draft) {
-            const targets = source.result.partitionBinding ? partitions?.partitions.find(partition => partition.id === source.result.partitionBinding!.partitionId)?.targets : options.plan.targets
-            if (!targets) return null
-            const ownerDigest = contentHash(JSON.stringify({ partitionId: source.result.partitionBinding?.partitionId ?? null, targets: targets.map(({ nodeId, path }) => ({ nodeId, path })) }))
-            readStageDraft(operation.input.source.commonDir, round.draft, { ownerDigest, sourceInputId: operation.input.id, schemaDigest: round.draft.schemaDigest, path: `.spex-sync-drafts/${ownerDigest}.json` })
-          }
+        const generation = elaborationGenerationSource(store, owner, prior, round)
+        if (!generation) fail('review_retry_binding', '已生成P1候选的原Native请求/结果绑定失配，不能回退为重新生成')
+        if (owner.id !== operation.id && round.draft) {
+          const binding = source.result.partitionBinding
+          const taskLine = generation.request?.prompt.split('\n任务:\n')[1]?.split('\n', 1)[0]
+          const task = taskLine && JSON.parse(taskLine) as Pick<import('./elaboration-types.js').ElaborationInput, 'targets' | 'partitionBinding'>
+          if (generation.request && (!task || !Array.isArray(task.targets) || canonical(task.partitionBinding) !== canonical(binding))) fail('review_retry_binding', '原Native任务的P1分区或目标身份不匹配')
+          const targets = task ? task.targets : binding ? partitions?.partitions.find(partition => partition.id === binding.partitionId)?.targets : options.plan.targets
+          if (!targets) return null
+          const ownerDigest = contentHash(JSON.stringify({ partitionId: binding?.partitionId ?? null, targets: targets.map(({ nodeId, path }) => ({ nodeId, path })) }))
+          readStageDraft(operation.input.source.commonDir, round.draft, { ownerDigest, sourceInputId: operation.input.id, schemaDigest: round.draft.schemaDigest, path: `.spex-sync-drafts/${ownerDigest}.json` })
         }
         return { ...source, round }
       }
@@ -2460,7 +2463,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       }
       const postGateReview: CodeBehaviorPostGateReview[] = []
       if (behaviorOrigin) {
-        const owners = partitions?.partitions.map(partition => ({ partitionId: partition.id, key: `partition:${partition.id}:elaboration` })) ?? [{ partitionId: undefined, key: 'elaboration' }]
+        const owners = partitions?.partitions.map(partition => ({ partitionId: partition.id, key: `partition:${partition.id}:elaboration`, targets: partition.targets })) ?? [{ partitionId: undefined, key: 'elaboration', targets: undefined }]
         const ownerKeys = new Set(owners.map(owner => owner.key))
         const beforeFiles = priorDeliveryFiles({ ...operation, baselineSelection: store.readBusinessBaselineSelection(operation.id) }, view, [...options.plan.readPaths, ...operation.scope.paths], options.plan)
         const sources = retryDraftSources(store, operation, attempt!.number).filter(({ prior }) => renderedRepairAttempt(prior))
@@ -2484,7 +2487,8 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           if (!sourceView?.keys.has(owner.key)) continue
           const { owner: sourceOwner, prior, checkpoints } = sourceView
           store.renewLease(fence, leaseMs); await yieldToControl(); store.renewLease(fence, leaseMs)
-          const source = renderedElaborationSource(sourceOwner, prior, owner.key, checkpoints)
+          const matchesFinding = (finding: ContractFinding): boolean => finding.code === 'refactor_business_meaning_changed' && !!finding.itemId && beforeFiles.has(finding.path) && (!owner.targets || owner.targets.some(target => target.path === finding.path && target.nodeId === finding.nodeId))
+          const source = renderedElaborationSource(sourceOwner, prior, owner.key, checkpoints, matchesFinding)
           const approved = source && stage<CodeBehaviorAnalysis>(store, sourceOwner, prior, 'analysis', 'automatic', checkpoints)
           if (!source || !approved?.reviewPassed || !analysisStageBinding(store, sourceOwner, approved)) continue
           const local = owner.partitionId ? approved.partitionEvidence?.find(item => item.partitionId === owner.partitionId) : undefined
@@ -2493,9 +2497,9 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           if (contentHash(JSON.stringify(original)) !== analysisRef.sha256 || !original.reviewPassed || original.inputId !== operation.input.id || original.policyDigest !== operation.policyDigest || original.composedDigest !== view.composed.contentDigest) continue
           if (owner.partitionId && source.result.partitionBinding?.analysisRef?.sha256 !== writeEvidence(operation.input.source.commonDir, approved).sha256) continue
           const findings = source.round.findings.flatMap(finding => {
-            if (finding.code !== 'refactor_business_meaning_changed' || finding.severity !== 'error' || !finding.itemId || !finding.path || !finding.nodeId) return []
+            if (finding.severity !== 'error' || !finding.itemId || !matchesFinding(finding)) return []
             const beforeSource = beforeFiles.get(finding.path), candidate = source.round.candidate!.changes.find(change => change.path === finding.path && change.nodeId === finding.nodeId)
-            if (!beforeSource || !candidate || candidate.beforeDigest !== contentHash(beforeSource) || owner.partitionId && !partitions!.partitions.find(partition => partition.id === owner.partitionId)!.targets.some(target => target.path === finding.path && target.nodeId === finding.nodeId)) return []
+            if (!beforeSource || !candidate || candidate.beforeDigest !== contentHash(beforeSource)) return []
             const beforeContract = parseContract({ nodeId: finding.nodeId, path: finding.path, source: beforeSource }).contract
             const before = beforeContract?.items.find(item => item.id === finding.itemId), after = parseContract(candidate).contract?.items.find(item => item.id === finding.itemId)
             if (!before || !after || ['AC', 'VERIFY'].includes(before.kind)) return []
