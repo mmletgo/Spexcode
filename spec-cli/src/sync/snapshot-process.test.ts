@@ -100,7 +100,7 @@ for (const format of ['sha1', 'sha256'] as const) test(`真实${format}空/二�
   assert.deepEqual(readObjectBatch(commonDir, []), new Map())
   assert.deepEqual([...readObjectBatch(commonDir, [...entries.map(entry => entry.oid), entries[0].oid])], entries.map((entry, index) => [entry.oid, contents[index]]))
   assert.deepEqual(readObjectBatch(commonDir, [entries[1].oid]).get(entries[1].oid), contents[1])
-  assert.throws(() => readObjectBatch(commonDir, ['HEAD']), /不可变 Git OID/)
+  assert.throws(() => readObjectBatch(commonDir, ['HEAD']), { message: 'Git 对象必须使用不可变 OID' })
   assert.throws(() => readObjectBatch(commonDir, [entries[0].oid, '0'.repeat(format === 'sha1' ? 40 : 64)]))
   const snapshot = await captureInputSnapshot(root)
   for (const entry of entries) assert.equal(readTree(commonDir, snapshot.immutableTree).find(item => item.path === entry.path)!.oid, entry.oid)
