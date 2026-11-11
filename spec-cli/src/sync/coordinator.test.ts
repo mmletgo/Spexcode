@@ -1063,7 +1063,7 @@ function gitReadCounter(directory: string): { reset(): void; entries(): string[]
   const bin = join(directory, 'git-read-counter-bin'), log = join(directory, 'git-read-counter.log'), wrapper = join(bin, 'git')
   const realGit = execFileSync('which', ['git'], { encoding: 'utf8' }).trim()
   mkdirSync(bin, { mode: 0o700 }); writeFileSync(log, '')
-  writeFileSync(wrapper, '#!/bin/sh\ncase " $* " in\n  *" ls-tree -rlz --full-tree "*) last=""; for arg do last="$arg"; done; printf "tree:%s\\n" "$last" >> "$SPEX_SYNC_TEST_GIT_COUNTER" ;;\n  *" ls-files -z --full-name --cached --others --exclude-standard "*) printf "capture\\n" >> "$SPEX_SYNC_TEST_GIT_COUNTER" ;;\nesac\nexec "$SPEX_SYNC_TEST_REAL_GIT" "$@"\n')
+  writeFileSync(wrapper, '#!/bin/sh\ncase " $* " in\n  *" ls-tree -rlz --full-tree "*) last=""; for arg do last="$arg"; done; printf "tree:%s\\n" "$last" >> "$SPEX_SYNC_TEST_GIT_COUNTER" ;;\n  *" ls-files -z --full-name --cached --others --exclude-standard "*) printf "capture\\n" >> "$SPEX_SYNC_TEST_GIT_COUNTER" ;;\n  *" cat-file blob "*) printf "single-blob\\n" >> "$SPEX_SYNC_TEST_GIT_COUNTER" ;;\n  *" cat-file --batch-check "*) printf "blob-metadata\\n" >> "$SPEX_SYNC_TEST_GIT_COUNTER" ;;\nesac\nexec "$SPEX_SYNC_TEST_REAL_GIT" "$@"\n')
   chmodSync(wrapper, 0o700)
   const oldPath = process.env.PATH, oldCounter = process.env.SPEX_SYNC_TEST_GIT_COUNTER, oldRealGit = process.env.SPEX_SYNC_TEST_REAL_GIT
   process.env.PATH = `${bin}:${oldPath ?? ''}`; process.env.SPEX_SYNC_TEST_GIT_COUNTER = log; process.env.SPEX_SYNC_TEST_REAL_GIT = realGit
@@ -1418,6 +1418,28 @@ test('P4当前输入只比较实际闭包，保留无关编辑与提交并拒绝
   const staged = await captureInputSnapshot(f.root)
   assert.equal(staged.immutableTree, current.immutableTree)
   assert.equal(await isSyncInputCurrent(operation, staged, plan), false)
+})
+
+test('冻结读集通过一次批量元数据读取物化原提交中的多文件范围', async t => {
+  const f = await fixture(t), bulk = join(f.root, 'bulk')
+  mkdirSync(bulk)
+  for (let index = 0; index < 48; index++) writeFileSync(join(bulk, `${index}.txt`), `原始文件 ${index}\n`)
+  writeFileSync(join(bulk, 'alias.txt'), '原始文件 0\n')
+  writeFileSync(join(bulk, 'binary.dat'), Buffer.from([0, 255]))
+  f.git('add', 'bulk'); f.git('commit', '--only', 'bulk', '-m', 'commit a larger read scope')
+  const input = await captureInputSnapshot(f.root, { committed: true })
+  const plan = { ...f.plan, readPaths: [...f.plan.readPaths, 'bulk'] }
+  const options = { ingressKey: 'bulk-read', rootCauseId: 'bulk-read', origin: 'spec' as const, budget: f.operation.budget, managedRoot: f.managedRoot }
+  const counter = gitReadCounter(f.parent)
+  try {
+    const admitted = await prepareSyncAdmission(input, plan, options), commands = counter.entries()
+    assert.ok(commands.filter(command => command === 'single-blob').length <= 1, `原读集 ${admitted.readSetDigest} 仍逐文件读取: ${commands.filter(command => command === 'single-blob').length}`)
+    assert.equal(commands.filter(command => command === 'blob-metadata').length, 1)
+    writeFileSync(join(bulk, '0.txt'), '后续未提交的作者字节\n'); f.git('add', 'bulk/0.txt')
+    counter.reset()
+    assert.equal((await prepareSyncAdmission(input, plan, options)).readSetDigest, admitted.readSetDigest)
+    assert.equal(counter.entries().filter(command => command === 'blob-metadata').length, 1, '每次重新核对原对象，不能信跨调用缓存')
+  } finally { counter.restore() }
 })
 
 test('P4当前性完整复核快照并仅在本次调用内复用同OID树读取', async t => {

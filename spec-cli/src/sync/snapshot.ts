@@ -169,10 +169,17 @@ export function readObject(commonDir: string, oid: string): Buffer {
 }
 /** 批读一组明确的 blob OID，沿用读树的容量分组、原字节及完整 OID 校验。 */
 export function readObjectBatch(commonDir: string, oids: readonly string[]): Map<string, Buffer> {
-  const unique = [...new Set(oids)], result = new Map<string, Buffer>()
+  const result = new Map<string, Buffer>()
+  visitObjectBatch(commonDir, oids, (oid, bytes) => { result.set(oid, bytes) })
+  return result
+}
+
+/** 逐组消费已校验对象，调用者可以释放无需保留的原字节。 */
+export function visitObjectBatch(commonDir: string, oids: readonly string[], visit: (oid: string, bytes: Buffer) => void): void {
+  const unique = [...new Set(oids)]
   if (unique.some(oid => !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(oid))) throw new Error('Git 对象必须使用不可变 OID')
-  if (unique.length === 0) return result
-  if (unique.length === 1) return new Map([[unique[0], readObject(commonDir, unique[0])]])
+  if (unique.length === 0) return
+  if (unique.length === 1) { visit(unique[0], readObject(commonDir, unique[0])); return }
   const metadata = objectGit(commonDir, ['cat-file', '--batch-check'], Buffer.from(unique.map(oid => `${oid}\n`).join('')))
   const lines = metadata.toString('ascii').split('\n')
   if (lines.pop() !== '' || lines.length !== unique.length) throw new Error('Git batch object metadata 不匹配')
@@ -185,8 +192,7 @@ export function readObjectBatch(commonDir: string, oids: readonly string[]): Map
     }
     return { oid, size }
   })
-  readObjects(commonDir, objects, (bytes, index) => result.set(unique[index], bytes))
-  return result
+  readObjects(commonDir, objects, (bytes, index) => visit(unique[index], bytes))
 }
 export function writeObject(commonDir: string, bytes: Buffer): string { return objectGit(commonDir, ['hash-object', '-w', '--stdin'], bytes).toString().trim() }
 export function writeTree(commonDir: string, entries: TreeEntry[]): string {
