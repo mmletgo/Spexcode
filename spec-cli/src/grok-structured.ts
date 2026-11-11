@@ -4,10 +4,9 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFil
 import { join } from 'node:path'
 import { createInterface } from 'node:readline'
 import type { Readable } from 'node:stream'
-import { setTimeout as delay } from 'node:timers/promises'
 import { Ajv } from 'ajv'
 import { detachedRuntimeIsGone, verifyDetachedRuntime, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
-import { nativeWorktreeLaunch, nativeWorktreeProcessesStopped, sampleNativeWorktreeProcesses } from './native-worktree-runtime.js'
+import { nativeWorktreeLaunch, periodicNativeWorktreeSampler, sampleNativeWorktreeProcesses, waitForNativeWorktreeProcessesStopped } from './native-worktree-runtime.js'
 import { sessionIdentityEnvVars } from './harness-shim.js'
 import { assertRejectedOutput, rejectedFinalOutput, structuredExecutionPolicy, structuredExecutionTimer, StructuredSessionError, type StructuredExecution } from './session-structured-policy.js'
 
@@ -163,11 +162,7 @@ function signalOwnedGroup(plan: OwnedLaunch): boolean {
 
 async function waitForStop(plan: OwnedLaunch, deadline: number, terminate: boolean): Promise<boolean> {
   try {
-    while (Date.now() < deadline) {
-      if (sha256(readFileSync(plan.receiptFile)) !== plan.receiptDigest) return false
-      if (await nativeWorktreeProcessesStopped(plan, terminate, deadline)) return true
-      await delay(Math.min(25, Math.max(0, deadline - Date.now())))
-    }
+    return await waitForNativeWorktreeProcessesStopped(plan, deadline, terminate, () => sha256(readFileSync(plan.receiptFile)) === plan.receiptDigest)
   } catch (error) {
     if (!(error instanceof StructuredSessionError && error.code === 'cancellation_pending') && (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
   }
@@ -257,7 +252,7 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
   child.stdin.once('error', () => { processFailed = true })
   let owned: OwnedLaunch | undefined
   let deadline: number | undefined, stopTimer: ReturnType<typeof setTimeout> | undefined
-  let census: ReturnType<typeof setInterval> | undefined, sampling: Promise<void> | undefined
+  let census: ReturnType<typeof setInterval> | undefined
   let timedOut = false, observerFailure: unknown, timeoutFailure: unknown
   let expire!: () => void
   const expiry = new Promise<null>(resolve => { expire = () => resolve(null) })
@@ -297,9 +292,10 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
     await sampleNativeWorktreeProcesses(owned)
     if (callbacks.signal?.aborted || timedOut || existsSync(join(root, 'cancel.json'))) abort()
     else child.stdin.end('start\n')
-    if (deadline === undefined) census = setInterval(() => {
-      if (!sampling) sampling = sampleNativeWorktreeProcesses(owned!).catch(error => { observerFailure ??= error; abort() }).finally(() => { sampling = undefined })
-    }, 250)
+    if (deadline === undefined) census = setInterval(periodicNativeWorktreeSampler(owned, () => deadline !== undefined, error => {
+      observerFailure ??= Object.assign(new StructuredSessionError('failed', 'Grok periodic native process observation did not recover'), { cause: error })
+      abort()
+    }), 250)
     const ended = await Promise.race([Promise.all([closed, observed]), expiry])
     armStop()
     if (!ended) throw pending('Grok native close and process-group stop remain unproven')

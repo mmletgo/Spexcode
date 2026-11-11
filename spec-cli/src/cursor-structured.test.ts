@@ -223,6 +223,25 @@ test('Cursor recovers one transient census fault without replacing the original 
   assert.deepEqual(await f.run(f.state(), replayCallbacks), outcome.result)
 })
 
+test('Cursor retries a transient census fault after the original terminal and exact child exit', { timeout: 10_000 }, async t => {
+  const f = fixture(t, 'periodic'), release = join(f.sessionRoot, 'fixture-release')
+  let stopFaults = 0
+  censusProbes(t, f, () => {
+    const pid = f.state().cursorNative?.pid
+    if (pid && existsSync(release) && processStartToken(pid) === null && stopFaults++ === 0) return failingProbe
+    return undefined
+  })
+  const flight = f.run().then(result => ({ result }), error => ({ error }))
+  try { await until(() => existsSync(f.started)) }
+  finally { writeFileSync(release, ''); await flight }
+  const outcome = await flight
+  assert(stopFaults >= 2)
+  if ('error' in outcome) throw outcome.error
+  assert.deepEqual(outcome.result, { threadId: f.state().cursorNative?.sessionId, turnId: f.state().cursorNative?.requestId, text: finalText })
+  const latest = readFileSync(join(f.sessionRoot, 'process-stop-observations.jsonl'), 'utf8').trimEnd().split('\n').at(-1)!
+  assert.equal((JSON.parse(latest) as { nativeStopped: boolean }).nativeStopped, true)
+})
+
 for (const exactStop of [true, false]) {
   test(`Cursor bounds sustained periodic faults and ${exactStop ? 'settles a proven stop as failure' : 'keeps an unproven stop pending'}`, { timeout: 10_000 }, async t => {
     const f = fixture(t, 'periodic'), cancel = join(f.sessionRoot, 'fixture-cancel.json')

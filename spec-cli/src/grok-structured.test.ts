@@ -1,20 +1,21 @@
 import test, { type TestContext } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import childProcess, { execFileSync, type SpawnOptions } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { assertGrokRejectedFinalSource, grokNativeModel, grokStructuredTurn, stopGrokStructuredTurn, type GrokStructuredExecution } from './grok-structured.js'
-import { nativeWorktreePrompt, nativeWorktreeResult } from './native-worktree-runtime.js'
+import { NATIVE_PROCESS_OBSERVATION_LIMIT_MS, nativeWorktreePrompt, nativeWorktreeResult } from './native-worktree-runtime.js'
 import { StructuredSessionError, structuredExecutionPolicy } from './session-structured-policy.js'
 
 const schema = { type: 'object', properties: { marker: { type: 'string' } }, required: ['marker'], additionalProperties: false }
 const finalText = '{"marker":"终态"}'
 const sha256 = (text: string): string => createHash('sha256').update(text).digest('hex')
 
-type Scenario = 'success' | 'wrong-session' | 'wrong-cwd' | 'missing-request' | 'duplicate-terminal' | 'missing-terminal' | 'wrong-format' | 'bad-schema' | 'hang' | 'read' | 'split-settlement-window' | 'cancel-during-settlement'
+type Scenario = 'success' | 'wrong-session' | 'wrong-cwd' | 'missing-request' | 'duplicate-terminal' | 'missing-terminal' | 'wrong-format' | 'bad-schema' | 'hang' | 'read' | 'periodic' | 'split-settlement-window' | 'cancel-during-settlement'
 
 function fixture(t: TestContext, scenario: Scenario, model = 'grok:default') {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'spex-grok-fixture-')))
@@ -37,7 +38,7 @@ function fixture(t: TestContext, scenario: Scenario, model = 'grok:default') {
   writeFileSync(cli, String.raw`#!${process.execPath}
 const assert = require('node:assert/strict')
 const { execFileSync, spawn } = require('node:child_process')
-const { readFileSync, writeFileSync } = require('node:fs')
+const { existsSync, readFileSync, writeFileSync } = require('node:fs')
 const { dirname, join } = require('node:path')
 const args = process.argv.slice(2)
 if (args[0] === '--version') { console.log('grok 1.0.77 (fixture) [stable]'); process.exit(0) }
@@ -85,6 +86,12 @@ if (scenario === 'split-settlement-window' || scenario === 'cancel-during-settle
   descendant.unref()
   setTimeout(finish, 400)
   setTimeout(() => {}, splitWindow ? 13000 : 900)
+} else if (scenario === 'periodic') {
+  const poll = setInterval(() => {
+    if (!existsSync(join(dirname(promptFile), 'fixture-release'))) return
+    clearInterval(poll)
+    finish()
+  }, 20)
 } else if (scenario !== 'hang') finish()
 `, { mode: 0o700 })
 
@@ -107,6 +114,63 @@ async function waitForFixture(path: string): Promise<void> {
   while (!existsSync(path) && Date.now() < deadline) await delay(25)
   assert(existsSync(path), 'the isolated fixture CLI did not launch')
 }
+
+function failCensus(t: TestContext, started: string, shouldFail: (ordinal: number) => boolean) {
+  const originalSpawn = childProcess.spawn
+  let count = 0
+  t.mock.method(childProcess, 'spawn', (file: string, args: string[], options: SpawnOptions) => {
+    if (file === '/bin/ps' && existsSync(started) && shouldFail(++count)) return originalSpawn('/bin/sh', ['-c', 'exit 2'], options)
+    return originalSpawn(file, args, options)
+  })
+  syncBuiltinESMExports()
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports() })
+  return () => count
+}
+
+test('Grok recovers a transient census failure in the original live turn', { timeout: 10_000 }, async t => {
+  const f = fixture(t, 'periodic'), association = join(f.sessionRoot, 'task-related-processes.json')
+  const probes = failCensus(t, f.started, ordinal => ordinal === 1)
+  const flight = f.run().then(result => ({ result }), error => ({ error }))
+  try {
+    await waitForFixture(f.started)
+    const baseline = statSync(association).mtimeMs, deadline = performance.now() + 4_000
+    while ((probes() < 2 || statSync(association).mtimeMs === baseline) && performance.now() < deadline) await delay(20)
+    assert(probes() >= 2)
+  } finally {
+    writeFileSync(join(f.sessionRoot, 'fixture-release'), '')
+    await flight
+  }
+  const outcome = await flight
+  if ('error' in outcome) throw outcome.error
+  assert.equal(outcome.result.turnId, f.requestId)
+  assert.deepEqual(await f.run(f.state(), replayCallbacks), outcome.result)
+})
+
+test('Grok settles a persistent census failure as failed after exact stop', { timeout: 10_000 }, async t => {
+  const f = fixture(t, 'periodic')
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() })
+  const probes = failCensus(t, f.started, () => {
+    try { process.kill(f.state().grokNative!.pid!, 0); return true }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false; throw error }
+  })
+  const flight = f.run().then(result => ({ result }), error => ({ error }))
+  try {
+    await waitForFixture(f.started)
+    const deadline = performance.now() + 4_000
+    while (probes() < 2 && performance.now() < deadline) await delay(20)
+    assert(probes() >= 2)
+    t.mock.timers.tick(NATIVE_PROCESS_OBSERVATION_LIMIT_MS + 1)
+    const outcome = await flight
+    assert('error' in outcome && outcome.error instanceof StructuredSessionError)
+    assert.equal(outcome.error.code, 'failed')
+    const latest = readFileSync(join(f.sessionRoot, 'process-stop-observations.jsonl'), 'utf8').trimEnd().split('\n').at(-1)!
+    assert.equal((JSON.parse(latest) as { nativeStopped: boolean }).nativeStopped, true)
+    assert.equal(existsSync(join(f.sessionRoot, 'settlement.json')), false)
+  } finally {
+    writeFileSync(join(f.sessionRoot, 'fixture-release'), '')
+    await flight
+  }
+})
 
 test('Grok default uses native config, explicit alias bytes are preserved and blank names are rejected', () => {
   assert.equal(grokNativeModel('grok:default'), undefined)
