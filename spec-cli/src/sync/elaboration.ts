@@ -2,7 +2,7 @@ import { StructuredSessionError, assertRejectedOutput } from '../session-structu
 import { nativeWorktreePrompt } from '../native-worktree-runtime.js'
 import { captureStageDraft, DRAFT_RECEIPT_INSTRUCTIONS, DRAFT_RECEIPT_SCHEMA, overlayStageTree, readStageDraft, stageWorktree, STAGE_READING_INSTRUCTIONS, type StageDraftMaterialRequest } from './stage-worktree.js'
 import type { StageDraftBinding } from './stage-worktree.js'
-import { readEvidence, readObject, readTree, writeObject, writeTree } from './snapshot.js'
+import { readEvidence, readTree, writeObject, writeTree } from './snapshot.js'
 import { isHostPrivatePath } from './candidate.js'
 import { isUtf8Text } from './composition.js'
 import { createHash } from 'node:crypto'
@@ -294,11 +294,13 @@ export function elaborationScopeErrors(input: ElaborationInput, generated: Gener
 
 function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate, inputDigest: string, options: { strictContextCoverage?: boolean; partitionSealFiles?: ReadonlyMap<string, string>; readonlyFactRepairs?: readonly ReadonlySpecRepair[]; readonlyFactBaselines?: ReadonlyMap<string, string> } = {}): { contracts: Contract[]; graph: ContractGraph; findings: ContractFinding[]; resolvedGapIds: string[] } {
   if (input.worktree && input.historyInput) {
-    const files = new Map(input.files)
-    for (const entry of readTree(input.historyInput.source.commonDir, input.worktree.tree)) {
-      if (entry.mode === '120000' || isHostPrivatePath(entry.path)) continue
-      const bytes = readObject(input.historyInput.source.commonDir, entry.oid)
-      if (isUtf8Text(bytes)) files.set(entry.path, bytes.toString('utf8'))
+    const files = new Map(input.files), treeSources = new Map<string, string>()
+    const entries = readTree(input.historyInput.source.commonDir, input.worktree.tree, (entry, bytes) => {
+      if (entry.mode !== '120000' && !isHostPrivatePath(entry.path) && isUtf8Text(bytes)) treeSources.set(entry.path, bytes.toString('utf8'))
+    })
+    for (const { path } of entries) {
+      const source = treeSources.get(path)
+      if (source !== undefined) files.set(path, source)
     }
     input = { ...input, files }
   }
