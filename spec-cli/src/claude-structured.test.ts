@@ -1100,8 +1100,9 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     const observations: { status: string; elapsedMs: number }[] = []
     if (periodic) {
       const spawnOriginal = spawn
+      const censusColumns = process.platform === 'linux' ? 'uid=,pid=' : 'uid=,pid=,ppid=,lstart='
       t.mock.method(childProcess, 'spawn', (file: string, args: readonly string[], options: SpawnOptions) => {
-        if (file === '/bin/ps' && args[1] === 'uid=,pid=,ppid=,lstart=' && execution.turnId) {
+        if (file === '/bin/ps' && args[0] === '-axo' && args[1] === censusColumns && execution.turnId) {
           const resultPath = join(root, 'result.json')
           const expired = observations.some(({ status }) => status === 'expired')
           if (existsSync(resultPath)) finalProbes++
