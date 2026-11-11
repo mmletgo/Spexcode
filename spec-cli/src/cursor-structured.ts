@@ -8,7 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { Ajv } from 'ajv'
 import { detachedRuntimeIsGone, verifyDetachedRuntime, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
 import { sessionIdentityEnvVars } from './harness-shim.js'
-import { nativeWorktreeLaunch, nativeWorktreeProcessesStopped, sampleNativeWorktreeProcesses } from './native-worktree-runtime.js'
+import { NATIVE_PROCESS_OBSERVATION_LIMIT_MS, nativeWorktreeLaunch, nativeWorktreeProcessesStopped, sampleNativeWorktreeProcesses } from './native-worktree-runtime.js'
 import { assertRejectedOutput, rejectedFinalOutput, StructuredSessionError, structuredExecutionPolicy, structuredExecutionTimer, type StructuredExecution } from './session-structured-policy.js'
 
 export type CursorNativeState = { version: 1; root: string; sessionId?: string; requestId?: string; pid?: number; receiptFile?: string }
@@ -383,6 +383,7 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
   let failure: unknown, timeoutFailure: unknown, deadline: number | undefined, expire!: () => void
   let stopTimer: ReturnType<typeof setTimeout> | undefined, forceTimer: ReturnType<typeof setTimeout> | undefined
   let census: ReturnType<typeof setInterval> | undefined, sampling: Promise<void> | undefined
+  let observationRecovery: { deadline: number; error: StructuredSessionError } | undefined
   const expiry = new Promise<null>(resolveExpiry => { expire = () => resolveExpiry(null) })
   const armStop = (): void => {
     if (deadline !== undefined) return
@@ -416,6 +417,9 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
     shutdown()
   }
   const fault = (error: unknown): void => { failure ??= error; shutdown() }
+  const observationFault = (error: unknown): void => {
+    fault(Object.assign(failed('Cursor periodic native process observation did not recover'), { cause: error }))
+  }
   child.once('error', fault); stdin.once('error', fault); gate.once('error', fault)
   activeInterrupts.set(root, abort)
   callbacks.signal?.addEventListener('abort', abort, { once: true })
@@ -469,7 +473,20 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
     } else shutdown()
     census = setInterval(() => {
       if (!interrupted && existsSync(cancelPath)) abort()
-      if (!sampling && deadline === undefined) sampling = sampleNativeWorktreeProcesses(owned!).catch(fault).finally(() => { sampling = undefined })
+      if (sampling || deadline !== undefined) return
+      const recovery = observationRecovery
+      if (recovery && Date.now() >= recovery.deadline) {
+        observationFault(recovery.error)
+        return
+      }
+      sampling = sampleNativeWorktreeProcesses(owned!, recovery?.deadline).then(() => {
+        observationRecovery = undefined
+      }, error => {
+        if (deadline !== undefined) return
+        if (error instanceof StructuredSessionError && error.code === 'cancellation_pending') {
+          observationRecovery ??= { deadline: Date.now() + NATIVE_PROCESS_OBSERVATION_LIMIT_MS, error }
+        } else observationFault(error)
+      }).finally(() => { sampling = undefined })
     }, 250)
 
     const ended = await Promise.race([Promise.all([closed, observed]), expiry])
