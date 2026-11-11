@@ -27,3 +27,5 @@ transport 配置只来自可信 server 注入，不进入模型可写的 Verific
 VerificationResult可选rpcDiagnostics只承载新SSH RPC超时的版本化安全元数据，固定action/verb及时间、字节、流/child观察和模块/载荷摘要，不含路径、原请求、完整argv、正文、环境或凭据。它不是VerificationEvidence或资源清算证明；旧结果与非运输超时保持字段缺席，不追补。
 
 政策的可选布尔 `scratchExecutable` 缺省为 false，仅显式 true 允许独立 V3 容器私有 `/tmp` tmpfs 执行；由可信 `RegisteredVerification.environment` 继承并随政策摘要冻结。该字段不改变只读输入、宿主权限或生产候选隔离。
+
+冻结验证配置可记录可信镜像的 `maskedVolumePaths`，参与配置摘要及冷恢复核对。旧配置和无卷镜像保持缺省挂载。

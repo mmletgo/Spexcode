@@ -271,3 +271,5 @@ ZCode P0 completed/events-RPC定向回归以真实分区协调器、Git/隔离SQ
 同一通用owner夹具先正常提交85970等价seed，再实际normal Git续到92755等价正文；原Native为exit1/is_error:true且无sealed/errorCode/witness，经正式stop/removed后新attempt仍必须从最新OID/SHA续改，原失败不升格format/success。缺prior与已有prior两场景先失败再通过；错root/user、未知subtype、停止不实、source/tests越界继续不授材料，旧原件和既有兄弟refs保持。
 
 原request/plan/init/echo/正式stop、source/schema与当前fence均认证后，实际干净HEAD仍等于原seed的无进度候选先沿既有分支跳过，再判断输出终态形状；不将无JSON的exit143旧失败误判为missing-final阻断新任务。该skip不代表成功或格式资格，foreign身份、未知停止/进程与真实新提交仍不得借此越过认证；exit143已有新稿不取得本轮明确exit1错误材料资格。
+
+真实 Docker 回归覆盖只读未执行声明的交付与保护测试失败。核对 V1–V4、未执行清单、实际测试运行原件、源码和测试 Git 对象，以及失败没有交付。

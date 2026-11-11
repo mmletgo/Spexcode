@@ -432,7 +432,7 @@ consumes the token after it.`,
     body: `Usage: spex sync settings
        spex sync enable [--config-digest <sha256>]
        spex sync status [--node <node-id>] [--limit N] [--json]
-       spex sync run <node-id> [--request-id <id>] [--patch-file <json>] [--retry-of <operation-id>] [--origin spec|initial|code|combined] [--committed] [--model <model-id>]
+       spex sync run <node-id> [--request-id <id>] [--patch-file <json>] [--retry-of <operation-id>] [--origin spec|initial|code|combined] [--committed] [--model <model-id>] [--record-unverified-coverage]
        spex sync decide <operation-id> --input-id <id> --analysis <sha256> --findings <id,...> --choice keep_intent|adopt_behavior|new_rule [--rule <text>] [--request-id <id>]
        spex sync show <operation-id>
        spex sync pause|resume
@@ -453,6 +453,7 @@ nodeIds 可明确限定意图根；新纯raw需求须登记根节点，status显
 可配置有限 callTimeoutMs；缺省单次最多 120000ms，旧操作沿用自身冻结配置和总期限。
 run 返回持久 operation，后端继续实际细化、生成、验证与受管交付，不需要 Dashboard。
 run --origin initial --committed 仅从实际提交 HEAD 初始化，排除工作区和 index 改动。
+--record-unverified-coverage 用于有保护测试的原生代码→规格；仍实际执行冻结测试，另列未执行契约 ID。
 --patch-file 使用 SpecBodyEdit 的 startLine/endLine/original/replacement 正文差量，
 直接进入完整操作，不先单独提交 Spec。重复 --request-id 幂等；不同内容不能复用同一键。
 recover 只核对并结算已有资源或已开始的交付日志，保持原控制、输入及预算，不派发新模型任务。

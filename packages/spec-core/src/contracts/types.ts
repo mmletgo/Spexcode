@@ -22,7 +22,13 @@ export type ParseContractInput = { nodeId: string; path: string; source: string 
 export type ParseContractResult = { contract: Contract | null; findings: ContractFinding[] }
 export type ContractReference = { field: string; id: string; kinds: ContractKind[] }
 export type ContractGraph = { contracts: readonly Contract[]; items: ReadonlyMap<string, ContractItem>; owners: ReadonlyMap<string, Contract>; dependencies: ReadonlyMap<string, readonly string[]>; dependents: ReadonlyMap<string, readonly string[]>; findings: readonly ContractFinding[] }
-export type ContractValidationContext = { mode?: 'draft' | 'final'; files?: ReadonlyMap<string, string>; nodeIds?: ReadonlySet<string> }
+export type ContractValidationContext = {
+  mode?: 'draft' | 'final'
+  files?: ReadonlyMap<string, string>
+  nodeIds?: ReadonlySet<string>
+  /** 由调用方授予具体业务义务记录未执行验收的资格。 */
+  recordUnverifiedAcceptance?: (id: string) => boolean
+}
 export type CoverageStatus = 'declared' | 'bound' | 'missing'
 export type ContractItemCoverage = { id: string; kind: BusinessKind; nodeId: string; status: CoverageStatus; acceptanceIds: string[]; code: string[]; tests: string[]; verifyIds: string[]; blockedBy: string[] }
 export type ContractMatrixCell = { object: string; stateId: string; eventId: string; transitionIds: string[]; acceptanceIds: string[]; status: CoverageStatus }

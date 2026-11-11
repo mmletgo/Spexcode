@@ -63,6 +63,8 @@ export type ElaborationInput = {
   /** 冻结计划的技术写范围与不可修改的外部验收文件，不授予新的业务权限。 */
   implementationWritePaths?: readonly string[]
   readonlyTestPaths?: readonly string[]
+  /** 仅原生完整只读细化可记录无可执行验收绑定的义务。 */
+  recordUnverifiedCoverage?: true
   authorizedChanges?: readonly AuthorizedContractChange[]
   /** 协调器保存的稳定 ID 退役记录，新候选不可复用。 */
   retiredIds?: readonly string[]

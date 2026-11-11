@@ -63,3 +63,5 @@ InputSnapshot 的可选 captureKind=commit 表示自动输入绑定已提交 HEA
 SyncBudget 保持既有四个 numeric 字段对象逐字语义，另接受精确 `{mode: "unlimited"}`，此模式没有总calls/attempts/repairs/timeout cap；operation.deadlineAtMs 显式为null。真实计数仍累计，单次Native调用、验证timeout、lease/fence和全部审查/交付门禁独立有效。
 
 SyncCheckpointRef仅在attempt checkpoint引用上可选携artifacts:{kind:json|untrusted_final,ref}，普通业务BlobRef保持仅sha256。新wrapper及其全部材料引用同次提交，旧缺席保持，无新增事实/候选/授权。
+
+持久 `recordUnverifiedCoverage` 绑定手动请求与操作。其通过的 `VerificationResultBlob` 单列 `unexecutedContractIds`，实际 V3 运行原件由层引用保留。

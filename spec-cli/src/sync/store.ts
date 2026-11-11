@@ -358,7 +358,7 @@ export class SyncStore {
     validateScope({ paths: files.map(file => file.path), contractIds: [], flowIds: [] })
     return files as ApplyFilePlan[]
   }
-  private normalizedSemanticDigest(input: Pick<SyncOperation, 'input' | 'requestBlob' | 'origin' | 'policyDigest' | 'scope' | 'retryOf' | 'baselineSelection'>): string {
+  private normalizedSemanticDigest(input: Pick<SyncOperation, 'input' | 'requestBlob' | 'origin' | 'policyDigest' | 'scope' | 'retryOf' | 'baselineSelection' | 'recordUnverifiedCoverage'>): string {
     if (!input.requestBlob) return syncSemanticDigest(input)
     const evidence = JSON.parse(this.blob(input.requestBlob).toString('utf8')) as { type?: string }
     if (evidence.type === 'sync.decision') {
@@ -374,13 +374,14 @@ export class SyncStore {
     return syncSemanticDigest({ ...input, requestBlob: { sha256: digest({ ...request, origin }) } })
   }
   private saveIngressReceipt(tx: ProtocolTransaction, input: AdmitSyncInput, operationId: string, payloadDigest: string): void {
-    const receipt: SyncIngressReceipt = { operationId, payloadDigest, ...syncModelBinding(input.model), input: clone(input.input), origin: input.origin, ...(input.requestBlob ? { requestBlob: input.requestBlob } : {}), budget: input.budget, deliveryPlan: input.deliveryPlan, previousBaselinePair: input.previousBaselinePair ?? null, ...(input.baselineSelection ? { baselineSelection: clone(input.baselineSelection) } : {}) }
+    const receipt: SyncIngressReceipt = { operationId, payloadDigest, ...syncModelBinding(input.model), input: clone(input.input), origin: input.origin, ...(input.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), ...(input.requestBlob ? { requestBlob: input.requestBlob } : {}), budget: input.budget, deliveryPlan: input.deliveryPlan, previousBaselinePair: input.previousBaselinePair ?? null, ...(input.baselineSelection ? { baselineSelection: clone(input.baselineSelection) } : {}) }
     tx.exec('INSERT INTO sync_ingress_receipts(ingress_key,operation_id,payload_digest,record_json) VALUES(?,?,?,?)', input.ingressKey, operationId, payloadDigest, JSON.stringify(receipt))
   }
   /** 稳定接入记录与既有消息派发计划共享一个 SQL 事务。 */
   admitAndEnqueue(input: AdmitSyncInput): SyncOperation { return this.admitWithObservation(input) }
   private admitWithObservation(input: AdmitSyncInput, observation?: SyncObservation): SyncOperation {
     validateScope(input.scope)
+    if (input.recordUnverifiedCoverage !== undefined && (input.recordUnverifiedCoverage !== true || observation || input.requestBlob || !input.planBlob || !['initial', 'code'].includes(input.origin))) fail('SYNC_COVERAGE_AUTHORITY', '记录未执行验收覆盖需要显式只读同步请求')
     if (input.model !== undefined && (typeof input.model !== 'string' || !input.model || input.model !== input.model.trim())) fail('SYNC_MODEL_INVALID', '模型需要非空精确 ID')
     const { model, ...withoutModel } = input
     input = { ...withoutModel, ...syncModelBinding(model) }
@@ -389,9 +390,16 @@ export class SyncStore {
     if (input.retryOf && (this.readOperation(input.retryOf).requestBlob?.sha256 ?? null) !== (input.requestBlob?.sha256 ?? null)) fail('SYNC_RETRY_BINDING', '显式重试必须继承原始用户请求引用')
     const parent = input.retryOf ? this.readOperation(input.retryOf) : null
     const revalidation = parent && revalidatable(parent) && !this.findOperationByIngressKey(input.ingressKey) ? proveUnadoptedDelivery(this, parent) : undefined
-    if (input.planBlob) { this.blob(input.planBlob); if (input.planBlob.sha256 !== input.policyDigest) fail('SYNC_PLAN_BINDING', 'plan evidence must have exactly the frozen policy digest') }
+    if (input.planBlob) {
+      const bytes = this.blob(input.planBlob)
+      if (input.planBlob.sha256 !== input.policyDigest) fail('SYNC_PLAN_BINDING', 'plan evidence must have exactly the frozen policy digest')
+      if (input.recordUnverifiedCoverage) {
+        const plan = JSON.parse(bytes.toString('utf8')) as SyncCoordinatorPlan
+        if (plan.version !== 'sync-coordinator-v2' || !plan.agentWorkflow || plan.direction !== 'code_to_spec' || !plan.mandatoryTests.length) fail('SYNC_COVERAGE_AUTHORITY', '冻结计划须使用原生只读同步及保护测试')
+      }
+    }
     if (input.delivery && (input.delivery.canonicalRoot !== input.deliveryPlan.canonicalRoot || input.delivery.branch !== input.deliveryPlan.branch || input.delivery.repositoryId !== input.input.source.repositoryId)) fail('SYNC_DELIVERY_BINDING', 'bound delivery differs from durable plan')
-    const payload = { input: inputPayload(input.input), ...syncModelBinding(input.model), ...(input.requestBlob ? { requestBlob: input.requestBlob } : {}), ...(input.planBlob ? { planBlob: input.planBlob } : {}), ...(input.retryOf ? { retryOf: input.retryOf } : {}), scope: canonicalScope(input.scope), policyDigest: input.policyDigest, impactDigest: input.impactDigest, readSetDigest: input.readSetDigest, deliveryPlan: input.deliveryPlan, previousBaselinePairId: input.previousBaselinePair?.id ?? null, ...(input.baselineSelection ? { baselineSelectionDigest: input.baselineSelection.digest } : {}), budget: input.budget }
+    const payload = { input: inputPayload(input.input), ...syncModelBinding(input.model), ...(input.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), ...(input.requestBlob ? { requestBlob: input.requestBlob } : {}), ...(input.planBlob ? { planBlob: input.planBlob } : {}), ...(input.retryOf ? { retryOf: input.retryOf } : {}), scope: canonicalScope(input.scope), policyDigest: input.policyDigest, impactDigest: input.impactDigest, readSetDigest: input.readSetDigest, deliveryPlan: input.deliveryPlan, previousBaselinePairId: input.previousBaselinePair?.id ?? null, ...(input.baselineSelection ? { baselineSelectionDigest: input.baselineSelection.digest } : {}), budget: input.budget }
     const legacyPayloadDigest = digest(payload), payloadDigest = digest({ ...payload, origin: input.origin })
     const requestType = input.requestBlob ? JSON.parse(this.blob(input.requestBlob).toString('utf8')) as { type?: string } : null
     const decision = requestType?.type === 'sync.decision' ? readControlledDecision(input.input, input.requestBlob!) : null
@@ -413,6 +421,7 @@ export class SyncStore {
       if (observation && input.baselineSelection) this.assertSelection(tx, input.input.source, input.baselineSelection, scopeResources(input.scope))
       const finish = (operation: SyncOperation, outcome: 'admitted' | 'coalesced' | 'duplicate'): SyncOperation => {
         if (syncModel(operation) !== syncModel(input)) fail('SYNC_MODEL_RETRY_REQUIRED', '相同业务输入切换模型必须使用正式 retryOf')
+        if (operation.recordUnverifiedCoverage !== input.recordUnverifiedCoverage) fail('SYNC_COVERAGE_AUTHORITY', '接入与既有操作的验收覆盖授权不同')
         if (observation) { observation.operationId = operation.id; observation.outcome = outcome; this.saveObservation(tx, observation) }
         return operation
       }
@@ -444,6 +453,7 @@ export class SyncStore {
       if (input.retryOf) {
         const previous = this.operation(tx, input.retryOf), eligibility = this.retryEligibility(tx, previous, revalidation)
         if (!eligibility.eligible) fail(eligibility.reason!.code, eligibility.reason!.message)
+        if ((previous.recordUnverifiedCoverage || revalidatable(previous)) && previous.recordUnverifiedCoverage !== input.recordUnverifiedCoverage) fail('SYNC_RETRY_BINDING', '重试必须保留原覆盖授权，已交付候选的重验亦不能改变选择')
         const selectionMatches = revalidation ? !!input.baselineSelection && this.revalidationSelection(tx, previous, input.baselineSelection) : (previous.baselineSelection?.digest ?? null) === (input.baselineSelection?.digest ?? null)
         if (!selectionMatches || revalidation && (digest(previous.budget) !== digest(input.budget) || digest(previous.scope) !== digest(canonicalScope(input.scope))) || previous.origin !== input.origin || identityKey(previous.input.source) !== identityKey(input.input.source) || digest(inputPayload(previous.input)) !== digest(inputPayload(input.input)) || (previous.requestBlob?.sha256 ?? null) !== (input.requestBlob?.sha256 ?? null) || previous.policyDigest !== input.policyDigest || previous.impactDigest !== input.impactDigest || previous.readSetDigest !== input.readSetDigest || previous.deliveryPlan.baseCommit !== input.deliveryPlan.baseCommit || (previous.previousBaselinePair?.id ?? null) !== (input.previousBaselinePair?.id ?? null) || digest(previous.scope.paths) !== digest(canonicalScope(input.scope).paths) || !contains(previous.scope, input.scope)) fail('SYNC_RETRY_BINDING', '显式重试必须完整复用原冻结来源、用户请求、政策及授权范围')
         if (input.ingressKey === previous.ingressKey || input.rootCauseId === previous.rootCauseId) fail('SYNC_RETRY_BINDING', '显式重试需要新的用户请求身份')
@@ -458,7 +468,8 @@ export class SyncStore {
         if (!eligibility.eligible) fail(eligibility.reason!.code, eligibility.reason!.message)
       }
       const older = tx.query('SELECT record_json FROM sync_operations WHERE repository_id=? AND source_root=?', input.input.source.repositoryId, input.input.source.canonicalRoot).map(row => parseRecord<SyncOperation>(row)!)
-      const predecessor = supersededInitial ?? (observation && input.baselineSelection && !input.retryOf ? older.filter(operation => identityKey(operation.input.source) === identityKey(input.input.source) && digest(canonicalScope(operation.scope)) === digest(canonicalScope(input.scope)) && !TERMINAL.has(operation.phase)).sort((a,b) => (b.dispatchAnchor?.firstEnqueueSeq ?? 0) - (a.dispatchAnchor?.firstEnqueueSeq ?? 0))[0] : undefined)
+      if (observation && older.some(operation => operation.recordUnverifiedCoverage && identityKey(operation.input.source) === identityKey(input.input.source) && operation.input.id === input.input.id && contains(operation.scope, input.scope) && !['cancelled', 'superseded'].includes(operation.phase))) fail('SYNC_OBSERVATION_MANUAL_COVERAGE', '同一冻结输入已由显式授权的手动同步处理')
+      const predecessor = supersededInitial ?? (observation && input.baselineSelection && !input.retryOf ? older.filter(operation => !operation.recordUnverifiedCoverage && identityKey(operation.input.source) === identityKey(input.input.source) && digest(canonicalScope(operation.scope)) === digest(canonicalScope(input.scope)) && !TERMINAL.has(operation.phase)).sort((a,b) => (b.dispatchAnchor?.firstEnqueueSeq ?? 0) - (a.dispatchAnchor?.firstEnqueueSeq ?? 0))[0] : undefined)
       const inheritedAnchor = predecessor ? predecessor.dispatchAnchor ?? {
         scope: physicalScope(predecessor.input.source), firstMessageId: predecessor.dispatchMessageId,
         firstEnqueueSeq: Number(tx.query('SELECT enqueue_seq FROM protocol_messages WHERE message_id=?', predecessor.dispatchMessageId)[0].enqueue_seq),
@@ -780,10 +791,14 @@ export class SyncStore {
     const result = JSON.parse(this.blob(verification.resultBlob).toString('utf8')) as VerificationResultBlob
     const bindings = ['inputId', 'candidateDigest', 'policyDigest', 'readSetDigest', 'environmentDigest', 'contextDigest'] as const
     if (result.schemaVersion !== 1 || !result.coveredScope || digest(result.coveredScope) !== digest(verification.coveredScope) || bindings.some(key => result[key] !== verification[key]) || !Array.isArray(result.layers) || result.layers.length !== 4 || !['V1', 'V2', 'V3', 'V4'].every(layer => result.layers.filter(entry => entry.layer === layer).length === 1) || result.layers.some(layer => !['pass', 'fail', 'unsupported'].includes(layer.verdict) || !Array.isArray(layer.evidenceRefs) || !layer.evidenceRefs.length) || verification.passed !== result.layers.every(layer => layer.verdict === 'pass')) fail('SYNC_VERIFICATION_INVALID', 'four unique independently evidenced layers and exact bindings required')
+    const unexecuted = result.unexecutedContractIds
+    if (unexecuted !== undefined && (!Array.isArray(unexecuted) || new Set(unexecuted).size !== unexecuted.length ||
+      unexecuted.some(id => typeof id !== 'string' || !/^(REQ|RULE|TR)-[A-Z0-9]+(?:-[A-Z0-9]+)+$/.test(id) || !verification.coveredScope.contractIds.includes(id)))) fail('SYNC_VERIFICATION_INVALID', '未执行验收覆盖须列明本轮验证范围内唯一的业务声明 ID')
     for (const ref of verification.evidenceRefs) this.blob(ref)
     for (const layer of result.layers) for (const ref of layer.evidenceRefs) this.blob(ref)
     return this.write(tx => {
       const { operation, attempt } = this.checkFence(tx, fence)
+      if (Boolean(operation.recordUnverifiedCoverage) !== (unexecuted !== undefined)) fail('SYNC_VERIFICATION_BINDING', '未执行验收覆盖报告与操作授权不一致')
       if (operation.baselineSelection && (verification.baselineSelectionDigest !== operation.baselineSelection.digest || result.baselineSelectionDigest !== operation.baselineSelection.digest)) fail('SYNC_VERIFICATION_BINDING', 'verification selection differs from current frozen attempt')
       if (operation.phase !== 'verifying' || !attempt.candidate || verification.inputId !== operation.input.id || verification.policyDigest !== operation.policyDigest || verification.readSetDigest !== operation.readSetDigest || verification.candidateDigest !== attempt.candidate.digest || !contains(attempt.candidate.coveredScope, verification.coveredScope)) fail('SYNC_VERIFICATION_BINDING', 'verification does not bind current frozen input and candidate')
       attempt.verification = clone({ ...verification, evidenceRefs: [...new Map([...verification.evidenceRefs, ...result.layers.flatMap(layer => layer.evidenceRefs)].map(ref => [ref.sha256, ref])).values()] }); attempt.status = verification.passed ? 'verified' : 'failed'; operation.phase = verification.passed ? 'ready_to_apply' : 'failed'

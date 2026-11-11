@@ -15,6 +15,7 @@ import { SyncStore, SYNC_COORDINATOR_ADDRESS, syncCoordinatorAddress } from './s
 
 const source = (name = 'source'): WorktreeIdentity => ({ repositoryId: 'repo', commonDir: '/repo/.git', canonicalRoot: `/repo/${name}`, gitDir: `/repo/.git/worktrees/${name}`, branch: name, physicalFingerprint: `${name}-inode-1` })
 const scope = (path = 'src/a.ts', rule = 'RULE-A'): SyncScope => ({ paths: [path], contractIds: [rule], flowIds: [] })
+const readonlyCoveragePlan = { version: 'sync-coordinator-v2', direction: 'code_to_spec', agentWorkflow: 'native-worktree-v1', mandatoryTests: [{ verificationId: 'VERIFY-DEMO-01', testPath: 'tests/demo.test.mjs', testId: 'DEMO-01' }] }
 async function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'sync-store-'))
   const path = join(root, 'db.sqlite')
@@ -33,7 +34,7 @@ async function fixture() {
     if (value.baselineSelection) { const ack = store.ackDispatch(value.input.source.repositoryId, operation.dispatchMessageId); return store.claimQueuedAttempt({ operationId: operation.id, source: value.input.source, scope: value.scope, leaseMs: 1000, expectedRevision: ack.revision }) }
     return store.claimAttempt({ operationId: operation.id, source: value.input.source, scope: value.scope, leaseMs: 1000, expectedMessageId: operation.dispatchMessageId })
   }
-  const ready = (value = admit(), readyScope = value.scope, blockedScope: SyncScope = { paths: [], contractIds: [], flowIds: [] }, blockedReason: 'needs_input' | 'conflicted' | null = null, beforeGeneration?: (claimed: ClaimedAttempt) => void, verificationMetadata: Pick<VerificationResultBlob, 'retiredIds' | 'restoredIds' | 'decisionRefs'> = {}) => {
+  const ready = (value = admit(), readyScope = value.scope, blockedScope: SyncScope = { paths: [], contractIds: [], flowIds: [] }, blockedReason: 'needs_input' | 'conflicted' | null = null, beforeGeneration?: (claimed: ClaimedAttempt) => void, verificationMetadata: Pick<VerificationResultBlob, 'retiredIds' | 'restoredIds' | 'decisionRefs' | 'unexecutedContractIds'> = {}) => {
     const claimed = claim(value), target = { ...input(value.deliveryPlan.canonicalRoot === value.input.source.canonicalRoot ? value.input.source : source('delivery'), 'target'), manifestBlob: put({ version: 1, entries: readyScope.paths.map(path => ({ path, mode: '100644', oid: 'a'.repeat(40), digest: '1'.repeat(64) })) }) }
     store.bindDelivery(claimed.fence, target.source)
     store.bindComposedInput(claimed.fence, { sourceInputId: value.input.id, previousBaselinePairId: value.previousBaselinePair?.id ?? null, tree: value.input.immutableTree, manifestBlob: target.manifestBlob, contentDigest: value.input.contentDigest, ...(value.requestBlob ? { requestBlob: value.requestBlob } : {}), ...(value.baselineSelection ? { baselineSelectionDigest: value.baselineSelection.digest } : {}) })
@@ -1909,6 +1910,70 @@ for (const withSelection of [true, false]) test(`提交观察替换零执行显�
   } finally { f.cleanup() }
 })
 
+test('自动观察不借用同一冻结输入的显式未执行覆盖授权', async () => {
+  const f = await fixture()
+  try {
+    const covered = scope('.spec/demo/spec.md', 'RULE-DEMO-01')
+    const selection = f.store.readBaselineSelection(source(), [{ kind: 'path', path: covered.paths[0] }, { kind: 'contract', id: covered.contractIds[0] }])
+    assert.ok('selection' in selection)
+    const planBlob = f.put(readonlyCoveragePlan)
+    const input = { ...f.input(), captureKind: 'commit' as const }
+    const manual: AdmitSyncInput = { ...f.admit(source(), input.id, covered), origin: 'initial', input, planBlob, policyDigest: planBlob.sha256, baselineSelection: selection.selection, recordUnverifiedCoverage: true }
+    const writePlan = f.put({ ...readonlyCoveragePlan, direction: 'spec_to_code' })
+    assert.throws(() => f.store.admitAndEnqueue({ ...manual, planBlob: writePlan, policyDigest: writePlan.sha256 }), /SYNC_COVERAGE_AUTHORITY/)
+    const enabled = f.store.admitAndEnqueue(manual)
+    assert.equal(f.store.admitAndEnqueue({ ...manual, ingressKey: 'manual-alias' }).id, enabled.id)
+    assert.throws(() => f.store.admitAndEnqueue({ ...manual, recordUnverifiedCoverage: undefined }), /SYNC_IDEMPOTENCY_CONFLICT/)
+
+    const observation = { input, configRef: f.put({ config: 'commit' }), selection: selection.selection, latestDifferenceDigest: 'same-frozen-commit' }
+    const expected = { controlRevision: 0, selectionDigest: selection.selection.digest }
+    const observed = f.store.observeAndAdmit(observation, { ...manual, ingressKey: 'automatic-same-input', recordUnverifiedCoverage: undefined }, expected)
+    assert.equal(observed.outcome, 'blocked')
+    assert.ok('reason' in observed)
+    assert.equal(observed.reason.code, 'SYNC_OBSERVATION_MANUAL_COVERAGE')
+    assert.equal(observed.observation.operationId, null)
+    assert.deepEqual(f.store.readOperation(enabled.id), enabled)
+
+    const forged = f.store.observeAndAdmit(observation, { ...manual, ingressKey: 'automatic-cannot-opt-in' }, expected)
+    assert.ok('reason' in forged)
+    assert.equal(forged.reason.code, 'SYNC_COVERAGE_AUTHORITY')
+    assert.equal(f.store.listOperations('repo').length, 1)
+
+    const newerInput = { ...f.input(source(), 'newer-frozen-input'), headCommit: 'f'.repeat(40), captureKind: 'commit' as const }
+    const newer = f.store.observeAndAdmit({ ...observation, input: newerInput, latestDifferenceDigest: 'next-commit' }, { ...manual, input: newerInput, ingressKey: 'automatic-new-input', origin: 'code', recordUnverifiedCoverage: undefined }, expected)
+    assert.ok('operation' in newer)
+    assert.equal(newer.outcome, 'admitted')
+    assert.equal(newer.operation.recordUnverifiedCoverage, undefined)
+    assert.equal(newer.operation.dispatchAnchor?.budgetRootOperationId, newer.operation.id)
+    assert.equal(f.store.readOperation(enabled.id).phase, 'superseded')
+
+    const strict = f.store.admitAndEnqueue({ ...manual, ingressKey: 'manual-strict', recordUnverifiedCoverage: undefined })
+    assert.notEqual(strict.id, enabled.id)
+    assert.notEqual(strict.payloadDigest, enabled.payloadDigest)
+  } finally { f.cleanup() }
+})
+
+test('未执行覆盖验证清单须绑定 opt-in 和当前正式验证范围', async t => {
+  const cases = [
+    { name: '仅列明已审且本轮未执行的声明', enabled: true, ids: ['RULE-DEMO-01'], outcome: 'verified' },
+    { name: '覆盖完整时保留空清单', enabled: true, ids: [], outcome: 'verified' },
+    { name: '缺少显式清单', enabled: true, ids: undefined, outcome: 'SYNC_VERIFICATION_BINDING' },
+    { name: '清单超出本轮范围', enabled: true, ids: ['RULE-OTHER-01'], outcome: 'SYNC_VERIFICATION_INVALID' },
+    { name: '默认严格操作拒绝清单', enabled: false, ids: ['RULE-DEMO-01'], outcome: 'SYNC_VERIFICATION_BINDING' },
+  ] as const
+  for (const { name, enabled, ids, outcome } of cases) await t.test(name, async () => {
+    const f = await fixture()
+    try {
+      const planBlob = f.put(readonlyCoveragePlan)
+      const covered = scope('.spec/demo/spec.md', 'RULE-DEMO-01')
+      const input: AdmitSyncInput = { ...f.admit(source(), 'coverage-proof', covered), origin: 'code', planBlob, policyDigest: planBlob.sha256, ...(enabled ? { recordUnverifiedCoverage: true } : {}) }
+      const ready = () => f.ready(input, covered, undefined, undefined, undefined, { unexecutedContractIds: ids && [...ids] })
+      if (outcome === 'verified') assert.equal(f.store.readAttempt(ready().attempt.id).status, 'verified')
+      else assert.throws(ready, { code: outcome })
+    } finally { f.cleanup() }
+  })
+})
+
 for (const hadAttempt of [true, false]) test(`提交初始化被替换后保留已有领取或已过期输入的去重（hadAttempt=${hadAttempt}）`, async () => {
   const f = await fixture()
   try {
@@ -2638,7 +2703,7 @@ test('writer34观察索引正常备份升级、失败原子回滚、保旧行且
   } finally { backup?.close(); f.cleanup() }
 })
 
-for (const prior of [34, 35, 36, 37, 38, 39, 40, 41] as const) test(`从writer${prior}升级仅追加围栏并保留可回滚备份`, async () => {
+for (const prior of [34, 35, 36, 37, 38, 39, 40, 41, 42] as const) test(`从writer${prior}升级仅追加围栏并保留可回滚备份`, async () => {
   const f = await fixture()
   let backup: ReturnType<typeof openProtocol> | undefined
   try {
@@ -2651,9 +2716,9 @@ for (const prior of [34, 35, 36, 37, 38, 39, 40, 41] as const) test(`从writer${
       previousRegistry: tx.query('SELECT * FROM schema_migrations WHERE component!=? OR version<=? ORDER BY component,version', SYNC_COMPONENT, prior),
     }))
     const before = read(f.protocol), backupPath = join(f.root, `v${prior}-before-upgrade.backup`)
-    assert.deepEqual(SYNC_MIGRATIONS.slice(prior).map(({ version }) => version), [35, 36, 37, 38, 39, 40, 41, 42].filter(version => version > prior))
+    assert.deepEqual(SYNC_MIGRATIONS.slice(prior).map(({ version }) => version), [35, 36, 37, 38, 39, 40, 41, 42, 43].filter(version => version > prior))
     for (const { sql } of SYNC_MIGRATIONS.slice(prior)) assert.match(sql, /^SELECT 1;/)
-    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), 42)
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), 43)
     assert.deepEqual(read(f.protocol), before)
     assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, versions), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
     assert.deepEqual(f.store.readAttempt(claimed.attempt.id), claimed.attempt)

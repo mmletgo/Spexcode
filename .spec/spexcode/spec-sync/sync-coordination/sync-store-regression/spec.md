@@ -123,3 +123,5 @@ unlimited回归以真实SQLite越过70calls、10attempts/repair及旧90分钟阈
 v21迁移以隔离真实SQLite和online backup证明v1–v20 checksum及旧flat raw refs原字节不改，旧v20 writer被组件门拒绝，回滚备份仍可按v20读取。新wrapper一个checkpoint动作保留全部JSON/raw保活refs；材料缺失时不发布部分引用，旧ref不补role。
 
 v22 writer marker用隔离真实SQLite与online backup核对v1–v21 checksum、旧operation/attempt/checkpoint及资源记录逐字保持；旧v21 writer被组件门拒绝，升级前备份可按v21读取。迁移不把历史缺席的草稿或RPC停止字段补写为新协议证明。
+
+v43 回归核对 v34–v42 原 SQL 与已有记录。覆盖选择分隔显式请求和默认自动观察，同一提交的自动观察保留手动操作；新提交按原顺序接入，且沿自身授权与预算。真实未执行覆盖清单必须与正式验证范围绑定。

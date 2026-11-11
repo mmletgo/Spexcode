@@ -31,3 +31,5 @@ desc: 已实现业务细化、双向变更、持续观察与隔离交付；完�
 完整实现由 [[sync-elaboration]]、[[sync-execution]]、[[sync-code-writeback]]、[[sync-coordination]]、[[sync-verification]] 和 [[sync-product-controls]] 配合完成。共享规则唯一，子节点引用对应 REQ-SYNC，不另造第二份业务真相。
 
 开发工作树已同步、原输入树待落地、主分支已同步分别展示。main 有未提交改动时不自动合并；这不阻止受管交付工作树的自动生成和验证。任何过期、缺口、冲突、验证失败或未结算 journal 都不算已同步。
+
+代码→规格可显式记录未执行的测试覆盖。真实业务规则及来源仍须完整独审，已绑定验收和保护测试仍实际执行，交付结果分别显示未执行的契约 ID 与真实运行结果。

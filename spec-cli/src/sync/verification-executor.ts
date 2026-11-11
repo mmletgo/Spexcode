@@ -57,6 +57,21 @@ function scratchMountOptions(policy: VerificationPolicy): string {
   return `rw,${policy.scratchExecutable === true ? 'exec' : 'noexec'},nosuid,nodev,size=${policy.scratchBytes},mode=1777`
 }
 
+function imageVolumeMaskPaths(volumes: Record<string, unknown> | null): string[] {
+  const paths = Object.keys(volumes ?? {}).sort()
+  const reserved = ['/candidate', '/runner', '/tmp', '/proc', '/sys', '/dev', '/etc/hosts', '/etc/hostname', '/etc/resolv.conf']
+  for (const [index, path] of paths.entries()) {
+    if (!/^(?:\/[a-zA-Z0-9_.-]+)+$/.test(path) || path.split('/').some(part => part === '.' || part === '..') ||
+      reserved.some(other => path === other || path.startsWith(`${other}/`) || other.startsWith(`${path}/`)) ||
+      paths.slice(0, index).some(other => path.startsWith(`${other}/`))) throw new Error('unsupported: 镜像卷路径与验证挂载冲突或不规范')
+  }
+  return paths
+}
+
+function verificationTmpfs(config: VerificationConfig): Record<string, string> {
+  return { '/tmp': scratchMountOptions(config.policy), ...Object.fromEntries((config.maskedVolumePaths ?? []).map(path => [path, 'ro,nosuid,nodev,noexec,size=1048576'])) }
+}
+
 type Inspect = {
   Id: string; Name: string; Image: string; Platform: string
   Config: { Image: string; User: string; WorkingDir: string; Entrypoint: string[]; Cmd: string[]; Labels: Record<string, string>; Env: string[]; Healthcheck?: { Test: string[] } }
@@ -74,14 +89,16 @@ function assertInspect(actual: Inspect, checkpoint: VerificationCheckpoint): voi
   if (checkpoint.containerId && actual.Id !== checkpoint.containerId) throw new Error('容器 ID 不匹配，拒绝接管')
   if (actual.Config.User !== '1000:1000' || actual.Config.WorkingDir !== (config.policy.cwd === '.' ? '/candidate' : `/candidate/${config.policy.cwd}`) || JSON.stringify(actual.Config.Entrypoint) !== JSON.stringify([config.argv[0]]) || JSON.stringify(actual.Config.Cmd) !== JSON.stringify(config.argv.slice(1)) || actual.Config.Healthcheck?.Test[0] !== 'NONE' || JSON.stringify([...actual.Config.Env].sort()) !== JSON.stringify([...config.environment].sort())) throw new Error('容器 command/user/healthcheck 不匹配')
   if (!host.ReadonlyRootfs || host.NetworkMode !== 'none' || host.Privileged || JSON.stringify(host.CapDrop) !== '["ALL"]' || host.CapAdd?.length || JSON.stringify(host.SecurityOpt) !== '["no-new-privileges"]' || !host.Init || host.AutoRemove || host.CgroupnsMode !== 'private' || host.RestartPolicy.Name !== 'no' || host.Memory !== config.policy.memoryBytes || host.MemorySwap !== config.policy.memoryBytes || host.NanoCpus !== config.policy.cpus * 1e9 || host.PidsLimit !== config.policy.pidsLimit || host.Devices.length || host.PidMode || host.IpcMode !== 'private') throw new Error('容器安全或预算配置不匹配')
-  if (JSON.stringify(mounts) !== JSON.stringify(expectedMounts) || host.Binds?.length || JSON.stringify(host.Tmpfs) !== JSON.stringify({ '/tmp': scratchMountOptions(config.policy) })) throw new Error('容器 mounts/scratch 不匹配')
+  const expectedTmpfs = verificationTmpfs(config)
+  const tmpfs = Object.entries(host.Tmpfs)
+  if (JSON.stringify(mounts) !== JSON.stringify(expectedMounts) || host.Binds?.length || tmpfs.length !== Object.keys(expectedTmpfs).length || tmpfs.some(([path, options]) => expectedTmpfs[path] !== options)) throw new Error('容器 mounts/scratch 不匹配')
   if (host.LogConfig.Type !== 'local' || host.LogConfig.Config['max-size'] !== String(config.policy.logBytes) || host.LogConfig.Config['max-file'] !== '1' || host.LogConfig.Config['compress'] !== 'false') throw new Error('容器日志预算不匹配')
 }
 
 function createArgs(checkpoint: VerificationCheckpoint): string[] {
   const { config, labels, uniqueContainerName } = checkpoint
   const policy = config.policy
-  return ['container', 'create', '--pull', 'never', '--name', uniqueContainerName, '--platform', config.platform, '--user', '1000:1000', '--read-only', '--network', 'none', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--init', '--restart', 'no', '--no-healthcheck', '--ipc', 'private', '--cgroupns', 'private', '--memory', String(policy.memoryBytes), '--memory-swap', String(policy.memoryBytes), '--cpus', String(policy.cpus), '--pids-limit', String(policy.pidsLimit), '--log-driver', 'local', '--log-opt', `max-size=${policy.logBytes}`, '--log-opt', 'max-file=1', '--log-opt', 'compress=false', '--tmpfs', `/tmp:${scratchMountOptions(policy)}`, '--mount', `type=bind,src=${config.candidatePath},dst=/candidate,readonly`, '--mount', `type=bind,src=${config.runnerPath},dst=/runner,readonly`, '--workdir', policy.cwd === '.' ? '/candidate' : `/candidate/${policy.cwd}`, '--env', 'HOME=/tmp', '--env', 'NODE_OPTIONS=', '--entrypoint', config.argv[0], ...Object.entries(labels).flatMap(([key, value]) => ['--label', `${key}=${value}`]), config.image, ...config.argv.slice(1)]
+  return ['container', 'create', '--pull', 'never', '--name', uniqueContainerName, '--platform', config.platform, '--user', '1000:1000', '--read-only', '--network', 'none', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--init', '--restart', 'no', '--no-healthcheck', '--ipc', 'private', '--cgroupns', 'private', '--memory', String(policy.memoryBytes), '--memory-swap', String(policy.memoryBytes), '--cpus', String(policy.cpus), '--pids-limit', String(policy.pidsLimit), '--log-driver', 'local', '--log-opt', `max-size=${policy.logBytes}`, '--log-opt', 'max-file=1', '--log-opt', 'compress=false', ...Object.entries(verificationTmpfs(config)).flatMap(([path, flags]) => ['--tmpfs', `${path}:${flags}`]), '--mount', `type=bind,src=${config.candidatePath},dst=/candidate,readonly`, '--mount', `type=bind,src=${config.runnerPath},dst=/runner,readonly`, '--workdir', policy.cwd === '.' ? '/candidate' : `/candidate/${policy.cwd}`, '--env', 'HOME=/tmp', '--env', 'NODE_OPTIONS=', '--entrypoint', config.argv[0], ...Object.entries(labels).flatMap(([key, value]) => ['--label', `${key}=${value}`]), config.image, ...config.argv.slice(1)]
 }
 
 /** 仅消费可信 Node reporter 的事件；子测试 stdout/stderr 是数据，不冒充测试事件。 */
@@ -148,7 +165,8 @@ export async function executeVerification(request: VerificationRequest, dependen
     if (!checkpoint) {
       if (request.signal?.aborted) return { status: 'cancelled', reason: '开始前取消' }
       const image = JSON.parse((await command(['image', 'inspect', request.policy.image])).stdout)[0] as { Id: string; Os: string; Architecture: string; Config: { Env: string[]; Volumes: Record<string, unknown> | null } }
-      if (`${image.Os}/${image.Architecture}` !== request.policy.platform || Object.keys(image.Config.Volumes ?? {}).length) throw new Error('unsupported: 镜像 platform/anonymous volume 不满足政策')
+      if (`${image.Os}/${image.Architecture}` !== request.policy.platform) throw new Error('unsupported: 镜像 platform 不满足政策')
+      const maskedVolumePaths = imageVolumeMaskPaths(image.Config.Volumes)
       const uniqueContainerName = `spex-verify-${randomUUID()}`
       const transportPlan = await remoteEnvironment?.plan(request.runId, uniqueContainerName)
       let candidatePath: string, runnerPath: string, exportDigest: string
@@ -170,7 +188,7 @@ export async function executeVerification(request: VerificationRequest, dependen
         await writeFile(join(runnerPath, 'reporter.mjs'), reporter(request.policy.logBytes), { mode: 0o444 })
         await chmod(directory, 0o755)
       }
-      const config: VerificationConfig = { image: request.policy.image, imageId: image.Id, environment: [...image.Config.Env.filter(value => !/^(HOME|NODE_OPTIONS)=/.test(value)), 'HOME=/tmp', 'NODE_OPTIONS='], platform: request.policy.platform, argv: ['node', '--test-reporter=/runner/reporter.mjs', ...request.policy.argv.slice(1)], candidatePath, runnerPath, exportDigest, policy: structuredClone(request.policy), runnerDigest: digest(reporter(request.policy.logBytes)), ...(transportPlan ? { transport: transportPlan } : {}) }
+      const config: VerificationConfig = { image: request.policy.image, imageId: image.Id, environment: [...image.Config.Env.filter(value => !/^(HOME|NODE_OPTIONS)=/.test(value)), 'HOME=/tmp', 'NODE_OPTIONS='], platform: request.policy.platform, argv: ['node', '--test-reporter=/runner/reporter.mjs', ...request.policy.argv.slice(1)], candidatePath, runnerPath, exportDigest, policy: structuredClone(request.policy), runnerDigest: digest(reporter(request.policy.logBytes)), ...(maskedVolumePaths.length ? { maskedVolumePaths } : {}), ...(transportPlan ? { transport: transportPlan } : {}) }
       if ([candidatePath, runnerPath].some(path => path.includes(','))) throw new Error('unsupported: mount 路径包含逗号')
       const configDigest = digest(JSON.stringify(config))
       const labels = { 'spex.owner': 'verification-v1', 'spex.run': request.runId, 'spex.input': request.inputDigest, 'spex.candidate': request.candidateDigest, 'spex.config': configDigest }

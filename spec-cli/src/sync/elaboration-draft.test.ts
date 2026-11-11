@@ -133,6 +133,60 @@ test('Native P1续修AC.test坏稿只用真实已有测试ID和可信VERIFY', as
   assert.equal(f.requests.at(-1)!.purpose, 'elaboration_generate')
 })
 
+test('原生只读P1仅按授权记录未执行覆盖，保留原契约义务、独审和严格封口', async t => {
+  const f = await fixture(t)
+  const target = f.input.targets[0], source = target.source!
+  const raw = source.slice(0, source.indexOf('## expanded spec'))
+  const input: ElaborationInput = {
+    ...f.input,
+    requestKey: 'unverified-coverage',
+    worktree: stageWorktree(f.commonDir, f.snapshot.headCommit, overlayStageTree(f.commonDir, f.snapshot.immutableTree, [{ path, source: raw }])),
+    targets: [{ ...target, source: raw, sourceDigest: elaborationDigest(raw) }],
+    facts: [{ source: 'decision:EXPORT-POLICY', text: '沿用固定验收夹具中用户明确给出的演示政策' }],
+    maxRepairs: 0,
+  }
+  const noAcceptance = draftRows(source)
+  noAcceptance.changes[0].tables.AC = []
+  const strict = await elaborate(input, { runner: f.run(() => JSON.stringify(noAcceptance)) })
+  assert.equal(strict.reviewPassed, false)
+  assert.ok(strict.rounds[0].findings.some(issue => issue.code === 'missing-acceptance' && issue.itemId === 'REQ-EXPORT-01'))
+
+  const authorized: ElaborationInput = { ...input, recordUnverifiedCoverage: true, requestKey: 'authorized-coverage' }
+  const recorded = await elaborate(authorized, { runner: f.run(() => JSON.stringify(noAcceptance)) })
+  assert.equal(recorded.status, 'complete', JSON.stringify(recorded.rounds[0].findings.filter(issue => issue.severity === 'error')))
+  assert.notEqual(recorded.inputDigest, strict.inputDigest)
+  assert.equal(recorded.implementationReady, false)
+  assert.equal(recorded.runtimeVerification, 'not_run')
+  assert.deepEqual(recorded.rounds[0].traces.map(trace => trace.purpose), ['elaboration_generate', 'elaboration_review'])
+  const eligible = recorded.coverage!.items.filter(item => ['REQ', 'RULE', 'TR'].includes(item.kind)).map(item => item.id).sort()
+  const recordedIds = (findings: ElaborationResult['rounds'][number]['findings']) => findings
+    .filter(issue => issue.code === 'acceptance-not-executed' && issue.severity === 'warning').map(issue => issue.itemId).sort()
+  assert.deepEqual(recordedIds(recorded.rounds[0].findings), eligible)
+  assert.ok(recorded.contracts.every(contract => contract.items.every(item => item.kind !== 'AC')))
+  assert.match(f.requests.at(-2)!.prompt, /原来已绑定的验收和冻结计划中的mandatory独立测试继续完整验证/)
+  assert.match(f.requests.at(-1)!.prompt, /"unverifiedContractIds":\[[^\]]*"REQ-EXPORT-01"/)
+  assert.match(f.requests.at(-1)!.prompt, /具体实现缺陷、已知测试缺陷及错误绑定仍须报修复/)
+  const sealed = sealPartitionedElaboration(authorized, recorded.changes, recorded.rounds[0].candidate!.applicability)
+  assert.equal(sealed.seal.passed, true)
+  assert.deepEqual(recordedIds(sealed.seal.findings), eligible)
+
+  const forged = draftRows(source)
+  forged.changes[0].tables.AC[0].test = 'tests/export.test.mjs#AC-NOT-DECLARED-01'
+  const invalid = await elaborate({ ...authorized, requestKey: 'invalid-coverage-binding' }, { runner: f.run(() => JSON.stringify(forged)) })
+  assert.equal(invalid.reviewPassed, false)
+  assert.ok(invalid.rounds[0].findings.some(issue => issue.code === 'readonly_implementation_gap' && issue.message.includes('AC-NOT-DECLARED-01')))
+  assert.equal(f.requests.at(-1)!.purpose, 'elaboration_generate')
+
+  const dropping = draftRows(source)
+  dropping.changes[0].removeIds = dropping.changes[0].tables.AC.map(row => String(row.id))
+  dropping.changes[0].tables.AC = []
+  const lostCoverage = await elaborate({ ...f.input, recordUnverifiedCoverage: true, maxRepairs: 0, requestKey: 'old-coverage-loss' }, { runner: f.run(() => JSON.stringify(dropping)) })
+  assert.equal(lostCoverage.reviewPassed, false)
+  assert.ok(lostCoverage.rounds[0].findings.some(issue => issue.code === 'missing-acceptance' && issue.itemId === 'REQ-EXPORT-01'))
+  assert.deepEqual(recordedIds(lostCoverage.rounds[0].findings), [])
+  await assert.rejects(elaborate({ ...authorized, implementationWritePaths: ['src/export.js'] }), /原生只读完整细化/)
+})
+
 test('Native P1续修状态事件和无状态END坏稿，保留实际Git草稿与拒因', async t => {
   const f = await fixture(t), valid = draftRows(f.input.targets[0].source!), invalid = structuredClone(valid)
   const tables = invalid.changes[0].tables

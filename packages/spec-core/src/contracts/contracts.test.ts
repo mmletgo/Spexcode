@@ -43,6 +43,23 @@ test('完整真实夹具解析、30格状态事件矩阵和argv绑定，无运�
   if (verify.kind === 'VERIFY') assert.deepEqual(verify.command, ['node', '--test', 'tests/export.test.mjs'])
 })
 
+test('按真实义务ID记录未执行验收，默认严格且已声明的错绑始终阻断', () => {
+  const graph = buildContractGraph([parse(without(baseline, 'AC'))])
+  const strict = validateContractGraph(graph, { files })
+  assert.ok(errors(strict).some(finding => finding.code === 'incomplete-contract' && finding.message.includes(' AC')))
+  assert.ok(errors(strict).some(finding => finding.code === 'missing-acceptance' && finding.itemId === 'REQ-EXPORT-01'))
+
+  const recorded = validateContractGraph(graph, { files, recordUnverifiedAcceptance: id => id === 'REQ-EXPORT-01' })
+  assert.deepEqual(recorded.filter(finding => finding.code === 'acceptance-not-executed').map(({ itemId, severity }) => ({ itemId, severity })), [{ itemId: 'REQ-EXPORT-01', severity: 'warning' }])
+  assert.ok(errors(recorded).some(finding => finding.code === 'missing-acceptance' && finding.itemId === 'RULE-EXPORT-01'))
+  assert.ok(!recorded.some(finding => finding.code === 'incomplete-contract'))
+  assert.deepEqual(projectContractCoverage(graph).items.find(item => item.id === 'REQ-EXPORT-01')?.acceptanceIds, [])
+
+  const wrongBinding = buildContractGraph([parse(baseline.replace('tests/export.test.mjs#AC-EXPORT-01', 'tests/export.test.mjs#AC-UNDECLARED-01'))])
+  const bindingErrors = errors(validateContractGraph(wrongBinding, { files, recordUnverifiedAcceptance: () => true }))
+  assert.ok(bindingErrors.some(finding => finding.code === 'missing-test-case' && finding.itemId === 'AC-EXPORT-01'))
+})
+
 test('一次覆盖投影只索引一次阻塞引用', () => {
   const graph = buildContractGraph([parse(variant('missing-policy').source)])
   const req = graph.items.get('REQ-EXPORT-01')

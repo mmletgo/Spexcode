@@ -191,11 +191,12 @@ async function readInput(input: InputSnapshot, plan: SyncCoordinatorPlan, previo
 /** 接入之前冻结真实读集合和派生输入，只返回既有协议接入结构，不改 source/index。 */
 export async function prepareSyncAdmission(input: InputSnapshot, supplied: SyncCoordinatorPlan, options: SyncAdmissionOptions, businessSelection = options.baselineSelection): Promise<AdmitSyncInput> {
   if (supplied.agentWorkflow) assertWorktreeSyncModel(syncModel(options))
+  if (options.recordUnverifiedCoverage && (!supplied.agentWorkflow || supplied.version !== 'sync-coordinator-v2' || supplied.direction !== 'code_to_spec' || !supplied.mandatoryTests.length || options.requestBlob || !['initial', 'code'].includes(options.origin))) fail('unverified_coverage_not_allowed', '记录未执行覆盖须为有可信保护测试的原生代码→规格操作')
   const plan = structuredClone(supplied), executionScope = options.executionScope ?? (options.baselineSelection ? plan.executionScope : undefined)
   if (options.baselineSelection && !executionScope) fail('execution_scope_missing', '精确基线接入必须冻结实际目标写入范围')
   const scope = executionScope ?? { paths: unique(plan.writePaths), contractIds: [], flowIds: [] }
   const view = await readInput(input, plan, options.previousBaselinePair, options.requestBlob, businessSelection, executionScope?.paths)
-  return { ...syncModelBinding(options.model), ingressKey: options.ingressKey, rootCauseId: options.rootCauseId, origin: options.origin, budget: options.budget, input, ...(options.requestBlob ? { requestBlob: options.requestBlob } : {}), ...(options.retryOf ? { retryOf: options.retryOf } : {}), ...(options.baselineSelection ? { baselineSelection: options.baselineSelection } : {}), planBlob: freezeSyncPlanEvidence(input.source.commonDir, plan), scope, policyDigest: syncPlanDigest(plan), impactDigest: options.impactDigest ?? contentHash(canonical({ targets: plan.targets, ...(plan.executionScope ? { scope } : {}), writePaths: unique(plan.writePaths), readSetDigest: view.readSetDigest })), readSetDigest: view.readSetDigest, delivery: null, deliveryPlan: planPrivateDelivery(input, options.managedRoot, options.ingressKey), previousBaselinePair: options.previousBaselinePair ?? null }
+  return { ...syncModelBinding(options.model), ingressKey: options.ingressKey, rootCauseId: options.rootCauseId, origin: options.origin, budget: options.budget, input, ...(options.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), ...(options.requestBlob ? { requestBlob: options.requestBlob } : {}), ...(options.retryOf ? { retryOf: options.retryOf } : {}), ...(options.baselineSelection ? { baselineSelection: options.baselineSelection } : {}), planBlob: freezeSyncPlanEvidence(input.source.commonDir, plan), scope, policyDigest: syncPlanDigest(plan), impactDigest: options.impactDigest ?? contentHash(canonical({ targets: plan.targets, ...(plan.executionScope ? { scope } : {}), writePaths: unique(plan.writePaths), readSetDigest: view.readSetDigest })), readSetDigest: view.readSetDigest, delivery: null, deliveryPlan: planPrivateDelivery(input, options.managedRoot, options.ingressKey), previousBaselinePair: options.previousBaselinePair ?? null }
 }
 
 type Stage = { version: 'sync-stage-v1'; operationId: string; attemptId: string; inputId: string; policyDigest: string; readSetDigest?: string; baselineSelectionRef?: BlobRef; guidanceContractVersion?: string; composedTree?: string; composedContentDigest?: string; stage: string; resultRef: BlobRef }
@@ -1133,14 +1134,19 @@ function safeArtifactRoot(root: string, operation: SyncOperation): void {
   if (resolve(root) !== root || realpathSync(root) !== root || !stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid?.() || (stat.mode & 0o077) !== 0 || root === operation.input.source.canonicalRoot || root.startsWith(`${operation.input.source.canonicalRoot}${sep}`) || operation.input.source.canonicalRoot.startsWith(`${root}${sep}`)) fail('artifact_directory', 'artifactRoot必须是source外canonical、当前用户独占0700目录')
 }
 function findingKey(finding: ContractFinding): string { return canonical({ code: finding.code, path: finding.path, nodeId: finding.nodeId, itemId: finding.itemId ?? null, relatedIds: unique(finding.relatedIds ?? []) }) }
-export async function candidateContext(operation: SyncOperation, candidate: CandidateRef): Promise<FrozenContracts> {
+function unexecutedAcceptanceIds(elaboration: Pick<SavedElaboration, 'rounds' | 'partitionSeal'>): string[] {
+  const findings = elaboration.partitionSeal?.findings ?? elaboration.rounds.at(-1)?.findings ?? []
+  return unique(findings.flatMap(finding => finding.code === 'acceptance-not-executed' && finding.severity === 'warning' && finding.itemId ? [finding.itemId] : []))
+}
+export async function candidateContext(operation: SyncOperation, candidate: CandidateRef, elaboration?: Pick<SavedElaboration, 'rounds' | 'partitionSeal'>): Promise<FrozenContracts> {
   const files = new Map<string, string>()
   const entries = verifyCandidate(operation.input.source.commonDir, candidate)
   readTree(operation.input.source.commonDir, candidate.tree, (entry, bytes) => {
     if (entry.mode === '120000' || isHostPrivatePath(entry.path)) return
     if (isUtf8Text(bytes)) files.set(entry.path, bytes.toString('utf8'))
   })
-  return readFrozenContracts(operation.input.source.canonicalRoot, files, new Set(entries.map(entry => entry.path)))
+  const reviewed = operation.recordUnverifiedCoverage && elaboration ? new Set(unexecutedAcceptanceIds(elaboration)) : undefined
+  return readFrozenContracts(operation.input.source.canonicalRoot, files, new Set(entries.map(entry => entry.path)), reviewed && (id => reviewed.has(id)))
 }
 /** 完整结构上下文不授予新意图；真实Spec差量的未读前态只取候选基树。 */
 export async function checkCandidateContractIntent(operation: SyncOperation, candidate: CandidateRef, accepted: FrozenContracts, frozen: FrozenContracts, policy: GenerationContractPolicy): Promise<ContractFinding[]> {
@@ -1154,24 +1160,29 @@ export async function checkCandidateContractIntent(operation: SyncOperation, can
   const after = new Map([...frozen.files].filter(([path]) => !isSyncSpecPath(path) || paths.has(path)))
   return checkGenerationContractIntent(await readFrozenContracts(operation.input.source.canonicalRoot, before), await readFrozenContracts(operation.input.source.canonicalRoot, after), policy)
 }
-function acceptanceRuns(frozen: FrozenContracts, ready: SyncScope, plan: SyncCoordinatorPlan, retirement?: { before: FrozenContracts; ids: string[] }): AcceptanceRun[] {
+function acceptanceRuns(frozen: FrozenContracts, ready: SyncScope, plan: SyncCoordinatorPlan, retirement: { before: FrozenContracts; ids: string[] }, unexecutedContractIds?: readonly string[]): AcceptanceRun[] {
   const acIds = ready.contractIds.filter(id => frozen.graph.items.get(id)?.kind === 'AC')
-  const retiringAc = retirement?.ids.filter(id => retirement.before.graph.items.get(id)?.kind === 'AC') ?? []
-  if (!acIds.length && !retiringAc.length) fail('no_ready_acceptance', '没有可执行的ready或明确退役验收，不写半成品')
+  const retiringAc = retirement.ids.filter(id => retirement.before.graph.items.get(id)?.kind === 'AC')
+  if (!acIds.length && !retiringAc.length && !(unexecutedContractIds?.length && plan.mandatoryTests.length)) fail('no_ready_acceptance', '没有可执行的ready或明确退役验收，不写半成品')
   const runs = acIds.length ? planAcceptanceRuns(frozen.graph, acIds, plan.verifications) : []
-  if (retiringAc.length) for (const run of planAcceptanceRuns(retirement!.before.graph, retiringAc, plan.verifications)) { const existing = runs.find(item => item.verificationId === run.verificationId); if (existing) { existing.bindings.push(...run.bindings); existing.policy.expectedTestIds = unique([...existing.policy.expectedTestIds, ...run.policy.expectedTestIds]) } else runs.push(run) }
+  if (retiringAc.length) for (const run of planAcceptanceRuns(retirement.before.graph, retiringAc, plan.verifications)) { const existing = runs.find(item => item.verificationId === run.verificationId); if (existing) { existing.bindings.push(...run.bindings); existing.policy.expectedTestIds = unique([...existing.policy.expectedTestIds, ...run.policy.expectedTestIds]) } else runs.push(run) }
   for (const mandatory of plan.mandatoryTests) {
     let run = runs.find(item => item.verificationId === mandatory.verificationId)
     if (!run) {
       const registered = plan.verifications.find(item => item.definition.id === mandatory.verificationId)!
       const verify = frozen.graph.items.get(mandatory.verificationId)
-      if (verify?.kind !== 'VERIFY' || canonical({ id: verify.id, command: verify.command, cwd: verify.cwd, timeoutMs: verify.timeoutMs }) !== canonical(registered.definition)) fail('oracle_verification', '独立测试政策未被真实候选准确登记')
+      if (verify ? verify.kind !== 'VERIFY' || canonical({ id: verify.id, command: verify.command, cwd: verify.cwd, timeoutMs: verify.timeoutMs }) !== canonical(registered.definition) : !unexecutedContractIds) fail('oracle_verification', '独立测试政策未被真实候选准确登记')
       run = { verificationId: mandatory.verificationId, bindings: [], policy: { ...registered.environment, argv: [...registered.definition.command], cwd: registered.definition.cwd, timeoutMs: registered.definition.timeoutMs, expectedTestIds: [] } }; runs.push(run)
     }
     if (!run.policy.expectedTestIds.includes(mandatory.testId)) run.policy.expectedTestIds.push(mandatory.testId)
   }
   for (const run of runs) run.policy.expectedTestIds.sort()
   return runs.sort((a, b) => a.verificationId.localeCompare(b.verificationId))
+}
+function unexecutedCandidateIds(operation: SyncOperation, frozen: FrozenContracts, ready: SyncScope): string[] | undefined {
+  if (!operation.recordUnverifiedCoverage) return undefined
+  const ids = new Set(ready.contractIds)
+  return unique(frozen.findings.flatMap(finding => finding.code === 'acceptance-not-executed' && finding.itemId && ids.has(finding.itemId) ? [finding.itemId] : []))
 }
 async function recoverResources(store: SyncStore, operation: SyncOperation, options: Pick<SyncCoordinatorOptions, 'recoveryOnly' | 'verificationDriver' | 'verificationTransport'> & { resourceRecoveryOnly?: true }, all: boolean): Promise<boolean> {
   const removedNative = store.listAttempts(operation.id).filter(attempt => all || attempt.id !== operation.currentAttemptId).flatMap(attempt =>
@@ -1225,7 +1236,7 @@ export async function recoverSyncOperationResources(store: SyncStore, operationI
 async function verificationRetrySource(store: SyncStore, operation: SyncOperation, view: InputView, renew: () => Promise<void>): Promise<{ operation: SyncOperation; attempt: SyncAttempt; generation: SavedGeneration; elaboration: SavedElaboration; analysis: CodeBehaviorEvidence; partitions: SyncPartitionPlan } | null> {
   if (!operation.retryOf) return null
   let owner = store.readOperation(operation.retryOf)
-  if (syncModel(owner) !== syncModel(operation)) return null
+  if (syncModel(owner) !== syncModel(operation) || owner.recordUnverifiedCoverage !== operation.recordUnverifiedCoverage) return null
   let ancestor = owner, first = ancestor.currentAttemptId ? store.readAttempt(ancestor.currentAttemptId) : null
   const searched = new Set<string>()
   while (ancestor.retryOf && (!first?.candidate || ancestor.callsUsed === 0 && first.dispatchPlans.length === 0)) {
@@ -1235,7 +1246,7 @@ async function verificationRetrySource(store: SyncStore, operation: SyncOperatio
     ancestor = store.readOperation(ancestor.retryOf)
     first = ancestor.currentAttemptId ? store.readAttempt(ancestor.currentAttemptId) : null
   }
-  if (syncModel(ancestor) !== syncModel(operation)) return null
+  if (syncModel(ancestor) !== syncModel(operation) || ancestor.recordUnverifiedCoverage !== operation.recordUnverifiedCoverage) return null
   if (first?.failure?.code !== 'verification_unsupported') return null
   function reject(message: string): never { return fail('candidate_retry_binding', message) }
   const candidate = first.candidate
@@ -1244,6 +1255,7 @@ async function verificationRetrySource(store: SyncStore, operation: SyncOperatio
   for (;;) {
     if (seen.has(owner.id)) reject('正式续验来源链存在循环')
     seen.add(owner.id)
+    if (owner.recordUnverifiedCoverage !== operation.recordUnverifiedCoverage) reject('正式候选续验必须保持原未执行覆盖选择')
     const prior = owner.currentAttemptId ? store.readAttempt(owner.currentAttemptId) : null
     const eligibility = store.readRetryEligibility(owner.id)
     const superseded = seen.size > 1 && owner.phase === 'superseded' && prior?.status === 'superseded'
@@ -1334,7 +1346,8 @@ async function verificationRetrySource(store: SyncStore, operation: SyncOperatio
     if (verifiedCarriers.length) {
       const historical = new Set([...(owner.previousBaselinePair?.retiredIds ?? []), ...(owner.baselineSelection ? selectedRetiredIds(store.readBusinessBaselineSelection(owner.id)!) : [])])
       const before = await readFrozenContracts(owner.input.source.canonicalRoot, priorDeliveryFiles({ ...owner, baselineSelection: store.readBusinessBaselineSelection(owner.id) }, view, [...policy.readPaths, ...owner.scope.paths], policy))
-      const runs = acceptanceRuns(await candidateContext(owner, candidate), owner.readyScope, policy, { before, ids: p1.retiredIds.filter(id => !historical.has(id)) })
+      const frozen = await candidateContext(owner, candidate, p1)
+      const runs = acceptanceRuns(frozen, owner.readyScope, policy, { before, ids: p1.retiredIds.filter(id => !historical.has(id)) }, unexecutedCandidateIds(owner, frozen, owner.readyScope))
       for (const carrier of verifiedCarriers) {
         await renew()
         const { operation: source, attempt } = carrier, commonDir = source.input.source.commonDir
@@ -1411,7 +1424,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
     if (view.readSetDigest !== operation.readSetDigest) fail('readset_changed', '当前完整读取上下文已改变')
     const now = store.readOperation(operation.id), attempt = store.readAttempt(fence!.attemptId)
     if (now.control !== 'run' || physicallyPaused() || now.currentAttemptId !== attempt.id || attempt.expiresAtMs <= Date.now() || syncDeadlineExpired(now.deadlineAtMs) || signal.aborted) fail('controlled', '交付门禁已停止或过期')
-    return writeEvidence(operation.input.source.commonDir, { version: 1, layer: 'V4', inputId: snapshot.id, source: snapshot.source, policyDigest: now.policyDigest, readSetDigest: view.readSetDigest, checkedAtMs: Date.now() })
+    return writeEvidence(operation.input.source.commonDir, { version: 1, layer: 'V4', inputId: snapshot.id, source: snapshot.source, policyDigest: now.policyDigest, readSetDigest: view.readSetDigest, ...(now.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), checkedAtMs: Date.now() })
   }
   const beforeApply = async (): Promise<void> => {
     try { await v4() }
@@ -1443,8 +1456,9 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
     if (attempt.publicationBase) await acquirePublication()
     if (!attempt.candidate) store.freezeCandidate(fence!, candidate)
     else if (canonical(attempt.candidate) !== canonical(candidate)) fail('candidate_binding', '已有候选不能替换')
-    const frozenCandidate = await candidateContext(operation, candidate)
-    const runs = acceptanceRuns(frozenCandidate, ready, options.plan, { before: retirementBefore, ids: retiredIds })
+    const frozenCandidate = await candidateContext(operation, candidate, elaboration)
+    const unexecutedContractIds = unexecutedCandidateIds(operation, frozenCandidate, ready)
+    const runs = acceptanceRuns(frozenCandidate, ready, options.plan, { before: retirementBefore, ids: retiredIds }, unexecutedContractIds)
     const candidateExportPath = join(options.artifactRoot, `export-${attempt.id}`), scratch = join(options.artifactRoot, `scratch-${attempt.id}`)
     let exported = stage<{ path: string; digest: string; exclusionBlob: BlobRef }>(store, operation, store.readAttempt(attempt.id), 'export')
     if (!exported) {
@@ -1482,7 +1496,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
     }
     const v4Ref = await v4(), v1Ref = writeEvidence(operation.input.source.commonDir, { candidateDigest: candidate.digest, findings: generated.validationFindings, candidateValidated: generated.candidateValidated }), v2Ref = writeEvidence(operation.input.source.commonDir, { candidateDigest: candidate.digest, review: generated.review, traces: generated.traces, ...(generated.partitionEvidence ? { partitionEvidence: generated.partitionEvidence, fileWriterPlanRef: generated.fileWriterPlanRef, partitionPlanDigest: partitions?.digest, partitionCoverage: generated.partitionEvidence.filter(item => !item.partitionId.startsWith('edge:')).map(item => item.partitionId), dependencyCoverage: partitions?.dependencies.filter(edge => generated.partitionEvidence?.some(item => item.partitionId === `edge:${edge.from}:${edge.to}`)) } : {}) }), v3Refs = v3Results.map(result => writeEvidence(operation.input.source.commonDir, result))
     const bindings = { inputId: operation.input.id, candidateDigest: candidate.digest, policyDigest: operation.policyDigest, readSetDigest: operation.readSetDigest, ...(operation.baselineSelection ? { baselineSelectionDigest: operation.baselineSelection.digest } : {}), environmentDigest: contentHash(canonical(runs.map(run => run.policy))), contextDigest: contentHash(canonical({ readSetDigest: view.readSetDigest, baselineSelection: operation.baselineSelection ?? null, publicationBase: attempt.publicationBase ?? null, elaboration: p1Evidence, composed: view.composed, analysisRef: analysis?.ref ?? null, decisionRef: hasDecision ? operation.requestBlob : null })) }
-    const result: VerificationResultBlob = { schemaVersion: 1, coveredScope: ready, retiredIds: unique(elaboration.retiredIds), restoredIds: restorations.map(change => change.id).sort(), decisionRefs: [...options.plan.decisionRefs ?? [], ...(hasDecision && operation.requestBlob ? [operation.requestBlob] : [])], ...bindings, layers: [{ layer: 'V1', verdict: 'pass', evidenceRefs: [v1Ref] }, { layer: 'V2', verdict: 'pass', evidenceRefs: [v2Ref] }, { layer: 'V3', verdict: 'pass', evidenceRefs: v3Refs }, { layer: 'V4', verdict: 'pass', evidenceRefs: [v4Ref] }] }
+    const result: VerificationResultBlob = { schemaVersion: 1, coveredScope: ready, retiredIds: unique(elaboration.retiredIds), restoredIds: restorations.map(change => change.id).sort(), decisionRefs: [...options.plan.decisionRefs ?? [], ...(hasDecision && operation.requestBlob ? [operation.requestBlob] : [])], ...bindings, ...(unexecutedContractIds ? { unexecutedContractIds } : {}), layers: [{ layer: 'V1', verdict: 'pass', evidenceRefs: [v1Ref] }, { layer: 'V2', verdict: 'pass', evidenceRefs: [v2Ref] }, { layer: 'V3', verdict: 'pass', evidenceRefs: v3Refs }, { layer: 'V4', verdict: 'pass', evidenceRefs: [v4Ref] }] }
     store.recordVerification(fence!, { ...bindings, passed: true, coveredScope: ready, evidenceRefs: [p1Evidence, v1Ref, v2Ref, ...v3Refs, v4Ref], resultBlob: writeEvidence(operation.input.source.commonDir, result) })
     const delivered = await deliver(fence!)
     return { status: delivered.operation.phase, ...delivered }
@@ -1620,7 +1634,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         for (const change of elaboration.nodeChanges ?? []) if (change.action === 'retire' || change.from.path !== change.to.path) files.delete(change.from.path)
         for (const change of elaboration.changes) files.set(change.path, change.source)
         const accepted = await readFrozenContracts(operation.input.source.canonicalRoot, files), candidate = generation.candidate!
-        const frozen = await candidateContext(operation, candidate)
+        const frozen = await candidateContext(operation, candidate, elaboration)
         const findings = [...frozen.findings, ...await checkCandidateContractIntent(operation, candidate, accepted, frozen, { newNodeRawSources: new Map([...(options.plan.newNodeRawSources ?? []), ...analysis.analysis.newNodes].map(item => [item.path, item.rawSource])), verifications: options.plan.verifications.map(item => item.definition) })]
         for (const oracle of options.plan.mandatoryTests) if (frozen.files.get(oracle.testPath) !== view.files.get(oracle.testPath)) fail('candidate_retry_binding', '续验候选改变原独立oracle')
         if (findings.some(finding => finding.severity === 'error')) fail('candidate_retry_binding', '原冻结候选未通过本次机械V1', [writeEvidence(operation.input.source.commonDir, findings)])
@@ -2611,7 +2625,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           targets = targets.map(target => { const source = priorFiles.get(target.path) ?? target.source; return { ...target, source, sourceDigest: source === null ? null : contentHash(source) } })
           refinementFiles = new Map(readTree(operation.input.source.commonDir, refinement.candidate.tree).filter(entry => within(entry.path, options.plan.readPaths) && entry.mode !== '120000').flatMap(entry => { const bytes = readObject(operation.input.source.commonDir, entry.oid); return isUtf8Text(bytes) ? [[entry.path, bytes.toString('utf8')] as [string, string]] : [] }))
         }
-        return { ...(draftProtocol ? { draftProtocol } : {}), ...(options.plan.agentWorkflow ? { worktree: stageWorktree(operation.input.source.commonDir, operation.input.headCommit, refinement?.candidate.tree ?? view.composed.tree) } : {}), root: operation.input.source.canonicalRoot, base: operation.input.headCommit, requestKey: `sync:${attempt!.id}:elaborate`, intent: { nodeId: effectiveIntentNodeId, rawSource }, targets, context: view.frozen.nodes.filter(node => !targets.some(target => target.path === node.path) && !moved.some(change => change.to.path === node.path)).map(node => ({ nodeId: node.id, path: node.path, source: view.files.get(node.path)! })), files: refinementFiles, facts: behaviorFacts, analysis, decisionAuthorities: analysis?.analysis.decisionAuthorities ?? options.plan.decisionAuthorities,  ...(refinement ? { refinement: { candidateDigest: refinement.candidateDigest, diagnostics: refinement.diagnostics } } : {}), mode: preserveBusiness ? 'preserve_business' : 'reelaborate', nodeChanges, verifications: options.plan.verifications.map(item => item.definition), implementationWritePaths: options.plan.version === 'sync-coordinator-v2' && options.plan.direction === 'code_to_spec' ? [] : unique(options.plan.writePaths), readonlyTestPaths: unique(options.plan.mandatoryTests.map(test => test.testPath)), authorizedChanges: behaviorAuthorization, historyInput: operation.input, retiredIds: unique([...(options.plan.retiredIds ?? []), ...historicalRetiredIds]), maxRepairs: 0, maxCalls: 2, totalTimeoutMs: operation.deadlineAtMs === null ? null : operation.deadlineAtMs - Date.now(), timeoutMs: callTimeoutMs, signal, model, effort: 'high' as const }
+        return { ...(draftProtocol ? { draftProtocol } : {}), ...(operation.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), ...(options.plan.agentWorkflow ? { worktree: stageWorktree(operation.input.source.commonDir, operation.input.headCommit, refinement?.candidate.tree ?? view.composed.tree) } : {}), root: operation.input.source.canonicalRoot, base: operation.input.headCommit, requestKey: `sync:${attempt!.id}:elaborate`, intent: { nodeId: effectiveIntentNodeId, rawSource }, targets, context: view.frozen.nodes.filter(node => !targets.some(target => target.path === node.path) && !moved.some(change => change.to.path === node.path)).map(node => ({ nodeId: node.id, path: node.path, source: view.files.get(node.path)! })), files: refinementFiles, facts: behaviorFacts, analysis, decisionAuthorities: analysis?.analysis.decisionAuthorities ?? options.plan.decisionAuthorities,  ...(refinement ? { refinement: { candidateDigest: refinement.candidateDigest, diagnostics: refinement.diagnostics } } : {}), mode: preserveBusiness ? 'preserve_business' : 'reelaborate', nodeChanges, verifications: options.plan.verifications.map(item => item.definition), implementationWritePaths: options.plan.version === 'sync-coordinator-v2' && options.plan.direction === 'code_to_spec' ? [] : unique(options.plan.writePaths), readonlyTestPaths: unique(options.plan.mandatoryTests.map(test => test.testPath)), authorizedChanges: behaviorAuthorization, historyInput: operation.input, retiredIds: unique([...(options.plan.retiredIds ?? []), ...historicalRetiredIds]), maxRepairs: 0, maxCalls: 2, totalTimeoutMs: operation.deadlineAtMs === null ? null : operation.deadlineAtMs - Date.now(), timeoutMs: callTimeoutMs, signal, model, effort: 'high' as const }
       }
       let cacheDraft: ElaborationDraft | undefined
       const reusableElaborationCache = (cached: SavedElaboration, tagged: boolean): boolean => {
@@ -2719,7 +2733,8 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       const implementationDiagnostics = elaboration.deferredImplementationFindings.filter(item => item.code === 'implementation-review').map(item => ({ code: item.code, message: JSON.stringify(item) }))
       if (implementationDiagnostics.length) repairContext = { previousOutput: repairContext?.previousOutput ?? null, diagnostics: [...(repairContext?.diagnostics ?? []), ...implementationDiagnostics] }
       const blockedReason = effectiveFindings.some(finding => finding.kind === 'conflict') || elaboration.status === 'conflict' ? 'conflicted' : elaboration.status === 'needs_input' || blocked.contractIds.length || blocked.flowIds.length ? 'needs_input' : null
-      if (!ready.contractIds.some(id => accepted.graph.items.get(id)?.kind === 'AC' || retiredIds.includes(id) && retirementBefore.graph.items.get(id)?.kind === 'AC')) {
+      const unexecutedIds = operation.recordUnverifiedCoverage ? new Set(unexecutedAcceptanceIds(elaboration)) : undefined
+      if (!ready.contractIds.some(id => unexecutedIds?.has(id) || accepted.graph.items.get(id)?.kind === 'AC' || retiredIds.includes(id) && retirementBefore.graph.items.get(id)?.kind === 'AC')) {
         const issue = failure('no_ready_acceptance', '业务缺口阻塞全部可执行验收，保留细化证据而不写半成品', blockedReason === 'conflicted' ? 'conflict' : 'missing_input', [p1Evidence])
         store.recordFailure(fence, issue); return current(undefined, issue)
       }
@@ -2749,7 +2764,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
             priorContext.push({ ...context, entries, files, objects })
           }
         }
-        const generationInput: import('./generation-types.js').GenerationInput = { ...(options.plan.agentWorkflow ? { nativeWorktree: true } : {}), root: operation.input.source.canonicalRoot, requestKey: `sync:${attempt.id}:generation`, snapshot: operation.input, composed: view.composed, manifest: view.manifest, files: view.files, contracts: accepted.contracts, elaboratedSpecs: elaboration.changes.map(change => ({ path: change.path, source: change.source })), readyIds: [...ready.contractIds, ...ready.flowIds].filter(id => !restoredResourceIds.includes(id)), blockedIds: [...blocked.contractIds, ...blocked.flowIds], retiredIds, ...(partitions ? { priorContext, retiredOwners: retiredIds.flatMap(id => { const item = retirementBefore.graph.items.get(id); return item ? [{ id, path: item.path }] : [] }) } : {}), intent: { nodeId: options.plan.intentNodeId, rawSource: (accepted.nodes.find(node => node.id === options.plan.intentNodeId) ?? retirementBefore.nodes.find(node => node.id === options.plan.intentNodeId))!.rawSource! }, facts: behaviorFacts, analysis, nodeChanges: elaboration.nodeChanges ?? nodeChanges, direction: decision && decision.decision.choice !== 'adopt_behavior' ? 'repair_to_intent' : preserveBusiness ? 'preserve_business' : analysis?.analysis.authorChanges?.length && !decision ? 'repair_to_intent' : analysis ? 'preserve_observed_behavior' : undefined, existingAcceptance: retirementBefore.contracts.flatMap(contract => contract.items.filter(item => item.kind === 'AC')), mandatoryTests: options.plan.mandatoryTests, verifications: options.plan.verifications.map(item => item.definition), repairContext, allowedScope: ready, policy: { version: options.plan.version, digest: operation.policyDigest }, timeoutMs: callTimeoutMs, signal, model, effort: 'high' as const }
+        const generationInput: import('./generation-types.js').GenerationInput = { ...(options.plan.agentWorkflow ? { nativeWorktree: true } : {}), ...(operation.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), root: operation.input.source.canonicalRoot, requestKey: `sync:${attempt.id}:generation`, snapshot: operation.input, composed: view.composed, manifest: view.manifest, files: view.files, contracts: accepted.contracts, elaboratedSpecs: elaboration.changes.map(change => ({ path: change.path, source: change.source })), readyIds: [...ready.contractIds, ...ready.flowIds].filter(id => !restoredResourceIds.includes(id)), blockedIds: [...blocked.contractIds, ...blocked.flowIds], retiredIds, ...(partitions ? { priorContext, retiredOwners: retiredIds.flatMap(id => { const item = retirementBefore.graph.items.get(id); return item ? [{ id, path: item.path }] : [] }) } : {}), intent: { nodeId: options.plan.intentNodeId, rawSource: (accepted.nodes.find(node => node.id === options.plan.intentNodeId) ?? retirementBefore.nodes.find(node => node.id === options.plan.intentNodeId))!.rawSource! }, facts: behaviorFacts, analysis, nodeChanges: elaboration.nodeChanges ?? nodeChanges, direction: decision && decision.decision.choice !== 'adopt_behavior' ? 'repair_to_intent' : preserveBusiness ? 'preserve_business' : analysis?.analysis.authorChanges?.length && !decision ? 'repair_to_intent' : analysis ? 'preserve_observed_behavior' : undefined, existingAcceptance: retirementBefore.contracts.flatMap(contract => contract.items.filter(item => item.kind === 'AC')), mandatoryTests: options.plan.mandatoryTests, verifications: options.plan.verifications.map(item => item.definition), repairContext, allowedScope: ready, policy: { version: options.plan.version, digest: operation.policyDigest }, timeoutMs: callTimeoutMs, signal, model, effort: 'high' as const }
         if (partitions && options.plan.version === 'sync-coordinator-v2') {
           const { requiredKeys, planningIds } = implementationGenerationDispatch(generationInput, partitions, options.plan.direction === 'code_to_spec')
           const dispatched = new Set(store.readAttempt(attempt.id).dispatchPlans.map(dispatch => dispatch.key))
@@ -2806,7 +2821,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
             }
             await yieldToControl(); store.renewLease(fence!, leaseMs)
           }
-          const frozen = await candidateContext(operation, candidate)
+          const frozen = await candidateContext(operation, candidate, elaboration)
           const inheritedGapFindings = new Set<string>()
           if (elaboration.partitionSeal?.passed) {
             const commonDir = operation.input.source.commonDir, base = readTree(commonDir, candidate.baseTree), entries = verifyCandidate(commonDir, candidate)
