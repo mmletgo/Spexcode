@@ -78,11 +78,15 @@ function assertPlan(plan: NativePlan, root: string, execution: CursorStructuredE
     throw stale('Cursor original worktree, prompt or policy binding differs')
 }
 
-function assertLaunch(plan: NativePlan, launch: NativeLaunch, native: CursorNativeState): void {
-  if (!Number.isSafeInteger(launch?.pid) || launch.pid <= 1 || launch.pid !== native.pid
-    || launch.receiptFile !== join(plan.root, 'process.json') || launch.receiptFile !== native.receiptFile
+function assertRawLaunch(plan: NativePlan, launch: NativeLaunch): void {
+  if (!Number.isSafeInteger(launch?.pid) || launch.pid <= 1 || launch.receiptFile !== join(plan.root, 'process.json')
     || launch.planDigest !== digest(plan) || launch.receiptDigest !== sha256(readEvidence(plan.root, 'process.json')))
     throw stale('Cursor original detached launch or receipt differs')
+}
+
+function assertLaunch(plan: NativePlan, launch: NativeLaunch, native: CursorNativeState): void {
+  assertRawLaunch(plan, launch)
+  if (launch.pid !== native?.pid || launch.receiptFile !== native.receiptFile) throw stale('Cursor original detached launch or receipt differs')
 }
 
 function readRequest(plan: NativePlan, execution: CursorStructuredExecution): NativeRequest {
@@ -164,20 +168,26 @@ function signalOwnedGroup(plan: OwnedLaunch): boolean {
   return true
 }
 
+function hasObservedLaunchLeader(plan: OwnedLaunch): boolean {
+  const receipt = read<{ startToken: string }>(plan.root, 'process.json')
+  const owned = read<Array<{ pid: number; startToken: string }>>(plan.root, 'owned-processes.json')
+  return Array.isArray(owned) && owned.some(identity => identity?.pid === plan.pid && identity.startToken === receipt.startToken.replace(/\s+/g, ' '))
+}
+
 async function waitForStop(plan: OwnedLaunch, deadline: number, terminate: boolean): Promise<boolean> {
   const receiptMatches = (): boolean => sha256(readEvidence(plan.root, 'process.json')) === plan.receiptDigest
   try {
-    if (terminate) {
-      if (!receiptMatches()) return false
-      const receipt = read<{ startToken: string }>(plan.root, 'process.json')
-      const owned = read<Array<{ pid: number; startToken: string }>>(plan.root, 'owned-processes.json')
-      if (!Array.isArray(owned) || !owned.some(identity => identity?.pid === plan.pid && identity.startToken === receipt.startToken.replace(/\s+/g, ' '))) return false
-    }
+    if (terminate && (!receiptMatches() || !hasObservedLaunchLeader(plan))) return false
     return await waitForNativeWorktreeProcessesStopped(plan, deadline, terminate, receiptMatches)
   } catch (error) {
     if (!(error instanceof StructuredSessionError && ['cancellation_pending', 'stale_result'].includes(error.code))) throw error
   }
   return false
+}
+
+async function waitForGatedStop(plan: OwnedLaunch, deadline: number): Promise<boolean> {
+  return Date.now() < deadline && detachedRuntimeIsGone(plan.pid, plan.receiptFile)
+    && hasObservedLaunchLeader(plan) && await waitForStop(plan, deadline, false)
 }
 
 const activeInterrupts = new Map<string, () => void>()
@@ -193,6 +203,13 @@ export async function stopCursorStructuredTurn(execution: CursorStructuredExecut
     assertPlan(plan, native.root, execution)
     if (noLaunch && !existsSync(join(native.root, 'launch.json'))) return notStarted
     const launch = read<NativeLaunch>(native.root, 'launch.json')
+    const unpublished = execution.turnStartRequested === true
+      && [native.pid, native.receiptFile, native.sessionId, native.requestId, execution.threadId, execution.turnId].every(value => value === undefined)
+      && !['request.json', 'close.json', 'result.json', 'settlement.json', 'cancel-ack.json'].some(name => existsSync(join(native.root, name)))
+    if (unpublished) {
+      assertRawLaunch(plan, launch)
+      return await waitForGatedStop({ ...plan, ...launch }, deadline) ? { nativeStopped: true, acknowledged: false, nativeStatus: 'stopped' } : unproven
+    }
     assertLaunch(plan, launch, native)
     const owned = { ...plan, ...launch }, launchDigest = digest(launch)
     const live = !detachedRuntimeIsGone(launch.pid, launch.receiptFile)
@@ -374,7 +391,7 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
   const child = spawn('/bin/sh', ['-c', 'IFS= read -r ready <&3 && [ "$ready" = start ] || exit 1; exec 3<&-; exec "$@"', 'spex-cursor-launch', launch.command, ...launch.args, ...args], { cwd: worktreePath, env, detached: true, stdio: ['pipe', 'pipe', 'ignore', 'pipe'] })
   const stdin = child.stdin!, stdout = child.stdout!, gate = child.stdio[3] as Writable
   const closed = new Promise<Exit>(resolveExit => child.once('close', (code, signal) => resolveExit({ code, signal })))
-  let owned: OwnedLaunch | undefined, boundRequest: NativeRequest | undefined
+  let gatedLaunch: OwnedLaunch | undefined, owned: OwnedLaunch | undefined, boundRequest: NativeRequest | undefined
   let normalClose: NativeClose | undefined, closeTimer: ReturnType<typeof setTimeout> | undefined
   let terminalSeen = false, cancelSent = false, interrupted = false, timedOut = false, stopped = false
   let failure: unknown, timeoutFailure: unknown, deadline: number | undefined, expire!: () => void
@@ -459,6 +476,7 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
     const binding = { planDigest: digest(plan), pid: child.pid, receiptFile, receiptDigest: sha256(readEvidence(root, 'process.json')) }
     writeEvidence(root, 'launch.json', binding)
     const launched = { ...plan, ...binding }
+    gatedLaunch = launched
     await sampleNativeWorktreeProcesses(launched)
     owned = launched
     await callbacks.onNative({ ...native, pid: child.pid, receiptFile })
@@ -496,9 +514,15 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
       if (!owned) gate.destroy()
       shutdown()
       const exit = await Promise.race([closed, expiry])
-      stopped = !!exit && !!owned && await waitForStop(owned, deadline!, true)
+      if (exit && owned) stopped = await waitForStop(owned, deadline!, true)
+      else if (exit && gatedLaunch) stopped = await waitForGatedStop(gatedLaunch, deadline!)
     }
     if (!stopped) throw Object.assign(pending('Cursor native stop remains unproven'), { cause: error })
+    if (!owned) {
+      if (interrupted || callbacks.signal?.aborted || existsSync(cancelPath))
+        throw Object.assign(cancelled(timedOut), timeoutFailure === undefined ? {} : { cause: timeoutFailure })
+      throw Object.assign(failed('Cursor gated launch process observation failed'), { cause: error })
+    }
     throw error
   } finally {
     clearTimeout(timer); clearTimeout(stopTimer); clearTimeout(forceTimer); clearTimeout(closeTimer); clearInterval(census)

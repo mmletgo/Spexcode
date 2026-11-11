@@ -2,7 +2,7 @@ import test, { type TestContext } from 'node:test'
 import assert from 'node:assert/strict'
 import childProcess, { execFileSync, type SpawnOptions } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
@@ -187,11 +187,11 @@ async function until(check: () => boolean): Promise<void> {
 type Probe = { script: string; args?: string[] }
 const failingProbe: Probe = { script: 'exit 2' }
 
-function censusProbes(t: TestContext, f: ReturnType<typeof fixture>, script: (ordinal: number) => Probe | undefined) {
+function censusProbes(t: TestContext, f: ReturnType<typeof fixture>, script: (ordinal: number) => Probe | undefined, since = f.started) {
   const originalSpawn = childProcess.spawn
   let count = 0
   t.mock.method(childProcess, 'spawn', (file: string, args: string[], options: SpawnOptions) => {
-    const replacement = file === '/bin/ps' && existsSync(f.started) ? script(++count) : undefined
+    const replacement = file === '/bin/ps' && existsSync(since) ? script(++count) : undefined
     return replacement === undefined ? originalSpawn(file, args, options)
       : originalSpawn('/bin/sh', ['-c', replacement.script, 'cursor-fixture-probe', ...(replacement.args ?? [])], options)
   })
@@ -199,6 +199,46 @@ function censusProbes(t: TestContext, f: ReturnType<typeof fixture>, script: (or
   t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports() })
   return () => count
 }
+
+test('Cursor settles a proven stopped gate even when the canonical launch binding was never published', { timeout: 10_000 }, async t => {
+  const f = fixture(t, 'read'), launchFile = join(f.sessionRoot, 'launch.json'), release = join(f.sessionRoot, 'fixture-probe-release')
+  const heldFailure = { script: 'while [ ! -f "$1" ]; do /bin/sleep .025; done; exit 2', args: [release] }
+  const probes = censusProbes(t, f, ordinal => ordinal === 2 ? heldFailure : undefined, launchFile)
+  let reserved: CursorStructuredExecution | undefined
+  const callbacks = { ...f.callbacks, onTurnStarting: async () => { await f.callbacks.onTurnStarting!(); reserved = f.state() } }
+  const flight = f.run(f.state(), callbacks).then(result => ({ result }), error => ({ error }))
+  let originalLaunch: string, pid: number
+  try {
+    await until(() => probes() >= 2)
+    assert(reserved && !reserved.cursorNative?.pid && reserved.turnStartRequested)
+    originalLaunch = readFileSync(launchFile, 'utf8')
+    pid = (JSON.parse(originalLaunch) as { pid: number }).pid
+    assert.equal((await stopCursorStructuredTurn({ ...reserved, state: 'cancelling' }, 500)).nativeStopped, false)
+    assert.notEqual(processStartToken(pid), null, 'unpublished raw binding must not authorize signaling a live process')
+  } finally { writeFileSync(release, ''); await flight }
+  const outcome = await flight
+  assert('error' in outcome && outcome.error instanceof StructuredSessionError)
+  assert.equal(existsSync(f.started), false)
+  assert.equal(existsSync(join(f.sessionRoot, 'request.json')), false)
+  assert.equal(processStartToken(pid), null)
+  const cold = { ...reserved!, state: 'cancelling' as const }
+  chmodSync(launchFile, 0o600)
+  writeFileSync(launchFile, JSON.stringify({ ...JSON.parse(originalLaunch), receiptDigest: '0'.repeat(64) }))
+  assert.equal((await stopCursorStructuredTurn(cold)).nativeStopped, false)
+  writeFileSync(launchFile, originalLaunch)
+  chmodSync(launchFile, 0o400)
+  const ownership = join(f.sessionRoot, 'owned-processes.json'), observedLeader = readFileSync(ownership)
+  writeFileSync(ownership, '[]')
+  assert.equal((await stopCursorStructuredTurn(cold)).nativeStopped, false)
+  writeFileSync(ownership, observedLeader)
+  assert.equal((await stopCursorStructuredTurn({ ...cold, cursorNative: { ...cold.cursorNative!, pid } })).nativeStopped, false)
+  assert.deepEqual(await stopCursorStructuredTurn(cold), { nativeStopped: true, acknowledged: false, nativeStatus: 'stopped' })
+  assert.equal(cold.cursorNative?.pid, undefined)
+  const lastStop = readFileSync(join(f.sessionRoot, 'process-stop-observations.jsonl'), 'utf8').trimEnd().split('\n').at(-1)!
+  assert.equal((JSON.parse(lastStop) as { nativeStopped: boolean }).nativeStopped, true)
+  assert.equal(existsSync(join(f.sessionRoot, 'settlement.json')), false)
+  assert.equal(outcome.error.code, 'failed')
+})
 
 test('Cursor recovers one transient census fault without replacing the original live prompt', { timeout: 10_000 }, async t => {
   const f = fixture(t, 'periodic'), cancel = join(f.sessionRoot, 'fixture-cancel.json')
