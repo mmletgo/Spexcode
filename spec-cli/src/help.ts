@@ -458,7 +458,8 @@ run --origin initial --committed 仅从实际提交 HEAD 初始化，排除工�
 recover 只核对并结算已有资源或已开始的交付日志，保持原控制、输入及预算，不派发新模型任务。
 resources recover 是单次离线资源清理；必须明确原input-id，不启动API/队列，不回放journal，也不改变业务失败或取得resume/adopt权限。
 resume 继续原操作，--retry-of 建立关联新操作；三个入口各自有明确门禁。
-新业务操作的手动 --model 优先于项目 sync.model；显式 --retry-of 可用 --model 选择新模型。相同 request ID 仍固定原模型，换模型必须使用 --retry-of；省略模型时，同 request/retry 继承原选择，新操作再取项目配置或 gpt-6.1-sol。自动观察也使用项目值；旧操作缺模型仍固定 gpt-6.1-sol。模型固定于 operation 与独审请求，resume/recover 不换模型。
+手动 --model 优先于项目 sync.model。省略模型时，同 request/retry 继承原选择；新原生操作依次读取项目设置、宿主 CLI 功能组，缺省沿用 Claude Code。换模型使用 --retry-of --model。模型固定于 operation 和独审请求，resume/recover 沿用原选择。
+--model llm-manager 或 sync.model=llm-manager 在新原生操作准入时解析已登记的宿主 CLI 功能组。cursor:default 沿用本机 Cursor CLI 配置。
 --retry-of 显式重试可重试的失败操作，保留原正文意图并关联旧结果；不能同时传 --patch-file。
 只有显式重试建立新操作和新预算，普通重复请求继续归并。未结算资源或已变输入拒绝重试。
 show/status 展示真实失败、GAP、过期和交付工作树；workspace_synced 不代表原输入树已落地。

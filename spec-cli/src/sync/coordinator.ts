@@ -380,7 +380,8 @@ function settledElaborationReview(store: SyncStore, operation: SyncOperation, pr
   if (rejection) authenticateRejection(prior, key, failure, rejection, checkpoint)
   const transportMatches = rejection
     ? state.state === 'failed' && (request.model?.startsWith('zcode:') && record.harness === 'zcode' || request.model?.startsWith('claude:') && record.harness === 'claude'
-      || request.model?.startsWith('grok:') && record.harness === 'grok-structured' && state.grokNative?.sessionId === session.threadId && state.grokNative?.turnId === session.turnId)
+      || request.model?.startsWith('grok:') && record.harness === 'grok-structured' && state.grokNative?.sessionId === session.threadId && state.grokNative?.turnId === session.turnId
+      || request.model?.startsWith('cursor:') && record.harness === 'cursor-structured' && state.cursorNative?.sessionId === session.threadId && state.cursorNative?.requestId === session.turnId)
     : request.model?.startsWith('zcode:') && isZCodeEventsRpcTimeout(state) && record.harness === 'zcode' && state.zcodeNative?.sessionId === session.threadId && state.zcodeNative.turnId === session.turnId && !state.rejectedOutput
   const boundInput = ({ purpose, prompt, schema, worktree }: ElaborationSessionRequest): string => contentHash(JSON.stringify({ inputDigest: result.inputDigest, purpose, prompt, schema, worktree }))
   if (resource.attemptId !== prior.id || resource.generation !== prior.generation || plan.schemaVersion !== 1 || checkpoint.schemaVersion !== 1
@@ -502,6 +503,29 @@ function reviewPlanStage(store: SyncStore, operation: SyncOperation, attempt: Sy
 function partitionElaborationStage(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string, binding: NonNullable<ElaborationResult['partitionBinding']>, inputDigest: string): { result: SavedElaboration; resultRef: BlobRef } | null {
   const source = partitionStage<SavedElaboration>(store, operation, attempt, key)
   return source && source.result.inputDigest === inputDigest && canonical(source.result.partitionBinding) === canonical(binding) ? source : null
+}
+
+/** 跨正式重试的批准仍属于原模型、Git生成和独立只读审查。 */
+function authenticatedApprovedElaboration(store: SyncStore, owner: SyncOperation, prior: SyncAttempt, result: SavedElaboration): boolean {
+  const round = result.rounds.at(-1), review = round?.traces.find(trace => trace.purpose === 'elaboration_review')
+  if (!round?.draft || !round.candidate || !review || round.traces.length !== 2 || !hasApprovedElaborationReview(result) || round.review?.verdict !== 'accept'
+    || round.candidate.inputDigest !== result.inputDigest || round.candidateDigest !== contentHash(JSON.stringify(round.candidate)) || round.candidateDigest !== result.candidateDigest
+    || canonical(round.review) !== canonical({ ...(round.reviewOutput as object), inputDigest: result.inputDigest, candidateDigest: result.candidateDigest })
+    || ELABORATION_BOUNDARIES.some(boundary => !round.review!.checkedBoundaries.includes(boundary))) return false
+  const generation = elaborationGenerationSource(store, owner, prior, round)
+  const reviewed = store.listAttempts(owner.id).filter(attempt => attempt.number <= prior.number).find(attempt => attempt.dispatchPlans.some(dispatch => dispatch.purpose === review.purpose && canonical(dispatch.session) === canonical({ sessionId: review.sessionId, threadId: review.threadId, turnId: review.turnId })))
+  const dispatch = reviewed?.dispatchPlans.find(dispatch => dispatch.purpose === review.purpose && dispatch.session?.sessionId === review.sessionId)
+  const source = reviewed && dispatch ? authenticatedDraftResult(store, owner, reviewed, dispatch.key, review.purpose) : null
+  if (!generation?.request || !source?.request || !source.result || source.request.inputDigest !== review.inputDigest || source.result.resultDigest !== review.resultDigest || canonical(source.result.output) !== canonical(round.reviewOutput)
+    || round.traces.some(trace => trace.purpose === 'elaboration_generate' && (trace.sessionId === review.sessionId || trace.threadId === review.threadId))) return false
+  for (const request of [generation.request, source.request]) {
+    const expected = contentHash(JSON.stringify({ inputDigest: result.inputDigest, purpose: request.purpose, prompt: request.prompt, schema: request.schema, worktree: request.worktree }))
+    const origin = request.purpose === 'elaboration_generate' ? generation.attempt : reviewed!
+    if (request.model !== syncModel(owner) || request.root !== owner.input.source.canonicalRoot || request.frozenContext || !request.worktree || request.base !== request.worktree.baseCommit
+      || request.worktree.mode !== (request.purpose === 'elaboration_generate' ? 'edit' : 'read') || request.inputDigest !== expected
+      || !request.requestKey.startsWith(`sync:${origin.id}:elaborate:partition:${result.partitionBinding!.partitionId}:`)) return false
+  }
+  return true
 }
 
 /** 原source协议只沿同原件provenance读取，当前attempt的新tag不能给legacy补签。 */
@@ -2142,11 +2166,52 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         return null
       }
       let approvalAncestors: ReturnType<typeof retryDraftSources> | undefined
+      let elaborationApprovalSources: ReturnType<typeof retryDraftSources> | undefined
+      const settledApprovalOperations = new Map<string, boolean>()
+      const elaborationApprovalDiagnostics = new Map<string, Set<string>>()
       const approvalHistory = new Map<string, ReturnType<typeof readSyncCheckpoints>>()
       const approvalCheckpoints = (owner: SyncOperation, origin: SyncAttempt): ReturnType<typeof readSyncCheckpoints> => {
         const original = approvalHistory.get(origin.id) ?? readSyncCheckpoints(store, owner, origin)
         approvalHistory.set(origin.id, original)
         return original
+      }
+      const loadAcceptedRetryElaboration = (key: string, binding: NonNullable<ElaborationResult['partitionBinding']>, inputDigest: string, interfaceSeed: boolean): SavedElaboration | null => {
+        if (!operation.retryOf) return null
+        elaborationApprovalSources ??= retryDraftSources(store, operation, attempt!.number)
+        for (const { owner, prior } of elaborationApprovalSources) {
+          if (owner.id !== operation.id) {
+            if (!settledApprovalOperations.has(owner.id)) settledApprovalOperations.set(owner.id, settledApprovalSource(store, owner))
+            if (!settledApprovalOperations.get(owner.id)) return null
+          }
+          if (canonical(prior.composedInput) !== canonical(view.composed)) continue
+          const checkpoints = approvalCheckpoints(owner, prior), plan = partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan', undefined, checkpoints)
+          if (plan?.result.digest !== binding.planDigest || canonical(plan.result) !== canonical(partitions)) continue
+          if (stage<Refinement>(store, owner, prior, 'refinement', 'automatic', checkpoints) || stage<{ refinement?: Refinement }>(store, owner, prior, 'repair-input', 'automatic', checkpoints)?.refinement) return null
+          if (!elaborationApprovalDiagnostics.has(prior.id)) {
+            const pending = stage<ReadonlyRepairBinding>(store, owner, prior, 'repair-input', 'automatic', checkpoints)?.readonlyOwnerRepair
+            const review = prior.failure?.kind === 'repairable' ? readonlyRepairFromAttempt(store, owner, prior) : null
+            const affected = new Set([...(pending?.owners ?? []), ...(review?.owners ?? [])].map(owner => owner.partitionId))
+            const aggregate = partitionStage<SavedElaboration>(store, owner, prior, 'elaboration', undefined, checkpoints)?.result
+            if (aggregate?.failure?.code === 'partition_final_seal_failed' && aggregate.reviewPassed && aggregate.partitionSeal?.passed === false) {
+              const locals = new Map((aggregate.partitionEvidence ?? []).map(member => [member.partitionId, JSON.parse(readEvidence(operation.input.source.commonDir, member.resultRef).toString()) as SavedElaboration]))
+              for (const id of partitionSealRepairOwners(plan.result, aggregate, locals).keys()) affected.add(id)
+            }
+            elaborationApprovalDiagnostics.set(prior.id, affected)
+          }
+          if (elaborationApprovalDiagnostics.get(prior.id)!.has(binding.partitionId)) return null
+          const source = partitionStage<SavedElaboration>(store, owner, prior, key, undefined, checkpoints)
+          if (!source) continue
+          const result = source.result, round = result.rounds.at(-1)
+          if (!result.reviewPassed && (round?.candidate || round?.findings.some(finding => finding.severity === 'error') || result.readonlySpecRepair)) return null
+          if (owner.id === operation.id) continue
+          if (result.inputDigest !== inputDigest || canonical(result.partitionBinding) !== canonical(binding) || result.phase !== (interfaceSeed ? 'interface_seed' : undefined)
+            || ![interfaceSeed ? 'interface_seed' : 'complete', 'needs_input', 'conflict'].includes(result.status) || !authenticatedApprovedElaboration(store, owner, prior, result)) continue
+          assertMaterialFence()
+          saveStage(store, fence!, `${key}:provenance`, { fromOperationId: owner.id, fromAttemptId: prior.id, resultRef: source.resultRef })
+          partitionCheckpoints.save(key, result)
+          return result
+        }
+        return null
       }
       const partitionCheckpoints: PartitionCheckpoints = {
         load: <T>(key: string) => stage<T>(store, operation, store.readAttempt(attempt!.id), key),
@@ -2238,7 +2303,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
             partitionCheckpoints.save(key, source.result)
             return source.result
           }
-          return null
+          return loadAcceptedRetryElaboration(key, binding, inputDigest, false)
         },
         readonlyFactRepairSource: (key, repair) => {
           for (const origin of store.listAttempts(operation.id)) {
@@ -2289,7 +2354,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
             partitionCheckpoints.save(key, saved)
             return saved
           }
-          return null
+          return loadAcceptedRetryElaboration(key, binding, inputDigest, true)
         },
         loadElaborationDraftMaterial: (key, binding, schemaDigest, request) => loadElaborationDraftMaterial(key, binding, schemaDigest, request),
         loadElaborationDraft: (key, binding, schemaDigest) => loadElaborationDraft(key, binding, schemaDigest),

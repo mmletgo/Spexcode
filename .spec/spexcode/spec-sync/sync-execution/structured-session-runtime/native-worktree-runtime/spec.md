@@ -20,6 +20,8 @@ macOS 在登记新原生 worktree 进程的启动请求之前解析该工作树�
 
 Native spawn 前保存同 UID 的 PID/start/PPID 基线，只读取进程元数据。receipt 的原生进程组及实际观察到的历史 owned 后代仍须按精确身份停止。新生 PPID1 或失去父链不等于任务归属；只有唯一 worktree/runtime/私有 tmp 的 cwd 等正向任务域证据才登记关联孤儿。关联证据按 PID/start 粘性保存，后续 chdir 不撤销，直到该精确身份消失；cwd 关联本身不授予 kill 权。无正向关联的同 UID 进程仅作 unattributed 诊断，不占任务容量，不按系统服务名设白名单。此边界不声称证明首次观察前已 chdir 脱域的任意系统进程都与任务无关；普通自由读取、编辑与检查能力保持。
 
+Linux 新基线明确登记 `linux-proc-start-ticks-v1`。候选进程以同一 `/proc` 进程目录核对 UID、PPID 和启动 ticks，owned 身份、detached receipt 和停止核验使用同一启动标识。新登记进程根必须匹配原 detached receipt，历史 owned 父身份匹配时才继续登记其后代。历史 Linux `ps lstart` 基线及其记录保留原件，尚未确证的停止保持待结算。macOS 继续读取和写入原有基线格式。
+
 macOS按PID查询cwd时使用lsof -b，避开此查询不需要的stat/lstat/readlink；cwd仍取原libproc结果，候选UID与停止身份门保持，其他潜在阻塞继续受原期限和pending规则约束。
 
 进程列表与macOS cwd探针异步运行，单个探针固定10秒期限及1MiB合计输出上限，不能阻塞心跳、异步Git回调、创建期限或取消timer。一次公共观察默认也共享同一个10秒绝对截止，内部ps/cwd不各自重置。正式stop继续传递原控制窗口的绝对截止，排队等待也受该截止约束，探针取10秒与真实remaining的较小值；过期队列轮到后不再派发，等待后、Native信号与最终停止观察发布前重核，不迟到写stopped:true。stop只更新原owned采样，再在身份核验/信号后做一次新鲜cwd分类，不用旧pending代替停止证明。既有Native控制timer、租约和模型预算不变。探针使用本次创建的独立进程组；超时或输出溢出先返回cancellation_pending，仅向该自有探针组发一次SIGKILL，不等待close，不能据此签发Native停止收据。父close不代表内部helper消失；沿既有只读进程组absence判据，未证gone持续保在途债务且不再spawn，后续只读核实整组gone后才可重新观察，不补发信号。各root的采样、分类与停止串行，未完成观察和迟到回复不能覆盖粘性任务关联；失败不返回空集或释放Native容量。该探针组所有权不来自cwd，不扩Native杀权、持久字段或版本。

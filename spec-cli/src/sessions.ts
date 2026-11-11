@@ -2776,7 +2776,9 @@ async function prepareSession(prompt: string, parentage: CreateParentage, launch
         try {
           const lname = context.structuredExecution ? context.structuredExecution.policy === 'native-worktree-v1' ? 'structured-native-worktree' : 'structured-read-only' : launcher ?? defaultLauncher(mainRoot())
           chosen = context.structuredExecution
-            ? context.structuredExecution.policy === 'native-worktree-v1' && context.structuredExecution.model?.startsWith('grok:')
+            ? context.structuredExecution.policy === 'native-worktree-v1' && context.structuredExecution.model?.startsWith('cursor:')
+              ? { name: lname, harness: 'cursor-structured', cmd: 'cursor-agent', headless: true, configDir: null }
+              : context.structuredExecution.policy === 'native-worktree-v1' && context.structuredExecution.model?.startsWith('grok:')
               ? { name: lname, harness: 'grok-structured', cmd: 'grok', headless: true, configDir: null }
               : (context.structuredExecution.policy === 'zcode-frozen-read-only-v1' || context.structuredExecution.policy === 'native-worktree-v1' && context.structuredExecution.model?.startsWith('zcode:'))
               ? { name: lname, harness: 'zcode', cmd: 'zcode', headless: true, configDir: null }

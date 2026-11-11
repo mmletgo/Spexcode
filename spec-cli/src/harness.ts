@@ -1139,52 +1139,59 @@ export const opencodeHeadlessHarness: Harness = {
   interrupt: (rec) => interruptViaRendezvous(rec.session, 'opencode-headless', { settle: true }),
 }
 
-const structuredGrokOnly = (): never => { throw new Error('Grok Build is available through native worktree synchronization') }
+const structuredClis = [
+  { id: 'grok-structured', vendor: 'grok', command: 'grok', name: 'Grok', title: 'Grok Build', sessionFlag: '--session-id' },
+  { id: 'cursor-structured', vendor: 'cursor', command: 'cursor-agent', name: 'Cursor', title: 'Cursor CLI', sessionFlag: '--resume' },
+] as const
+const structuredOnly = (name: string): never => { throw new Error(`${name} is available through native worktree synchronization`) }
 
-const grokStructuredHarness: Harness = {
-  id: 'grok-structured',
-  dispatchId: 'grok-structured',
-  headless: true,
-  runtimeOwnership: 'leaf',
-  events: [],
-  ownsRendezvous: false,
-  paneTitleIsSelfSummary: false,
-  transcript: unsupportedTranscript('grok-structured'),
-  launchCmd: structuredGrokOnly,
-  baseCmd: (cmd = 'grok') => cmd,
-  sessionIdArg: (id) => `--session-id ${id}`,
-  sessionEnvVar: harnessIdentity('grok-structured').sessionEnvVar,
-  launchEnv: noLaunchEnv,
-  shimFile: structuredGrokOnly,
-  shimScope: 'tree',
-  worktreeHookAnchor: () => null,
-  contractFiles: () => [],
-  skillDir: () => null,
-  agentDir: () => null,
-  shim: structuredGrokOnly,
-  shimOwnership: 'exclusive',
-  writeTrust: () => [],
-  slashCommands: () => [],
-  liveness: sessionHomeLiveness,
-  exactNativeTargetId: (rec) => rec.harnessSessionId ?? null,
-  deliver: async () => ({ ok: false, error: 'Grok structured worktree requests are immutable' }),
-  cleanupRuntime: async () => {},
-  coldPreflight: async (rec) => {
-    const execution = (rec as typeof rec & { structuredExecution?: StructuredExecution }).structuredExecution
-    const stopped = execution?.state === 'completed' || execution?.cancellation?.nativeStopped === true
-    if (execution?.version !== 6 || execution.policy !== 'native-worktree-v1' || !execution.model?.startsWith('grok:') || !stopped)
-      return { ok: false, reason: 'exact Grok native execution has not settled' }
-    return { ok: true, alreadyCold: true }
-  },
-  clean: () => {},
-  removeTrust: () => {},
-  resumeArg: structuredGrokOnly,
+function structuredCliHarness(cli: typeof structuredClis[number]): Harness {
+  const unavailable = () => structuredOnly(cli.title)
+  return {
+    id: cli.id,
+    dispatchId: cli.id,
+    headless: true,
+    runtimeOwnership: 'leaf',
+    events: [],
+    ownsRendezvous: false,
+    paneTitleIsSelfSummary: false,
+    transcript: unsupportedTranscript(cli.id),
+    launchCmd: unavailable,
+    baseCmd: (cmd = cli.command) => cmd,
+    sessionIdArg: (id) => `${cli.sessionFlag} ${id}`,
+    sessionEnvVar: harnessIdentity(cli.id).sessionEnvVar,
+    launchEnv: noLaunchEnv,
+    shimFile: unavailable,
+    shimScope: 'tree',
+    worktreeHookAnchor: () => null,
+    contractFiles: () => [],
+    skillDir: () => null,
+    agentDir: () => null,
+    shim: unavailable,
+    shimOwnership: 'exclusive',
+    writeTrust: () => [],
+    slashCommands: () => [],
+    liveness: sessionHomeLiveness,
+    exactNativeTargetId: (rec) => rec.harnessSessionId ?? null,
+    deliver: async () => ({ ok: false, error: `${cli.name} structured worktree requests are immutable` }),
+    cleanupRuntime: async () => {},
+    coldPreflight: async (rec) => {
+      const execution = (rec as typeof rec & { structuredExecution?: StructuredExecution }).structuredExecution
+      const stopped = execution?.state === 'completed' || execution?.cancellation?.nativeStopped === true
+      if (execution?.version !== 6 || execution.policy !== 'native-worktree-v1' || !execution.model?.startsWith(`${cli.vendor}:`) || !stopped)
+        return { ok: false, reason: `exact ${cli.name} native execution has not settled` }
+      return { ok: true, alreadyCold: true }
+    },
+    clean: () => {},
+    removeTrust: () => {},
+    resumeArg: unavailable,
+  }
 }
 
 // Materialization iterates the harnesses with ordinary launch and delivery support.
 export const HARNESSES: readonly Harness[] = [claudeHarness, codexHarness, opencodeHarness, piHarness, zcodeHarness, claudeHeadlessHarness, opencodeHeadlessHarness, piHeadlessHarness, codexHeadlessHarness]
 
-export const RUNTIME_HARNESSES: readonly Harness[] = [...HARNESSES, grokStructuredHarness]
+export const RUNTIME_HARNESSES: readonly Harness[] = [...HARNESSES, ...structuredClis.map(structuredCliHarness)]
 
 // the legacy/default adapter for old records and config defaults. New launches derive harness from a launcher.
 export const defaultHarness: Harness = claudeHarness
@@ -1213,9 +1220,9 @@ export type Launcher = { name: string; harness: string; cmd: string; headless: b
 export type LauncherDefault = { default: string | null; error: string | null }
 
 function configuredLauncherHarness(id: string): Harness {
-  const harness = harnessById(id)
-  if (harness === grokStructuredHarness) return structuredGrokOnly()
-  return harness
+  const cli = structuredClis.find(candidate => candidate.id === id)
+  if (cli) return structuredOnly(cli.title)
+  return harnessById(id)
 }
 
 // the complete configured named launchers from .spec/spexcode.json, as a stable name-sorted list (for CLI/session

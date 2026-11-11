@@ -1,7 +1,8 @@
 import { spawn, execFileSync } from 'node:child_process'
 import { appendFileSync, existsSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from 'node:fs'
+import { open, readFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
-import { detachedRuntimeIsGone, hostProcessAdapter, processStartToken, type ProcessIdentity } from '@spexcode/spec-core'
+import { detachedRuntimeIsGone, hostProcessAdapter, parseProcStat, processStartToken, verifyDetachedRuntime, type ProcessIdentity } from '@spexcode/spec-core'
 import { StructuredSessionError } from './session-structured-policy.js'
 
 export type NativeWorktreeRequest = { baseCommit: string; tree: string; mode: 'read' | 'edit' }
@@ -60,6 +61,8 @@ export function nativeWorktreePrompt(prompt: string, seed: NativeWorktreeRequest
 export type NativeOwnedPlan = { root: string; pid?: number; receiptFile: string; workspace?: string; tmp?: string }
 
 type NativeProcessRow = ProcessIdentity & { ppid: number }
+const linuxProcessIdentityDomain = 'linux-proc-start-ticks-v1'
+type NativeProcessBaseline = NativeProcessRow[] | { identityDomain: typeof linuxProcessIdentityDomain; rows: NativeProcessRow[] }
 
 export const NATIVE_PROCESS_OBSERVATION_LIMIT_MS = 10_000
 export const NATIVE_PROCESS_OBSERVATION_PENDING = 'native worktree process observation remains unproven'
@@ -124,11 +127,46 @@ function nativeProcessOutput(plan: NativeOwnedPlan, command: string, args: strin
 async function nativeProcessCensus(plan: NativeOwnedPlan, deadline: number): Promise<NativeProcessRow[]> {
   const uid = process.getuid?.()
   if (uid === undefined) throw new StructuredSessionError('unsupported', 'native worktree requires a same-UID process census')
-  const output = await nativeProcessOutput(plan, '/bin/ps', ['-axo', 'uid=,pid=,ppid=,lstart='], deadline)
-  return output.split('\n').flatMap(line => {
-    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line)
-    return match && Number(match[1]) === uid ? [{ pid: Number(match[2]), ppid: Number(match[3]), startToken: match[4].replace(/\s+/g, ' ') }] : []
-  })
+  const linux = process.platform === 'linux'
+  const output = await nativeProcessOutput(plan, '/bin/ps', ['-axo', linux ? 'uid=,pid=' : 'uid=,pid=,ppid=,lstart='], deadline)
+  if (!linux) {
+    return output.split('\n').flatMap(line => {
+      const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line)
+      return match && Number(match[1]) === uid ? [{ pid: Number(match[2]), ppid: Number(match[3]), startToken: match[4].replace(/\s+/g, ' ') }] : []
+    })
+  }
+  const rows: NativeProcessRow[] = []
+  for (const line of output.split('\n')) {
+    const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line)
+    if (!match || Number(match[1]) !== uid) continue
+    assertObservationDeadline(deadline)
+    const pid = Number(match[2])
+    try {
+      // A directory handle keeps both reads on the same proc entry even if the numeric PID is reused.
+      const directory = await open(join('/proc', String(pid)), 'r')
+      try {
+        const path = join('/proc/self/fd', String(directory.fd))
+        const status = await readFile(join(path, 'status'), 'utf8')
+        const effectiveUid = /^Uid:[ \t]+\d+[ \t]+(\d+)/m.exec(status)?.[1]
+        if (effectiveUid === undefined) throw observationPending()
+        if (Number(effectiveUid) !== uid) continue
+        const { ppid, startToken } = parseProcStat(await readFile(join(path, 'stat'), 'utf8'))
+        rows.push({ pid, ppid, startToken })
+      } finally { await directory.close() }
+    } catch (error) {
+      if (!['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? ''))
+        throw Object.assign(observationPending(), { cause: error })
+    }
+  }
+  assertObservationDeadline(deadline)
+  return rows
+}
+
+function readProcessBaseline(root: string): NativeProcessRow[] {
+  const saved = JSON.parse(readFileSync(join(root, 'process-baseline.json'), 'utf8')) as NativeProcessBaseline | null
+  if (process.platform !== 'linux' && Array.isArray(saved)) return saved
+  if (process.platform === 'linux' && !Array.isArray(saved) && saved?.identityDomain === linuxProcessIdentityDomain && Array.isArray(saved.rows)) return saved.rows
+  throw observationPending()
 }
 
 /** spawn 前冻结同 UID 基线；运行中仅把实际观察到的 Native 后代记为已拥有。 */
@@ -144,22 +182,30 @@ async function sampleProcesses(plan: NativeOwnedPlan, deadline: number): Promise
   }
 }
 async function captureOwnedProcesses(plan: NativeOwnedPlan, deadline: number): Promise<void> {
+  if (plan.pid) readProcessBaseline(plan.root)
   const path = join(plan.root, 'owned-processes.json'), rows = await nativeProcessCensus(plan, deadline)
   assertObservationDeadline(deadline)
   if (!plan.pid) {
-    writeFileSync(join(plan.root, 'process-baseline.json'), JSON.stringify(rows), { mode: 0o400, flag: 'wx' })
+    const baseline: NativeProcessBaseline = process.platform === 'linux' ? { identityDomain: linuxProcessIdentityDomain, rows } : rows
+    writeFileSync(join(plan.root, 'process-baseline.json'), JSON.stringify(baseline), { mode: 0o400, flag: 'wx' })
     writeFileSync(path, '[]', { mode: 0o600 })
     return
   }
   const owned = new Map((existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) as ProcessIdentity[] : []).map(item => [item.pid, item]))
-  const queue = [plan.pid, ...owned.keys()], seen = new Set<number>()
+  const byPid = new Map(rows.map(row => [row.pid, row])), leader = byPid.get(plan.pid)
+  if (leader && !owned.has(plan.pid)) {
+    const verified = verifyDetachedRuntime(plan.pid, plan.receiptFile)
+    if (verified.ok && leader.startToken === verified.identity.startToken.replace(/\s+/g, ' '))
+      owned.set(leader.pid, { pid: leader.pid, startToken: leader.startToken })
+  }
+  const queue = [...owned.keys()], seen = new Set<number>()
   while (queue.length) {
     const pid = queue.shift()!
     if (seen.has(pid)) continue
     seen.add(pid)
-    const row = rows.find(item => item.pid === pid), previous = owned.get(pid)
-    if (previous && row && previous.startToken !== row.startToken) continue
-    if (row) owned.set(pid, { pid, startToken: row.startToken })
+    const row = byPid.get(pid), previous = owned.get(pid)
+    if (!row || previous && previous.startToken !== row.startToken) continue
+    owned.set(pid, { pid, startToken: row.startToken })
     queue.push(...rows.filter(item => item.ppid === pid).map(item => item.pid))
   }
   assertObservationDeadline(deadline)
@@ -194,9 +240,9 @@ export function classifyNativeWorktreeOrphans(plan: NativeOwnedPlan, deadline?: 
   return observeSerially(plan, limit => classifyOrphans(plan, limit), deadline)
 }
 async function classifyOrphans(plan: NativeOwnedPlan, deadline: number): Promise<NativeOrphanObservation> {
+  const baseline = new Map(readProcessBaseline(plan.root).map(row => [row.pid, row]))
   const rows = await nativeProcessCensus(plan, deadline), current = new Map(rows.map(row => [row.pid, row]))
   assertObservationDeadline(deadline)
-  const baseline = new Map((JSON.parse(readFileSync(join(plan.root, 'process-baseline.json'), 'utf8')) as NativeProcessRow[]).map(row => [row.pid, row]))
   const owned = JSON.parse(readFileSync(join(plan.root, 'owned-processes.json'), 'utf8')) as ProcessIdentity[]
   const relatedPath = join(plan.root, 'task-related-processes.json')
   const related = existsSync(relatedPath) ? JSON.parse(readFileSync(relatedPath, 'utf8')) as NativeTaskRelatedProcess[] : []

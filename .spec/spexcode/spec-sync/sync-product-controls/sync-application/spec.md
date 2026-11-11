@@ -123,6 +123,8 @@ revert 将精确历史恢复 Spec 作为可信目标，保原节点/业务 ID �
 
 新手动 run/verify operation 可显式选择模型以覆盖项目默认；省略模型时，同 request 的 prior 或显式 retry 的原选择优先于当前版本化配置 `sync.model`，无 prior/retry 才使用项目值或该计划的工作流默认值。自动观察、decide 与 revert 新operation采用相同判据；admission、固定运行描述与真实runner request保相同请求选择，本轮实际模型由CLI证据另行绑定。同request改选择拒绝，普通重复不能用配置变化重置预算；授权/configDigest/currentness门禁保持。
 
+新操作选择 `llm-manager` 时，在 [[sync-model-selection]] 规定的宿主选路成功后固定具体原生 CLI 模型。自动观察在确实准入时才选路。同 requestId 的重放直接使用原操作已固定的模型。
+
 Dashboard 的受控正文保存继续直接 submit，requestBlob 即时触发 spec→code，不等待 Git 提交。外部编辑器的 Spec/代码保存、原子替换与 git add 均不启动自动模型；自动观察只接受已提交 HEAD tree，首次显式 enable 可从既有 committed HEAD 发起 initial，同期未提交或未暂存的新编辑不混入。enable 仅授权已提交配置及意图，不从未提交内容建立初始输入。
 
 首次无已证明自动接入快照时以 initial 纳管当前已提交树；旧无 captureKind 的操作不能被猜作 committed 前态。后续自动输入依据该节点最近已消费的真实 commit 快照到当前输入的 tree 差量区分 spec/code/combined；停机多次提交仍按累计已提交差量分类，paused 中尚未处理的新作者变化只观察而不消费边界。相关路径取当前计划与该节点最近消费记录的精确path绑定并集，已删除路径不能仅因当前树不再列出它而失去方向；不扩大到全局源码根或无关owner。v2 plan 的 commitTrigger 冻结该 before 快照（首次 initial 为 null）及真实累计 paths，after 仍为 operation.input。它是作者提交前态而非已验证交付，不替代 receipt/baseline，也不按 HEAD^ 猜测或只保存可能被 GC 的 OID。仅提交无关路径或空提交不启动模型。code 冻结 code_to_spec、combined 冻结 combined；initial 有已提交授权实现时冻结 code_to_spec，否则与 Spec 保存相同冻结 spec_to_code。沿同一 plan/selection 规划，不复制执行器或分区政策。

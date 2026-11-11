@@ -13,6 +13,7 @@ export const HARNESS_IDENTITIES = [
   { id: 'pi-headless', sessionEnvVar: 'PI_SESSION_ID' },
   { id: 'codex-headless', sessionEnvVar: 'CODEX_THREAD_ID' },
   { id: 'grok-structured', sessionEnvVar: 'SPEX_GROK_STRUCTURED_SESSION_ID' },
+  { id: 'cursor-structured', sessionEnvVar: 'SPEX_CURSOR_STRUCTURED_SESSION_ID' },
 ] as const satisfies readonly HarnessIdentityRow[]
 
 export type HarnessId = typeof HARNESS_IDENTITIES[number]['id']

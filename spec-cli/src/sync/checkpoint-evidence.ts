@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { assertRejectedOutput, structuredExecutionPolicy, type RejectedStructuredOutput, type StructuredExecution } from '../session-structured-policy.js'
 import { nativeWorktreePrompt } from '../native-worktree-runtime.js'
 import { assertGrokRejectedFinalSource } from '../grok-structured.js'
+import { assertCursorRejectedFinalSource } from '../cursor-structured.js'
 import { sessionIdForCreateKey } from '../sessions.js'
 import { readRecord } from '../session-record.js'
 import { contentHash, readEvidence } from './snapshot.js'
@@ -92,6 +93,10 @@ export function authenticateNativeRejectedFinal(store: SyncStore, operation: Syn
   if (plan.request.model?.startsWith('grok:')) {
     if (record.harness !== 'grok-structured') fail('Grok拒绝结果没有原结构化执行器身份')
     assertGrokRejectedFinalSource(prompt, state, record.worktreePath)
+  }
+  if (plan.request.model?.startsWith('cursor:')) {
+    if (record.harness !== 'cursor-structured') fail('Cursor 拒绝结果没有原结构化执行器身份')
+    assertCursorRejectedFinalSource(prompt, state, record.worktreePath)
   }
   return state
 }
