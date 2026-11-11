@@ -6913,7 +6913,7 @@ for (const failureKind of ['format', 'business', 'protocol'] as const) for (cons
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
 
-for (const partitioned of [false, true]) for (const legacyP0 of partitioned ? [false] : [false, true]) for (const legacyP1 of !partitioned && legacyP0 ? [false, true] : [false]) for (const mixedAncestors of legacyP1 ? [false, true] : [false]) for (const reviewRejected of legacyP1 && !mixedAncestors ? [false, true] : [false]) for (const unprovenAncestor of partitioned ? [false, true] : [false]) for (const bindingMismatch of partitioned && !unprovenAncestor ? ['none', 'schema', 'owner', 'plan', 'readset', 'p1-schema', 'p1-owner'] as const : ['none'] as const) test(`正式retryOf换模型并SQLite重启保留P0/P1原Git稿与八项后置发现 ${partitioned ? 'partition' : 'whole'} unproven=${unprovenAncestor} legacyP0=${legacyP0} legacyP1=${legacyP1} mixed=${mixedAncestors} reviewRejected=${reviewRejected} binding=${bindingMismatch}`, async t => {
+for (const partitioned of [false, true]) for (const legacyP0 of partitioned ? [false] : [false, true]) for (const legacyP1 of !partitioned && legacyP0 ? [false, true] : [false]) for (const mixedAncestors of legacyP1 ? [false, true] : [false]) for (const reviewRejected of legacyP1 && !mixedAncestors ? [false, true] : [false]) for (const unprovenAncestor of partitioned ? [false, true] : [false]) for (const bindingMismatch of partitioned && !unprovenAncestor ? ['none', 'schema', 'owner', 'plan', 'readset', 'p1-schema', 'p1-owner', 'p1-irrelevant-owner'] as const : ['none'] as const) test(`正式retryOf换模型并SQLite重启保留P0/P1原Git稿与八项后置发现 ${partitioned ? 'partition' : 'whole'} unproven=${unprovenAncestor} legacyP0=${legacyP0} legacyP1=${legacyP1} mixed=${mixedAncestors} reviewRejected=${reviewRejected} binding=${bindingMismatch}`, async t => {
   const plan = partitioned ? { version: 'sync-coordinator-v2' as const, direction: 'code_to_spec' as const, sourcePaths: ['src'], writePaths: ['.spec'], partitionPolicy: { version: 'sync-partition-policy-v1' as const, maxReadBytes: 524288, maxParallel: 1 }, commitTrigger: { before: null, paths: ['src/export.js'] } } : {}
   const f = await fixture(t, { maxAttempts: 1, maxCalls: 12, maxRepairs: 0, timeoutMs: 120_000 }, false, original, 'project', original, { ...plan, agentWorkflow: 'native-worktree-v1' }, undefined, 'code', 'zcode:fixture/old', partitioned)
   if (legacyP0) {
@@ -7024,7 +7024,10 @@ for (const partitioned of [false, true]) for (const legacyP0 of partitioned ? [f
         if (wrapper.stage === 'partition-plan' && bindingMismatch === 'plan') value.digest = contentHash('foreign plan')
         if (wrapper.stage.endsWith(':elaboration') && value.rounds.at(-1)?.draft) {
           if (bindingMismatch === 'p1-schema') value.rounds.at(-1).draft.schemaDigest = contentHash('foreign P1 schema')
-          if (bindingMismatch === 'p1-owner') value.rounds.at(-1).draft.ownerDigest = contentHash('foreign P1 owner')
+          if (bindingMismatch === 'p1-owner' || bindingMismatch === 'p1-irrelevant-owner') value.rounds.at(-1).draft.ownerDigest = contentHash('foreign P1 owner')
+          if (bindingMismatch === 'p1-irrelevant-owner') for (const finding of value.rounds.at(-1).findings) {
+            if (finding.code === 'refactor_business_meaning_changed') finding.code = 'readonly_implementation_gap'
+          }
         }
         wrapper.resultRef = writeEvidence(f.input.source.commonDir, value)
       }
@@ -7054,6 +7057,14 @@ for (const partitioned of [false, true]) for (const legacyP0 of partitioned ? [f
   assert.deepEqual(calls.filter(call => call.startsWith('retry:')), mixedAncestors ? ['retry:code_behavior_analyze', 'retry:code_behavior_review', 'retry:elaboration_generate', 'retry:elaboration_generate', 'retry:elaboration_review'] : bindingMismatch === 'owner' || bindingMismatch.startsWith('p1-') ? [] : bindingMismatch !== 'none' ? ['retry:code_behavior_analyze'] : ['retry:code_behavior_analyze', 'retry:code_behavior_review', 'retry:elaboration_generate', 'retry:elaboration_review'], JSON.stringify({ failure: result.failure, phase: result.operation.phase }))
   if (bindingMismatch === 'owner' || bindingMismatch === 'p1-owner') assert.match(result.failure!.message, /草稿owner\/schema\/path或保活ref不匹配/)
   if (bindingMismatch === 'p1-schema') assert.match(result.failure!.message, /草稿seed没有精确只读schema/)
+  if (bindingMismatch === 'p1-irrelevant-owner') {
+    const current = store.listAttempts(active.id)[0]
+    const wrapper = current.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(entry => entry.stage === 'analysis')
+    assert.ok(wrapper, '普通P1诊断不能阻断原P0批准复用')
+    const original = oldAttempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(entry => entry.stage === 'analysis')
+    assert.deepEqual(wrapper.resultRef, original.resultRef)
+    assert.match(result.failure!.message, /草稿owner\/schema\/path或保活ref不匹配/, '真正使用该P1稿件时仍须拒绝不合格原件')
+  }
   if (reviewRejected) {
     const current = store.listAttempts(active.id)[0], wrapper = current.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(wrapper => wrapper.stage === 'elaboration:draft-material-provenance')
     const provenance = JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString())

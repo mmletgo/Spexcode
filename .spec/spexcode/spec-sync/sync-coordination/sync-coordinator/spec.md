@@ -17,6 +17,8 @@ related:
 
 ## expanded spec
 
+P0 后置回审先按实际受影响的冻结 owner 及 `refactor_business_meaning_changed` 发现筛选原轮。普通 P1 结构、测试绑定或审查诊断留在 P1。跨操作重验命中的 Git 草稿用原已认证 Native 任务的完整 targets 计算 owner，包括 P0 已审后才加入的规格叶，继续核原 schema、真实 Git 对象及保活引用。
+
 Grok Build 的派发、候选和独审沿现有原生工作树编排。续用 Grok 格式拒绝前核对同一原生会话和 request ID。已停的只读复审在原候选下继续。
 
 普通协调器显式启用[[sync-native-run]]的已结算工作树回收：completed及精确停止的failed/cancelled只在原请求/资源/Native和当前clean Git相符时正式close，原结果、错误、branch/archive、会话与JSON原件保持。P0/P1既有停止材料路径先完整认证Native/removed/request/owner/schema/保护面，再await[[archive]]临时checkout接缝；callback继续原physical/Git observer、capture及未批准provenance，空稿返回null继续来源顺序，观察或恢复异常亦只回收本次创建且经原归属证明的临时checkout。已捕获Git稿直接按对象冷读。dirty/未知停止保留，pending不改业务结果或预算；全程不启动旧Native、execution wake或队列，不增加扫描器或持久状态。

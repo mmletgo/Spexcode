@@ -16,6 +16,8 @@ related:
 
 ## expanded spec
 
+正式重试回归核对普通 P1 结构诊断不会阻断已审 P0 原件复用。P1 实际使用旧稿时继续校验原 owner、schema 和 Git 引用。
+
 Claude P0暂停/失败与ZCode P1已提交稿经正式close后，在新attempt沿原Native/CAS/owner/schema及source/tests保护面取同一原JSON，继承未批准材料而非从零派发。私有fixture从首个session创建起固定cwd/commonDir；临时恢复后目录再移除，原record/Native文件、checkpoint/resource及archive SHA逐字不变。callback失败、restore后半失败和registry前出现matching checkout的边界由[[sync-native-run-regression]]证明；均不得启动旧Native或改旧批准。
 
 多轮V5事实返修经真实Git/隔离SQLite及独立Native审查accept进入V3恢复债后，同attempt再次调度结算pending，再正式pause/run新fence，须保持最新已审desc/expanded/basis、完整同一候选与原Native独审provenance，零新增模型。独立旧cleared历史形态只追加受控的repairContext-only stage，原因果CAS与原件保持。缺因果及冲突base在模型派发前拒绝，既有去repairContext、模型及候选漂移反例保持。受控运输及Native fixture不代替真实产品验收。
