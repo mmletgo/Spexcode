@@ -120,6 +120,8 @@ P1 只把实际目标正文及其已审代码/可写验收路径、业务 ID 加
 
 复用现有快照、成对 composition、受控 request overlay、P1 elaborate、scope 扩充/租约、generation、真实 V3 resource 执行与 private delivery，不另建消息队列、契约图或事实数据库。原 source/composed/candidate 分开，policy/readset 内容摘要必须绑定 operation。读集合完整保留契约及 source/code/related/AC 测试全文，不以2MiB内联限制拒绝或截断。超大阶段正文由 [[frozen-context-reader]] 在正式派发摘要前无损冻结，各独立turn核完整读取证明，仍保原input/readSet/policy和总预算。host private、越界路径、目录未授权字节拒绝。
 
+准入和当前性复核沿 [[sync-input-snapshot]] 批读冻结目标与授权读集的对象。批读仍按原路径顺序装配正文，逐项保留原模式、缺席和对象校验。重复对象只在当次批次去重，独立测试绑定及读集摘要保持。
+
 operation 独立本机 kernel mutex 防双 coordinator；紧凑 stage checkpoint 只保存 refs、独立结果及诊断，不复制整张契约图。当前 attempt 在独占证明下重入稳定 requestKey，派发前原子计费、持久资源意图，完整真实结果/hash/独立身份保存后重放。lease heartbeat 贯穿原生长调用，控制/总deadline触发 Abort；旧 generation 只能结算真实资源证据。历史未removed资源精确恢复，未知终态保留 recovery_required，不假释放容量。
 
 P1 已审结构结果登记所有未来业务 ID，包括 GAP/partial FLOW；ready/blocked 分区只隔离业务 ID，共享 paths 留 ready。无可执行 ready AC 不生成或写半成品；V1 仅容许已审 GAP 精确解释的缺口。未读继承 GAP 必须来自本轮已通过 partitionSeal 的同义原项和精确 finding，复用原 GAP 闭包分类；GAP及完整 affected 闭包不得涉及 ready 声明或 FLOW 步骤，其全部 owner 不属于本轮 accepted，且 Spec、治理源码、AC.test 等冻结义务在已审 composed、baseTree 与 candidate 的 path/mode/OID/absence 完全一致。缺证明、新增、改变或涉及本轮依赖的 GAP 仍阻断，不扩 scope/blocked/验证登记。generation 硬门禁保护 raw/全局REQ/AC/VERIFY、实际diff与独立oracle，V2使用不同会话；V3仅执行 ready AC 和 mandatoryTests 的固定命令/镜像；V4复采完整source、当前可信plan/readset与物理身份，一致才可交付，并于 beginApply 前再核。完整V1–V4 pass才 recordVerification(pass)，范围精确ready声明/完整FLOW，不包含blocked。

@@ -47,8 +47,8 @@ import { nativeWorktreePrompt, nativeWorktreeResult } from '../native-worktree-r
 import { readRecord } from '../session-record.js'
 import { structuredExecutionPolicy, StructuredSessionError } from '../session-structured-policy.js'
 import { SettledSessionCreateTimeoutError } from '../session-structured.js'
-import { canonicalSnapshotSource, captureInputSnapshot, contentHash, identifyRawWorktree, objectGit, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot, writeEvidence } from './snapshot.js'
-import type { SnapshotManifest } from './snapshot.js'
+import { canonicalSnapshotSource, captureInputSnapshot, contentHash, identifyRawWorktree, objectGit, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot, visitObjectBatch, writeEvidence } from './snapshot.js'
+import type { SnapshotManifest, TreeEntry } from './snapshot.js'
 import { SyncStoreError } from './store.js'
 import type { SyncStore } from './store.js'
 import { dockerVerificationDriver, parseVerificationReport, verificationExportDigest } from './verification-executor.js'
@@ -122,6 +122,18 @@ export async function isSyncInputCurrent(operation: SyncOperation, current: Inpu
     && readEntries(operation.input, headTree(operation.input)) === readEntries(current, headTree(current))
 }
 
+function frozenInputTexts(commonDir: string, entries: readonly TreeEntry[]): Map<string, string> {
+  const texts = new Map<string, string>(), files = new Map<string, string>()
+  visitObjectBatch(commonDir, entries.map(entry => entry.oid), (oid, bytes) => {
+    if (isUtf8Text(bytes)) texts.set(oid, bytes.toString('utf8'))
+  })
+  for (const entry of entries) {
+    const text = texts.get(entry.oid)
+    if (entry.mode !== '120000' && text !== undefined) files.set(entry.path, text)
+  }
+  return files
+}
+
 async function readInput(input: InputSnapshot, plan: SyncCoordinatorPlan, previous?: SyncOperation['previousBaselinePair'], requestBlob?: BlobRef, selection?: FrozenBaselineSelection, executionPaths = plan.executionScope?.paths, treeCache = new Map<string, ReturnType<typeof readTree>>()): Promise<InputView> {
   if (!['sync-coordinator-v1', 'sync-coordinator-v2'].includes(plan.version) || !plan.targets.length || !plan.writePaths.length) fail('invalid_plan', '可信计划缺少版本、目标或写范围')
   for (const path of [...plan.readPaths, ...plan.writePaths, ...plan.targets.map(item => item.path), ...(plan.newNodeRawSources ?? []).map(item => item.path)]) {
@@ -144,14 +156,11 @@ async function readInput(input: InputSnapshot, plan: SyncCoordinatorPlan, previo
   if (requestBlob) composition = composeControlledRequest(input, composition.composed, requestBlob, { retainConflicts: true, baselineSelection: selection })
   if (!composition.composed) fail('request_conflict', '用户受控差量与已交付细化存在重叠冲突', [writeEvidence(input.source.commonDir, composition.conflicts)])
   let composed = composition.composed, entries = readTree(input.source.commonDir, composed.tree, undefined, treeCache)
-  const targetSources = new Map<string, string>()
-  for (const target of plan.targets) {
+  const targetEntries = plan.targets.flatMap(target => {
     const entry = entries.find(item => item.path === target.path)
-    if (entry && entry.mode !== '120000') {
-      const bytes = readObject(input.source.commonDir, entry.oid)
-      if (isUtf8Text(bytes)) targetSources.set(target.path, bytes.toString('utf8'))
-    }
-  }
+    return entry && entry.mode !== '120000' ? [entry] : []
+  })
+  const targetSources = frozenInputTexts(input.source.commonDir, targetEntries)
   const completeReadPaths = unique([...readPaths, ...ownedObligationPaths(plan.targets, executionPaths, targetSources, unique([...entries, ...sourceEntries].map(entry => entry.path)))])
   for (const path of completeReadPaths) {
     validateRepositoryPath(path)
@@ -167,12 +176,8 @@ async function readInput(input: InputSnapshot, plan: SyncCoordinatorPlan, previo
   }
   if (contentHash(JSON.stringify(entries)) !== composed.contentDigest || readEvidence(input.source.commonDir, composed.manifestBlob).toString() !== JSON.stringify({ version: 1, entries })) fail('composition_digest', '组合输入真实清单与引用不一致')
   const readEntries = entries.filter(entry => within(entry.path, readPaths))
-  const files = new Map<string, string>()
-  for (const entry of readEntries) {
-    if (isHostPrivatePath(entry.path)) fail('private_context', `读集合包含宿主运行资料: ${entry.path}`)
-    const bytes = readObject(input.source.commonDir, entry.oid)
-    if (entry.mode !== '120000' && isUtf8Text(bytes)) files.set(entry.path, bytes.toString('utf8'))
-  }
+  for (const entry of readEntries) if (isHostPrivatePath(entry.path)) fail('private_context', `读集合包含宿主运行资料: ${entry.path}`)
+  const files = frozenInputTexts(input.source.commonDir, readEntries)
   for (const target of plan.targets) if (!within(target.path, plan.writePaths) || !within(target.path, plan.readPaths)) fail('target_scope', `目标必须在可信读写集合: ${target.path}`)
   const ids = new Set<string>()
   for (const test of plan.mandatoryTests) {
