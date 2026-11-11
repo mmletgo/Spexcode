@@ -50,6 +50,8 @@ P0 只在本次 attempt 尚无阶段检查点和 code_behavior saved/reserved �
 
 显式 retryOf 只沿正式已结算祖先复用通过独审的局部 P0。冻结来源、输入、原意、计划、读集、业务基线、组合及局部 schema 和范围均一致时，认证原分析与独审、Git 原件和旧模型绑定，保存来源和原 resultRef。新操作只派发未批准分区，允许选择不同模型。原 attempt、调用、草稿及独审不补签。更早祖先因新准入被替代时，仍须重新核对已终结 attempt、活租约、资源和 journal 的结算。当前重新装配完整 P0；P1 仅分析资格及候选续验回到原操作复验该批准，全部当前封口和验证继续执行。
 
+正式 retryOf 同样可保留尚未完成全图 P1 时已经独审 accept 的完整叶与父接口分区。沿既有已结算失败、取消及正式 superseded 祖先核对冻结计划、source、readSet、业务 selection、scope、组合树和完整局部输入；父接口分类及父子上下文必须相同。批准仍由原模型的实际生成与独立只读审查、完整请求摘要和 Git 草稿证明，原物理工作树已回收时从保活对象冷读。只保存原 resultRef 与真实来源，未批准 owner 使用本次模型继续；当前 schema、正文渲染及全图 seal 仍须重新核验。同 owner 较新的候选拒绝、错误或只读返修诊断阻止回退旧 accept，未采纳 settled 重验不得跨过去继承旧批准。历史字段、旧请求、调用及失败结论保持。
+
 P0 分析的精确 owner 请求首次派发保留前，可沿既有 Native 停止资格观察原正常提交，复用 [[sync-stage-worktree]] 的已提交草稿核验，包括从原冻结树重建的托管投影。全量保护文件、索引与原停止身份均通过时，冻结真实草稿 Git 引用及当前 input、seed、owner、schema。续入先读取该冻结稿，旧已保留请求沿原规则。原稿仍待新分析及独审，原批准分区和诊断运输协议保持原绑定。
 
 P1权限/绑定非法的独审沿[[sync-elaboration]]现有同owner repairDiagnostics重审原合法候选。续审保留原generation trace，不要求新review轮号存在generate；按真实session/thread/turn命中该operation原attempt实际dispatch，再冷验完整保存Native请求、原结果/summary摘要及Git草稿seed/result身份。只有当前局部完整输入与原candidate机械校验保持、原review重新判为越界/绑定非法时才跳过生成；旧seed排除draft的边界、原请求字段缺席、控制attempt跳过判据、预算/资源/取消及全图seal保持。多次续审与后续只读owner返修均追溯同一真实generation来源，不把新审查轮当新生成。
@@ -66,7 +68,7 @@ P1的whole缓存沿[[sync-elaboration]]同时核身份与当前owner范围。分
 
 定位原P1阶段时，各分区在本次回审扫描内共享同一历史attempt的完整认证检查点，并保留各自的来源优先顺序与绑定校验。首次读取历史检查点和处理匹配阶段前，沿当前fence续租、让出事件循环并复核租约。
 
-新P0按attempt显式冻结code-behavior-draft-v1，已有code_behavior reserved派发不补签。whole与partition的临时草稿continuation沿原stage/input/readSet/selection保存，分区另核原plan digest；来源由当前operation及正式retryOf祖先的已终结attempt统一枚举；跨operation只迁未批准材料，不迁readyAnalysis、独审accept或已审缓存，加载时记录原resultRef provenance，沿精确continuation-provenance核已校验分析及当前独审的原请求、summary回执、Native身份与真实Git draft path/OID/schema/seed/resultCommit/resultTree。业务摘要不包含非权威修复诊断，但真实prompt/request仍包含；格式失败沿原预算新attempt续原JSON，review格式失败保留此前已校验分析，业务拒绝仍重新分析与独审。已有只读Native格式拒绝沿authenticateNativeRejectedFinal核原请求/精确schema/input、canonical Native错误及已停止removed资源；旧累计诊断仅从原/当前任务的可复算结构化表示移除顶层repairDiagnostics，其余指令、业务字段、待审分析与只读seed、selection/composed及精确schema完全一致才迁接，认证仍使用原inputDigest；不因最新schema不符默退旧材料。只将原CAS文本和真实错误投影为下一真实临时输入，保plan/checkpoint provenance，不补历史draft或accept。
+新P0按attempt显式冻结code-behavior-draft-v1，已有code_behavior reserved派发不补签。whole与partition的临时草稿continuation沿原stage/input/readSet/selection保存，分区另核原plan digest；来源由当前operation及正式retryOf祖先的已终结attempt统一枚举；续修材料跨operation不携readyAnalysis或批准，前述局部批准复用单独按原件认证；加载时记录原resultRef provenance，沿精确continuation-provenance核已校验分析及当前独审的原请求、summary回执、Native身份与真实Git draft path/OID/schema/seed/resultCommit/resultTree。业务摘要不包含非权威修复诊断，但真实prompt/request仍包含；格式失败沿原预算新attempt续原JSON，review格式失败保留此前已校验分析，业务拒绝仍重新分析与独审。已有只读Native格式拒绝沿authenticateNativeRejectedFinal核原请求/精确schema/input、canonical Native错误及已停止removed资源；旧累计诊断仅从原/当前任务的可复算结构化表示移除顶层repairDiagnostics，其余指令、业务字段、待审分析与只读seed、selection/composed及精确schema完全一致才迁接，认证仍使用原inputDigest；不因最新schema不符默退旧材料。只将原CAS文本和真实错误投影为下一真实临时输入，保plan/checkpoint provenance，不补历史draft或accept。
 
 P0已校验分析准备独审时，正式认证及停止的历史独审物理稿若因精确Git状态发现授权范围外修改，记录拒绝原因及原plan/checkpoint，跳过整份来源，不从该工作树捕获Git稿或沿用批准。继续查找其他合格材料或发起当前独审，当前已校验分析保持。身份、停止、Git/IO、索引或竞态失败仍按原方式报错，P0分析和P1的材料门不变。
 

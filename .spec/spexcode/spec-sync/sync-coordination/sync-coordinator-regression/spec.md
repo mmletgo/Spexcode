@@ -81,6 +81,8 @@ code→Spec的分区AC提案引用未变只读父规则时，完整原proposal�
 
 正式 retryOf 的局部 P0 回归先使首分区通过独审、兄弟失败且旧 whole 缺席，关闭重开 SQLite 后换模型重试。原分区零重派，旧 trace、Git 和 resultRef 保留，新的批准来自当前模型；来源记录和未完成侧的校验保持。第二代重试经原已替代祖先取得批准，P0 零重派；混合仅分析分区扩域及冷恢复仍验原 ref，伪造来源在 P1 前拒绝。更换模型的 V3 前置失败保留已批准 P0，后续生成与独审按新模型正常执行。
 
+局部 P1 的正式 retryOf 回归使用真实 Git 提交、隔离 SQLite 和受控 Native 资源桥，先使完整叶及可选父接口通过独审、兄弟未完成；移除已结算的原物理工作树，再冷重启并连续换模型重试。已有 accept 的 owner 零重派，resultRef、原请求和来源保持，未审 owner 使用新模型，最后重新通过全图 seal。原独审 thread 错配必须重新生成及独审；同 owner 较新的真实业务 repair 不能被更早 accept 遮蔽。原 operation、attempt、资源及 source/index 保持，不把受控记录当作真实 CLI 或现场最终验收。
+
 混合行为分析失败回归证明业务拒绝与unsupported并存时仍不自动续修；同operation经显式pause→resume、且旧资源已结算后启动新attempt，只有已保存的 `behavior_analysis_invalid` / `behavior_review_failed` 原件按partitionId进入对应失败分区，unsupported/基础设施失败不进入诊断，已accept分区沿原ref复用而不重新派发。资源仍未知时沿原 `recovery_required` 门禁停止且不运行新attempt；本用例不扩大自动修复资格或预算。
 
 ZCode 严格 JSON 文本格式失败以精确错误码验证同预算有限重试、逐轮完整反馈及分区隔离；失败区的新分析和独审收到原格式诊断，已接受区不重派发，普通 stale_result 不取得修复资格。确定性接缝测试不冒充真实 Native 完成。
@@ -258,7 +260,7 @@ P1独审格式失败回归使用真实Git、隔离SQLite及受控Native资源桥
 
 已认证Native completed但ruleLocation字段无效的完整协调回归覆盖新早验与旧已归一化成功原件：旧版须复现下一attempt零派发并unsupported/readonly_spec_repair_binding；修复后只给原失败组同candidate原JSON/schema/错误/trace临时稿，连续两次正常Git续稿且清空进程内旧会话后仍能从原CAS/dispatch冷验。兄弟accept原ref跨轮不变，严格位置修好后仅原owner进入P1，code_generate为零、源码/tests对象不变；缺Native原件、非completed和伪thread不取得稿权限。该真实Git/私有SQLite及受控Native资源桥在P1入口停止，不修改实际Scene或宣称真实Agent、Docker、正式重试/采纳通过。
 
-完整未采纳settled重验以真实临时Native工作树、正常Git提交/交付hooks与隔离SQLite验证：父自身receipt推进CAS而业务基线保持；新P0/P1和独审真实派发，原Git JSON作为未批准材料续修，旧候选不进入业务读取。新P1能力失败后再走普通failed→retry，最早原业务selection仍递归保持。受控V3 driver明确只证明协议与编排，不声称真实模型、Docker或用户场景通过；Source HEAD/index及父全部历史原值保持。
+完整未采纳settled重验以真实临时Native工作树、正常Git提交/交付hooks与隔离SQLite验证：父自身receipt推进CAS而业务基线保持；首次新P0/P1和独审真实派发，原Git JSON作为未批准材料续修，旧候选不进入业务读取。新P1能力失败后再走普通failed→retry，最早原业务selection仍递归保持；已审P0只可沿该次首次重验的新operation/attempt/resultRef复用，不能取未采纳settled祖先。受控V3 driver明确只证明协议与编排，不声称真实模型、Docker或用户场景通过；Source HEAD/index及父全部历史原值保持。
 
 历史checkpoint性能回归使用14attempt、1790唯一CAS及101分区的真实SQLite/Git协调路径，记录原30秒lease/1秒heartbeat、扫描中的控制机会和首次受控reserveDispatch；必须在同attempt/leaseToken有效时推进，零额外attempt/journal且source/index保持。从分区预算到P0协议冻结的准备窗口须单独计历史CAS读取，并限制在分类质疑、原P0复用与P0诊断各一次历史规模之和。纯读取对照同时计CAS读取和JSON解码：单次root/artifact/inspect每SHA读取解码一次，下次仍重读SHA而不再解码；命中后坏CAS、当前refs移除/伪raw role和返回对象污染反例继续拒绝或隔离；同一store先warm认证，再改变canonical Native停止状态或清除原resource的failed观察仍须拒绝，恢复精确原件后重新认证。受控runner仅证明引擎首派发，不冒称真实模型、业务结果或最终交付。
 

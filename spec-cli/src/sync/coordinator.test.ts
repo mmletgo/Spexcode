@@ -7023,6 +7023,121 @@ for (const partitioned of [false, true]) for (const legacyP0 of partitioned ? [f
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
 
+for (const parentSeed of [false, true]) for (const defect of parentSeed ? ['none', 'review-identity', 'newer-review'] as const : ['none'] as const) test(`P1正式retry保留局部accept与原Native模型，SQLite冷恢复后仅派发未审owner parent=${parentSeed} defect=${defect}`, async t => {
+  const parentPath = '.spec/project/spec.md', parentId = 'REQ-PARENT-01', importPath = '.spec/project/beta/import-contract/spec.md'
+  const raw = '保留导出与导入两个模块的已有业务。'
+  const parent = `---\ntitle: 共享接口\nstatus: pending\n---\n## raw source\n\n${raw}\n`
+  const parentSource = `${parent}\n## expanded spec\n\n### REQ\n\n| id | goal | source | constraints | success | depends-on |\n| --- | --- | --- | --- | --- | --- |\n| ${parentId} | 保留两个模块 | user:raw | 保持既有业务 | 既有验收通过 | - |\n`.replace('status: pending', 'status: active\ncontract-schema: sync-v1')
+  const other = original.replaceAll('export-job', 'import-job').replaceAll('EXPORT', 'IMPORT').replaceAll('export-contract', 'import-contract').replaceAll('src/export.js', 'src/beta/import.js').replaceAll('tests/export.test.mjs', 'tests/import.test.mjs').replaceAll('decision:IMPORT-POLICY', 'decision:EXPORT-POLICY')
+  const rawOnly = (source: string) => source.slice(0, source.indexOf('## expanded spec')).replace('contract-schema: sync-v1\n', '')
+  const environment = { version: 'trusted-test-v1' as const, image: 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392', platform: 'linux/arm64' as const, memoryBytes: 128 * 1024 * 1024, cpus: 1, pidsLimit: 64, scratchBytes: 16 * 1024 * 1024, logBytes: 128 * 1024 }
+  const verifications = [original, other].map(source => { const definition = parseContract({ nodeId: 'fixture', path: contractPath, source }).contract!.items.find(item => item.kind === 'VERIFY')!; assert.equal(definition.kind, 'VERIFY'); return { definition: { id: definition.id, command: definition.command, cwd: definition.cwd, timeoutMs: definition.timeoutMs }, environment } })
+  const mandatoryTests = [original, other].map(source => { const acceptance = parseContract({ nodeId: 'fixture', path: contractPath, source }).contract!.items.find(item => item.kind === 'AC')!; assert.equal(acceptance.kind, 'AC'); const [testPath, testId] = acceptance.test.split('#'); return { verificationId: acceptance.command, testPath, testId } })
+  const f = await fixture(t, { maxAttempts: 1, maxCalls: 24, maxRepairs: 0, timeoutMs: 180_000 }, false, rawOnly(original), 'project', original, {
+    version: 'sync-coordinator-v2', direction: 'spec_to_code', agentWorkflow: 'native-worktree-v1', intentNodeId: parentSeed ? 'project' : 'export-contract', sourcePaths: ['src'], verifications, mandatoryTests,
+    targets: [...(parentSeed ? [{ nodeId: 'project', path: parentPath, rawSource: raw }] : []), { nodeId: 'export-contract', path: contractPath }, { nodeId: 'import-contract', path: importPath }],
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 },
+  }, undefined, 'spec', 'claude:MiniMax-M3.1-Flash', true, { ...(parentSeed ? { [parentPath]: parent } : {}), [importPath]: rawOnly(other), 'src/beta/import.js': readFileSync(new URL('src/export.js', fixturePath), 'utf8'), 'tests/import.test.mjs': readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', 'IMPORT').replaceAll('src/export.js', 'src/beta/import.js') })
+  let store = f.store, active = f.operation, approvedLeaf = '', retryRound = 0
+  const calls: { operation: string; nodeId: string; purpose: string; model?: string }[] = [], records = new Map<string, NativeRunRecord>(), workspaces: string[] = []
+  f.options.runner = async request => {
+    const behavior = request.purpose.startsWith('code_behavior_')
+    if (!behavior && !request.purpose.startsWith('elaboration_')) throw Object.assign(new Error('完整P1已重新封口'), { code: 'unsupported' })
+    const operation = store.readOperation(active.id), attempt = store.readAttempt(operation.currentAttemptId!)
+    const task = nativeTask(request, f.input.source.commonDir) as { targets: { nodeId: string; path: string }[]; requiredChangedPaths: string[] }, { nodeId, path } = behavior ? { nodeId: 'P0', path: '' } : task.targets[0]
+    calls.push({ operation: active.id, nodeId, purpose: request.purpose, model: request.model })
+    if (!behavior && active.id === f.operation.id && nodeId !== 'project' && approvedLeaf && approvedLeaf !== nodeId) throw Object.assign(new Error('兄弟owner尚未完成，保留局部独审'), { code: 'unsupported' })
+    if (retryRound === 1 && request.purpose === 'elaboration_review' && defect !== 'newer-review') throw Object.assign(new Error('待审owner在新独审入口停止'), { code: 'unsupported' })
+    let output: unknown = retryRound === 1 && request.purpose === 'elaboration_review' && defect === 'newer-review'
+      ? { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ kind: 'repair', code: 'root-review', affectedIds: [parentId], message: '须核实本共享接口义务', evidence: '原父接口与后代实际行为', decision: '保留原政策并补充准确接口' }] }
+      : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+    if (behavior) {
+      assert.deepEqual(task.requiredChangedPaths, [])
+      const reviewed = request.purpose === 'code_behavior_review' ? readCodeBehaviorContext(request, f.input.source.commonDir).pendingAnalysis! : null
+      output = reviewed ? { inputDigest: request.inputDigest, analysisDigest: reviewed.analysisDigest, verdict: 'accept', checkedPaths: [], checkedChangeIds: [], findings: [] }
+        : { changes: [], facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    } else if (request.purpose === 'elaboration_generate') {
+      const generated = rows(nodeId === 'project' ? parentSource : nodeId === 'export-contract' ? original : other, path)
+      generated.changes[0].nodeId = nodeId
+      generated.applicability = generated.applicability.map(entry => ({ ...entry, applies: nodeId !== 'project', affectedIds: [nodeId === 'project' ? parentId : nodeId === 'export-contract' ? 'REQ-EXPORT-01' : 'REQ-IMPORT-01'] }))
+      if (parentSeed && nodeId !== 'project') {
+        for (const row of generated.changes[0].tables.FLOW) row.req = [...row.req as string[], parentId]
+        for (const row of generated.changes[0].tables.AC) row.covers = [...row.covers as string[], parentId]
+      }
+      output = adaptElaborationNativeOutput(request, generated)
+    } else if (active.id === f.operation.id && nodeId !== 'project') approvedLeaf = nodeId
+    const writing = behavior || request.purpose === 'elaboration_generate', workspace = join(f.parent, `partial-p1-${calls.length}`)
+    if (!writing) f.git('worktree', 'add', '--detach', workspace, request.worktree!.baseCommit)
+    const worktree = writing ? committedDraftFixture(f, request, output, workspace) : nativeWorktreeResult(workspace, request.worktree!)
+    workspaces.push(workspace)
+    const receipt = writing ? { summary: '原正常Git草稿及独立审查' } : output
+    const fence = { operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }
+    return createAttemptRunner(store, fence, { pollMs: 2, runtime: {
+      readRecord: id => records.get(id) ?? null, cancel: async () => { throw new Error('fixture不得控制真实进程') },
+      run: async native => {
+        const sessionId = sessionIdForCreateKey(native.sessionCreateKey!), identity = { threadId: `partial-p1-${sessionId}`, turnId: 'turn' }, execution = structuredExecutionPolicy(native), resultDigest = contentHash(JSON.stringify(receipt))
+        records.set(sessionId, { session: sessionId, status: 'awaiting', harnessSessionId: identity.threadId, createRequestId: contentHash(native.sessionCreateKey!), createPayloadHash: contentHash(JSON.stringify({ prompt: nativeWorktreePrompt(native.prompt, native.worktree!), parent: null, launcher: null, base: native.base, structuredExecution: execution })), structuredExecution: { ...execution, ...identity, state: 'completed', output: receipt, resultDigest, ...(worktree ? { resultWorktree: worktree } : {}) } })
+        return { sessionId, ...identity, output: receipt, resultDigest, ...(worktree ? { worktree } : {}) }
+      },
+    } })(request)
+  }
+  const first = await runSyncOperation(store, active.id, f.options)
+  assert.equal(first.failure?.message, '兄弟owner尚未完成，保留局部独审', JSON.stringify(first.failure))
+  const old = first.operation, [prior] = store.listAttempts(old.id), commonDir = f.input.source.commonDir
+  const stages = (owner: SyncOperation, attempt: SyncAttempt) => readSyncCheckpoints(store, owner, attempt).json.map(item => item.value as { stage?: string; resultRef: { sha256: string } })
+  const approved = stages(old, prior).filter(stage => stage.stage?.startsWith('partition:') && stage.stage.endsWith(':elaboration') && (JSON.parse(readEvidence(commonDir, stage.resultRef).toString()) as ElaborationResult).reviewPassed)
+  assert.equal(approved.length, parentSeed ? 2 : 1)
+  const aggregate = stages(old, prior).find(stage => stage.stage === 'elaboration')!
+  assert.equal((JSON.parse(readEvidence(commonDir, aggregate.resultRef).toString()) as ElaborationResult).reviewPassed, false)
+  const oldBytes = JSON.stringify({ operation: store.readOperation(old.id), attempts: store.listAttempts(old.id), resources: store.listResources(prior.id) })
+  for (const workspace of workspaces) f.git('worktree', 'remove', workspace)
+  assert.ok(workspaces.every(workspace => !existsSync(workspace)), '正式结算后的原物理Native工作树已移除，冷复用只读保活Git与原记录')
+  f.closeForRestart()
+  const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
+  store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) }); f.useStore(store)
+  active = store.admitAndEnqueue(await prepareSyncAdmission(f.input, f.plan, { ingressKey: 'partial-p1-retry', rootCauseId: 'partial-p1-retry', retryOf: old.id, model: 'claude:default', origin: old.origin, budget: old.budget, managedRoot: f.managedRoot, baselineSelection: store.readBusinessBaselineSelection(old.id), executionScope: old.scope, impactDigest: old.impactDigest }))
+  active = store.ackDispatch(f.input.source.repositoryId, active.dispatchMessageId); f.useOperation(active); retryRound = 1
+  const findResource = store.findResource.bind(store)
+  if (defect !== 'none') {
+    const root = approved.map(stage => JSON.parse(readEvidence(commonDir, stage.resultRef).toString()) as ElaborationResult).find(result => result.phase === 'interface_seed')!
+    const review = root.rounds.at(-1)!.traces.find(trace => trace.purpose === 'elaboration_review')!
+    const dispatch = prior.dispatchPlans.find(dispatch => dispatch.session?.sessionId === review.sessionId)!, resource = findResource(prior.id, dispatch.key)!
+    const checkpoint = JSON.parse(readEvidence(commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
+    const changed = { ...resource, checkpointRef: writeEvidence(commonDir, { ...checkpoint, result: { ...checkpoint.result!, threadId: 'wrong-original-review-thread' } }) }
+    store.findResource = (attemptId, key) => attemptId === prior.id && key === dispatch.key ? changed : findResource(attemptId, key)
+  }
+  const second = await runSyncOperation(store, active.id, f.options), retried = calls.filter(call => call.operation === active.id)
+  store.findResource = findResource
+  assert.equal(retried.some(call => call.nodeId === approvedLeaf || defect === 'none' && call.nodeId === 'project'), false, '原件一致的已accept叶与父接口必须零重派')
+  assert.deepEqual(retried.map(call => call.purpose), ['elaboration_generate', 'elaboration_review'], JSON.stringify(second.failure))
+  assert.ok(retried.every(call => call.model === active.model))
+  if (defect === 'newer-review') assert.equal(store.readAttempt(second.operation.currentAttemptId!).failure?.code, 'repair_budget_exhausted', JSON.stringify(second))
+  else assert.equal(second.failure?.message, '待审owner在新独审入口停止', JSON.stringify(second.failure))
+  const saved = stages(second.operation, store.readAttempt(second.operation.currentAttemptId!))
+  for (const source of defect === 'none' ? approved : []) {
+    assert.deepEqual(saved.find(stage => stage.stage === source.stage)?.resultRef, source.resultRef)
+    assert.deepEqual(JSON.parse(readEvidence(commonDir, saved.find(stage => stage.stage === `${source.stage}:provenance`)!.resultRef).toString()), { fromOperationId: old.id, fromAttemptId: prior.id, resultRef: source.resultRef })
+  }
+  assert.equal(JSON.stringify({ operation: store.readOperation(old.id), attempts: store.listAttempts(old.id), resources: store.listResources(prior.id) }), oldBytes)
+  if (defect === 'review-identity') {
+    assert.ok(retried.every(call => call.nodeId === 'project'), '原独审身份失配的父接口必须重新生成及独审')
+    assert.equal(saved.some(stage => stage.stage?.endsWith(':elaboration:provenance')), false)
+    return
+  }
+  const previous = second.operation
+  active = store.admitAndEnqueue(await prepareSyncAdmission(f.input, f.plan, { ingressKey: 'partial-p1-second-retry', rootCauseId: 'partial-p1-second-retry', retryOf: previous.id, model: 'zcode:default', origin: previous.origin, budget: previous.budget, managedRoot: f.managedRoot, baselineSelection: store.readBusinessBaselineSelection(previous.id), executionScope: previous.scope, impactDigest: previous.impactDigest }))
+  active = store.ackDispatch(f.input.source.repositoryId, active.dispatchMessageId); f.useOperation(active); retryRound = 2
+  const third = await runSyncOperation(store, active.id, f.options)
+  const continued = calls.filter(call => call.operation === active.id)
+  assert.equal(continued.some(call => call.nodeId === approvedLeaf || defect === 'none' && call.nodeId === 'project'), false, '再次正式重试须回到各区原Native批准，不重派复制wrapper')
+  assert.deepEqual(continued.map(call => call.purpose), defect === 'newer-review' ? ['elaboration_generate', 'elaboration_review', 'elaboration_generate', 'elaboration_review'] : ['elaboration_generate', 'elaboration_review'])
+  if (defect === 'newer-review') assert.equal(continued[0].nodeId, 'project', '同owner较新的真实业务repair不得被更早accept遮蔽')
+  assert.ok(continued.every(call => call.model === active.model))
+  assert.equal(third.failure?.message, '完整P1已重新封口', JSON.stringify(third.failure))
+  assert.deepEqual(store.listRecoverableResources(), [])
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+})
+
 test('P0正式retry只重新派发未独审通过的分区，保留原模型和Git独审证明', async t => {
   const importPath = '.spec/project/import-contract/spec.md', importSpec = original.replaceAll('export-job', 'import-job').replaceAll('EXPORT', 'IMPORT').replaceAll('export-contract', 'import-contract').replaceAll('src/export.js', 'src/import.js').replaceAll('tests/export.test.mjs', 'tests/import.test.mjs')
   const f = await fixture(t, { maxAttempts: 2, maxCalls: 24, maxRepairs: 1, timeoutMs: 120_000 }, false, original, 'project', original, {
@@ -7675,13 +7790,23 @@ test('未采纳settled重验重新派发P0/P1并续原Git稿，坏candidate不�
   active = f.store.ackDispatch(f.input.source.repositoryId, active.dispatchMessageId); f.useOperation(active); retry = true; rejectFirstReview = true
   const firstRevalidation = await runSyncOperation(f.store, active.id, f.options)
   assert.equal(firstRevalidation.operation.phase, 'failed', JSON.stringify(firstRevalidation.failure))
+  assert.deepEqual(calls.filter(call => call.startsWith('new:')), ['new:code_behavior_analyze', 'new:code_behavior_review', 'new:elaboration_generate', 'new:elaboration_review'], '未采纳settled的首次重验必须真实重派P0/P1')
   const failedParent = f.store.readOperation(active.id)
+  const failedAttempt = f.store.readAttempt(failedParent.currentAttemptId!)
+  const stages = (owner: SyncOperation, attempt: SyncAttempt) => readSyncCheckpoints(f.store, owner, attempt).json.map(item => item.value as { stage?: string; resultRef: { sha256: string } })
+  const reviewedP0 = stages(failedParent, failedAttempt).filter(stage => stage.stage?.startsWith('partition:') && stage.stage.endsWith(':analysis'))
+  assert.ok(reviewedP0.length)
   active = f.store.admitAndEnqueue(await prepareSyncAdmission(f.input, f.plan, { ingressKey: 'ordinary-retry-after-revalidation', rootCauseId: 'ordinary-retry-after-revalidation', retryOf: failedParent.id, model: failedParent.model, origin: failedParent.origin, budget: failedParent.budget, managedRoot: f.managedRoot, baselineSelection: failedParent.baselineSelection, executionScope: failedParent.scope, impactDigest: failedParent.impactDigest }, f.store.readBusinessBaselineSelection(failedParent.id)))
   assert.deepEqual(f.store.readBusinessBaselineSelection(active.id), business, '普通failed→retry仍递归沿最早原业务selection')
   active = f.store.ackDispatch(f.input.source.repositoryId, active.dispatchMessageId); f.useOperation(active)
   const result = await runSyncOperation(f.store, active.id, f.options)
   assert.equal(result.operation.phase, 'workspace_synced', JSON.stringify({ failure: result.failure, calls, attempts: f.store.listAttempts(active.id).map(attempt => attempt.failure) }))
-  assert.deepEqual(calls.filter(call => call.startsWith('new:')), ['new:code_behavior_analyze', 'new:code_behavior_review', 'new:elaboration_generate', 'new:elaboration_review', 'new:code_behavior_analyze', 'new:code_behavior_review', 'new:elaboration_generate', 'new:elaboration_review', 'new:code_review'])
+  assert.deepEqual(calls.filter(call => call.startsWith('new:')), ['new:code_behavior_analyze', 'new:code_behavior_review', 'new:elaboration_generate', 'new:elaboration_review', 'new:elaboration_generate', 'new:elaboration_review', 'new:code_review'])
+  const resumed = stages(result.operation, f.store.readAttempt(result.operation.currentAttemptId!))
+  for (const source of reviewedP0) {
+    assert.deepEqual(resumed.find(stage => stage.stage === source.stage)?.resultRef, source.resultRef)
+    assert.deepEqual(JSON.parse(readEvidence(f.input.source.commonDir, resumed.find(stage => stage.stage === `${source.stage}:provenance`)!.resultRef).toString()), { fromOperationId: failedParent.id, fromAttemptId: failedAttempt.id, resultRef: source.resultRef }, '普通retry只承接首次重验的新P0，不能取未采纳settled祖先')
+  }
   assert.equal(JSON.stringify({ operation: f.store.readOperation(parent.id), attempts: f.store.listAttempts(parent.id), journals: f.store.listJournals(parent.id) }), oldHistory)
   assert.equal(f.git('rev-parse', 'HEAD'), f.input.headCommit)
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
