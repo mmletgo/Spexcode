@@ -2720,14 +2720,14 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       if (!elaboration) {
         store.renewLease(fence, leaseMs); await yieldToControl(); store.renewLease(fence, leaseMs)
         if (operation.phase === 'analyzing') store.startElaboration(fence)
-        let protocol = stage<{ version: 'elaboration-draft-v1'; generationGuidance?: ElaborationGenerationGuidance }>(store, operation, attempt, 'elaboration-draft-protocol')
+        let protocol = stage<{ version: 'elaboration-draft-v1'; generationGuidance?: ElaborationGenerationGuidance; compactSealDiagnostics?: true }>(store, operation, attempt, 'elaboration-draft-protocol')
         if (!protocol && options.plan.agentWorkflow && !attempt.dispatchPlans.some(dispatch => dispatch.purpose.startsWith('elaboration_'))) {
-          protocol = { version: 'elaboration-draft-v1', generationGuidance: ELABORATION_GENERATION_GUIDANCE }
+          protocol = { version: 'elaboration-draft-v1', generationGuidance: ELABORATION_GENERATION_GUIDANCE, compactSealDiagnostics: true }
           saveStage(store, fence, 'elaboration-draft-protocol', protocol)
         }
         if (protocol && Object.hasOwn(protocol, 'generationGuidance') && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V1 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V2 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V3 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V4 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE) fail('elaboration_generation_guidance_unsupported', '持久P1生成提示版本不受支持；仅字段缺席允许原提示')
         const draftProtocol = protocol?.version
-        const elaborationInput = { ...makeElaborationInput(draftProtocol), ...(protocol?.generationGuidance ? { generationGuidance: protocol.generationGuidance } : {}) }
+        const elaborationInput = { ...makeElaborationInput(draftProtocol), generationGuidance: protocol?.generationGuidance, compactSealDiagnostics: protocol?.compactSealDiagnostics }
         const loadDraft = draftProtocol ? (schemaDigest: string): ElaborationDraft | null => {
           const draft = loadElaborationDraft('elaboration', undefined, schemaDigest)
           return draft && cacheDraft ? { ...draft, errors: [...draft.errors, ...cacheDraft.errors] } : draft
