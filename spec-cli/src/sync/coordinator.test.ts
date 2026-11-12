@@ -8212,27 +8212,28 @@ test('未采纳settled重验重新派发P0/P1并续原Git稿，坏candidate不�
   assert.notEqual(result.receipt!.actualTree, first.receipt!.actualTree)
 })
 
-for (const frozen of ['new', 'v1', 'v2-reserved', 'v3-reserved', 'legacy-checkpoint', 'reserved', 'null', 'empty', 'future'] as const) test(`P0 context传输只在首次冻结选择，${frozen}保留旧字段缺席与请求绑定`, async t => {
+for (const frozen of ['new', 'v1', 'v2-reserved', 'v3-reserved', 'v4-reserved', 'legacy-checkpoint', 'reserved', 'null', 'empty', 'future'] as const) test(`P0 context传输只在首次冻结选择，${frozen}保留旧字段缺席与请求绑定`, async t => {
   const f = await fixture(t, { maxAttempts: 1, maxCalls: 8, maxRepairs: 0, timeoutMs: 120_000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, 'code', 'claude:default')
   const claim = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30_000, expectedMessageId: f.operation.dispatchMessageId })
   let originalProtocol: { ref: { sha256: string }; bytes: Buffer } | undefined
   const rejectsTransport = ['null', 'empty', 'future'].includes(frozen)
-  const expectedTransport = frozen === 'new' ? 'git-json-v4' : frozen === 'v1' ? 'git-json-v1' : frozen === 'v2-reserved' ? 'git-json-v2' : frozen === 'v3-reserved' ? 'git-json-v3' : undefined
+  const expectedTransport = frozen === 'new' ? 'git-json-v5' : frozen === 'v1' ? 'git-json-v1' : frozen === 'v2-reserved' ? 'git-json-v2' : frozen === 'v3-reserved' ? 'git-json-v3' : frozen === 'v4-reserved' ? 'git-json-v4' : undefined
   const protocolValue = { version: 'code-behavior-draft-v1', ...(expectedTransport ? { contextTransport: expectedTransport } : rejectsTransport ? { contextTransport: frozen === 'null' ? null : frozen === 'empty' ? '' : 'git-json-future' } : {}) }
-  if (frozen === 'legacy-checkpoint' || frozen === 'v1' || frozen === 'v2-reserved' || frozen === 'v3-reserved' || rejectsTransport) {
+  if (frozen === 'legacy-checkpoint' || frozen === 'v1' || frozen === 'v2-reserved' || frozen === 'v3-reserved' || frozen === 'v4-reserved' || rejectsTransport) {
     const value = protocolValue, resultRef = writeEvidence(f.input.source.commonDir, value)
     const ref = writeEvidence(f.input.source.commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: claim.attempt.id, inputId: f.input.id, policyDigest: f.operation.policyDigest, stage: 'behavior-draft-protocol', resultRef })
     f.store.checkpoint(claim.fence, { ...ref, artifacts: syncCheckpointArtifacts(value, resultRef) })
     originalProtocol = { ref, bytes: readEvidence(f.input.source.commonDir, ref) }
   }
-  const reserved = frozen === 'reserved' || frozen === 'v2-reserved' || frozen === 'v3-reserved' ? f.store.reserveDispatch(claim.fence, { key: `sync:${claim.attempt.id}:original-reserved`, purpose: 'code_behavior_review', requestDigest: contentHash('原完整冻结Native请求摘要') }) : null
+  const reserved = frozen.endsWith('reserved') ? f.store.reserveDispatch(claim.fence, { key: `sync:${claim.attempt.id}:original-reserved`, purpose: 'code_behavior_review', requestDigest: contentHash('原完整冻结Native请求摘要') }) : null
   const reservedBytes = JSON.stringify(reserved)
   let captured = false
   f.options.runner = async request => {
     captured = true
     const task = JSON.parse(request.prompt.split('\n任务:\n')[1].split('\n草稿文件=')[0])
     assert.equal(task.contextTransport, expectedTransport)
-    assert.equal(request.prompt.includes('SPEX_P0_COVERAGE'), frozen === 'new' || frozen === 'v3-reserved')
+    assert.equal(request.prompt.includes('SPEX_P0_COVERAGE'), frozen === 'new' || frozen === 'v3-reserved' || frozen === 'v4-reserved')
+    assert.equal(request.prompt.includes('invalidAcceptanceBasis'), frozen === 'new')
     assert.equal(request.worktree!.mode, frozen === 'reserved' ? 'read' : 'edit')
     const contexts = readTree(f.input.source.commonDir, request.worktree!.tree).filter(entry => entry.path.endsWith('.context.json'))
     assert.equal(contexts.length, expectedTransport ? 1 : 0)

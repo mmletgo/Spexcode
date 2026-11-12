@@ -1891,9 +1891,11 @@ test('漏helper的accept具体拒绝并携完整前轮proposal与未批准analys
   })
 })
 
+const sharedAcceptancePolicyPath = '.spec/export/spec.md'
+const sharedAcceptancePolicy = `---\ntitle: 共享政策\ncontract-schema: sync-v1\n---\n## raw source\n\n共享数据政策，保留未选义务。\n\n## expanded spec\n\n### REQ\n\n| id | goal | source | constraints | success | depends-on |\n| --- | --- | --- | --- | --- | --- |\n| REQ-SHARED-01 | 共享数据约束 | user:raw | 保持字段 | 数据完整 | - |\n\n### RULE\n\n| id | scope | constraint | basis | authority | source | depends-on |\n| --- | --- | --- | --- | --- | --- | --- |\n| RULE-SHARED-01 | 共享字段 | 标题去首尾空白 | 原始要求 | export | user:raw | REQ-SHARED-01 |\n`
+
 for (const mode of ['readonly-unchanged', 'readonly-author', 'readonly-business', 'writable-new-basis'] as const) test(`AC变化依据可行性 ${mode} 复用来源变化且不以旧AC闭包限制新依据`, async t => {
-  const parentPath = '.spec/export/spec.md'
-  const parent = `---\ntitle: 共享政策\ncontract-schema: sync-v1\n---\n## raw source\n\n共享数据政策，保留未选义务。\n\n## expanded spec\n\n### REQ\n\n| id | goal | source | constraints | success | depends-on |\n| --- | --- | --- | --- | --- | --- |\n| REQ-SHARED-01 | 共享数据约束 | user:raw | 保持字段 | 数据完整 | - |\n\n### RULE\n\n| id | scope | constraint | basis | authority | source | depends-on |\n| --- | --- | --- | --- | --- | --- | --- |\n| RULE-SHARED-01 | 共享字段 | 标题去首尾空白 | 原始要求 | export | user:raw | REQ-SHARED-01 |\n`
+  const parentPath = sharedAcceptancePolicyPath, parent = sharedAcceptancePolicy
   const f = await fixture(t, source => source.replace('| AC-EXPORT-01 | ', '| AC-EXPORT-01 | RULE-SHARED-01,'), { [parentPath]: parent })
   writeFileSync(join(f.root, 'src/export.js'), `${f.source}\n// observable result detail\n`)
   if (mode === 'readonly-author') writeFileSync(join(f.root, parentPath), parent.replace('共享数据政策，保留未选义务。', '共享数据政策，保留未选义务；标题最长128字符。'))
@@ -1922,6 +1924,114 @@ for (const mode of ['readonly-unchanged', 'readonly-author', 'readonly-business'
     assert.deepEqual(calls, ['code_behavior_analyze', 'code_behavior_review'])
     assert.deepEqual(accepted.authorizedChanges[0].action === 'update_acceptance' && accepted.authorizedChanges[0].ruleIds, [basis])
   }
+})
+
+test('P0 v5 在原 v4 草稿即时定位 AC 的未变化只读来源', async t => {
+  const parentPath = sharedAcceptancePolicyPath
+  const addedRule = '| RULE-SHARED-02 | 共享字段 | 标题最长64字符 | 原始要求 | export | user:raw | REQ-SHARED-01 |\n'
+  const parent = sharedAcceptancePolicy + addedRule
+  const f = await fixture(t, undefined, { [parentPath]: parent })
+  const sourcePath = 'src/export.js', source = 'code:src/export.js#ExportService.dispatch'
+  writeFileSync(join(f.root, sourcePath), f.source + '\n// observable export result\n')
+  writeFileSync(join(f.root, parentPath), parent.replace('最长64字符', '最长128字符'))
+  const prepared = await f.input()
+  const input: CodeBehaviorInput = {
+    ...prepared, draftProtocol: 'code-behavior-draft-v1', contextTransport: 'git-json-v4', origin: 'code',
+    plan: { ...prepared.plan, version: 'sync-coordinator-v2', direction: 'code_to_spec', agentWorkflow: 'native-worktree-v1',
+      writePaths: ['.spec/export/export-contract'], sourcePaths: ['src'],
+      partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 } },
+  }
+  const ac = 'AC-EXPORT-01'
+  const blocked = ['REQ-SHARED-01', 'RULE-SHARED-01']
+  const retained = ['RULE-SHARED-02', 'RULE-EXPORT-05']
+  const ruleIds = [...blocked, ...retained]
+  const acceptance = { id: ac, ruleIds, source, reason: '尝试随输出变化更新验收' }
+  const commonDir = input.snapshot.source.commonDir
+  let checkpoint: CodeBehaviorContinuation | null = null
+  const checkpoints = { load: () => checkpoint, save: (value: CodeBehaviorContinuation) => { checkpoint = structuredClone(value) } }
+  let v4Request: ElaborationSessionRequest | undefined, oldDraft: { oid: string; bytes: Buffer; schema: Buffer; context: Buffer } | undefined
+  const calls: string[] = []
+  const dispatch: ElaborationRunner = async request => {
+    calls.push(request.purpose)
+    const seed = request.worktree!, workspace = join(f.root, '..', `ac-preflight-${calls.length}`)
+    git(f.root, 'worktree', 'add', '--detach', workspace, seed.baseCommit)
+    const descriptor = JSON.parse(request.prompt.split('\n任务:\n')[1].split('\n草稿文件=')[0])
+    const context = readCodeBehaviorContext(request, commonDir)
+    const draft = /草稿文件=([^\s；]+)/.exec(request.prompt)![1]
+    const schemaPath = draft.replace(/\.json$/, '.schema.json')
+    const contextBytes = readFileSync(join(workspace, descriptor.path)), schemaBytes = readFileSync(join(workspace, schemaPath))
+    const requiredPaths = context.task.requiredChangedPaths as string[]
+    assert.ok(requiredPaths.includes(sourcePath))
+    assert.deepEqual(context.errors, [])
+    assert.deepEqual(context.repairDiagnostics, [])
+    const check = /\nnode - (\S+) (\S+) <<'SPEX_P0_COVERAGE'\n([\s\S]+?)\nSPEX_P0_COVERAGE(?:\n|$)/.exec(request.prompt)
+    let draftBytes: Buffer
+    if (context.pendingAnalysis) {
+      assert.match(request.prompt, /SPEX_P0_REVIEW_PATHS/)
+      assert.equal(check, null)
+      assert.equal(request.inputDigest, v4Request!.inputDigest)
+      const stage = context.pendingAnalysis
+      draftBytes = Buffer.from(JSON.stringify({ inputDigest: request.inputDigest, analysisDigest: stage.analysisDigest, verdict: 'accept', checkedPaths: requiredPaths, checkedChangeIds: stage.analysis.changes.map(change => change.id), findings: [] }))
+    } else {
+      const proposal = {
+        changes: [{ kind: 'allowed_change', paths: requiredPaths, affectedIds: [ac, ...ruleIds], ruleIds, originalIntent: '保留完整导出', previousBehavior: '原结果', sourceBehavior: '结果附加可观察信息', deliveryBehavior: '原验收', evidence: sourcePath, counterexample: '同键保持幂等' }],
+        facts: [{ source, text: '导出结果附加可观察信息' }], acceptanceChanges: [acceptance], newNodes: [], resolutions: [],
+      }
+      if (!oldDraft) {
+        v4Request = request
+        draftBytes = Buffer.from(JSON.stringify(proposal))
+        assert.ok(check)
+        assert.equal(contentHash(check[3]), '65a9b20e272b66c79af933f9fb25b29914c8fd347add63d9c67d201304f6b08c', 'v4 冻结自检脚本逐字保持')
+        mkdirSync(join(workspace, draft, '..'), { recursive: true })
+        writeFileSync(join(workspace, draft), draftBytes)
+        const checked = spawnSync(process.execPath, ['-', check[1], check[2]], { cwd: workspace, input: check[3], encoding: 'utf8' })
+        assert.equal(checked.status, 0, checked.stderr)
+        assert.deepEqual(JSON.parse(checked.stdout), { missingChangedPaths: [], missingOwnerPaths: [] })
+      } else {
+        assert.equal(request.inputDigest, v4Request!.inputDigest)
+        assert.deepEqual(schemaBytes, oldDraft.schema)
+        assert.equal(behaviorMaterialTaskMatches(v4Request!, request, commonDir), true, 'v5 只读检查投影不改变旧稿的冻结业务任务')
+        assert.doesNotMatch(contextBytes.toString('utf8'), /尝试随输出变化更新验收|历史失败诊断不参与新输入/)
+        assert.equal(git(workspace, 'rev-parse', `HEAD:${draft}`), oldDraft.oid)
+        assert.deepEqual(readFileSync(join(workspace, draft)), oldDraft.bytes)
+        assert.ok(check, 'v5在已有草稿上执行分析自检')
+        const run = (status: number, invalidAcceptanceBasis: object[]) => {
+          const originalBytes = readFileSync(join(workspace, draft))
+          const checked = spawnSync(process.execPath, ['-', check[1], check[2]], { cwd: workspace, input: check[3], encoding: 'utf8' })
+          assert.equal(checked.status, status, checked.stderr)
+          assert.deepEqual(JSON.parse(checked.stdout), { missingChangedPaths: [], missingOwnerPaths: [], invalidAcceptanceBasis })
+          assert.deepEqual(readFileSync(join(workspace, draft)), originalBytes)
+          assert.deepEqual(readFileSync(join(workspace, descriptor.path)), contextBytes)
+          assert.deepEqual(readFileSync(join(workspace, schemaPath)), oldDraft!.schema)
+        }
+        run(1, [{ id: ac, unchangedReadonlyBasis: blocked.map(id => ({ id, nodeId: 'export', path: parentPath })) }])
+        writeFileSync(join(workspace, draft), JSON.stringify({ ...proposal, acceptanceChanges: [{ ...acceptance, source: 'user:raw' }] }))
+        run(0, [])
+        draftBytes = Buffer.from(JSON.stringify({ ...proposal, acceptanceChanges: [{ ...acceptance, ruleIds: retained }] }))
+        writeFileSync(join(workspace, draft), draftBytes)
+        run(0, [])
+      }
+    }
+    mkdirSync(join(workspace, draft, '..'), { recursive: true }); writeFileSync(join(workspace, draft), draftBytes)
+    git(workspace, 'add', draft); git(workspace, 'commit', '-m', `normal P0 draft ${calls.length}`)
+    const tree = git(workspace, 'rev-parse', 'HEAD^{tree}')
+    assert.deepEqual(readTree(commonDir, tree).filter(entry => !entry.path.startsWith('.spex-sync-drafts/')), readTree(commonDir, input.composed.tree))
+    if (!oldDraft) oldDraft = { oid: git(workspace, 'rev-parse', `HEAD:${draft}`), bytes: draftBytes, schema: schemaBytes, context: contextBytes }
+    const receipt = { summary: '已正常提交本阶段JSON' }
+    return { sessionId: `p0-ac-session-${calls.length}`, threadId: `p0-ac-thread-${calls.length}`, turnId: 'turn', output: receipt, resultDigest: contentHash(JSON.stringify(receipt)), worktree: nativeWorktreeResult(workspace, seed) }
+  }
+  await assert.rejects(analyzeCodeBehavior(input, dispatch, undefined, checkpoints), { code: 'behavior_analysis_invalid', message: 'P0 行为校验未通过' })
+  const prior = structuredClone(checkpoint!)
+  assert.equal(prior.drafts.code_behavior_analyze!.oid, oldDraft!.oid)
+  assert.ok(!JSON.stringify(prior).includes(blocked[0]))
+  const accepted = await analyzeCodeBehavior({ ...input, contextTransport: 'git-json-v5', requestKey: 'next-attempt', repairDiagnostics: [{ code: 'legacy', message: '历史失败诊断不参与新输入' }] }, dispatch, undefined, checkpoints)
+  assert.equal(accepted.reviewPassed, true)
+  assert.deepEqual(accepted.authorizedChanges[0].action === 'update_acceptance' && accepted.authorizedChanges[0].ruleIds, retained)
+  assert.deepEqual(calls, ['code_behavior_analyze', 'code_behavior_analyze', 'code_behavior_review'])
+  assert.deepEqual(readStageDraft(commonDir, prior.drafts.code_behavior_analyze!, prior.drafts.code_behavior_analyze!), oldDraft!.bytes.toString('utf8'))
+  const descriptor = JSON.parse(v4Request!.prompt.split('\n任务:\n')[1].split('\n草稿文件=')[0])
+  assert.equal(descriptor.sha256, contentHash(oldDraft!.context))
+  assert.equal(readCodeBehaviorContext(v4Request!, commonDir).errors.length, 0)
 })
 
 test('AC复合门禁逐项诊断未变规则与不绑定来源，不把多个allowed_change并集授权', async t => {
@@ -3013,6 +3123,7 @@ for (const contextTransport of ['git-json-v1', 'git-json-v2', 'git-json-v3', 'gi
   const accepted = (digest: string) => { assert.equal(digest, result.inputDigest); return result }
   const legacy = await analyzeCodeBehavior({ ...input, contextTransport: undefined }, neverRun, accepted)
   assert.equal(await analyzeCodeBehavior({ ...input, contextTransport: 'git-json-v2' }, neverRun, accepted), legacy)
+  if (contextTransport === 'git-json-v4') assert.equal(await analyzeCodeBehavior({ ...input, contextTransport: 'git-json-v5' }, neverRun, accepted), result)
   for (let index = 0; index < 23; index++) assert.equal(await analyzeCodeBehavior({ ...input, requestKey: `new-attempt-${index}` }, neverRun, accepted), legacy)
   assert.equal(calls, 0)
   t.diagnostic(JSON.stringify({ transportContractOnly: true, epipeRootCauseClaimed: false, acceptedLookups: 23, distinctFixtureOwners: 1, addedRunnerCalls: calls, stages: seen }))

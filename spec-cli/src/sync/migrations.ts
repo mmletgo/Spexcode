@@ -171,7 +171,8 @@ CREATE INDEX sync_observations_committed_frontiers ON sync_observations(
 { version: 40, sql: 'SELECT 1; -- Protect Grok native worktree operations and settled evidence from older writers.' },
 { version: 41, sql: 'SELECT 1; -- Protect Cursor ACP native worktree operations and settled evidence from older writers.' },
 { version: 42, sql: 'SELECT 1; -- Protect cross-operation approved P1 partition provenance from older writers.' },
-{ version: 43, sql: 'SELECT 1; -- Protect explicit readonly coverage choices and their verification evidence from older writers.' }]
+{ version: 43, sql: 'SELECT 1; -- Protect explicit readonly coverage choices and their verification evidence from older writers.' },
+{ version: 44, sql: 'SELECT 1; -- Protect frozen P0 analysis acceptance basis preflight from older writers.' }]
 
 /** 升级前以 SQLite online backup 保存一致性旧库；迁移本身由组件事务执行。 */
 export async function migrateSyncStore(protocol: SessionProtocol, options: { backupPath?: string } = {}): Promise<number> {
