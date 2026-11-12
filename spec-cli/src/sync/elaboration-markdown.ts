@@ -155,8 +155,14 @@ function readonlyCitationPatchErrors(input: ElaborationInput, generated: Generat
       const old = parseCodeEntry(before), next = parseCodeEntry(after)
       const ref = old.anchor ? `${old.path}#${old.anchor}` : old.path
       if (origin === 'related' && !old.anchor && (old.path.endsWith('/') ? !next.path.endsWith('/') : !isFrozenFile(next.path))) return false
-      return Boolean(next.path && !next.path.includes('*') && Boolean(old.anchor) === Boolean(next.anchor) && (origin !== 'code' || old.path === next.path)
-        && issues.some(issue => issue.itemId === itemId && issue.citation?.origin === origin && issue.citation.ref === ref))
+      if (!next.path || next.path.includes('*')) return false
+      const issue = issues.find(issue => issue.itemId === itemId && issue.citation?.origin === origin && issue.citation.ref === ref)
+      if (!issue) return false
+      if (Boolean(old.anchor) === Boolean(next.anchor)) return origin !== 'code' || old.path === next.path
+      if (origin !== 'source' || old.path !== next.path) return false
+      return old.anchor
+        ? issue.code === 'anchor-dead' && repair.wholeFileSourcePaths?.includes(old.path) === true
+        : issue.code === 'anchor-selector-required'
     }
     for (const relation of ['code', 'related'] as const)
       if (node[relation].length !== contract[relation].length || contract[relation].some((ref, index) => !citationChange(relation, ref, node[relation][index])))

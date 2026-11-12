@@ -1182,4 +1182,31 @@ test('V1真实caller区分投影seed与完整accepted target，VERIFY剔表不�
   })
   assert.equal(result.status, 'complete', JSON.stringify({ failure: result.failure, findings: result.rounds.flatMap(round => round.findings) }))
   assert.deepEqual(f.requests.slice(calls).map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
+  const approvedRepair = local!, priorCalls = f.requests.length
+  const cached = await elaborateSyncPartitions({ ...input, requestKey: 'v1-caller-frozen-approval' }, plan, 1, { load: () => null, save,
+    loadReadonlySpecRepair: (_key, _binding, inputDigest) => ({ prior, repair: { ...repair, baseInputDigest: inputDigest }, wholeFileSourcePaths: ['src/marker.py'] }),
+    loadAcceptedElaboration: (_key, _binding, inputDigest) => inputDigest === approvedRepair.inputDigest ? approvedRepair : null,
+  }, async () => { throw new Error('原批准应沿精确旧输入复验') })
+  assert.equal(cached.status, 'complete')
+  assert.equal(f.requests.length, priorCalls)
+
+  const oldDraft = approvedRepair.rounds.at(-1)!.draft!
+  const originalDraftSource = readStageDraft(f.commonDir, oldDraft, oldDraft)
+  const migrated = await elaborateSyncPartitions({ ...input, requestKey: 'v1-caller-file-source-draft' }, plan, 1, { load: () => null, save,
+    loadReadonlySpecRepair: (_key, _binding, inputDigest) => ({ prior, repair: { ...repair, baseInputDigest: inputDigest }, wholeFileSourcePaths: ['src/marker.py'] }),
+    loadElaborationDraft: (_key, _binding, schemaDigest, inputDigest) =>
+      schemaDigest === oldDraft.schemaDigest && inputDigest === approvedRepair.inputDigest ? oldDraft : null,
+    loadElaborationDraftMaterial: (_key, _binding, _schemaDigest, request) => {
+      assert.ok(request)
+      assert.notEqual(request.binding.schemaDigest, oldDraft.schemaDigest)
+      assert.equal(elaborationMaterialContext(f.commonDir, f.requests[calls], request), null)
+      return null
+    },
+  }, f.run((_request, workspace, draftPath) => {
+    assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), originalDraftSource)
+    assert.match(readFileSync(join(workspace, draftPath.replace(/\.json$/, '.schema.json')), 'utf8'), /code:src\/marker\.py/)
+    return JSON.stringify(f.corrected)
+  }))
+  assert.equal(migrated.status, 'complete')
+  assert.deepEqual(f.requests.slice(priorCalls).map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
 })

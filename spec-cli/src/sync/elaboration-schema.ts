@@ -39,6 +39,18 @@ export function elaborationSchema(input: ElaborationInput, options: { purpose?: 
   const properties = (changes.items as { properties: Record<string, unknown> }).properties
   properties.targetIndex = { type: 'integer', minimum: 0, maximum: input.targets.length - 1, ...(targets.length > 0 && targets.length < input.targets.length ? { enum: targets.map(target => target.targetIndex) } : {}) }
   const tables = properties.tables as { properties: { RULE: { items: { properties: Record<string, Record<string, unknown>> } } } }
+  const wholeFilePaths = input.readonlySpecRepair?.wholeFileSourcePaths
+  if (wholeFilePaths?.length) {
+    const rowSchemas = (properties.tables as { properties: Record<string, { items: { properties: Record<string, unknown> } }> }).properties
+    const wholeFileSource = {
+      type: 'string',
+      anyOf: [{ pattern: source.pattern }, { enum: wholeFilePaths.map(path => 'code:' + path) }],
+      description: '所列整文件来源已经冻结并核实没有命名声明。其他代码来源使用精确声明。',
+    }
+    for (const { items } of Object.values(rowSchemas)) {
+      if (items.properties.source) items.properties.source = wholeFileSource
+    }
+  }
   const authority = tables.properties.RULE.items.properties.authority
   const owners = new Set(targets.map(target => target.nodeId))
   for (const change of input.nodeChanges ?? []) {

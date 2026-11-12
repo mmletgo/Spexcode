@@ -23,7 +23,7 @@ import { authenticateNativeFailure, authenticateNativeRejectedFinal, composedBef
 import type { SyncCheckpointStageView } from './checkpoint-evidence.js'
 import type { FileMutex } from './file-mutex.js'
 import { checkGenerationContractIntent, isSyncSpecPath, readFrozenContracts } from './frozen-contracts.js'
-import { isReadonlyCitationFailure } from './frozen-anchors.js'
+import { findWholeFileSourcePaths, isReadonlyCitationFailure } from './frozen-anchors.js'
 import { decisionAuthorizationErrors, sameContractBusinessMeaning } from './contract-evolution.js'
 import type { FrozenContracts, GenerationContractPolicy } from './frozen-contracts.js'
 import { implementationGenerationDispatch, completeSyncPartitionPlan, analyzeSyncPartitions, elaborateSyncPartitions, generateSyncPartitions, partitionSealRepairOwners, analysisOnlyPartitionEvidence, IMPLEMENTATION_PLAN_SCHEMA } from './partition-execution.js'
@@ -2532,7 +2532,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           }
           return false
         },
-        loadReadonlySpecRepair: (key, binding, inputDigest, localInput) => {
+        loadReadonlySpecRepair: async (key, binding, inputDigest, localInput) => {
           const owner = readonlyActiveOwners.find(owner => owner.key === key)
           if (!owner) return null
           const sourceAttempt = store.readAttempt(owner.fromAttemptId)
@@ -2544,8 +2544,19 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           const findings = readonlyOwnerRepair!.findings.filter(finding => prior.changes.some(change => change.nodeId === finding.nodeId && change.path === finding.path))
             .map(finding => localInput.generationGuidance === ELABORATION_GENERATION_GUIDANCE && finding.relatedIds ? { ...finding, relatedIds: finding.relatedIds.filter(id => ids.has(id)) } : finding)
           if (prior.changes.some(change => !within(change.path, options.plan.writePaths) || options.plan.mandatoryTests.some(test => overlap(change.path, test.testPath)))) fail('readonly_spec_repair_binding', '只读V1 owner目标越过冻结授权')
-          saveStage(store, fence!, `${key}:readonly-repair-provenance`, { fromAttemptId: sourceAttempt.id, resultRef: owner.resultRef, generationRef: readonlyOwnerRepair!.generationRef })
-          return { prior, priorInput, repair: { ...(readonlyOwnerRepair!.kind ? { kind: readonlyOwnerRepair!.kind, reviewEvidence: readonlyOwnerRepair!.reviewEvidence } : findings.every(issue => issue.citation) ? { applicability: round.candidate!.applicability } : {}), baseInputDigest: inputDigest, candidateDigest: readonlyOwnerRepair!.candidateDigest, generationRef: readonlyOwnerRepair!.generationRef, acceptedRef: owner.resultRef, changes: prior.changes, output: round.output, review: round.review, findings } }
+          const current = store.readAttempt(attempt!.id)
+          const name = key + ':readonly-repair-provenance'
+          const reserved = current.dispatchPlans.some(dispatch => dispatch.key.startsWith('sync:' + current.id + ':elaborate:partition:' + binding.partitionId + ':'))
+          const sourcePaths = !readonlyOwnerRepair!.kind && findings.every(issue => issue.citation)
+            ? findings.filter(issue => issue.code === 'anchor-dead' && issue.citation?.origin === 'source').map(issue => parseCodeEntry(issue.citation!.ref).path)
+            : []
+          const wholeFileSourcePaths = reserved
+            ? stage<{ wholeFileSourcePaths?: string[] }>(store, operation, current, name)?.wholeFileSourcePaths
+            : sourcePaths.length ? await findWholeFileSourcePaths(view.files, sourcePaths) : undefined
+          assertMaterialFence()
+          saveStage(store, fence!, name, { fromAttemptId: sourceAttempt.id, resultRef: owner.resultRef, generationRef: readonlyOwnerRepair!.generationRef,
+            ...(wholeFileSourcePaths?.length ? { wholeFileSourcePaths } : {}) })
+          return { prior, priorInput, wholeFileSourcePaths, repair: { ...(readonlyOwnerRepair!.kind ? { kind: readonlyOwnerRepair!.kind, reviewEvidence: readonlyOwnerRepair!.reviewEvidence } : findings.every(issue => issue.citation) ? { applicability: round.candidate!.applicability } : {}), baseInputDigest: inputDigest, candidateDigest: readonlyOwnerRepair!.candidateDigest, generationRef: readonlyOwnerRepair!.generationRef, acceptedRef: owner.resultRef, changes: prior.changes, output: round.output, review: round.review, findings } }
         },
         loadPartitionSealRepair: async (key, binding, inputDigest) => {
           const source = await loadSealRepairSource()

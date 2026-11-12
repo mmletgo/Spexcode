@@ -122,6 +122,24 @@ test('只读V1混合引用差量保留原业务正文、AC和可信命令', () =
     { ...change, tables: { ...change.tables, RULE: [{ ...change.tables.RULE[0], basis: '改写事实' }] } },
   ]) assert.ok(elaborationPatchErrors(snapshot, { ...output, changes: [variant] }).length > 0)
   assert.ok(elaborationPatchErrors(snapshot, { ...output, applicability: [{ ...output.applicability[0], applies: false, affectedIds: [] }] }).some(error => error.includes('保留原已审适用性')))
+
+  const filePath = 'src/export.js'
+  const withSource = (source: string): GeneratedElaboration => ({
+    ...output, changes: [{ ...change, tables: { ...change.tables, RULE: [{ ...change.tables.RULE[0], source }] } }],
+  })
+  const wholeFileInput = { ...snapshot, readonlySpecRepair: { ...snapshot.readonlySpecRepair!, wholeFileSourcePaths: [filePath] } }
+  assert.deepEqual(elaborationPatchErrors(wholeFileInput, withSource('code:' + filePath)), [])
+  assert.ok(elaborationPatchErrors(wholeFileInput, withSource('code:src/other.js')).length > 0)
+  const bareSource = frozen.replace('code:' + oldRef, 'code:' + filePath)
+  const bareInput: ElaborationInput = {
+    ...snapshot, targets: [{ ...snapshot.targets[0], source: bareSource, sourceDigest: elaborationDigest(bareSource) }],
+    readonlySpecRepair: { ...snapshot.readonlySpecRepair!, findings: [
+      { ...snapshot.readonlySpecRepair!.findings[0], code: 'anchor-selector-required', citation: { origin: 'source', ref: filePath } },
+      snapshot.readonlySpecRepair!.findings[1],
+    ] },
+  }
+  assert.deepEqual(elaborationPatchErrors(bareInput, output), [])
+  assert.ok(elaborationPatchErrors(bareInput, withSource('code:src/other.js#run')).length > 0)
 })
 
 test('raw-only旧节点用同一协议首次建立契约，保留原raw及既有说明', () => {

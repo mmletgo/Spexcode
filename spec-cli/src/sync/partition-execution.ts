@@ -1,11 +1,11 @@
 import type { StageDraftMaterialRequest } from './stage-worktree.js'
 import { setImmediate as yieldToControl } from 'node:timers/promises'
-import { stageWorktree, STAGE_READING_INSTRUCTIONS } from './stage-worktree.js'
+import { readStageDraft, stageWorktree, STAGE_READING_INSTRUCTIONS } from './stage-worktree.js'
 import { posix } from 'node:path'
 import { contractReferences, parseContract, parseParts } from '@spexcode/spec-core/contracts'
 import { analyzeCodeBehavior, compositionConflictPaths, deriveBehaviorAuthorization, partitionBehaviorChangedPaths, uncoveredCompositionConflicts, verifyBehaviorReadBasis } from './code-behavior.js'
 import type { CodeBehaviorApprovalBinding, CodeBehaviorInput, CodeBehaviorContinuation, CodeBehaviorMaterialRequest, CodeBehaviorReviewReference } from './code-behavior.js'
-import { outputErrors } from './elaboration-schema.js'
+import { elaborationSchema, outputErrors } from './elaboration-schema.js'
 import { elaborate, freezeElaborationInput, verifyElaborationDraftCache, projectElaborationFlowReadiness, sealPartitionedElaboration, partitionSealRepairContext } from './elaboration.js'
 import type { Contract, ContractFinding, Verification } from '@spexcode/spec-core/contracts'
 import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE, partitionedElaborationInputDigest } from './elaboration-types.js'
@@ -24,7 +24,7 @@ import { historicalOwnerPaths, historicalRetiredIds, obligationPaths, projectPri
 import type { RawOnlyInterfaceSeedDescendant, RawOnlyInterfaceSeedEvidence, SyncPartition, SyncPartitionPlan } from './partitioning.js'
 import type { CodeBehaviorAnalysis, CodeBehaviorEvidence } from './writeback-types.js'
 
-type PartitionSealRepair = { prior: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>; repair: ReadonlySpecRepair }
+type PartitionSealRepair = { prior: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>; repair: ReadonlySpecRepair; priorInput?: ElaborationInput; wholeFileSourcePaths?: string[] }
 export type PartitionCheckpoints = {
   load<T>(key: string): T | null
   loadCandidateReviewRepair?(key: string, plan: SyncPartitionPlan, input: GenerationInput, candidate: NonNullable<GenerationResult['candidate']>): GenerationInput['reviewRepair'] | null
@@ -42,7 +42,7 @@ export type PartitionCheckpoints = {
   loadElaborationRepairSeed?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): ElaborationRepairSeed | null
   loadElaborationRepairDiagnostics?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): ElaborationRepairDiagnostics | null
   readonlyFactRepairSource?(key: string, repair: ReadonlySpecRepair): boolean
-  loadReadonlySpecRepair?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string, localInput: ElaborationInput): (PartitionSealRepair & { priorInput?: ElaborationInput }) | null
+  loadReadonlySpecRepair?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string, localInput: ElaborationInput): PartitionSealRepair | null | Promise<PartitionSealRepair | null>
   loadPartitionSealRepair?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): PartitionSealRepair | null | Promise<PartitionSealRepair | null>
   save(key: string, value: unknown): BlobRef
 }
@@ -425,27 +425,47 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
       return draft && cacheDraft ? { ...draft, errors: [...draft.errors, ...cacheDraft.errors] } : draft
     } : undefined
     const inputDigest = freezeElaborationInput(localInput).inputDigest
-    const readonlyRepair = checkpoints.loadReadonlySpecRepair?.(key, partitionBinding, inputDigest, localInput) ?? await checkpoints.loadPartitionSealRepair?.(key, partitionBinding, inputDigest)
+    const readonlyRepair = await checkpoints.loadReadonlySpecRepair?.(key, partitionBinding, inputDigest, localInput) ?? await checkpoints.loadPartitionSealRepair?.(key, partitionBinding, inputDigest)
     if (readonlyRepair) {
-      const priorBase = 'priorInput' in readonlyRepair ? (readonlyRepair as { priorInput?: ElaborationInput }).priorInput ?? localInput : localInput
+      const priorBase = readonlyRepair.priorInput ?? localInput
       const priorInput = readonlyRepair.prior.readonlySpecRepair ? readonlyRepairInput(priorBase, readonlyRepair.prior.readonlySpecRepair, checkpoints.readonlyFactRepairSource?.(key, readonlyRepair.prior.readonlySpecRepair) === true) : priorBase
       if (freezeElaborationInput(priorInput).inputDigest !== readonlyRepair.prior.inputDigest) reject('只读V1修复的已审owner不匹配当前完整局部输入')
-      const repairedInput = readonlyRepairInput(localInput, readonlyRepair.repair, checkpoints.readonlyFactRepairSource?.(key, readonlyRepair.repair) === true)
-      const repairInputDigest = freezeElaborationInput(repairedInput).inputDigest
+      const originalRepairInput = readonlyRepairInput(localInput, readonlyRepair.repair, checkpoints.readonlyFactRepairSource?.(key, readonlyRepair.repair) === true)
+      const originalRepairDigest = freezeElaborationInput(originalRepairInput).inputDigest
+      const wholeFileSourcePaths = readonlyRepair.wholeFileSourcePaths
+      const repairedInput = wholeFileSourcePaths?.length
+        ? { ...originalRepairInput, readonlySpecRepair: { ...readonlyRepair.repair, wholeFileSourcePaths } }
+        : originalRepairInput
+      const usesWholeFiles = repairedInput !== originalRepairInput
+      const repairInputDigest = usesWholeFiles ? freezeElaborationInput(repairedInput).inputDigest : originalRepairDigest
+      const repairInputs = [{ input: originalRepairInput, digest: originalRepairDigest }]
+      if (usesWholeFiles) repairInputs.push({ input: repairedInput, digest: repairInputDigest })
       for (const target of readonlyRepair.repair.kind === 'candidate_review' ? repairedInput.targets : []) if (target.source !== null && target.source !== localInput.targets.find(original => original.path === target.path)!.source) factBaselines.set(target.path, target.source)
-      if (saved && saved.inputDigest === repairInputDigest && JSON.stringify(saved.readonlySpecRepair) === JSON.stringify(readonlyRepair.repair)) {
-        if (reusableCache(repairedInput, saved)) return saved
-      } else if (saved && contentHash(JSON.stringify(saved)) !== readonlyRepair.repair.acceptedRef.sha256) reject('只读V1修复不能绕过另一份当前局部原件')
-      const accepted = (interfaceSeed ? checkpoints.loadAcceptedInterfaceSeed : checkpoints.loadAcceptedElaboration)?.(key, partitionBinding, repairInputDigest)
-      if (accepted) {
-        if (JSON.stringify(accepted.readonlySpecRepair) !== JSON.stringify(readonlyRepair.repair)) reject('只读修复承接不能改变原诊断来源')
-        if (reusableCache(repairedInput, accepted)) return accepted
+      const cached = saved && repairInputs.find(item => saved.inputDigest === item.digest && JSON.stringify(saved.readonlySpecRepair) === JSON.stringify(item.input.readonlySpecRepair))
+      if (cached && reusableCache(cached.input, saved)) return saved
+      if (saved && !cached && contentHash(JSON.stringify(saved)) !== readonlyRepair.repair.acceptedRef.sha256) reject('只读V1修复不能绕过另一份当前局部原件')
+      for (const { input, digest } of repairInputs) {
+        const accepted = (interfaceSeed ? checkpoints.loadAcceptedInterfaceSeed : checkpoints.loadAcceptedElaboration)?.(key, partitionBinding, digest)
+        if (accepted) {
+          if (JSON.stringify(accepted.readonlySpecRepair) !== JSON.stringify(input.readonlySpecRepair)) reject('只读修复承接不能改变原诊断来源')
+          if (reusableCache(input, accepted)) return accepted
+        }
       }
       const seed = checkpoints.loadElaborationRepairSeed?.(key, partitionBinding, repairInputDigest) ?? undefined
+      const schemaPurpose = localInput.phase === 'interface_seed' ? 'interface_seed' : 'generation'
+      const oldSchemaDigest = usesWholeFiles ? contentHash(JSON.stringify(elaborationSchema(originalRepairInput, { purpose: schemaPurpose }))) : undefined
       const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = await elaborate(repairedInput, {
-        runner, partitionSealFiles: sealInput.files, seed, draft: cacheDraft,
+        runner, partitionSealFiles: sealInput.files, seed,
+        draft: oldSchemaDigest && cacheDraft?.schemaDigest === oldSchemaDigest ? undefined : cacheDraft,
         loadDraft: loadDraft ? schemaDigest => loadDraft(schemaDigest, repairInputDigest) : undefined,
-        loadDraftMaterial: localInput.draftProtocol ? (schemaDigest, request) => checkpoints.loadElaborationDraftMaterial?.(key, partitionBinding, schemaDigest, request) ?? null : undefined,
+        loadDraftMaterial: localInput.draftProtocol ? async (schemaDigest, request) => {
+          const material = await checkpoints.loadElaborationDraftMaterial?.(key, partitionBinding, schemaDigest, request)
+          if (material || !oldSchemaDigest || request?.existingDraft) return material ?? null
+          const priorDraft = loadDraft?.(oldSchemaDigest, originalRepairDigest) ?? cacheDraft
+          if (priorDraft?.schemaDigest !== oldSchemaDigest) return null
+          const source = readStageDraft(commonDir, priorDraft, { ...priorDraft, sourceInputId: originalRepairInput.historyInput!.id })
+          return { source, errors: priorDraft.errors }
+        } : undefined,
         repairDiagnostics: checkpoints.loadElaborationRepairDiagnostics?.(key, partitionBinding, repairInputDigest) ?? undefined,
       })
       checkpoints.save(key, compact)

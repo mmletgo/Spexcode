@@ -200,6 +200,21 @@ test('列数、来源、bool、argv、仓库路径、空表和多文件治理快
   }
 })
 
+test('代码来源解析保留仓库相对文件路径，可选的符号不得为空', () => {
+  for (const ref of ['src/pkg/module.py', 'src/export.js#ExportService']) {
+    const contract = parse(baseline.replace('decision:EXPORT-POLICY | REQ-EXPORT-01', `code:${ref} | REQ-EXPORT-01`))
+    const rule = contract.items.find(item => item.id === 'RULE-EXPORT-01')
+    assert.ok(rule?.kind === 'RULE')
+    assert.deepEqual(rule.source, { kind: 'code', ref })
+  }
+  for (const ref of ['src/pkg/module.py#', '#ExportService', '/src/pkg/module.py', 'src/../module.py', 'src/pkg/', 'src/*.py']) {
+    const source = baseline.replace('decision:EXPORT-POLICY | REQ-EXPORT-01', `code:${ref} | REQ-EXPORT-01`)
+    const result = parseContract({ nodeId: 'export-contract', path: specPath, source })
+    assert.equal(result.contract, null, ref)
+    assert.deepEqual(result.findings.map(finding => finding.code), ['invalid-source'], ref)
+  }
+})
+
 test('ID全局唯一、引用类型/归属、依赖循环；正常失败重试业务循环合法', () => {
   const contract = parse()
   assert.ok(buildContractGraph([contract, { ...contract, nodeId: 'copy', path: 'copy/spec.md' }]).findings.some((finding) => finding.code === 'duplicate-id'))
