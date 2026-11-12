@@ -19,6 +19,11 @@ export const contractIds = (value: string): string[] => value === '-' ? [] : val
 export const isRepositoryPath = (value: string, allowRoot = false): boolean =>
   (allowRoot && value === '.') || (!!value && !/^[\/\\]|^[A-Za-z]:|[\0\r\n*?]/.test(value) && !value.split(/[\/\\]/).some((part) => !part || part === '..' || part === '.'))
 
+function isCodeReference(value: string): boolean {
+  const [path, selector] = value.split('#')
+  return isRepositoryPath(path) && (selector === undefined || Boolean(selector))
+}
+
 // Markdown table separators inside escaped text or a matched code span belong to the cell.
 export function contractTableCells(line: string): string[] {
   const cells: string[] = []
@@ -117,7 +122,7 @@ export function parseContract(input: ParseContractInput): ParseContractResult {
         if (!source || (source[1] === 'user' && source[2] !== 'raw' && !/^REQ-[A-Z0-9-]+$/.test(source[2])) ||
           (source[1] === 'rule' && !/^RULE-[A-Z0-9-]+$/.test(source[2])) ||
           (source[1] === 'derived' && !/^(REQ|FLOW|STEP|STATE|EVENT|TR|RULE|AC|GAP)-[A-Z0-9-]+$/.test(source[2])) ||
-          (source[1] === 'code' && (!source[2].includes('#') || !isRepositoryPath(source[2].split('#')[0]) || !source[2].split('#')[1]))) {
+          (source[1] === 'code' && !isCodeReference(source[2]))) {
           fail('invalid-source', `${id} 来源格式不合法`, rowLine, id)
         } else fields.source = { kind: source[1], ref: source[2] } as ContractSource
       }
@@ -157,7 +162,7 @@ export function parseContract(input: ParseContractInput): ParseContractResult {
   const list = (v: string | string[] | undefined): string[] => Array.isArray(v) ? [...v] : v ? [v] : []
   const code = list(fm.code), related = list(fm.related)
   for (const entry of code) {
-    if (!isRepositoryPath(entry.split('#')[0]) || entry.includes('#') && !entry.split('#')[1]) fail('invalid-code-binding', `非法治理锚点：${entry}`)
+    if (!isCodeReference(entry)) fail('invalid-code-binding', `非法治理锚点：${entry}`)
   }
   if (new Set(code.map((entry) => entry.split('#')[0])).size > 1) fail('multiple-governed-files', '一个契约节点最多治理一个代码文件；跨文件职责须拆为子节点')
   return { contract: findings.length ? null : { schema: 'sync-v1', nodeId: input.nodeId, path: input.path, rawSource: parts?.rawSource ?? body.trim(), expandedSpec: parts?.expandedSpec ?? '', code, related, items }, findings }

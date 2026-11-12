@@ -4,21 +4,49 @@ import type { ContractFinding, ContractGraph } from '@spexcode/spec-core/contrac
 
 export type FrozenAnchorEvidence = {
   nodeId: string; path: string; declarationPath: string; line?: number; itemId?: string
-  origin: 'code' | 'related' | 'source'; selector: string; unit: Unit | null
+  origin: 'code' | 'related' | 'source'; selector: string | null; unit: Unit | null
 }
 export type FrozenAnchorResult = { findings: ContractFinding[]; anchors: FrozenAnchorEvidence[] }
 
 export function isReadonlyCitationFailure(finding: ContractFinding): boolean {
   return finding.severity === 'error' && (finding.code === 'anchor-dead' || Boolean(finding.citation) &&
-    ['anchor-ambiguous', 'anchor-parse-error', 'anchor-file-missing', 'related-file-missing'].includes(finding.code))
+    ['anchor-ambiguous', 'anchor-parse-error', 'anchor-file-missing', 'anchor-selector-required', 'related-file-missing'].includes(finding.code))
+}
+
+function frozenFileExtraction(files: ReadonlyMap<string, string>, paths: readonly string[], registry: Extractor[]) {
+  const frozenFiles = new Map(paths.map(path => [path, files.get(path)]))
+  const parsedFiles = new Map<string, CachedExtraction>()
+  const readiness = new Map<Extractor, true | string>()
+  return async (path: string): Promise<{ units: Unit[] } | { code: string; message: string }> => {
+    const source = frozenFiles.get(path)
+    if (source === undefined) return { code: 'anchor-file-missing', message: `冻结候选缺少锚点文件 ${path}` }
+    const extractor = extractorFor(registry, extOf(path))
+    if (!extractor) return { code: 'anchor-language-unsupported', message: `${path} 没有指定的可信语言解析器` }
+    if (!readiness.has(extractor)) readiness.set(extractor, await extractor.ready())
+    if (readiness.get(extractor) !== true) return { code: 'anchor-extractor-unavailable', message: `${extractor.id} 不可用：${readiness.get(extractor)}` }
+    if (!parsedFiles.has(path)) parsedFiles.set(path, await extractCachedBlob(source, path, extractor, blobShaForContent(source)))
+    const parsed = parsedFiles.get(path)!
+    return 'error' in parsed ? { code: 'anchor-parse-error', message: `${path} 无法解析：${parsed.error}` } : parsed
+  }
+}
+
+export async function findWholeFileSourcePaths(files: ReadonlyMap<string, string>, paths: readonly string[], registry: Extractor[] = extractors('')): Promise<string[]> {
+  const candidates = [...new Set(paths)].sort()
+  const extract = frozenFileExtraction(files, candidates, registry)
+  const eligible: string[] = []
+  for (const path of candidates) {
+    const parsed = await extract(path)
+    if ('units' in parsed && parsed.units.length === 0) eligible.push(path)
+  }
+  return eligible
 }
 
 /** 只解析冻结文本；使用工具自身的语言注册表，不加载候选工作区的可执行依赖。 */
 export async function validateFrozenAnchors(graph: ContractGraph, files: ReadonlyMap<string, string>, registry: Extractor[] = extractors('')): Promise<FrozenAnchorResult> {
-  const frozenFiles = new Map(files)
   const findings: ContractFinding[] = [], anchors: FrozenAnchorEvidence[] = []
   const report = (query: Omit<FrozenAnchorEvidence, 'unit'>, code: string, message: string, severity: 'error' | 'warning' = 'error'): void => {
-    findings.push({ code, severity, nodeId: query.nodeId, path: query.declarationPath, line: query.line, itemId: query.itemId, citation: { origin: query.origin, ref: `${query.path}#${query.selector}` }, message })
+    const ref = query.selector === null ? query.path : `${query.path}#${query.selector}`
+    findings.push({ code, severity, nodeId: query.nodeId, path: query.declarationPath, line: query.line, itemId: query.itemId, citation: { origin: query.origin, ref }, message })
   }
   const queries: Omit<FrozenAnchorEvidence, 'unit'>[] = []
   for (const contract of graph.contracts) {
@@ -30,23 +58,19 @@ export async function validateFrozenAnchors(graph: ContractGraph, files: Readonl
     }
     for (const item of contract.items) if (item.kind !== 'VERIFY' && item.source.kind === 'code') {
       const entry = parseCodeEntry(item.source.ref)
-      if (entry.anchor) queries.push({ nodeId: contract.nodeId, declarationPath: contract.path, line: item.line, itemId: item.id, path: entry.path, selector: entry.anchor, origin: 'source' })
+      queries.push({ nodeId: contract.nodeId, declarationPath: contract.path, line: item.line, itemId: item.id, path: entry.anchor === null ? item.source.ref : entry.path, selector: entry.anchor, origin: 'source' })
     }
   }
-  const parsedFiles = new Map<string, CachedExtraction>()
-  const readiness = new Map<Extractor, true | string>()
+  const extract = frozenFileExtraction(files, queries.map(query => query.path), registry)
   for (const query of queries) {
     const evidence: FrozenAnchorEvidence = { ...query, unit: null }
     anchors.push(evidence)
-    const source = frozenFiles.get(query.path)
-    if (source === undefined) { report(query, 'anchor-file-missing', `冻结候选缺少锚点文件 ${query.path}`); continue }
-    const extractor = extractorFor(registry, extOf(query.path))
-    if (!extractor) { report(query, 'anchor-language-unsupported', `${query.path} 没有指定的可信语言解析器`); continue }
-    if (!readiness.has(extractor)) readiness.set(extractor, await extractor.ready())
-    if (readiness.get(extractor) !== true) { report(query, 'anchor-extractor-unavailable', `${extractor.id} 不可用：${readiness.get(extractor)}`); continue }
-    if (!parsedFiles.has(query.path)) parsedFiles.set(query.path, await extractCachedBlob(source, query.path, extractor, blobShaForContent(source)))
-    const parsed = parsedFiles.get(query.path)!
-    if ('error' in parsed) { report(query, 'anchor-parse-error', `${query.path} 无法解析：${parsed.error}`); continue }
+    const parsed = await extract(query.path)
+    if ('code' in parsed) { report(query, parsed.code, parsed.message); continue }
+    if (query.selector === null) {
+      if (parsed.units.length) report(query, 'anchor-selector-required', `${query.path} 含命名声明，代码来源必须使用 ${query.path}#符号`)
+      continue
+    }
     const verdict = resolveSelectors(parsed.units, [query.selector])[0]
     if ('dead' in verdict) {
       const alternatives = [...new Set(parsed.units.map(unit => unit.name).filter(name => name.endsWith(`.${query.selector}`)))].slice(0, 5)
