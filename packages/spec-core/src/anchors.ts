@@ -1,6 +1,8 @@
 import { dirname, join } from 'node:path'
 import { createRequire } from 'node:module'
 import { createHash } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
+import type TypeScript from 'typescript'
 import { gitRequiredA, gitObjectFormat, isGitObjectId, batchRevisionOids, batchBlobTexts, combinedDiffOwnedChanges, driftPathWindow, readImmutableHunkFacts, persistImmutableHunkFacts, withEventLedgerBuild, type DiffLineRange, type DriftIndex, type DriftPathEvent, type ImmutableHunkRanges } from './git.js'
 
 const RS = '\x1e'
@@ -9,7 +11,7 @@ const RS = '\x1e'
 // A spec's `code:` entry may pin ONE named unit: `path#symbol` (`#Class.method` for a class method).
 // Everything below the entry parse splits into two layers:
 //   - the LANGUAGE SEAM: pure extractors (content, filename) -> Unit[] — no git, no cache, no fs.
-//     Each extension maps to exactly ONE designated extractor; there is NO cross-tier fallback.
+//     Each extension maps to exactly ONE designated extractor.
 //   - the LANGUAGE-AGNOSTIC ENGINE: file-revision memo (keyed by the complete immutable parse input), anchor resolution
 //     (dead/ambiguous), diff-hunk ∩ unit-range intersection over the drift window. It never knows
 //     which language it is measuring.
@@ -121,16 +123,77 @@ export function parseRelation(raws: string[], relation: 'code' | 'related'): Rel
 }
 
 // ---- legacy extractor: ts-ast ----
-// Kept as a public compatibility helper only. The production language registry below routes every shipped
-// language through Tree-sitter WASM and never selects this host-dependent path.
+// The public compatibility helper resolves the host compiler. The registry shares its AST walk but
+// only resolves the TypeScript compiler shipped with SpexCode.
 // Parse-only via the HOST project's own typescript, so the parse matches what the project itself compiles
 // with. If it cannot resolve, ready() returns a loud unverified verdict and lint skips these anchors
 // without crashing (no bundled compiler, regex fallback, or fake pass for JS).
 const JS_EXTS = new Set(['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'mts', 'cts'])
 const TS_AST_MEMO_SCHEMA = 'ts-ast-memo-v1'
+const TS_SIMPLE_VARIABLE_NAME = /^[A-Za-z_$][\w$]*$/u
+
+function tsAstUnits(ts: typeof TypeScript, content: string, filename: string, matchTreeSitter = false): Unit[] {
+  const kind = /\.tsx$/.test(filename) ? ts.ScriptKind.TSX
+    : /\.jsx$/.test(filename) ? ts.ScriptKind.JSX
+    : /\.(ts|mts|cts)$/.test(filename) ? ts.ScriptKind.TS
+    : ts.ScriptKind.JS
+  const sf = ts.createSourceFile(filename, content, ts.ScriptTarget.Latest, false, kind) as TypeScript.SourceFile & {
+    parseDiagnostics?: readonly TypeScript.Diagnostic[]
+  }
+  if (sf.parseDiagnostics?.length) {
+    const detail = `TypeScript reports ${sf.parseDiagnostics.length} syntax error(s) in ${ts.ScriptKind[kind]}`
+    if (matchTreeSitter) throw new Error(`${filename} has Tree-sitter syntax errors and ${detail}`)
+    throw new Error(`${filename} does not parse as ${ts.ScriptKind[kind]} (${sf.parseDiagnostics.length} syntax error(s))`)
+  }
+  const line = (pos: number) => sf.getLineAndCharacterOfPosition(pos).line + 1
+  const modifiers = (node: TypeScript.Node) => matchTreeSitter && ts.canHaveModifiers(node) ? node.modifiers ?? [] : []
+  const start = (node: TypeScript.Node) => {
+    if (!matchTreeSitter) return line(node.getStart(sf))
+    const list = modifiers(node)
+    const exported = list.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)
+    if (!exported && !ts.isClassElement(node)) return line(node.getStart(sf))
+    const first = list.find((m) => !ts.isDecorator(m) && m.kind !== ts.SyntaxKind.ExportKeyword && m.kind !== ts.SyntaxKind.DefaultKeyword)
+      ?? node.getChildren(sf).find((child) => child.kind !== ts.SyntaxKind.SyntaxList && !ts.isJSDoc(child))
+    return line((first ?? node).getStart(sf))
+  }
+  const units: Unit[] = []
+  const push = (name: string, kind: string, node: TypeScript.Node, typeOnly = false) =>
+    units.push({ name, kind, start: start(node), end: line(node.end), ...(typeOnly ? { typeOnly } : {}) })
+  const declarationName = (name: TypeScript.Identifier) => matchTreeSitter ? name.getText(sf) : name.text
+  const nameOrDefault = (name?: TypeScript.Identifier) => name ? declarationName(name) : matchTreeSitter ? null : '(default)'
+  for (const st of sf.statements) {
+    if (modifiers(st).some((m) => m.kind === ts.SyntaxKind.DeclareKeyword)) continue
+    if (ts.isFunctionDeclaration(st)) {
+      const name = nameOrDefault(st.name)
+      if (name && (!matchTreeSitter || (st.body && !st.asteriskToken))) push(name, 'function', st)
+    } else if (ts.isClassDeclaration(st)) {
+      const cname = nameOrDefault(st.name)
+      if (!cname || modifiers(st).some((m) => m.kind === ts.SyntaxKind.AbstractKeyword)) continue
+      push(cname, 'class', st)
+      for (const m of st.members) {
+        if (!(ts.isMethodDeclaration(m) || ts.isConstructorDeclaration(m) || ts.isGetAccessorDeclaration(m) || ts.isSetAccessorDeclaration(m)) || !m.body) continue
+        const mname = ts.isConstructorDeclaration(m) ? 'constructor'
+          : matchTreeSitter ? m.name.getText(sf)
+          : ts.isIdentifier(m.name) ? m.name.text : '(computed)'
+        push(`${cname}.${mname}`, 'method', m)
+      }
+    } else if (ts.isVariableStatement(st)) {
+      for (const d of st.declarationList.declarations) {
+        if (!ts.isIdentifier(d.name)) continue
+        const name = declarationName(d.name)
+        if (matchTreeSitter && !TS_SIMPLE_VARIABLE_NAME.test(name)) continue
+        const fn = d.initializer && (ts.isArrowFunction(d.initializer) || (!matchTreeSitter && ts.isFunctionExpression(d.initializer)))
+        push(name, fn ? 'const-fn' : 'const-data', st)
+      }
+    } else if (ts.isEnumDeclaration(st)) push(declarationName(st.name), 'enum', st)
+    else if (ts.isInterfaceDeclaration(st)) push(declarationName(st.name), 'interface', st, true)
+    else if (ts.isTypeAliasDeclaration(st)) push(declarationName(st.name), 'type', st, true)
+  }
+  return units
+}
 
 export function tsAstExtractor(root: string): Extractor {
-  let ts: any | null | undefined // undefined = unprobed; null = unresolvable
+  let ts: typeof TypeScript | null | undefined // undefined = unprobed; null = unresolvable
   let tsModulePath = ''
   let readiness: true | string | undefined
   const probe = () => {
@@ -152,8 +215,7 @@ export function tsAstExtractor(root: string): Extractor {
       // compiler API this extractor drives. Probe the ACTUAL surface with a tiny parse. Once a candidate
       // resolves, incompatibility is loud rather than silently changing parser versions.
       try {
-        const sf = ts.createSourceFile('probe.ts', 'const x = 1', ts.ScriptTarget.Latest, false, ts.ScriptKind.TS)
-        if (!sf?.statements?.length || sf.parseDiagnostics?.length) throw new Error('probe parse failed')
+        if (!tsAstUnits(ts, 'const x = 1', 'probe.ts').length) throw new Error('probe parse failed')
         readiness = true
       } catch {
         readiness = `host typescript (v${ts?.version ?? 'unknown'}) resolves but its createSourceFile API is unusable (a TS7/Go build?) — pin 'npm i -D typescript@5', or remove the #anchor`
@@ -163,41 +225,7 @@ export function tsAstExtractor(root: string): Extractor {
     extract(content, filename) {
       probe()
       if (!ts) throw new Error('ts-ast extractor is not ready (typescript unresolvable)')
-      const kind = /\.(tsx)$/.test(filename) ? ts.ScriptKind.TSX
-        : /\.(jsx)$/.test(filename) ? ts.ScriptKind.JSX
-        : /\.(ts|mts|cts)$/.test(filename) ? ts.ScriptKind.TS
-        : ts.ScriptKind.JS
-      const sf = ts.createSourceFile(filename, content, ts.ScriptTarget.Latest, false, kind)
-      // parse-only gate: a file that does not parse yields GARBAGE units (a shell script's `x=$(...)`
-      // parses as a const) — throw so the caller renders an honest "cannot parse" verdict instead.
-      if (sf.parseDiagnostics?.length) throw new Error(`${filename} does not parse as ${ts.ScriptKind[kind]} (${sf.parseDiagnostics.length} syntax error(s))`)
-      const line = (pos: number) => sf.getLineAndCharacterOfPosition(pos).line + 1
-      const units: Unit[] = []
-      const push = (name: string, ukind: string, node: any, typeOnly = false) =>
-        units.push({ name, kind: ukind, start: line(node.getStart(sf)), end: line(node.end), ...(typeOnly ? { typeOnly } : {}) })
-      for (const st of sf.statements) {
-        if (ts.isFunctionDeclaration(st)) push(st.name ? st.name.text : '(default)', 'function', st)
-        else if (ts.isClassDeclaration(st)) {
-          const cname = st.name ? st.name.text : '(default)'
-          push(cname, 'class', st)
-          for (const m of st.members) {
-            if ((ts.isMethodDeclaration(m) || ts.isConstructorDeclaration(m) || ts.isGetAccessorDeclaration(m) || ts.isSetAccessorDeclaration(m)) && m.body) {
-              const mname = ts.isConstructorDeclaration(m) ? 'constructor' : (m.name && ts.isIdentifier(m.name) ? m.name.text : '(computed)')
-              push(`${cname}.${mname}`, 'method', m)
-            }
-          }
-        } else if (ts.isVariableStatement(st)) {
-          for (const d of st.declarationList.declarations) {
-            if (!ts.isIdentifier(d.name)) continue // destructuring — not anchorable by one name
-            const fn = d.initializer && (ts.isArrowFunction(d.initializer) || ts.isFunctionExpression(d.initializer))
-            // range = the whole statement (multi-declarator lines co-move; each name shares the range)
-            units.push({ name: d.name.text, kind: fn ? 'const-fn' : 'const-data', start: line(st.getStart(sf)), end: line(st.end) })
-          }
-        } else if (ts.isEnumDeclaration(st)) push(st.name.text, 'enum', st)
-        else if (ts.isInterfaceDeclaration(st)) push(st.name.text, 'interface', st, true)
-        else if (ts.isTypeAliasDeclaration(st)) push(st.name.text, 'type', st, true)
-      }
-      return units
+      return tsAstUnits(ts, content, filename)
     },
     memoKey(filename) {
       probe()
@@ -410,6 +438,7 @@ export type TreeSitterLanguageRow = {
   grammar: string
   schema: string
   units(root: TreeSitterNode): Unit[]
+  syntaxFallback?: Pick<Extractor, 'extract' | 'memoKey'>
 }
 
 let treeSitterModulePromise: Promise<any> | undefined
@@ -487,7 +516,7 @@ function tsTreeUnits(root: TreeSitterNode): Unit[] {
       } else if (node.type === 'lexical_declaration' || node.type === 'variable_declaration') {
         for (const decl of nodeChildren(node).filter((child) => child.type === 'variable_declarator')) {
           const name = nodeText(nodeField(decl, 'name'))
-          if (!/^[A-Za-z_$][\w$]*$/u.test(name)) continue
+          if (!TS_SIMPLE_VARIABLE_NAME.test(name)) continue
           const value = nodeField(decl, 'value')
           add(name, value?.type === 'arrow_function' || value?.type === 'function' ? 'const-fn' : 'const-data', node)
         }
@@ -667,9 +696,25 @@ function rubyTreeUnits(root: TreeSitterNode): Unit[] {
   return units
 }
 
+let trustedTsCompilerIdentity: string | undefined
+const trustedTsSyntaxFallback: Pick<Extractor, 'extract' | 'memoKey'> = {
+  async extract(content, filename) {
+    const { default: ts } = await import('typescript')
+    return tsAstUnits(ts, content, filename, true)
+  },
+  memoKey() {
+    if (!trustedTsCompilerIdentity) {
+      const manifest = fileURLToPath(import.meta.resolve('typescript/package.json'))
+      const { version } = createRequire(import.meta.url)(manifest) as { version: string }
+      trustedTsCompilerIdentity = `${TS_AST_MEMO_SCHEMA}\0${import.meta.resolve('typescript')}\0${version}`
+    }
+    return trustedTsCompilerIdentity
+  },
+}
+
 export const TREE_SITTER_ROWS: TreeSitterLanguageRow[] = [
-  { id: 'tree-sitter-typescript', extensions: ['ts', 'mts', 'cts'], grammar: 'typescript', schema: 'ts-v1', units: tsTreeUnits },
-  { id: 'tree-sitter-tsx', extensions: ['tsx'], grammar: 'tsx', schema: 'tsx-v1', units: tsTreeUnits },
+  { id: 'tree-sitter-typescript', extensions: ['ts', 'mts', 'cts'], grammar: 'typescript', schema: 'ts-v1', units: tsTreeUnits, syntaxFallback: trustedTsSyntaxFallback },
+  { id: 'tree-sitter-tsx', extensions: ['tsx'], grammar: 'tsx', schema: 'tsx-v1', units: tsTreeUnits, syntaxFallback: trustedTsSyntaxFallback },
   { id: 'tree-sitter-javascript', extensions: ['js', 'jsx', 'mjs', 'cjs'], grammar: 'javascript', schema: 'js-v1', units: tsTreeUnits },
   { id: 'tree-sitter-python', extensions: ['py', 'pyi'], grammar: 'python', schema: 'python-v1', units: pythonTreeUnits },
   { id: 'tree-sitter-go', extensions: ['go'], grammar: 'go', schema: 'go-v1', units: goTreeUnits },
@@ -697,14 +742,20 @@ export function treeSitterExtractor(row: TreeSitterLanguageRow): Extractor {
       let tree: any
       try {
         tree = parser.parse(content)
-        if (!tree?.rootNode || treeHasSyntaxError(tree.rootNode)) throw new Error(`${filename} has Tree-sitter syntax errors`)
-        return row.units(tree.rootNode)
+        const root = tree?.rootNode
+        if (root) {
+          if (!treeHasSyntaxError(root)) return row.units(root)
+          if (row.syntaxFallback) return row.syntaxFallback.extract(content, filename)
+        }
+        throw new Error(`${filename} has Tree-sitter syntax errors`)
       } finally {
         tree?.delete?.()
         parser.delete?.()
       }
     },
-    memoKey(filename) { return JSON.stringify({ schema: 'tree-sitter-wasm-v1', row: row.id, grammar: row.grammar, rowSchema: row.schema, filename }) },
+    memoKey(filename) {
+      return JSON.stringify({ schema: 'tree-sitter-wasm-v1', row: row.id, grammar: row.grammar, rowSchema: row.schema, filename, syntaxFallback: row.syntaxFallback?.memoKey(filename) })
+    },
   }
 }
 

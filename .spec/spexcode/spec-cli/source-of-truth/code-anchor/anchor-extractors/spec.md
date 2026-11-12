@@ -2,7 +2,7 @@
 title: anchor-extractors
 status: active
 hue: 15
-desc: Extraction is a language seam: pure (content, filename) → units functions, one Tree-sitter WASM runtime, each language a DATA row with its grammar and declaration rules; an unparseable file is a loud integrity error that leaves its anchors unverified, never a fake pass.
+desc: Language rows extract named units from source text with Tree-sitter WASM. TypeScript rows retry a grammar rejection with SpexCode's compiler. Unparseable files leave anchors unverified with an integrity error.
 code:
   - packages/spec-core/src/anchors.ts#treeSitterExtractor
   - packages/spec-core/src/anchors.ts#treeSitterLanguage
@@ -22,25 +22,21 @@ stays language-agnostic.
 
 **Extraction is a language seam.** Extractors are pure `(content, filename) → units` functions (no
 git, no cache, no fs — importable by an external scorer as-is), and every extension maps to exactly
-ONE designated extractor — no cross-language or cross-engine fallback. The precise extractor for every
-shipped language is the same Tree-sitter WASM engine; a language is a DATA row carrying its grammar,
-extension set, declaration-node rules, qualified-name rules, and extractor schema. The initial rows are
-TypeScript/TSX, Python, Go, Rust, Java, and Ruby. Adding a language adds a row and grammar asset, never a
-new resolver branch. The runtime and grammar assets are SpexCode package inputs, so adopters do not need
-the language's compiler or a host parser dependency. The runtime is initialized lazily; an unavailable
-runtime, missing grammar, incompatible grammar ABI, or parse error is an explicit `integrity` error and
-leaves the affected anchors unverified rather than silently selecting another parser or returning a fake
-pass. Tree-sitter's error-recovery tree is therefore rejected when its root reports `hasError`.
+ONE designated extractor. Each language row carries its Tree-sitter grammar, extension set,
+declaration-node rules, qualified-name rules, and extractor schema. Adding a language adds a row and
+grammar asset. SpexCode supplies its parsing dependencies and initializes them lazily. An unavailable
+runtime, missing grammar, or incompatible grammar ABI leaves the affected anchors unverified with an
+explicit `integrity` error.
 
-That strictness has a cost the rejection message must carry: a shipped grammar can lag its language, so a
-file rejected here is not necessarily invalid source. The pinned TypeScript grammar, for one, parses
-`import('mod').Type` but not the array over it, `import('mod').Type[]`. And because a rejection is
-file-wide while a session's scope spans many nodes, ONE such file makes every selector into it
-unextractable and, through session proof's explicit-unavailable rule, takes down every session's eval
-summary at once — the loudest possible failure wearing the quietest possible face, a toolbar that reads
-"unavailable" and names no cause. So the message names the file and the engine's verdict, and the honest
-remedies are the grammar row and the source construct, never a softened gate: a parse this engine cannot
-certify may not be reported as a hit or a no-hit.
+Every row rejects Tree-sitter's error-recovery tree. For `.ts`, `.mts`, `.cts`, and `.tsx`, the row
+retries a syntax rejection with SpexCode's pinned TypeScript compiler, which parses the supplied text
+with the file's script kind and produces units only when it reports zero parse diagnostics. This covers
+valid syntax the shipped grammar can reject, such as `abstract?: string | null` in a type literal.
+The compiler resolves from the tool's installation and runs only a syntax parse. It reads no project
+configuration, resolves no candidate imports, and executes no candidate dependencies. The retry uses
+the same declaration vocabulary, qualified-name matching, type-only flags, and one-based source ranges.
+If parsing still fails, the `integrity` error names the file and parser verdict and leaves every anchor
+in that file unverified.
 
 The place to meet that cost is the ref-change gate, at the moment the construct is written, and the
 population it must cover is EVERY declared selector. A selector's declaration site — a node's frontmatter
@@ -52,7 +48,8 @@ this engine parsed constantly and no gate ever asked about.
 The extractor contract stays language-agnostic above the seam: immutable file-revision memoization,
 dead/ambiguous resolution, and hunk∩range all live outside it. A memo key includes every input to the
 extractor: object-hash algorithm and blob oid, filename semantics (including script kind), extractor/schema
-identity, grammar/runtime identity, and normalized query configuration; same bytes under `.ts` and `.tsx`
+identity, grammar/runtime identity, the configured compiler retry identity and version, and normalized
+query configuration. The same bytes under `.ts` and `.tsx`
 therefore never share a result by oid alone, and the result is independent of call order. Within one READ
 — a lint run, a board build, a CLI scan — every live anchored window is handed to the engine at once: it
 reads a historical `(commit,path)` image, its blob, and an ordinary `(commit,path)` hunk once, then applies

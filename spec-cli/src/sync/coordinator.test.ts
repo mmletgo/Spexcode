@@ -4348,7 +4348,7 @@ test('readonly-owner零派发guard只阻相同候选诊断，真实owner新派�
   assert.equal(readonlySpecRepairStalled(repair, 'same', [{ ...findings[0], message: '另一真实错误' }], attempt), false)
 })
 
-for (const mode of ['review-format-continuation', 'review-format-interleaved', 'review-format-finite-one', 'review-format-finite-zero', 'existing', 'new-leaf', 'aggregate-only', 'review', 'review-anchor-reference', 'review-accepted-reuse', 'review-accepted-reuse-repair', 'review-partial', 'review-pending', 'review-pending-unchanged', 'review-pending-sibling', 'review-pending-cross-source', 'review-pending-missing-owner', 'review-pending-lineage', 'review-pending-foreign-base', 'review-pending-unreviewed-base', 'review-prose', 'review-prose-cross-owner', 'review-prose-unknown', 'review-prose-path', 'review-prose-empty', 'review-multi', 'review-p1-fail', 'review-rebind', 'review-rebind-native', 'review-resume', 'review-location', 'review-ref', 'wrong-ref', 'unaffected-ref', 'readset', 'selection', 'selection-deleted', 'selection-source', 'non-null-selection', 'input-digest', 'foreign', 'policy', 'candidate', 'missing-owner'] as const) test(`readonly-owner late V1 ${mode} 只返修精确owner`, async t => {
+for (const mode of ['review-format-continuation', 'review-format-interleaved', 'review-format-finite-one', 'review-format-finite-zero', 'existing', 'mixed-citations', 'new-leaf', 'aggregate-only', 'review', 'review-anchor-reference', 'review-accepted-reuse', 'review-accepted-reuse-repair', 'review-partial', 'review-pending', 'review-pending-unchanged', 'review-pending-sibling', 'review-pending-cross-source', 'review-pending-missing-owner', 'review-pending-lineage', 'review-pending-foreign-base', 'review-pending-unreviewed-base', 'review-prose', 'review-prose-cross-owner', 'review-prose-unknown', 'review-prose-path', 'review-prose-empty', 'review-multi', 'review-p1-fail', 'review-rebind', 'review-rebind-native', 'review-resume', 'review-location', 'review-ref', 'wrong-ref', 'unaffected-ref', 'readset', 'selection', 'selection-deleted', 'selection-source', 'non-null-selection', 'input-digest', 'foreign', 'policy', 'candidate', 'missing-owner'] as const) test(`readonly-owner late V1 ${mode} 只返修精确owner`, async t => {
   const formatFinite = mode === 'review-format-finite-one' || mode === 'review-format-finite-zero'
   const formatRemaining = mode === 'review-format-finite-one' ? 1 : 0
   const formatInterleaved = mode === 'review-format-interleaved'
@@ -4362,8 +4362,9 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
   const prose = mode.startsWith('review-prose') || pending
   const semantic = mode.startsWith('review'), multi = mode === 'review-multi' || mode === 'review-p1-fail'
   const newLeaf = semantic && !partial && !reuse || mode === 'new-leaf' || mode === 'aggregate-only', aggregateOnly = mode === 'aggregate-only'
-  const negative = !['existing', 'new-leaf', 'aggregate-only', 'review', 'review-anchor-reference', 'review-accepted-reuse', 'review-accepted-reuse-repair', 'review-partial', 'review-pending', 'review-pending-unchanged', 'review-pending-sibling', 'review-pending-lineage', 'review-prose', 'review-multi', 'review-p1-fail', 'review-rebind', 'review-rebind-native', 'review-resume'].includes(mode)
-  const baseSpec = original.split('\n').map(line => line.startsWith('| AC-EXPORT-') ? line.replace(' | derived:REQ-EXPORT-01 | REQ-EXPORT-01 |', ' | code:src/export.js#ExportService | REQ-EXPORT-01 |') : line).join('\n')
+  const negative = !['existing', 'mixed-citations', 'new-leaf', 'aggregate-only', 'review', 'review-anchor-reference', 'review-accepted-reuse', 'review-accepted-reuse-repair', 'review-partial', 'review-pending', 'review-pending-unchanged', 'review-pending-sibling', 'review-pending-lineage', 'review-prose', 'review-multi', 'review-p1-fail', 'review-rebind', 'review-rebind-native', 'review-resume'].includes(mode)
+  const mixedCitations = mode === 'mixed-citations'
+  const baseSpec = (mixedCitations ? original.replace('code:\n', 'related:\n  - tests/export.test.mjs\ncode:\n') : original).split('\n').map(line => line.startsWith('| AC-EXPORT-') ? line.replace(' | derived:REQ-EXPORT-01 | REQ-EXPORT-01 |', ' | code:src/export.js#ExportService | REQ-EXPORT-01 |') : line).join('\n')
   const definitions = [
     { nodeId: 'export-contract', path: contractPath, sourcePath: 'src/export.js', testPath: 'tests/export.test.mjs', word: 'export', upper: 'EXPORT' },
     ...(formatContinuation ? ['import', 'archive', 'report', 'download', 'upload'] : ['import', 'archive', 'report']).map(word => ({ nodeId: `${word}-contract`, path: `.spec/project/${word}/${word}-contract/spec.md`, sourcePath: `src/${word}/${word}.js`, testPath: `tests/${word}.test.mjs`, word, upper: word.toUpperCase() })),
@@ -4397,7 +4398,7 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
       if (request.purpose === 'code_behavior_analyze') return { ...(output as object), changes: (output as { changes: object[] }).changes.map(change => ({ ...change, ...(newLeaf && badOwners.includes(definition) ? { kind: 'allowed_change', affectedIds: [], ruleIds: [] } : { affectedIds: [`RULE-${definition.upper}-05`], ruleIds: [`RULE-${definition.upper}-05`] }) })), newNodes: newLeaf && definition === badOwner ? [{ codePath: definition.sourcePath, parentNodeId: 'export-contract', basis: '真实新增无治理模块具有父raw对应的服务职责' }] : [] }
     }
     if (request.purpose.startsWith('elaboration_')) {
-      const context = JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as { targets: { nodeId: string; path: string }[]; readonlySpecRepair?: unknown }
+      const context = JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as { targets: { nodeId: string; path: string }[]; readonlySpecRepair?: ElaborationResult['readonlySpecRepair'] }
       const definition = definitions.find(item => item.nodeId === context.targets[0].nodeId)!
       ownerCalls.push({ attempt: attempt.number, nodeId: definition.nodeId, purpose: request.purpose })
       if (prose || partial) {
@@ -4413,6 +4414,12 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
       if (request.purpose === 'elaboration_generate') {
         const generated = rows(sources.get(definition.nodeId)!, definition.path)
         generated.changes[0].nodeId = definition.nodeId
+        if (!semantic && context.readonlySpecRepair) {
+          const original = context.readonlySpecRepair.changes.find(change => change.nodeId === definition.nodeId)!
+          generated.changes[0].description = String(parseFrontmatter(original.source).fm.desc ?? '')
+          generated.changes[0].prose = null
+          if (mixedCitations && attempt.number === 2) generated.changes[0].description = '未获授权的业务描述改动'
+        }
         if (semantic) {
           const number = (generatedPerOwner.get(definition.nodeId) ?? 0) + 1; generatedPerOwner.set(definition.nodeId, number)
           if (!partial && !reuse && badOwners.includes(definition) && (unchanged || crossSource || lineage || number < (pending || mode === 'review-p1-fail' && definition !== badOwner ? 2 : 3))) {
@@ -4431,7 +4438,10 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
             }
             assert.ok(request.prompt.includes('不是新的业务事实或授权'))
           }
-        } else if (definition.nodeId === badOwner.nodeId && ++badGenerations < 3) for (const [index, acceptance] of generated.changes[0].tables.AC.entries()) acceptance.source = `code:${definition.sourcePath}#${index % 2 ? 'options' : 'process.stdout.write'}`
+        } else if (definition.nodeId === badOwner.nodeId && ++badGenerations < 3) {
+          for (const [index, acceptance] of generated.changes[0].tables.AC.entries()) acceptance.source = `code:${definition.sourcePath}#${index % 2 ? 'options' : 'process.stdout.write'}`
+          if (mixedCitations) generated.changes[0].related = ['tests/missing-related.test.mjs']
+        }
         return generated
       }
     }
@@ -4847,7 +4857,7 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
   if (negative) { assert.equal(finalReview, false); assert.equal(f.store.listAttempts(f.operation.id).length, 2); assert.equal(ownerCalls.filter(call => call.attempt > 1).length, 0); assert.notEqual(result.failure?.kind, 'repairable', JSON.stringify(result.failure)); assert.ok(['failed', 'unsupported'].includes(result.status), JSON.stringify(result.failure)); return }
   assert.ok(finalReview, JSON.stringify({ failure: result.failure, calls: ownerCalls, failures: f.store.listAttempts(f.operation.id).map(attempt => attempt.failure) }))
   const second = pending ? 4 : aggregateOnly || mode === 'review-resume' ? 3 : 2
-  for (const owner of badOwners) assert.deepEqual(ownerCalls.filter(call => call.attempt > 1 && call.nodeId === owner.nodeId).map(({ attempt, purpose }) => [attempt, purpose]), partial ? [[second, 'elaboration_generate'], [second, 'elaboration_review']] : lineage ? [[4, 'elaboration_generate'], [4, 'elaboration_review'], [5, 'elaboration_generate'], [5, 'elaboration_review']] : pending || mode === 'review-p1-fail' && owner !== badOwner ? [[second, 'elaboration_generate'], [second, 'elaboration_review']] : [[second, 'elaboration_generate'], [second, 'elaboration_review'], [mode === 'review-rebind-native' ? 4 : second + 1, 'elaboration_generate'], [mode === 'review-rebind-native' ? 4 : second + 1, 'elaboration_review']])
+  for (const owner of badOwners) assert.deepEqual(ownerCalls.filter(call => call.attempt > 1 && call.nodeId === owner.nodeId).map(({ attempt, purpose }) => [attempt, purpose]), mixedCitations ? [[2, 'elaboration_generate'], [3, 'elaboration_generate'], [3, 'elaboration_review']] : partial ? [[second, 'elaboration_generate'], [second, 'elaboration_review']] : lineage ? [[4, 'elaboration_generate'], [4, 'elaboration_review'], [5, 'elaboration_generate'], [5, 'elaboration_review']] : pending || mode === 'review-p1-fail' && owner !== badOwner ? [[second, 'elaboration_generate'], [second, 'elaboration_review']] : [[second, 'elaboration_generate'], [second, 'elaboration_review'], [mode === 'review-rebind-native' ? 4 : second + 1, 'elaboration_generate'], [mode === 'review-rebind-native' ? 4 : second + 1, 'elaboration_review']])
   const attempts = f.store.listAttempts(f.operation.id)
   const stages = attempts.map(attempt => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())))
   for (const values of stages.slice(1)) {
@@ -4875,8 +4885,16 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
   if (semantic) {
     for (const generated of [generations[0], pending || partial ? null : mode === 'review-rebind-native' ? generations[2] : generations[second - 1]].filter(Boolean)) { assert.equal(generated.candidateValidated, true); assert.ok(generated.partitionEvidence.some((evidence: { review: { verdict: string } }) => evidence.review.verdict === 'repair')) }
   } else {
+    if (mixedCitations) {
+      const findings = generations[0].validationFindings as { code: string; citation?: { origin: string; ref: string } }[]
+      assert.ok(findings.some(finding => finding.code === 'related-file-missing' && finding.citation?.ref === 'tests/missing-related.test.mjs'))
+      assert.ok(findings.some(finding => finding.code === 'anchor-dead' && finding.citation?.origin === 'source'))
+      const failed = JSON.parse(readEvidence(f.input.source.commonDir, attempts[1].failure!.evidenceRefs[0]).toString()) as ElaborationResult
+      assert.ok(failed.rounds.some(round => round.findings.some(issue => issue.code === 'rows_patch' && issue.message.includes('保留标题、描述'))))
+      assert.equal(generations[1], null, '越权引用草稿在独审和V1前拒绝')
+      assert.equal(generations.at(-1).candidateValidated, true)
+    } else assert.ok(generations[second - 1].validationFindings.some((finding: { code: string }) => finding.code === 'anchor-dead'), 'agent实际修过但未修好仍可下一轮')
     assert.ok(generations[0].validationFindings.some((finding: { code: string }) => finding.code === 'anchor-dead'))
-    assert.ok(generations[second - 1].validationFindings.some((finding: { code: string }) => finding.code === 'anchor-dead'), 'agent实际修过但未修好仍可下一轮')
   }
   if (partial) {
     assert.equal(generations[0].status, 'failed'); assert.ok(generations[0].failure)

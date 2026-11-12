@@ -34,7 +34,7 @@ const LANGUAGES = [
     id: 'typescript',
     tracked: 'src/index.ts',
     untracked: 'src/local-only.ts',
-    source: 'export const answer: number = 42\n',
+    source: 'export interface Api { draft: { abstract?: string | null; }; }\n',
   },
 ]
 
@@ -406,6 +406,22 @@ function runCase({ language, harness, name }, spex, suiteRoot) {
     `[${name}] coverage sees the git-tracked source`)
   assert.ok(!lintOutput.includes(language.untracked), `[${name}] coverage ignores untracked source`)
   assert.match(lintOutput, /spex spec lint: 0 error\(s\), \d+ warning\(s\)/, `[${name}] lint has zero errors`)
+  if (language.id === 'typescript') {
+    const spec = join(project, '.spec/project/spec.md')
+    const source = readFileSync(spec, 'utf8')
+    write(spec, source.replace(/^---\n/, `---\nrelated:\n  - ${language.tracked}#Api\n`))
+    const candidateModules = join(project, 'node_modules')
+    const compilerLoaded = join(caseRoot, 'candidate-typescript-loaded')
+    write(join(candidateModules, 'typescript/package.json'), '{"name":"typescript","main":"index.cjs"}\n')
+    write(join(candidateModules, 'typescript/index.cjs'), `require('node:fs').writeFileSync(${JSON.stringify(compilerLoaded)}, 'loaded')\n`)
+    const anchorLint = run(spex, ['spec', 'lint'], {
+      cwd: project,
+      env: { ...env, NODE_PATH: candidateModules },
+      label: `[${name}] installed spex spec lint with fallback anchor`,
+    })
+    assert.ok(anchorLint.includes(`${language.tracked}#Api anchors a interface`), `[${name}] installed lint resolves the fallback anchor as type-only`)
+    assert.ok(!existsSync(compilerLoaded), `[${name}] anchor extraction does not execute the governed project's TypeScript module`)
+  }
 
   console.log(`clean-init smoke: ${name} ok`)
 }
@@ -429,9 +445,6 @@ function main() {
       cwd: consumer,
       label: 'offline install of packed spexcode',
     })
-    assert.ok(!existsSync(join(consumer, 'node_modules', 'typescript')),
-      'packed production install does not make adopters carry the TypeScript compiler')
-
     const spex = join(consumer, 'node_modules', '.bin', process.platform === 'win32' ? 'spex.cmd' : 'spex')
     assert.ok(existsSync(spex), 'packed install exposes the spex executable')
     run(spex, ['--help'], { cwd: consumer, label: 'installed spex --help' })

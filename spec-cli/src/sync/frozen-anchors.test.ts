@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { Extractor } from '@spexcode/spec-core'
 import { buildContractGraph, type Contract } from '@spexcode/spec-core/contracts'
-import { validateFrozenAnchors } from './frozen-anchors.js'
+import { isReadonlyCitationFailure, validateFrozenAnchors } from './frozen-anchors.js'
 
 function contract(code: string[], related: string[] = [], source = 'src/export.ts#Exporter.run'): Contract {
   return { schema: 'sync-v1', nodeId: 'export', path: '.spec/export/spec.md', rawSource: '导出数据', expandedSpec: '', code, related,
@@ -32,6 +32,18 @@ test('V1分别拒绝实际候选中的改名、歧义和语法错误', async () 
     assert.equal(result.findings[0].code, code)
     assert.ok(result.anchors.every(x => x.unit === null))
   }
+})
+
+test('限定名建议保留原锚点失败并绑定具体关系与行', async () => {
+  const ref = 'src/export.ts#run'
+  const graph = buildContractGraph([contract([ref], [], ref)])
+  const result = await validateFrozenAnchors(graph, new Map([['src/export.ts', 'export class Exporter { run() {} }']]))
+  assert.deepEqual(result.findings.map(issue => [issue.code, issue.citation, issue.itemId]), [
+    ['anchor-dead', { origin: 'code', ref }, undefined],
+    ['anchor-dead', { origin: 'source', ref }, 'RULE-EXPORT-01'],
+  ])
+  assert.ok(result.findings.every(issue => isReadonlyCitationFailure(issue) && issue.message.includes('Exporter.run')))
+  assert.ok(result.anchors.every(anchor => anchor.unit === null))
 })
 
 test('V1缺失related/source文件、未知语言与不可用解析器不能静默跳过', async () => {

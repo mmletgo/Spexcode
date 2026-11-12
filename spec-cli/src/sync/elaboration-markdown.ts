@@ -1,10 +1,11 @@
-import { parseRelation } from '@spexcode/spec-core'
+import { parseCodeEntry, parseRelation } from '@spexcode/spec-core'
 import { ownerNodesForPath } from './governance-owners.js'
 import { CONTRACT_COLUMNS, contractTableCells, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
-import type { ContractItem, ContractKind, Verification } from '@spexcode/spec-core/contracts'
+import type { ContractFinding, ContractItem, ContractKind, Verification } from '@spexcode/spec-core/contracts'
 import type { Applicability, ElaborationCandidate, ElaborationInput, ElaborationTarget, ReadonlySpecRepair } from './elaboration-types.js'
 import { ELABORATION_GENERATION_GUIDANCE } from './elaboration-types.js'
 import { contractBusinessProse } from './contract-evolution.js'
+import { readTree } from './snapshot.js'
 
 export type ContractCell = string | string[] | boolean | number | null
 export type GeneratedTables = Record<ContractKind, Record<string, ContractCell>[]>
@@ -43,8 +44,12 @@ const contractRow = (item: ContractItem): Record<string, ContractCell> => Object
   return [column, value]
 }))
 
+export const hasTypedCitationRepair = (repair: ReadonlySpecRepair | undefined): repair is ReadonlySpecRepair & { findings: (ContractFinding & { citation: NonNullable<ContractFinding['citation']> })[] } =>
+  Boolean(repair && repair.kind === undefined && repair.findings.length && repair.findings.every(issue => issue.citation))
+
 /** 本轮影响归属由范围检查、渲染及独审共用，不把目标列表当作业务授权。 */
 export function targetHasCurrentChanges(input: ElaborationInput, target: ElaborationTarget): boolean {
+  if (hasTypedCitationRepair(input.readonlySpecRepair)) return input.readonlySpecRepair.findings.some(issue => issue.nodeId === target.nodeId && issue.path === target.path)
   if (!input.analysis || !target.source) return true
   const contract = parseContract({ ...target, source: target.source }).contract
   if (!contract || !contract.items.length) return true
@@ -116,6 +121,53 @@ export function elaborationPatchErrors(input: ElaborationInput, generated: Gener
       if (!ids.has(id)) errors.push(`${node.path}: 删除行不属于冻结节点 ${id}`)
       if (updates.has(id)) errors.push(`${node.path}: 同一节点不能同时删除和更新 ${id}`)
       removes.add(id)
+    }
+    return errors
+  }).concat(readonlyCitationPatchErrors(input, generated))
+}
+
+/** 原P1正文仍是权威；只接受精确V1引用差量，未提供的行由既有渲染器保留。 */
+function readonlyCitationPatchErrors(input: ElaborationInput, generated: GeneratedElaboration): string[] {
+  const repair = input.readonlySpecRepair
+  if (!hasTypedCitationRepair(repair)) return []
+  const applicability = (items: readonly Applicability[]): string => JSON.stringify(items.map(({ boundary, applies, basis, affectedIds }) => [boundary, applies, basis, affectedIds]))
+  if (!repair.applicability || applicability(generated.applicability) !== applicability(repair.applicability)) return ['V1引用返修必须保留原已审适用性及关联ID']
+  let inventory: Set<string> | undefined
+  const isFrozenFile = (path: string): boolean => {
+    if (input.files?.has(path)) return true
+    if (!input.worktree || !input.historyInput) return false
+    inventory ??= new Set(readTree(input.historyInput.source.commonDir, input.worktree.tree).map(entry => entry.path))
+    return inventory.has(path)
+  }
+  return generated.changes.flatMap(node => {
+    const target = input.targets.find(target => target.nodeId === node.nodeId && target.path === node.path)
+    const contract = target?.source ? parseContract({ ...target, source: target.source }).contract : null
+    if (!target?.source || !contract) return [`${node.path}: V1引用返修缺少原已审正文`]
+    const issues = repair.findings.filter(issue => issue.nodeId === node.nodeId && issue.path === node.path)
+    const original = parseFrontmatter(target.source)
+    const expanded = parseParts(target.source)?.expandedSpec ?? original.body
+    const errors: string[] = []
+    if (node.removeIds.length || node.title !== String(original.fm.title ?? '') || node.description !== String(original.fm.desc ?? '')
+      || node.prose !== null && node.prose.replace(/\r\n?/g, '\n').replace(/\n{3,}/g, '\n\n').trim() !== contractBusinessProse(expanded.replace(/\r\n?/g, '\n')))
+      errors.push(`${node.path}: V1引用返修必须保留标题、描述、业务正文与稳定ID`)
+    const citationChange = (origin: NonNullable<ContractFinding['citation']>['origin'], before: string, after: string, itemId?: string): boolean => {
+      if (before === after) return true
+      const old = parseCodeEntry(before), next = parseCodeEntry(after)
+      const ref = old.anchor ? `${old.path}#${old.anchor}` : old.path
+      if (origin === 'related' && !old.anchor && (old.path.endsWith('/') ? !next.path.endsWith('/') : !isFrozenFile(next.path))) return false
+      return Boolean(next.path && !next.path.includes('*') && Boolean(old.anchor) === Boolean(next.anchor) && (origin !== 'code' || old.path === next.path)
+        && issues.some(issue => issue.itemId === itemId && issue.citation?.origin === origin && issue.citation.ref === ref))
+    }
+    for (const relation of ['code', 'related'] as const)
+      if (node[relation].length !== contract[relation].length || contract[relation].some((ref, index) => !citationChange(relation, ref, node[relation][index])))
+        errors.push(`${node.path}: V1引用返修只能将所列 ${relation} 引用逐项修复为相同粒度的冻结路径或声明`)
+    for (const [kind, rows] of Object.entries(node.tables)) for (const row of rows) {
+      const item = contract.items.find(item => item.kind === kind && item.id === row.id)
+      const old = item && contractRow(item)
+      if (!item || !old || Object.entries(old).some(([column, value]) => JSON.stringify(value) !== JSON.stringify(row[column]) && !(column === 'source'
+        && item.kind !== 'VERIFY' && item.source.kind === 'code' && typeof row.source === 'string' && row.source.startsWith('code:')
+        && citationChange('source', item.source.ref, row.source.slice('code:'.length), item.id))))
+        errors.push(`${node.path}#${row.id}: V1引用返修只允许修复该行所列代码来源，保留其余字段`)
     }
     return errors
   })
@@ -200,17 +252,18 @@ export function renderElaboration(input: ElaborationInput, generated: GeneratedE
     const baseline = target && renderingSource ? parseContract({ ...target, source: renderingSource }).contract : null
     const programVerificationUpdates = input.phase === 'interface_seed' ? (input.verifications ?? []).filter(policy => baseline?.items.some(item => item.kind === 'VERIFY' && item.id === policy.id) && input.authorizedChanges?.some(change => change.id === policy.id && change.action === 'update_verification')) : []
     const raw = (move && target?.source ? originalParts?.rawSource : node.nodeId === input.intent.nodeId ? input.intent.rawSource : target?.rawSource || originalParts?.rawSource) || null
-    const fm = input.mode === 'preserve_business' && target?.source ? { ...original, ...(factRepair ? { desc: node.description } : {}), 'contract-schema': 'sync-v1', code: node.code, related: node.related } : { ...original, title: node.title, desc: node.description, 'contract-schema': 'sync-v1', ...(!target?.source ? { status: 'pending' } : {}), code: node.code, related: node.related }
+    const preserveBusiness = input.mode === 'preserve_business' || hasTypedCitationRepair(input.readonlySpecRepair)
+    const fm = preserveBusiness && target?.source ? { ...original, ...(factRepair ? { desc: node.description } : {}), 'contract-schema': 'sync-v1', code: node.code, related: node.related } : { ...original, title: node.title, desc: node.description, 'contract-schema': 'sync-v1', ...(!target?.source ? { status: 'pending' } : {}), code: node.code, related: node.related }
     if (target && unchangedTargetOutput(target, node) && raw === (parts?.rawSource || null) && !move && !programVerificationUpdates.length) return { nodeId: node.nodeId, path: node.path, beforeDigest: target.sourceDigest, source: target.source! }
     const metadataEqual = Object.entries(fm).every(([key, value]) => JSON.stringify(value) === JSON.stringify((key === 'code' || key === 'related') && typeof original[key] === 'string' ? [original[key]] : original[key]) || Array.isArray(value) && !value.length && !original[key] || value === '' && original[key] === undefined)
-    if (baseline && (node.prose === null || input.mode === 'preserve_business' && !factRepair) && metadataEqual && raw === (parts?.rawSource || null) && !move && !programVerificationUpdates.length && !node.removeIds.length && Object.values(node.tables).every(rows => !rows.length)) return { nodeId: node.nodeId, path: node.path, beforeDigest: target!.sourceDigest, source: target!.source! }
+    if (baseline && (node.prose === null || preserveBusiness && !factRepair) && metadataEqual && raw === (parts?.rawSource || null) && !move && !programVerificationUpdates.length && !node.removeIds.length && Object.values(node.tables).every(rows => !rows.length)) return { nodeId: node.nodeId, path: node.path, beforeDigest: target!.sourceDigest, source: target!.source! }
     const metadata = Object.entries(fm).filter(([_key, value]) => !Array.isArray(value) || value.length).map(([key, value]) => Array.isArray(value)
       ? `${key}:\n${value.map(item => `  - ${JSON.stringify(item)}`).join('\n')}`
       : `${key}: ${JSON.stringify(value)}`).join('\n')
     const sourceLines = renderingSource?.split('\n') ?? []
     const removedIds = new Set(node.removeIds)
     const replaceFactProse = factRepair && node.prose !== null
-    const preserveExpanded = parts !== null && (legacyBody !== null || node.prose === null || input.mode === 'preserve_business' || factRepair)
+    const preserveExpanded = parts !== null && (legacyBody !== null || node.prose === null || preserveBusiness || factRepair)
     const tables = Object.fromEntries(Object.entries(CONTRACT_COLUMNS).map(([kind, columns]) => {
       const updates = new Map(node.tables[kind as ContractKind].map(row => [String(row.id), row]))
       const rows: string[] = []
