@@ -19,7 +19,7 @@ import { elaborate, hasApprovedElaborationReview, elaborationMaterialContext, fr
 import { outputErrors } from './elaboration-schema.js'
 import type { ElaborationResult, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ElaborationTrace, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ReadonlySpecRepair } from './elaboration-types.js'
 import { claimFileMutex } from './file-mutex.js'
-import { authenticateNativeFailure, authenticateNativeRejectedFinal, readSyncCheckpoints, readSyncCheckpointStageIndex, retryOperationLineage, syncCheckpointArtifacts } from './checkpoint-evidence.js'
+import { authenticateNativeFailure, authenticateNativeRejectedFinal, readSyncCheckpoints, readSyncCheckpointStageIndex, retryOperationLineage, syncCheckpointArtifacts, withCheckpointStageBasis } from './checkpoint-evidence.js'
 import type { SyncCheckpointStageView } from './checkpoint-evidence.js'
 import type { FileMutex } from './file-mutex.js'
 import { checkGenerationContractIntent, isSyncSpecPath, readFrozenContracts } from './frozen-contracts.js'
@@ -908,7 +908,7 @@ function readonlyRepairContext(store: SyncStore, operation: SyncOperation, sourc
   if (operation.baselineSelection) {
     const basis = readSyncCheckpoints(store, operation, source).json.map(({ value }) => value as Stage).find(saved => saved.version === 'sync-stage-v1' && saved.stage === 'generation' && saved.operationId === operation.id && saved.attemptId === source.id && saved.inputId === operation.input.id && saved.policyDigest === operation.policyDigest && saved.resultRef?.sha256 === generationRef.sha256)
     if (!basis?.readSetDigest || !basis.baselineSelectionRef || !stageSelectionMatches(store, operation, basis)) fail('readonly_spec_repair_binding', '只读续修原generation绑定不属于当前合法null资源扩展')
-    context = { ...operation, readSetDigest: basis.readSetDigest, baselineSelection: JSON.parse(readEvidence(operation.input.source.commonDir, basis.baselineSelectionRef).toString('utf8')) as FrozenBaselineSelection }
+    context = withCheckpointStageBasis(operation, basis.readSetDigest, JSON.parse(readEvidence(operation.input.source.commonDir, basis.baselineSelectionRef).toString('utf8')) as FrozenBaselineSelection)
   }
   return context
 }
@@ -1099,7 +1099,7 @@ function authenticateAnalysisOnlyPartitions(store: SyncStore, operation: SyncOpe
   const p0 = store.readAttempt(basis.attemptId), commonDir = operation.input.source.commonDir
   if (p0.number > attempt.number || p0.composedInput?.contentDigest !== whole.composedDigest) return false
   const selection = basis.baselineSelectionRef ? JSON.parse(readEvidence(commonDir, basis.baselineSelectionRef).toString('utf8')) as FrozenBaselineSelection : undefined
-  const source = { ...operation, readSetDigest: whole.readSetDigest, ...(selection ? { baselineSelection: selection } : {}) }
+  const source = withCheckpointStageBasis(operation, whole.readSetDigest, selection)
   const history = new Map<string, SyncCheckpointStageView>()
   const checkpoints = (origin: SyncAttempt): SyncCheckpointStageView => {
     const cached = history.get(origin.id) ?? readSyncCheckpointStageIndex(store, origin.operationId === operation.id ? source : store.readOperation(origin.operationId), origin)
@@ -1129,7 +1129,7 @@ function authenticateAnalysisOnlyPartitions(store: SyncStore, operation: SyncOpe
         ancestors ??= new Map([...retryOperationLineage(store, operation)].filter(candidate => candidate.id !== operation.id && settledApprovalSource(store, candidate)).map(candidate => [candidate.id, candidate]))
         const ancestor = ancestors.get(previous.operationId)
         if (!ancestor) return false
-        ownerOperation = { ...ancestor, readSetDigest: whole.readSetDigest, ...(selection ? { baselineSelection: selection } : {}) }
+        ownerOperation = withCheckpointStageBasis(ancestor, whole.readSetDigest, selection)
       }
       origin = previous
     }

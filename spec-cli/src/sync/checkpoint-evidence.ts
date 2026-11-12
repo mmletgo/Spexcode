@@ -19,6 +19,14 @@ type Saved = Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>
 export type RawFinalEvidence = RejectedStructuredOutput & { ownerInputDigest: string; ownerRequestKey: string }
 type StageBasis = { readSetDigest?: string; baselineSelectionRef?: BlobRef }
 type Wrapper = StageBasis & { version: string; operationId: string; attemptId: string; inputId: string; policyDigest: string; stage: string; resultRef: BlobRef; composedTree?: string; composedContentDigest?: string }
+const checkpointOwner = Symbol('checkpointOwner')
+type PhaseOperation = SyncOperation & { [checkpointOwner]?: SyncOperation }
+
+export function withCheckpointStageBasis(operation: PhaseOperation, readSetDigest: string, baselineSelection?: FrozenBaselineSelection): SyncOperation {
+  const phase: PhaseOperation = { ...operation, readSetDigest, ...(baselineSelection ? { baselineSelection } : {}), [checkpointOwner]: operation[checkpointOwner] ?? operation }
+  return phase
+}
+
 function fail(message: string): never { throw Object.assign(new Error(message), { code: 'checkpoint_artifact_binding' }) }
 const hash = (value: unknown): string => contentHash(JSON.stringify(value))
 /** 正式重试沿相同冻结来源、输入、政策与意图回溯。 */
@@ -129,7 +137,8 @@ export function authenticateNativeRejectedFinal(store: SyncStore, operation: Syn
 export type SyncCheckpointStageView = { json: { ref: BlobRef; value: unknown }[]; raw: { has(sha256: string): boolean } }
 type ScannedCheckpoints = SyncCheckpointStageView & { raw: Map<string, RawFinalEvidence> }
 
-function scanSyncCheckpoints(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, readNativeRecord: typeof readRecord): ScannedCheckpoints {
+function scanSyncCheckpoints(store: SyncStore, operation: PhaseOperation, attempt: SyncAttempt, readNativeRecord: typeof readRecord): ScannedCheckpoints {
+  operation = operation[checkpointOwner] ?? operation
   const raw = new Map<string, RawFinalEvidence>()
   const roots = [...attempt.checkpointRefs].reverse(), refs = new Map<string, BlobRef>()
   for (const root of roots) { refs.set(root.sha256, root); for (const artifact of root.artifacts ?? []) refs.set(artifact.ref.sha256, artifact.ref) }
