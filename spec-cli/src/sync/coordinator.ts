@@ -1904,11 +1904,12 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         const result = stage<SavedElaboration>(store, owner, prior, key, 'automatic', checkpoints)
         return result ? { result, resultRef: writeEvidence(operation.input.source.commonDir, result) } : null
       }
-      const loadElaborationDraft = (key: string, binding?: NonNullable<ElaborationResult['partitionBinding']>, schemaDigest?: string): ElaborationDraft | null => {
+      const loadElaborationDraft = (key: string, binding?: NonNullable<ElaborationResult['partitionBinding']>, schemaDigest?: string, repairInputDigest?: string): ElaborationDraft | null => {
         const sources = retryDraftSources(store, operation, attempt!.number)
         for (const { owner, prior } of sources) {
           const source = draftMaterialStage(owner, prior, key)
           if (!source || source.result.phase === 'partitioned_final' || source.result.partitionBinding?.partitionId !== binding?.partitionId) continue
+          if (repairInputDigest !== undefined && source.result.inputDigest !== repairInputDigest) continue
           for (const round of [...source.result.rounds].reverse()) {
             const draft = round.draft
             if (!draft || owner.id !== operation.id && (!schemaDigest || draft.schemaDigest !== schemaDigest || binding && (source.result.partitionBinding?.planDigest !== binding.planDigest || partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan', undefined, historyCheckpoints(owner, prior))?.result.digest !== binding.planDigest))) continue
@@ -2585,7 +2586,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           return loadAcceptedRetryElaboration(key, binding, inputDigest, true)
         },
         loadElaborationDraftMaterial: (key, binding, schemaDigest, request) => loadElaborationDraftMaterial(key, binding, schemaDigest, request),
-        loadElaborationDraft: (key, binding, schemaDigest) => loadElaborationDraft(key, binding, schemaDigest),
+        loadElaborationDraft: (key, binding, schemaDigest, repairInputDigest) => loadElaborationDraft(key, binding, schemaDigest, repairInputDigest),
         loadElaborationRepairDiagnostics: (key, binding, inputDigest) => loadElaborationRepairDiagnostics(key, inputDigest, binding),
         loadElaborationRepairSeed: (key, binding, inputDigest) => loadElaborationRepairSeed(key, inputDigest, binding),
         save: (key, value) => {
