@@ -33,20 +33,28 @@ export function* retryOperationLineage(store: SyncStore, operation: SyncOperatio
 }
 
 type DecodedCheckpoint = { value: unknown } | { error: SyntaxError }
-const decodedCheckpoints = new WeakMap<SyncStore, { operationId: string; commonDir: string; values: Map<string, DecodedCheckpoint> }>()
+const DECODE_CACHE_BYTES = 32 * 1024 * 1024
+const decodedCheckpoints = new WeakMap<SyncStore, { operationId: string; commonDir: string; bytes: number; values: Map<string, DecodedCheckpoint> }>()
 
 function readCheckpointJson<T>(store: SyncStore, operation: SyncOperation, ref: BlobRef): T {
   const commonDir = operation.input.source.commonDir, bytes = readEvidence(commonDir, ref)
   let cache = decodedCheckpoints.get(store)
   if (!cache || cache.operationId !== operation.id || cache.commonDir !== commonDir) {
-    cache = { operationId: operation.id, commonDir, values: new Map() }
+    cache = { operationId: operation.id, commonDir, bytes: 0, values: new Map() }
     decodedCheckpoints.set(store, cache)
   }
   let decoded = cache.values.get(ref.sha256)
   if (!decoded) {
     try { decoded = { value: JSON.parse(bytes.toString('utf8')) as unknown } }
     catch (error) { if (!(error instanceof SyntaxError)) throw error; decoded = { error } }
-    cache.values.set(ref.sha256, decoded)
+    if (bytes.length <= DECODE_CACHE_BYTES) {
+      if (cache.bytes + bytes.length > DECODE_CACHE_BYTES) {
+        cache.values.clear()
+        cache.bytes = 0
+      }
+      cache.values.set(ref.sha256, decoded)
+      cache.bytes += bytes.length
+    }
   }
   if ('error' in decoded) throw decoded.error
   return decoded.value as T
@@ -115,8 +123,10 @@ export function authenticateNativeRejectedFinal(store: SyncStore, operation: Syn
   return state
 }
 
-/** 先核失败原件与原生资源；JSON外形和checkpoint上的role都不能自行授予stage权限。 */
-export function readSyncCheckpoints(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, readNativeRecord: typeof readRecord = readRecord): { json: { ref: BlobRef; value: unknown }[]; raw: Map<string, RawFinalEvidence> } {
+export type SyncCheckpointStageView = { json: { ref: BlobRef; value: unknown }[]; raw: { has(sha256: string): boolean } }
+type ScannedCheckpoints = SyncCheckpointStageView & { raw: Map<string, RawFinalEvidence> }
+
+function scanSyncCheckpoints(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, readNativeRecord: typeof readRecord): ScannedCheckpoints {
   const raw = new Map<string, RawFinalEvidence>()
   const roots = [...attempt.checkpointRefs].reverse(), refs = new Map<string, BlobRef>()
   for (const root of roots) { refs.set(root.sha256, root); for (const artifact of root.artifacts ?? []) refs.set(artifact.ref.sha256, artifact.ref) }
@@ -241,5 +251,18 @@ export function readSyncCheckpoints(store: SyncStore, operation: SyncOperation, 
   }
   for (const root of roots) for (const artifact of root.artifacts ?? []) if (artifact.kind === 'untrusted_final' && !raw.has(artifact.ref.sha256)) fail('raw role没有真实失败原件，不能隐藏损坏checkpoint')
   for (const [sha256, error] of syntax) if (!raw.has(sha256)) throw error
-  return structuredClone({ json: [...json].filter(([sha256]) => !raw.has(sha256)).map(([sha256, value]) => ({ ref: { sha256 }, value })), raw })
+  return { json: [...json].filter(([sha256]) => !raw.has(sha256)).map(([sha256, value]) => ({ ref: { sha256 }, value })), raw }
+}
+
+/** 先核失败原件与原生资源；JSON外形和checkpoint上的role都不能自行授予stage权限。 */
+export function readSyncCheckpoints(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, readNativeRecord: typeof readRecord = readRecord): ScannedCheckpoints {
+  return structuredClone(scanSyncCheckpoints(store, operation, attempt, readNativeRecord))
+}
+
+/** 历史阶段查询只保留已核根wrapper与raw摘要；正文按所需resultRef读取。 */
+export function readSyncCheckpointStageIndex(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, readNativeRecord: typeof readRecord = readRecord): SyncCheckpointStageView {
+  const { json, raw } = scanSyncCheckpoints(store, operation, attempt, readNativeRecord)
+  const roots = new Set(attempt.checkpointRefs.map(ref => ref.sha256))
+  const wrappers = json.filter(({ ref, value }) => roots.has(ref.sha256) && (value as Partial<Wrapper> | null)?.version === 'sync-stage-v1')
+  return { json: structuredClone(wrappers), raw: new Set(raw.keys()) }
 }

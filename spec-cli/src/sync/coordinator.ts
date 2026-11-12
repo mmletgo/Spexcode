@@ -19,7 +19,8 @@ import { elaborate, hasApprovedElaborationReview, elaborationMaterialContext, fr
 import { outputErrors } from './elaboration-schema.js'
 import type { ElaborationResult, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ElaborationTrace, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial } from './elaboration-types.js'
 import { claimFileMutex } from './file-mutex.js'
-import { authenticateNativeFailure, authenticateNativeRejectedFinal, readSyncCheckpoints, retryOperationLineage, syncCheckpointArtifacts } from './checkpoint-evidence.js'
+import { authenticateNativeFailure, authenticateNativeRejectedFinal, readSyncCheckpoints, readSyncCheckpointStageIndex, retryOperationLineage, syncCheckpointArtifacts } from './checkpoint-evidence.js'
+import type { SyncCheckpointStageView } from './checkpoint-evidence.js'
 import type { FileMutex } from './file-mutex.js'
 import { checkGenerationContractIntent, isSyncSpecPath, readFrozenContracts } from './frozen-contracts.js'
 import { decisionAuthorizationErrors, sameContractBusinessMeaning } from './contract-evolution.js'
@@ -238,13 +239,14 @@ type ReadonlyOwnerRepair = { kind?: 'candidate_review'; reviewEvidence?: { parti
 export function readonlySpecRepairStalled(repair: Pick<ReadonlyOwnerRepair, 'candidateDigest' | 'findings' | 'owners'>, candidateDigest: string | undefined, findings: readonly ContractFinding[], attempt: Pick<SyncAttempt, 'id' | 'dispatchPlans'>): boolean {
   return candidateDigest === repair.candidateDigest && canonical(findings.filter(item => item.severity === 'error')) === canonical(repair.findings) && !attempt.dispatchPlans.some(dispatch => dispatch.purpose.startsWith('elaboration_') && repair.owners.some(owner => dispatch.key.startsWith(`sync:${attempt.id}:elaborate:partition:${owner.partitionId}:`)))
 }
-function stage<T>(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, name: string, usage: 'automatic' | 'evidence' = 'automatic', checkpoints = readSyncCheckpoints(store, operation, attempt)): T | null {
+function stage<T>(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, name: string, usage: 'automatic' | 'evidence' = 'automatic', checkpoints: SyncCheckpointStageView = readSyncCheckpoints(store, operation, attempt)): T | null {
   for (const { value: entry } of checkpoints.json) {
     const value = entry as Partial<Stage>
     if (value.version !== 'sync-stage-v1' || value.stage !== name) continue
     if (value.operationId !== operation.id || value.attemptId !== attempt.id || value.inputId !== operation.input.id || value.policyDigest !== operation.policyDigest || !value.resultRef) fail('stage_binding', '持久阶段身份不一致')
     if (!stageSelectionMatches(store, operation, value as Stage)) continue
     if (usage === 'automatic' && behaviorAnalysisStage(name) && value.guidanceContractVersion !== CODE_BEHAVIOR_GUIDANCE_VERSION) return null
+    if (checkpoints.raw.has(value.resultRef.sha256)) fail('stage_binding', '不可信拒稿不能成为阶段结果')
     const result = checkpoints.json.find(entry => entry.ref.sha256 === value.resultRef!.sha256)
     return result ? result.value as T : JSON.parse(readEvidence(operation.input.source.commonDir, value.resultRef).toString('utf8')) as T
   }
@@ -274,7 +276,7 @@ function elaborationRepairSeed(result: SavedElaboration | null, requestKey: stri
     ? { settled: true, requestKey, inputDigest: result.inputDigest, candidateDigest: last.candidateDigest, output: last.output, candidate: last.candidate, findings: last.findings, review: last.review, traces: last.traces } : undefined
 }
 
-function partitionStage<T>(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string, sourceSelection?: FrozenBaselineSelection, checkpoints = readSyncCheckpoints(store, operation, attempt)): { result: T; resultRef: BlobRef } | null {
+function partitionStage<T>(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string, sourceSelection?: FrozenBaselineSelection, checkpoints: SyncCheckpointStageView = readSyncCheckpoints(store, operation, attempt)): { result: T; resultRef: BlobRef } | null {
   const result = stage<T>(store, operation, attempt, key, 'automatic', checkpoints)
   if (!result) return null
   const resultRef = writeEvidence(operation.input.source.commonDir, result)
@@ -630,7 +632,7 @@ export function behaviorMaterialTaskMatches(original: BehaviorTaskRequest, curre
 }
 
 /** 续审analysis沿精确原件provenance回到实际Native提交；不借任意历史session授予已校验资格。 */
-function behaviorTraceBinding(store: SyncStore, operation: SyncOperation, origin: SyncAttempt, key: string, trace: ElaborationTrace, sourceSelection?: FrozenBaselineSelection, readCheckpoints?: (attempt: SyncAttempt) => ReturnType<typeof readSyncCheckpoints>, bindModel = false): boolean {
+function behaviorTraceBinding(store: SyncStore, operation: SyncOperation, origin: SyncAttempt, key: string, trace: ElaborationTrace, sourceSelection?: FrozenBaselineSelection, readCheckpoints?: (attempt: SyncAttempt) => SyncCheckpointStageView, bindModel = false): boolean {
   for (;;) {
     const dispatch = origin.dispatchPlans.find(dispatch => dispatch.purpose === trace.purpose && dispatch.session?.sessionId === trace.sessionId && dispatch.session.threadId === trace.threadId && dispatch.session.turnId === trace.turnId)
     if (trace.purpose !== 'code_behavior_analyze' && trace.purpose !== 'code_behavior_review') return false
@@ -997,7 +999,7 @@ function analysisStageBinding(store: SyncStore, operation: SyncOperation, analys
   return null
 }
 /** 批准只来自原局部分析与独审，未生成旧whole也可认证。 */
-function authenticateApprovedBehaviorPartition(store: SyncStore, source: SyncOperation, origin: SyncAttempt, key: string, local: CodeBehaviorAnalysis, changedPaths: readonly string[], selection: FrozenBaselineSelection | undefined, checkpoints: (attempt: SyncAttempt) => ReturnType<typeof readSyncCheckpoints>, analysisSchemaDigest?: string): boolean {
+function authenticateApprovedBehaviorPartition(store: SyncStore, source: SyncOperation, origin: SyncAttempt, key: string, local: CodeBehaviorAnalysis, changedPaths: readonly string[], selection: FrozenBaselineSelection | undefined, checkpoints: (attempt: SyncAttempt) => SyncCheckpointStageView, analysisSchemaDigest?: string): boolean {
   const original = checkpoints(origin), commonDir = source.input.source.commonDir
   const analysisDigest = contentHash(JSON.stringify({ ...local, traces: [], reviewPassed: false }))
   if (!local.reviewPassed || local.traces.length !== 2 || local.traces[0].purpose !== 'code_behavior_analyze' || local.traces[1].purpose !== 'code_behavior_review' || local.traces[0].sessionId === local.traces[1].sessionId || local.traces[0].threadId === local.traces[1].threadId) return false
@@ -1047,9 +1049,9 @@ function authenticateAnalysisOnlyPartitions(store: SyncStore, operation: SyncOpe
   if (p0.number > attempt.number || p0.composedInput?.contentDigest !== whole.composedDigest) return false
   const selection = basis.baselineSelectionRef ? JSON.parse(readEvidence(commonDir, basis.baselineSelectionRef).toString('utf8')) as FrozenBaselineSelection : undefined
   const source = { ...operation, readSetDigest: whole.readSetDigest, ...(selection ? { baselineSelection: selection } : {}) }
-  const history = new Map<string, ReturnType<typeof readSyncCheckpoints>>()
-  const checkpoints = (origin: SyncAttempt): ReturnType<typeof readSyncCheckpoints> => {
-    const cached = history.get(origin.id) ?? readSyncCheckpoints(store, origin.operationId === operation.id ? source : store.readOperation(origin.operationId), origin)
+  const history = new Map<string, SyncCheckpointStageView>()
+  const checkpoints = (origin: SyncAttempt): SyncCheckpointStageView => {
+    const cached = history.get(origin.id) ?? readSyncCheckpointStageIndex(store, origin.operationId === operation.id ? source : store.readOperation(origin.operationId), origin)
     history.set(origin.id, cached)
     return cached
   }
@@ -1875,7 +1877,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       }
       const renderedRepairAttempt = (prior: SyncAttempt): boolean => ['failed', 'superseded', 'settled'].includes(prior.status) && prior.failure?.kind === 'repairable' && canonical(prior.composedInput) === canonical(view.composed)
       // 同一原round既供P1完整定位，也供精确P0分类质疑；候选仍只是拒绝诊断。
-      const renderedElaborationSource = (owner: SyncOperation, prior: SyncAttempt, key: string, checkpoints?: ReturnType<typeof readSyncCheckpoints>, matchesFinding?: (finding: ContractFinding) => boolean): { result: SavedElaboration; resultRef: BlobRef; round: ElaborationResult['rounds'][number] } | null => {
+      const renderedElaborationSource = (owner: SyncOperation, prior: SyncAttempt, key: string, checkpoints?: SyncCheckpointStageView, matchesFinding?: (finding: ContractFinding) => boolean): { result: SavedElaboration; resultRef: BlobRef; round: ElaborationResult['rounds'][number] } | null => {
         if (!renderedRepairAttempt(prior)) return null
         const source = partitionStage<SavedElaboration>(store, owner, prior, key, undefined, checkpoints), round = source?.result.rounds.at(-1)
         if (!source || source.result.reviewPassed || source.result.phase === 'partitioned_final' || source.result.status !== 'exhausted' || source.result.failure?.code !== 'repair_budget_exhausted' || !round?.candidate || !round.findings.some(finding => finding.severity === 'error' && (!matchesFinding || matchesFinding(finding)))) return null
@@ -2180,9 +2182,9 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       let elaborationApprovalSources: ReturnType<typeof retryDraftSources> | undefined
       const settledApprovalOperations = new Map<string, boolean>()
       const elaborationApprovalDiagnostics = new Map<string, Set<string>>()
-      const approvalHistory = new Map<string, ReturnType<typeof readSyncCheckpoints>>()
-      const approvalCheckpoints = (owner: SyncOperation, origin: SyncAttempt): ReturnType<typeof readSyncCheckpoints> => {
-        const original = approvalHistory.get(origin.id) ?? readSyncCheckpoints(store, owner, origin)
+      const approvalHistory = new Map<string, SyncCheckpointStageView>()
+      const approvalCheckpoints = (owner: SyncOperation, origin: SyncAttempt): SyncCheckpointStageView => {
+        const original = approvalHistory.get(origin.id) ?? readSyncCheckpointStageIndex(store, owner, origin)
         approvalHistory.set(origin.id, original)
         return original
       }
@@ -2292,7 +2294,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           const planRef = contentHash(JSON.stringify(plan)), selection = store.readBusinessBaselineSelection(operation.id)
           for (const { owner, prior } of approvalAncestors) {
             if (canonical(prior.composedInput) !== canonical(view.composed)) continue
-            const checkpoints = (origin: SyncAttempt): ReturnType<typeof readSyncCheckpoints> => approvalCheckpoints(owner, origin)
+            const checkpoints = (origin: SyncAttempt): SyncCheckpointStageView => approvalCheckpoints(owner, origin)
             const original = checkpoints(prior), savedPlan = partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan', selection, original)
             if (savedPlan?.resultRef.sha256 !== planRef) continue
             const source = partitionStage<CodeBehaviorAnalysis>(store, owner, prior, key, selection, original)
@@ -2461,7 +2463,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         const ownerKeys = new Set(owners.map(owner => owner.key))
         const beforeFiles = priorDeliveryFiles({ ...operation, baselineSelection: store.readBusinessBaselineSelection(operation.id) }, view, [...options.plan.readPaths, ...operation.scope.paths], options.plan)
         const sources = retryDraftSources(store, operation, attempt!.number).filter(({ prior }) => renderedRepairAttempt(prior))
-        const history = new Map<string, { owner: SyncOperation; prior: SyncAttempt; checkpoints: ReturnType<typeof readSyncCheckpoints>; keys: Set<string> } | null>()
+        const history = new Map<string, { owner: SyncOperation; prior: SyncAttempt; checkpoints: SyncCheckpointStageView; keys: Set<string> } | null>()
         for (const owner of owners) for (const sourceAttempt of sources) {
           let sourceView = history.get(sourceAttempt.prior.id)
           if (sourceView === undefined) {
@@ -2469,7 +2471,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
             const sourceOwner = store.readOperation(sourceAttempt.owner.id), prior = store.readAttempt(sourceAttempt.prior.id)
             sourceView = null
             if (renderedRepairAttempt(prior)) {
-              const checkpoints = readSyncCheckpoints(store, sourceOwner, prior), keys = new Set<string>()
+              const checkpoints = readSyncCheckpointStageIndex(store, sourceOwner, prior), keys = new Set<string>()
               for (const { value } of checkpoints.json) {
                 const entry = value as Partial<Stage> | null
                 if (entry?.version === 'sync-stage-v1' && entry.stage && ownerKeys.has(entry.stage)) keys.add(entry.stage)
