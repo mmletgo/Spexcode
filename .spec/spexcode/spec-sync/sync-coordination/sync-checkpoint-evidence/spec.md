@@ -23,6 +23,8 @@ code:
 
 正式重试逐字复用已审P1局部时，嵌套repairDiagnostics沿同一分区、批准resultRef及正式复用provenance回溯到原操作与原失败resultRef。每次回溯核对冻结输入、政策、读取范围和attempt归属，再用原Native资源与原owner认证旧拒稿。其原摘要与不可信角色保留；直接的rounds、其它owner、错误来源或未批准候选仍走原拒绝门禁。
 
+已审 P1 扩域后，读取前一阶段的局部批准须核对原 selection、readSet、同阶段全局聚合中的精确局部引用，以及正式 scope expansion 原件。原组合树和正文身份必须保持，新增资源只允许未初始化绑定。同一操作后续 attempt 可沿正式复用引用找到完成扩域的来源。旧拒稿仍按扩域前冻结的 scope、组合与正式复用链认证，不能将扩域后的业务权限赋给原诊断。
+
 partitionEvidence容器中的rounds是原局部结果的副本，不能以聚合的inputDigest/failure替原owner认证。读取先核唯一partitionId与原local绑定、完整rounds按引用顺序精确拼接；全局partitioned_final重算同planDigest及各local输入摘要，早退单local容器保原binding/inputDigest。随后仅沿各原resultRef执行既有完整Native强认证；嵌套refinement.prior/repair-input沿同一机制，错ref、错输入、删改重排round或重复owner均显式失败。
 
 同一原Native强认证接缝也供精确code_review格式续审的原result/plan/checkpoint引用读取复用，核原canonical record、请求/schema/prompt/模型、失败身份及停止状态；不新增raw role或平铺pin，不给旧缺席补ref，不解析原文取得stage、accept或业务权限。
