@@ -19,10 +19,10 @@ test('完整候选路径清单让V1拒绝不存在的related身份，保留真�
   const inventory = new Set(paths), pending = readFrozenContracts('/frozen', files, inventory)
   for (const value of invalid) inventory.add(value)
   const rejected = await pending
-  assert.equal(rejected.findings.filter(finding => finding.code === 'integrity' && finding.message.includes('missing related file')).length, invalid.length)
+  assert.deepEqual(rejected.findings.filter(finding => finding.code === 'related-file-missing').map(finding => finding.citation), invalid.map(ref => ({ origin: 'related', ref })))
   files.set(spec, source.replace('code:\n', 'related:\n  - docs/reference.png\n  - docs/\ncode:\n'))
   const accepted = await readFrozenContracts('/frozen', files, paths)
-  assert.deepEqual(accepted.findings.filter(finding => finding.code === 'integrity'), [])
+  assert.deepEqual(accepted.findings.filter(finding => finding.code === 'integrity' || finding.code === 'related-file-missing'), [])
 })
 
 test('冻结输入在不存在的宿主目录仍重建真实契约、源码锚点与验收', async () => {

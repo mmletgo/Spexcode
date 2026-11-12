@@ -8,12 +8,17 @@ export type FrozenAnchorEvidence = {
 }
 export type FrozenAnchorResult = { findings: ContractFinding[]; anchors: FrozenAnchorEvidence[] }
 
+export function isReadonlyCitationFailure(finding: ContractFinding): boolean {
+  return finding.severity === 'error' && (finding.code === 'anchor-dead' || Boolean(finding.citation) &&
+    ['anchor-ambiguous', 'anchor-parse-error', 'anchor-file-missing', 'related-file-missing'].includes(finding.code))
+}
+
 /** 只解析冻结文本；使用工具自身的语言注册表，不加载候选工作区的可执行依赖。 */
 export async function validateFrozenAnchors(graph: ContractGraph, files: ReadonlyMap<string, string>, registry: Extractor[] = extractors('')): Promise<FrozenAnchorResult> {
   const frozenFiles = new Map(files)
   const findings: ContractFinding[] = [], anchors: FrozenAnchorEvidence[] = []
   const report = (query: Omit<FrozenAnchorEvidence, 'unit'>, code: string, message: string, severity: 'error' | 'warning' = 'error'): void => {
-    findings.push({ code, severity, nodeId: query.nodeId, path: query.declarationPath, line: query.line, itemId: query.itemId, message })
+    findings.push({ code, severity, nodeId: query.nodeId, path: query.declarationPath, line: query.line, itemId: query.itemId, citation: { origin: query.origin, ref: `${query.path}#${query.selector}` }, message })
   }
   const queries: Omit<FrozenAnchorEvidence, 'unit'>[] = []
   for (const contract of graph.contracts) {
@@ -43,7 +48,10 @@ export async function validateFrozenAnchors(graph: ContractGraph, files: Readonl
     const parsed = parsedFiles.get(query.path)!
     if ('error' in parsed) { report(query, 'anchor-parse-error', `${query.path} 无法解析：${parsed.error}`); continue }
     const verdict = resolveSelectors(parsed.units, [query.selector])[0]
-    if ('dead' in verdict) report(query, 'anchor-dead', `${query.path}#${query.selector} 不存在于冻结候选`)
+    if ('dead' in verdict) {
+      const alternatives = [...new Set(parsed.units.map(unit => unit.name).filter(name => name.endsWith(`.${query.selector}`)))].slice(0, 5)
+      report(query, 'anchor-dead', `${query.path}#${query.selector} 不存在于冻结候选${alternatives.length ? `；同一文件中的限定名备选 ${alternatives.join(', ')}` : ''}`)
+    }
     else if ('ambiguous' in verdict) report(query, 'anchor-ambiguous', `${query.path}#${query.selector} 匹配 ${verdict.ambiguous} 个符号`)
     else {
       evidence.unit = verdict.ok

@@ -86,6 +86,44 @@ test('重复upsert、重复删除、异节点删除、同节点删除再更新�
   assert.throws(() => renderElaboration(input, output, 'input'), /同时删除和更新/)
 })
 
+test('只读V1混合引用差量保留原业务正文、AC和可信命令', () => {
+  const rule = baseline.items.find(item => item.kind === 'RULE')!
+  assert.equal(rule.kind, 'RULE')
+  const oldRef = 'src/export.js#run', oldRelated = 'docs/typo.md'
+  const frozen = source.replace('code:\n', `related:\n  - ${oldRelated}\ncode:\n`)
+    .split('\n').map(line => line.startsWith(`| ${rule.id} `) ? line.replace(`${rule.source.kind}:${rule.source.ref}`, `code:${oldRef}`) : line).join('\n')
+  const accepted = parseContract({ nodeId: baseline.nodeId, path, source: frozen }).contract!
+  const ref = { sha256: 'a'.repeat(64) }
+  const snapshot: ElaborationInput = { ...input, implementationWritePaths: [], files: new Map([['docs/reference.md', '冻结文件']]), targets: [{ ...input.targets[0], source: frozen, sourceDigest: elaborationDigest(frozen) }],
+    readonlySpecRepair: { baseInputDigest: ref.sha256, candidateDigest: ref.sha256, generationRef: ref, acceptedRef: ref, changes: [], applicability: [{ boundary: 'retries', applies: true, basis: '原已审策略', affectedIds: [rule.id] }], output: null, review: null, findings: [
+      { code: 'anchor-dead', severity: 'error', nodeId: baseline.nodeId, path, itemId: rule.id, citation: { origin: 'source', ref: oldRef }, message: '缺少声明' },
+      { code: 'related-file-missing', severity: 'error', nodeId: baseline.nodeId, path, citation: { origin: 'related', ref: oldRelated }, message: '缺少文件' },
+    ] } }
+  const output = patch(), change = output.changes[0]
+  output.applicability = structuredClone(snapshot.readonlySpecRepair!.applicability!)
+  change.related = ['docs/reference.md']
+  change.tables.RULE = [{ id: rule.id, scope: rule.scope, constraint: rule.constraint, basis: rule.basis, authority: rule.authority, source: 'code:src/export.js#ExportService.run', 'depends-on': rule.dependsOn }]
+  assert.deepEqual(elaborationPatchErrors(snapshot, output), [])
+  const rendered = renderElaboration(snapshot, output, 'input').changes[0].source
+  const actual = parseContract({ nodeId: baseline.nodeId, path, source: rendered }).contract!
+  assert.equal(actual.rawSource, accepted.rawSource)
+  assert.deepEqual(actual.related, change.related)
+  const withoutLocation = ({ line: _line, ...item }: typeof actual.items[number]) => item
+  assert.deepEqual(actual.items.map(withoutLocation), accepted.items.map(item => withoutLocation(item.kind === 'RULE' && item.id === rule.id ? { ...item, source: { kind: 'code', ref: 'src/export.js#ExportService.run' } } : item)))
+  for (const variant of [
+    { ...change, prose: '改写原正文' },
+    { ...change, removeIds: [rule.id] },
+    { ...change, related: [] },
+    { ...change, related: ['docs/**'] },
+    { ...change, related: ['docs'] },
+    { ...change, related: ['docs/'] },
+    { ...change, code: ['src/other.js'] },
+    ...['code:src/export.js', 'user:raw'].map(source => ({ ...change, tables: { ...change.tables, RULE: [{ ...change.tables.RULE[0], source }] } })),
+    { ...change, tables: { ...change.tables, RULE: [{ ...change.tables.RULE[0], basis: '改写事实' }] } },
+  ]) assert.ok(elaborationPatchErrors(snapshot, { ...output, changes: [variant] }).length > 0)
+  assert.ok(elaborationPatchErrors(snapshot, { ...output, applicability: [{ ...output.applicability[0], applies: false, affectedIds: [] }] }).some(error => error.includes('保留原已审适用性')))
+})
+
 test('raw-only旧节点用同一协议首次建立契约，保留原raw及既有说明', () => {
   const rawOnly = '---\ntitle: 导出服务\n---\n## raw source\n\n真实旧原意。\n\n## expanded spec\n\n原有不适用依据与业务输入域。\n'
   const output = patch()

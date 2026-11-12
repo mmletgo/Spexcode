@@ -28,7 +28,13 @@ export async function readFrozenContracts(root: string, input: ReadonlyMap<strin
   const findings = [...parsed.flatMap(result => result.findings), ...validateContractGraph(graph, { mode: 'final', files, nodeIds: new Set(nodes.map(node => node.id)), recordUnverifiedAcceptance })]
   if (paths) {
     const directories = new Set([...paths].flatMap(path => path.split('/').slice(0, -1).map((_part, index, parts) => parts.slice(0, index + 1).join('/'))))
-    findings.push(...specRelationFindings(nodes, path => paths.has(path) || directories.has(path.replace(/\/+$/, ''))).map(finding => ({ code: finding.rule, severity: finding.level === 'error' ? 'error' as const : 'warning' as const, nodeId: finding.spec!, path: nodes.find(node => node.id === finding.spec)!.path, message: finding.msg })))
+    const byId = new Map(nodes.map(node => [node.id, node]))
+    findings.push(...specRelationFindings(nodes, path => paths.has(path) || directories.has(path.replace(/\/+$/, ''))).map(finding => {
+      const node = byId.get(finding.spec!)!
+      const missingRelated = finding.rule === 'integrity' && finding.file && node.related.includes(finding.file) && !node.code.includes(finding.file)
+      return { code: missingRelated ? 'related-file-missing' : finding.rule, severity: finding.level === 'error' ? 'error' as const : 'warning' as const, nodeId: node.id, path: node.path, message: finding.msg,
+        ...(missingRelated ? { citation: { origin: 'related' as const, ref: finding.file! } } : {}) }
+    }))
   }
   findings.push(...(await validateFrozenAnchors(graph, files)).findings)
   return { files, nodes: nodes.map(node => ({ id: node.id, path: node.path, rawSource: parseParts(sources.get(node.path)!)?.rawSource || null })), contracts, graph, coverage: projectContractCoverage(graph), findings }
