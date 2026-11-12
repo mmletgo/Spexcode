@@ -503,7 +503,7 @@ function partitionElaborationStage(store: SyncStore, operation: SyncOperation, a
 }
 
 /** 跨正式重试的批准仍属于原模型、Git生成和独立只读审查。 */
-function authenticatedApprovedElaboration(store: SyncStore, owner: SyncOperation, prior: SyncAttempt, result: SavedElaboration): boolean {
+function authenticatedApprovedElaboration(store: SyncStore, owner: SyncOperation, prior: SyncAttempt, result: SavedElaboration, reviewInSourceAttempt = false): boolean {
   const round = result.rounds.at(-1), review = round?.traces.find(trace => trace.purpose === 'elaboration_review')
   if (!round?.draft || !round.candidate || !review || round.traces.length !== 2 || !hasApprovedElaborationReview(result) || round.review?.verdict !== 'accept'
     || round.candidate.inputDigest !== result.inputDigest || round.candidateDigest !== contentHash(JSON.stringify(round.candidate)) || round.candidateDigest !== result.candidateDigest
@@ -511,6 +511,7 @@ function authenticatedApprovedElaboration(store: SyncStore, owner: SyncOperation
     || ELABORATION_BOUNDARIES.some(boundary => !round.review!.checkedBoundaries.includes(boundary))) return false
   const generation = elaborationGenerationSource(store, owner, prior, round)
   const reviewed = store.listAttempts(owner.id).filter(attempt => attempt.number <= prior.number).find(attempt => attempt.dispatchPlans.some(dispatch => dispatch.purpose === review.purpose && canonical(dispatch.session) === canonical({ sessionId: review.sessionId, threadId: review.threadId, turnId: review.turnId })))
+  if (reviewInSourceAttempt && reviewed?.id !== prior.id) return false
   const dispatch = reviewed?.dispatchPlans.find(dispatch => dispatch.purpose === review.purpose && dispatch.session?.sessionId === review.sessionId)
   const source = reviewed && dispatch ? authenticatedDraftResult(store, owner, reviewed, dispatch.key, review.purpose) : null
   if (!generation?.request || !source?.request || !source.result || source.request.inputDigest !== review.inputDigest || source.result.resultDigest !== review.resultDigest || canonical(source.result.output) !== canonical(round.reviewOutput)
@@ -523,6 +524,35 @@ function authenticatedApprovedElaboration(store: SyncStore, owner: SyncOperation
       || !request.requestKey.startsWith(`sync:${origin.id}:elaborate:partition:${result.partitionBinding!.partitionId}:`)) return false
   }
   return true
+}
+
+/** 复制的局部批准只能沿同一原件回到实际Native派发。 */
+function elaborationDraftGenerationSource(store: SyncStore, owner: SyncOperation, prior: SyncAttempt, key: string, source: { result: SavedElaboration; resultRef: BlobRef }, round: ElaborationResult['rounds'][number], sources: ReturnType<typeof retryDraftSources>) {
+  const direct = elaborationGenerationSource(store, owner, prior, round)
+  if (direct) return { ...direct, ownerId: owner.id }
+  const { result, resultRef } = source, binding = result.partitionBinding
+  if (!binding || key !== 'partition:' + binding.partitionId + ':elaboration' || !result.structurePassed || !result.reviewPassed || result.failure || round !== result.rounds.at(-1)) return null
+  let index = sources.findIndex(item => item.owner.id === owner.id && item.prior.id === prior.id)
+  if (index < 0) return null
+  let planRef: string | undefined
+  for (;;) {
+    const origin = sources[index], checkpoints = readSyncCheckpointStageIndex(store, origin.owner, origin.prior)
+    const plan = partitionStage<SyncPartitionPlan>(store, origin.owner, origin.prior, 'partition-plan', undefined, checkpoints)
+    const saved = partitionStage<SavedElaboration>(store, origin.owner, origin.prior, key, undefined, checkpoints)
+    if (plan?.result.digest !== binding.planDigest || planRef && plan.resultRef.sha256 !== planRef || saved?.resultRef.sha256 !== resultRef.sha256
+      || canonical(origin.prior.composedInput) !== canonical(prior.composedInput) || origin.prior.baselineSelectionDigest !== prior.baselineSelectionDigest
+      || origin.owner.id !== owner.id && !settledApprovalSource(store, origin.owner)) return null
+    planRef = plan.resultRef.sha256
+    const provenance = partitionStage<{ fromOperationId: string; fromAttemptId: string; resultRef: BlobRef }>(store, origin.owner, origin.prior, key + ':provenance', undefined, checkpoints)
+    if (!provenance) {
+      if (!authenticatedApprovedElaboration(store, origin.owner, origin.prior, result, true)) return null
+      const generation = elaborationGenerationSource(store, origin.owner, origin.prior, round)
+      return generation && { ...generation, ownerId: origin.owner.id }
+    }
+    const next = sources.findIndex(item => item.owner.id === provenance.result.fromOperationId && item.prior.id === provenance.result.fromAttemptId)
+    if (provenance.result.resultRef.sha256 !== resultRef.sha256 || next <= index) return null
+    index = next
+  }
 }
 
 /** 原source协议只沿同原件provenance读取，当前attempt的新tag不能给legacy补签。 */
@@ -1689,13 +1719,13 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         }
         return null
       }
-      const priorElaborationInputMatches = (prior: SyncAttempt, binding?: NonNullable<ElaborationResult['partitionBinding']>): boolean => {
+      const priorElaborationInputMatches = (prior: SyncAttempt, binding?: NonNullable<ElaborationResult['partitionBinding']>, owner = operation, checkpoints?: SyncCheckpointStageView): boolean => {
         if (canonical(prior.composedInput) !== canonical(view.composed) || prior.baselineSelectionDigest !== operation.baselineSelection?.digest) return false
         if (binding) {
-          const plan = partitionStage<SyncPartitionPlan>(store, operation, prior, 'partition-plan')
+          const plan = partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan', undefined, checkpoints)
           if (!plan || plan.result.digest !== binding.planDigest) return false
         }
-        const priorAnalysis = stage<CodeBehaviorAnalysis>(store, operation, prior, 'analysis'), analysisRef = binding?.analysisRef ?? analysis?.ref
+        const priorAnalysis = stage<CodeBehaviorAnalysis>(store, owner, prior, 'analysis', 'automatic', checkpoints), analysisRef = binding?.analysisRef ?? analysis?.ref
         if (analysisRef ? !priorAnalysis || contentHash(JSON.stringify(priorAnalysis)) !== analysisRef.sha256 : priorAnalysis !== null) return false
         return true
       }
@@ -1750,14 +1780,15 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         return result ? { result, resultRef: writeEvidence(operation.input.source.commonDir, result) } : null
       }
       const loadElaborationDraft = (key: string, binding?: NonNullable<ElaborationResult['partitionBinding']>, schemaDigest?: string): ElaborationDraft | null => {
-        for (const { owner, prior } of retryDraftSources(store, operation, attempt!.number)) {
+        const sources = retryDraftSources(store, operation, attempt!.number)
+        for (const { owner, prior } of sources) {
           const source = draftMaterialStage(owner, prior, key)
           if (!source || source.result.phase === 'partitioned_final' || source.result.partitionBinding?.partitionId !== binding?.partitionId) continue
           for (const round of [...source.result.rounds].reverse()) {
             const draft = round.draft
             if (!draft || owner.id !== operation.id && (!schemaDigest || draft.schemaDigest !== schemaDigest || binding && (source.result.partitionBinding?.planDigest !== binding.planDigest || partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan')?.result.digest !== binding.planDigest))) continue
             const generation = round.candidate
-              ? elaborationGenerationSource(store, owner, prior, round)
+              ? elaborationDraftGenerationSource(store, owner, prior, key, source, round, sources)
               : authenticatedDraftResult(store, owner, prior, `sync:${prior.id}:elaborate${binding ? `:partition:${binding.partitionId}` : ''}:${round.index}:elaboration_generate`, 'elaboration_generate', draft)
             if (round.candidate && !generation) fail('review_retry_binding', '已生成P1候选的原Native生成身份失配，不能回退为重新生成')
             if (!generation) continue
@@ -1795,10 +1826,10 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
             if (!source || source.result.partitionBinding?.partitionId !== binding?.partitionId) continue
             for (const round of [...source.result.rounds].reverse()) {
               if (!round.draft || identity(round.draft) !== identity(existingDraft)) continue
-              const key = `sync:${prior.id}:elaborate${binding ? `:partition:${binding.partitionId}` : ''}:${round.index}:elaboration_generate`
-              const generation = round.candidate ? elaborationGenerationSource(store, owner, prior, round) : authenticatedDraftResult(store, owner, prior, key, 'elaboration_generate', round.draft) ? { attempt: prior, key } : null
+              const dispatchKey = `sync:${prior.id}:elaborate${binding ? `:partition:${binding.partitionId}` : ''}:${round.index}:elaboration_generate`
+              const generation = round.candidate ? elaborationDraftGenerationSource(store, owner, prior, key, source, round, sources) : authenticatedDraftResult(store, owner, prior, dispatchKey, 'elaboration_generate', round.draft) ? { attempt: prior, key: dispatchKey, ownerId: owner.id } : null
               if (!generation) continue
-              const sourceIndex = sources.findIndex(item => item.owner.id === owner.id && item.prior.id === generation.attempt.id), roundIndex = /:(\d+):elaboration_generate$/.exec(generation.key)?.[1]
+              const sourceIndex = sources.findIndex(item => item.owner.id === generation.ownerId && item.prior.id === generation.attempt.id), roundIndex = /:(\d+):elaboration_generate$/.exec(generation.key)?.[1]
               if (sourceIndex >= 0 && roundIndex !== undefined) return { sourceIndex, roundIndex: Number(roundIndex) }
             }
           }
@@ -1953,28 +1984,52 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         if (sealRepairSource !== undefined) return sealRepairSource
         sealRepairSource = null
         if (!partitions) return null
-        for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number).reverse()) {
-          if (!['failed', 'superseded', 'settled'].includes(prior.status) || prior.failure?.kind !== 'repairable' && !(prior.status === 'superseded' && !prior.failure)) return null
-          if (prior.operationId === operation.id && prior.status === 'superseded' && !prior.failure && !prior.checkpointRefs.length && !prior.dispatchPlans.length && prior.composedInput === null && prior.candidate === null && prior.verification === null && prior.currentSession === null && prior.publicationBase === undefined && prior.baselineSelectionDigest === operation.baselineSelection?.digest) continue
-          const plan = partitionStage<SyncPartitionPlan>(store, operation, prior, 'partition-plan')
-          if (!plan || canonical(plan.result) !== canonical(partitions) || !priorElaborationInputMatches(prior, { planDigest: partitions.digest, partitionId: '', ...(analysis ? { analysisRef: analysis.ref } : {}) })) return null
-          const source = partitionStage<SavedElaboration>(store, operation, prior, 'elaboration')
+        const current = store.listAttempts(operation.id).filter(item => item.number < attempt!.number).reverse().map(prior => ({ owner: operation, prior }))
+        const ancestors = operation.retryOf ? retryDraftSources(store, operation, attempt!.number).filter(({ owner }) => owner.id !== operation.id) : []
+        let interrupted: { owner: SyncOperation; prior: SyncAttempt; checkpoints: SyncCheckpointStageView } | undefined
+        for (const { owner, prior } of [...current, ...ancestors]) {
+          const crossOperation = owner.id !== operation.id, repairable = prior.failure?.kind === 'repairable' || prior.status === 'superseded' && !prior.failure
+          if (!['failed', 'superseded', 'settled'].includes(prior.status) || crossOperation && !settledApprovalSource(store, owner)) return null
+          if (!repairable && (!crossOperation || interrupted || prior.failure?.code !== 'review_retry_binding' || prior.dispatchPlans.length || prior.candidate || prior.verification || prior.currentSession || prior.publicationBase !== undefined)) return null
+          if (prior.status === 'superseded' && !prior.failure && !prior.checkpointRefs.length && !prior.dispatchPlans.length && prior.composedInput === null && prior.candidate === null && prior.verification === null && prior.currentSession === null && prior.publicationBase === undefined && prior.baselineSelectionDigest === operation.baselineSelection?.digest) continue
+          const checkpoints = readSyncCheckpointStageIndex(store, owner, prior)
+          const plan = partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan', undefined, checkpoints)
+          if (!plan || canonical(plan.result) !== canonical(partitions) || !priorElaborationInputMatches(prior, { planDigest: partitions.digest, partitionId: '', ...(analysis ? { analysisRef: analysis.ref } : {}) }, owner, checkpoints)) return null
+          if (!repairable) {
+            interrupted = { owner, prior, checkpoints }
+            continue
+          }
+          const source = partitionStage<SavedElaboration>(store, owner, prior, 'elaboration', undefined, checkpoints)
           if (source?.result.structurePassed && source.result.reviewPassed && !source.result.failure) return null
-          if (!source || source.result.failure?.code !== 'partition_final_seal_failed') continue
+          if (!source || source.result.failure?.code !== 'partition_final_seal_failed') {
+            if (interrupted || crossOperation && prior.dispatchPlans.length) return null
+            continue
+          }
+          if (crossOperation && (prior.failure?.code !== 'partition_final_seal_failed' || !prior.failure.evidenceRefs.some(ref => ref.sha256 === source.resultRef.sha256))) fail('partition_final_seal_binding', '跨操作返修必须引用原正式失败的精确全局seal')
           const result = source.result, seal = result.partitionSeal
-          if (result.phase !== 'partitioned_final' || result.structurePassed || !result.reviewPassed || !seal || seal.passed || result.candidateDigest !== seal.candidateDigest || !elaborationComposedBinding(store, operation, prior, result, view.composed)
+          if (result.phase !== 'partitioned_final' || result.structurePassed || !result.reviewPassed || !seal || seal.passed || result.candidateDigest !== seal.candidateDigest || !elaborationComposedBinding(store, owner, prior, result, view.composed)
             || seal.candidateDigest !== contentHash(JSON.stringify({ inputDigest: seal.inputDigest, changes: seal.changes, applicability: seal.applicability, nodeChanges: seal.nodeChanges }))) fail('partition_final_seal_binding', '全局seal诊断缺少原失败候选及精确组合树绑定')
           const locals = new Map<string, { result: SavedElaboration; resultRef: BlobRef }>()
-          for (const owner of result.partitionEvidence ?? []) {
-            const local = partitionStage<SavedElaboration>(store, operation, prior, `partition:${owner.partitionId}:elaboration`)
-            if (!local || local.resultRef.sha256 !== owner.resultRef.sha256 || local.result.partitionBinding?.planDigest !== partitions.digest || local.result.partitionBinding.partitionId !== owner.partitionId || !local.result.structurePassed || !local.result.reviewPassed || local.result.failure || local.result.rounds.at(-1)?.review?.verdict !== 'accept' || locals.has(owner.partitionId)) fail('partition_final_seal_binding', '全局seal诊断缺少同计划真实已审局部原件')
+          for (const member of result.partitionEvidence ?? []) {
+            const local = partitionStage<SavedElaboration>(store, owner, prior, `partition:${member.partitionId}:elaboration`, undefined, checkpoints)
+            if (!local || local.resultRef.sha256 !== member.resultRef.sha256 || local.result.partitionBinding?.planDigest !== partitions.digest || local.result.partitionBinding.partitionId !== member.partitionId || !local.result.structurePassed || !local.result.reviewPassed || local.result.failure || local.result.rounds.at(-1)?.review?.verdict !== 'accept' || locals.has(member.partitionId)) fail('partition_final_seal_binding', '全局seal诊断缺少同计划真实已审局部原件')
             const round = local.result.rounds.at(-1)!
             if (!round.candidate || local.result.candidateDigest !== round.candidateDigest || round.review!.inputDigest !== local.result.inputDigest || round.review!.candidateDigest !== round.candidateDigest || round.candidate.inputDigest !== local.result.inputDigest || round.candidateDigest !== contentHash(JSON.stringify(round.candidate)) || round.candidate.changes.length !== local.result.changes.length || round.candidate.changes.some(change => !local.result.changes.some(saved => saved.nodeId === change.nodeId && saved.path === change.path && saved.beforeDigest === change.beforeDigest && saved.source === change.source))) fail('partition_final_seal_binding', '全局seal局部原件缺少真实候选与独审摘要绑定')
-            locals.set(owner.partitionId, local)
+            locals.set(member.partitionId, local)
           }
-          if (result.analysisOnlyPartitions ? !authenticatedMixedElaborationCoverage(store, operation, prior, partitions, result) : locals.size !== partitions.partitions.length || partitions.partitions.some(partition => !locals.has(partition.id))) fail('partition_final_seal_binding', '全局seal诊断没有完整分区来源')
+          if (result.analysisOnlyPartitions ? !authenticatedMixedElaborationCoverage(store, owner, prior, partitions, result) : locals.size !== partitions.partitions.length || partitions.partitions.some(partition => !locals.has(partition.id))) fail('partition_final_seal_binding', '全局seal诊断没有完整分区来源')
           const owners = partitionSealRepairOwners(partitions, result, new Map([...locals].map(([id, local]) => [id, local.result])))
           if (!owners.size) fail('partition_final_seal_unroutable', '失败全局seal没有可反馈的真实error')
+          const interruption = interrupted
+          if (interruption) {
+            const suffix = ':elaboration:readonly-repair-provenance'
+            const anchors = interruption.checkpoints.json.filter(({ value }) => (value as Stage).stage.startsWith('partition:') && (value as Stage).stage.endsWith(suffix))
+            if (!anchors.length || anchors.some(entry => {
+              const key = (entry.value as Stage).stage, partitionId = key.slice('partition:'.length, -suffix.length)
+              const saved = stage<{ fromOperationId?: string; fromAttemptId: string; resultRef: BlobRef; generationRef: BlobRef }>(store, interruption.owner, interruption.prior, key, 'automatic', { ...interruption.checkpoints, json: [entry] })
+              return !saved || (saved.fromOperationId ?? interruption.owner.id) !== owner.id || saved.fromAttemptId !== prior.id || saved.generationRef.sha256 !== source.resultRef.sha256 || !owners.has(partitionId) || saved.resultRef.sha256 !== locals.get(partitionId)?.resultRef.sha256
+            })) fail('partition_final_seal_binding', '中断的全局seal返修缺少原候选和受影响owner的精确来源')
+          }
           sealRepairSource = { attempt: prior, ...source, locals, owners }
           return sealRepairSource
         }
@@ -2351,7 +2406,18 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           const prior = local.result, round = prior.rounds.at(-1)!
           if (canonical(prior.partitionBinding) !== canonical(binding) || (prior.readonlySpecRepair?.baseInputDigest ?? prior.inputDigest) !== inputDigest) return null
           if (prior.changes.some(change => !within(change.path, options.plan.writePaths) || options.plan.mandatoryTests.some(test => overlap(change.path, test.testPath)))) fail('partition_final_seal_binding', '全局seal返修owner越过原冻结写范围')
-          saveStage(store, fence!, `${key}:readonly-repair-provenance`, { fromAttemptId: source.attempt.id, resultRef: local.resultRef, generationRef: source.resultRef })
+          const crossOperation = source.attempt.operationId !== operation.id
+          const name = `${key}:readonly-repair-provenance`
+          const provenance = { ...(crossOperation ? { fromOperationId: source.attempt.operationId } : {}), fromAttemptId: source.attempt.id, resultRef: local.resultRef, generationRef: source.resultRef }
+          if (crossOperation) {
+            const current = store.readAttempt(attempt!.id)
+            if (current.dispatchPlans.some(dispatch => dispatch.key.startsWith(`sync:${current.id}:elaborate:partition:${binding.partitionId}:`))) {
+              const saved = stage<typeof provenance>(store, operation, current, name, 'automatic', readSyncCheckpointStageIndex(store, operation, current))
+              if (!saved) return null
+              if (canonical(saved) !== canonical(provenance)) fail('partition_final_seal_binding', '已预留owner必须重放其原全局seal返修来源')
+            }
+          }
+          saveStage(store, fence!, name, provenance)
           return { prior, repair: { kind: 'partition_seal', baseInputDigest: inputDigest, candidateDigest: source.result.candidateDigest!, generationRef: source.resultRef, acceptedRef: local.resultRef, changes: prior.changes, output: round.output, review: round.review, findings } }
         },
         loadAcceptedInterfaceSeed: (key, binding, inputDigest) => {
