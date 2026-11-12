@@ -54,6 +54,8 @@ P0 只在本次 attempt 尚无阶段检查点和 code_behavior saved/reserved �
 
 正式 retryOf 同样可保留尚未完成全图 P1 时已经独审 accept 的完整叶与父接口分区。沿既有已结算失败、取消及正式 superseded 祖先核对冻结计划、source、readSet、业务 selection、scope、组合树和完整局部输入；父接口分类及父子上下文必须相同。批准仍由原模型的实际生成与独立只读审查、完整请求摘要和 Git 草稿证明，原物理工作树已回收时从保活对象冷读。只保存原 resultRef 与真实来源，未批准 owner 使用本次模型继续；当前 schema、正文渲染及全图 seal 仍须重新核验。同 owner 较新的候选拒绝、错误或只读返修诊断阻止回退旧 accept，未采纳 settled 重验不得跨过去继承旧批准。历史字段、旧请求、调用及失败结论保持。
 
+封口返修在复制载体找不到原Native生成时，沿同owner及同resultRef的正式provenance逐跳回到原生成和独立只读审查。每跳核原冻结计划、组合树、读集和业务selection，只承接严格较早且已结算的同操作轮次或正式重试祖先。草稿新鲜度以实际生成的operation、attempt及轮次比较，原批准与Git见证保持原样。
+
 P0 分析的精确 owner 请求首次派发保留前，可沿既有 Native 停止资格观察原正常提交，复用 [[sync-stage-worktree]] 的已提交草稿核验，包括从原冻结树重建的托管投影。全量保护文件、索引与原停止身份均通过时，冻结真实草稿 Git 引用及当前 input、seed、owner、schema。续入先读取该冻结稿，旧已保留请求沿原规则。原稿仍待新分析及独审，原批准分区和诊断运输协议保持原绑定。
 
 P1权限/绑定非法的独审沿[[sync-elaboration]]现有同owner repairDiagnostics重审原合法候选。续审保留原generation trace，不要求新review轮号存在generate；按真实session/thread/turn命中该operation原attempt实际dispatch，再冷验完整保存Native请求、原结果/summary摘要及Git草稿seed/result身份。只有当前局部完整输入与原candidate机械校验保持、原review重新判为越界/绑定非法时才跳过生成；旧seed排除draft的边界、原请求字段缺席、控制attempt跳过判据、预算/资源/取消及全图seal保持。多次续审与后续只读owner返修均追溯同一真实generation来源，不把新审查轮当新生成。
@@ -241,6 +243,8 @@ P2局部/跨边accepted checkpoint跨attempt仅在同operation/input/policy/read
 
 
 whole P1 aggregate 的 stage wrapper 只在真实计算 strict seal 时保存当时 composedTree 与 composedContentDigest；同attempt缓存及跨attempt/retry提升都须二字段精确匹配当前真实 composed，缺字段的旧whole或异树whole不能直接成为当前封口。来源attempt可能已在扩域后先重绑新composed再记录失败，不能拿其最终composedInput替旧seal补签。原readonlyBase继续提供owner/provenance，局部输入及原件仍按既有摘要规则承接；不同全树时由原locals重建并严格封口，不强制重派未变Agent。null资源扩展桥与全局stageSelectionMatches语义不变，promotion仅复制已核原wrapper的composition绑定，不无条件写入当前值冒称旧proof。
+
+正式retry可承接已结算且同冻结输入、计划和组合树的失败全局封口。零派发的原Native身份核验中断须有正式readonly-repair-provenance，逐项绑定原封口、受影响owner及其局部resultRef。该原件只为归属owner提供返修，其他已独审owner保持原引用，修复后再次独审并完整封口。已预留的owner只重放原请求绑定的返修来源。
 
 已认证 native_worktree_result_invalid 与既有精确结构输出失败共用分析修复准入和单体/分区诊断筛选；原 mode/seed/HEAD/tree/status 诊断只反馈对应分区的新分析及独审。原资源未结算不得重派，正式结算后在新 attempt/新工作树重做，不采纳或清理旧脏工作树。生成续修沿既有 attempt.failure 反馈真实 code/message；不增加权限或绕过原预算和独审。
 
