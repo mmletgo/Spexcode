@@ -513,7 +513,48 @@ test('cold ZCode cancellation rechecks exact receipt after awaited process obser
   } finally { t.mock.restoreAll(); kill(-child.pid, 'SIGTERM'); await ended; rmSync(directory, { recursive: true, force: true }) }
 })
 
-for (const censusPhase of ['pre-exit', 'post-exit', 'late-protocol-error'] as const) test(`same-stack ZCode completion reuses its fresh stop proof while cold unsettled replay reobserves processes: ${censusPhase}`, { timeout: 30_000 }, async t => {
+test('cold ZCode cancellation settles an unpublished worktree launch only after exact witnessed exit', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'spex-zcode-unpublished-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const receiptFile = join(root, 'process.json'), ownedPath = join(root, 'owned-processes.json')
+  await sampleNativeWorktreeProcesses({ root, receiptFile })
+  const child = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { cwd: root, detached: true, stdio: 'ignore' })
+  assert(child.pid)
+  const pid = child.pid, ended = new Promise<void>(resolve => child.once('close', () => resolve()))
+  t.after(async () => {
+    if (processStartToken(pid)) { process.kill(-pid, 'SIGTERM'); await ended }
+  })
+  const identity = writeDetachedRuntimeReceipt(pid, receiptFile)
+  const witnessed = JSON.stringify([{ pid, startToken: identity.startToken.replace(/\s+/g, ' ') }])
+  writeFileSync(ownedPath, witnessed)
+  const policy = structuredExecutionPolicy({
+    schema: {}, inputDigest: 'input', purpose: 'stop', timeoutMs: null, model: 'zcode:default', nativeConfiguration: 'cli-config-v1',
+    worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'edit' },
+  })
+  const native = { version: 3 as const, root, sessionId: 'session', inputId: 'input' }
+  const plan = { ...native, pid, receiptFile, workspace: root, worktreeProcessBaseline: 1, nativeConfiguration: 'cli-config-v1',
+    policyDigest: createHash('sha256').update(JSON.stringify(policy)).digest('hex'), requestDigest: 'unused-cold-request-digest',
+    cliVersion: 'fixture', cliSha256: 'a'.repeat(64), builtinPath: zcodeCapability.builtinPath, runtime: join(root, 'runtime') }
+  const planPath = join(root, 'plan.json'), originalPlan = JSON.stringify(plan), originalReceipt = readFileSync(receiptFile)
+  writeFileSync(planPath, originalPlan)
+  const execution: ZCodeStructuredExecution = { ...policy, version: 6, policy: 'native-worktree-v1', zcodeNative: native, frozenReadProof: undefined,
+    state: 'cancelling', turnStartRequested: true, error: 'ZCode spawned ownership could not be durably published; exact stop is required' }
+  assert.equal((await stopZCodeStructuredTurn(execution, 1000)).nativeStopped, false)
+  assert.equal(processStartToken(pid), identity.startToken, 'unpublished historical PID must never be signalled')
+  process.kill(-pid, 'SIGTERM')
+  await ended
+  assert.equal((await stopZCodeStructuredTurn({ ...execution, threadId: 'existing-thread' }, 1000)).nativeStopped, false)
+  writeFileSync(ownedPath, JSON.stringify([{ pid, startToken: 'unrelated' }]))
+  assert.equal((await stopZCodeStructuredTurn(execution, 1000)).nativeStopped, false)
+  writeFileSync(ownedPath, witnessed)
+  assert.deepEqual(await stopZCodeStructuredTurn(execution, 5000), { nativeStopped: true, acknowledged: false, nativeStatus: 'stopped' })
+  assert.equal(readFileSync(planPath, 'utf8'), originalPlan)
+  assert.deepEqual(readFileSync(receiptFile), originalReceipt)
+  assert.equal(existsSync(join(root, 'send.json')), false)
+  assert.equal(existsSync(join(root, 'exit.json')), false)
+})
+
+for (const censusPhase of ['pre-exit', 'post-exit', 'late-protocol-error', 'startup-transient'] as const) test(`same-stack ZCode completion reuses its fresh stop proof while cold unsettled replay reobserves processes: ${censusPhase}`, { timeout: 30_000 }, async t => {
   const directory = mkdtempSync(join(tmpdir(), 'zcode-worktree-census-repro-'))
   t.after(() => rmSync(directory, { recursive: true, force: true }))
   const bin = join(directory, 'bin'), workspace = join(directory, 'workspace'), realm = join(directory, 'realm'), id = 'fixture'
@@ -522,6 +563,7 @@ for (const censusPhase of ['pre-exit', 'post-exit', 'late-protocol-error'] as co
   const originalEnv = { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR }
   const originalSpawn = childProcess.spawn.bind(childProcess)
   let preExitCensusCalls = 0, postExitCensusCalls = 0, preExitInjectedCensusCalls = 0, postExitInjectedCensusCalls = 0, coldReplayRequested = false
+  let publishedBeforeStartupCensus = false, startupInjectedCensusCalls = 0
   const cli = join(bin, 'zcode')
   const rpcFixture = `#!/usr/bin/env node
 const readline=require('node:readline'),cp=require('node:child_process');
@@ -563,10 +605,22 @@ else throw new Error('unexpected fixture RPC')
   const callbacks = {
     onThread: async (threadId: string) => { replayExecution = { ...replayExecution, threadId } },
     onTurn: async (turnId: string) => { replayExecution = { ...replayExecution, turnId } },
-    onNative: async (zcodeNative: ZCodeStructuredExecution['zcodeNative']) => { replayExecution = { ...replayExecution, zcodeNative } },
+    onNative: async (zcodeNative: ZCodeStructuredExecution['zcodeNative']) => {
+      if (censusPhase === 'startup-transient' && zcodeNative?.pid && !publishedBeforeStartupCensus) {
+        assert.equal(verifyDetachedRuntime(zcodeNative.pid, zcodeNative.receiptFile!).ok, true)
+        assert.equal(existsSync(join(root, 'send.json')), false)
+        assert.deepEqual(JSON.parse(readFileSync(join(root, 'owned-processes.json'), 'utf8')), [])
+        publishedBeforeStartupCensus = true
+      }
+      replayExecution = { ...replayExecution, zcodeNative }
+    },
   }
   const interceptedSpawn = (command: string, args: readonly string[], options: SpawnOptions) => {
     if (command === '/bin/ps') {
+      if (publishedBeforeStartupCensus && startupInjectedCensusCalls === 0 && !existsSync(join(root, 'send.json'))) {
+        startupInjectedCensusCalls++
+        return originalSpawn(process.execPath, ['-e', 'process.exitCode=23'], options)
+      }
       if (existsSync(exitPath)) {
         postExitCensusCalls++
         if (coldReplayRequested || censusPhase === 'post-exit') {
@@ -639,6 +693,7 @@ else throw new Error('unexpected fixture RPC')
     assert.equal(preExitInjectedCensusCalls, 0, 'fresh pre-exit proof must avoid another census')
     assert.equal(outcome.result.turnId, 'fixture-turn')
     assert.equal(outcome.result.text, '{"ok":true}')
+    if (censusPhase === 'startup-transient') assert.equal(startupInjectedCensusCalls, 1)
     const expectedUsage = censusPhase === 'pre-exit'
       ? { source: 'zcode-turn-usage', totalInputTokens: 1100, outputTokens: 134, cacheReadInputTokens: 800, cacheWriteInputTokens: 0 }
       : undefined

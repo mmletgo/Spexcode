@@ -7216,9 +7216,10 @@ for (const partitioned of [false, true]) for (const legacyP0 of partitioned ? [f
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
 
-for (const parentSeed of [false, true]) for (const defect of parentSeed ? ['none', 'review-identity', 'newer-review', 'seal-repair', 'seal-anchor'] as const : ['none'] as const) test(`P1正式retry保留局部accept与原Native模型，SQLite冷恢复后仅派发未审owner parent=${parentSeed} defect=${defect}`, async t => {
+for (const parentSeed of [false, true]) for (const defect of parentSeed ? ['none', 'review-identity', 'newer-review', 'seal-repair', 'seal-anchor', 'seal-dispatched', 'seal-request'] as const : ['none'] as const) test(`P1正式retry保留局部accept与原Native模型，SQLite冷恢复后仅派发未审owner parent=${parentSeed} defect=${defect}`, async t => {
   const parentPath = '.spec/project/spec.md', parentId = 'REQ-PARENT-01', importPath = '.spec/project/beta/import-contract/spec.md'
-  const sealRepair = defect === 'seal-repair' || defect === 'seal-anchor'
+  const sealRepair = defect.startsWith('seal-')
+  const afterDispatch = defect === 'seal-dispatched' || defect === 'seal-request'
   const raw = '保留导出与导入两个模块的已有业务。'
   const parent = `---\ntitle: 共享接口\nstatus: pending\n---\n## raw source\n\n${raw}\n`
   const parentSource = `${parent}\n## expanded spec\n\n### REQ\n\n| id | goal | source | constraints | success | depends-on |\n| --- | --- | --- | --- | --- | --- |\n| ${parentId} | 保留两个模块 | user:raw | 保持既有业务 | 既有验收通过 | - |\n`.replace('status: pending', 'status: active\ncontract-schema: sync-v1')
@@ -7233,7 +7234,7 @@ for (const parentSeed of [false, true]) for (const defect of parentSeed ? ['none
     partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 },
   }, undefined, 'spec', 'claude:MiniMax-M3.1-Flash', true, { ...(parentSeed ? { [parentPath]: parent } : {}), [importPath]: rawOnly(other), 'src/beta/import.js': readFileSync(new URL('src/export.js', fixturePath), 'utf8'), 'tests/import.test.mjs': readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', 'IMPORT').replaceAll('src/export.js', 'src/beta/import.js') })
   let store = f.store, active = f.operation, approvedLeaf = '', retryRound = 0
-  let sealRef: BlobRef | undefined, approvedLeafDraft: ElaborationDraft | undefined
+  let sealRef: BlobRef | undefined, approvedLeafDraft: ElaborationDraft | undefined, interruptedRepair: SyncAttempt | undefined
   const calls: { operation: string; nodeId: string; purpose: string; model?: string }[] = [], records = new Map<string, NativeRunRecord>(), workspaces: string[] = []
   f.options.runner = async request => {
     const behavior = request.purpose.startsWith('code_behavior_')
@@ -7318,7 +7319,15 @@ for (const parentSeed of [false, true]) for (const defect of parentSeed ? ['none
   const checkpoint = store.checkpoint.bind(store)
   if (sealRepair) store.checkpoint = (fence, ref) => {
     const wrapper = JSON.parse(readEvidence(commonDir, ref).toString())
-    if (store.readAttempt(fence.attemptId).number !== 2 || !wrapper.stage?.endsWith(':elaboration:readonly-repair-provenance')) return checkpoint(fence, ref)
+    if (store.readAttempt(fence.attemptId).number !== 2) return checkpoint(fence, ref)
+    if (afterDispatch) {
+      const result = wrapper.stage?.endsWith(':elaboration') && JSON.parse(readEvidence(commonDir, wrapper.resultRef).toString()) as ElaborationResult | undefined
+      const saved = checkpoint(fence, ref)
+      if (result && result.readonlySpecRepair?.kind === 'partition_seal' && result.reviewPassed)
+        throw Object.assign(new Error('fixture中断已派发并部分独审的封口返修'), { code: 'unsupported' })
+      return saved
+    }
+    if (!wrapper.stage?.endsWith(':elaboration:readonly-repair-provenance')) return checkpoint(fence, ref)
     if (defect === 'seal-anchor') {
       const anchor = JSON.parse(readEvidence(commonDir, wrapper.resultRef).toString())
       const changed = { ...anchor, resultRef: anchor.generationRef }
@@ -7336,9 +7345,11 @@ for (const parentSeed of [false, true]) for (const defect of parentSeed ? ['none
   assert.ok(retried.every(call => call.model === active.model))
   if (sealRepair) {
     const [attempt, interrupted] = store.listAttempts(second.operation.id)
+    interruptedRepair = interrupted
     assert.equal(attempt.failure?.code, 'partition_final_seal_failed')
-    assert.equal(interrupted.failure?.code, 'review_retry_binding')
-    assert.deepEqual(interrupted.dispatchPlans, [])
+    assert.equal(interrupted.failure?.code, afterDispatch ? 'unsupported' : 'review_retry_binding')
+    assert.deepEqual(interrupted.dispatchPlans.map(dispatch => dispatch.purpose), afterDispatch ? ['elaboration_generate', 'elaboration_review'] : [])
+    if (afterDispatch) assert.ok(interrupted.dispatchPlans.every(dispatch => findResource(interrupted.id, dispatch.key)?.phase === 'removed'))
     sealRef = stages(second.operation, attempt).find(stage => stage.stage === 'elaboration')!.resultRef
     const aggregate = JSON.parse(readEvidence(commonDir, sealRef).toString()) as ElaborationResult
     assert.equal(aggregate.reviewPassed, true)
@@ -7360,15 +7371,23 @@ for (const parentSeed of [false, true]) for (const defect of parentSeed ? ['none
   const previous = second.operation
   active = store.admitAndEnqueue(await prepareSyncAdmission(f.input, f.plan, { ingressKey: 'partial-p1-second-retry', rootCauseId: 'partial-p1-second-retry', retryOf: previous.id, model: 'zcode:default', origin: previous.origin, budget: previous.budget, managedRoot: f.managedRoot, baselineSelection: store.readBusinessBaselineSelection(previous.id), executionScope: previous.scope, impactDigest: previous.impactDigest }))
   active = store.ackDispatch(f.input.source.repositoryId, active.dispatchMessageId); f.useOperation(active); retryRound = 2
+  if (defect === 'seal-request') {
+    const origin = interruptedRepair!, dispatch = origin.dispatchPlans[0], original = findResource(origin.id, dispatch.key)!
+    const plan = JSON.parse(readEvidence(commonDir, original.plan.planBlob).toString()) as NativeRunPlan
+    const wrong = writeEvidence(commonDir, { ...plan, request: { ...plan.request, inputDigest: 'foreign-repair-request' } })
+    store.findResource = (attemptId, key) => attemptId === origin.id && key === dispatch.key ? { ...original, plan: { ...original.plan, planBlob: wrong } } : findResource(attemptId, key)
+  }
   const third = await runSyncOperation(store, active.id, f.options)
+  store.findResource = findResource
   const continued = calls.filter(call => call.operation === active.id)
-  if (defect === 'seal-anchor') {
+  if (defect === 'seal-anchor' || defect === 'seal-request') {
     assert.equal(third.failure?.code, 'partition_final_seal_binding', JSON.stringify(third.failure))
     assert.deepEqual(continued, [])
     return
   }
   if (sealRepair) {
     const attempt = store.readAttempt(third.operation.currentAttemptId!)
+    if (afterDispatch) assert.ok(continued.every(call => call.nodeId !== 'project'), '已结算并独审的同封口修复保持原批准')
     assert.deepEqual(continued.filter(call => call.nodeId === approvedLeaf).map(call => call.purpose), ['elaboration_generate', 'elaboration_review'], JSON.stringify({ continued, phase: third.operation.phase, failure: attempt.failure && { code: attempt.failure.code, message: attempt.failure.message.slice(0, 800) } }))
     const final = stages(third.operation, attempt).find(stage => stage.stage === 'elaboration')!
     const sealed = JSON.parse(readEvidence(commonDir, final.resultRef).toString()) as ElaborationResult

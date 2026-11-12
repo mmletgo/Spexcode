@@ -65,6 +65,10 @@ NativePlan v1/v2 与缺席 `nativeConfiguration` 的历史请求保持原策略�
 
 取消沿原协调入口撤销发布权。活运行向同 session 发 stop，核 ACK 后仍要求精确 turn 终态与 idle；关闭后仍核全部进程。冷取消只允许原固定 plan、PID/start/receipt 的专属 runtime，精确 TERM 后核进程组与 MCP 全亡；未知身份不操作，不以 ACK、leader 退出或迟到 output 释放容量或发布结果。
 
+ZCode 启动在固定 plan 与真实 detached receipt 落盘后立即发布原 PID，再完成原生进程观测，首次 RPC 仍须等待完整观察。worktree 首次观测暂态失败可对同一精确存活 PID 按既有单次上限复验一次。原观察串行和停止门保持。
+
+已知在首次发送前中断且会话未发布 PID 的 worktree 启动，只在原 plan、detached receipt 与已捕获 leader 逐项吻合、整个原进程组已缺席，并经新鲜非终止观察证明后代及任务域均结算时恢复资源。此前未发布的身份不授信号权限，原 plan、receipt 与完成状态不改写。
+
 普通测试覆盖命名空间、精确 fence decoder、事件安全投影、固定能力配置和冷取消身份；真实 native 测试必须显式环境开关，默认不得运行模型。当前节点保持 pending，直到正式产品 A/B 证据及门槛全部成立。
 
 

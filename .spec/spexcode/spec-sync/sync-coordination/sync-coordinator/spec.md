@@ -246,6 +246,8 @@ whole P1 aggregate 的 stage wrapper 只在真实计算 strict seal 时保存当
 
 正式retry可承接已结算且同冻结输入、计划和组合树的失败全局封口。零派发的原Native身份核验中断须有正式readonly-repair-provenance，逐项绑定原封口、受影响owner及其局部resultRef。该原件只为归属owner提供返修，其他已独审owner保持原引用，修复后再次独审并完整封口。已预留的owner只重放原请求绑定的返修来源。
 
+正式重试可跨过多轮已正式结算的封口返修。只有原Native请求和checkpoint逐项匹配同一封口的owner、局部批准、诊断及请求摘要时，才接续原封口。较新的真实全树结果先核。已独审且输入相同的局部沿原批准复用，未批准稿按原真实生成来源继续。
+
 Native 细化在原 attempt 的草稿协议阶段冻结封口诊断提示形态。新的阶段使用目录入口，已有阶段沿原形态逐字重放。此选择只影响 Native 请求绑定，不改变业务输入摘要、诊断原件和正式返修来源。
 
 已认证 native_worktree_result_invalid 与既有精确结构输出失败共用分析修复准入和单体/分区诊断筛选；原 mode/seed/HEAD/tree/status 诊断只反馈对应分区的新分析及独审。原资源未结算不得重派，正式结算后在新 attempt/新工作树重做，不采纳或清理旧脏工作树。生成续修沿既有 attempt.failure 反馈真实 code/message；不增加权限或绕过原预算和独审。
