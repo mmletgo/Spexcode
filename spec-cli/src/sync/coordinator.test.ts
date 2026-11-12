@@ -7216,10 +7216,10 @@ for (const partitioned of [false, true]) for (const legacyP0 of partitioned ? [f
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
 
-for (const parentSeed of [false, true]) for (const defect of parentSeed ? ['none', 'review-identity', 'newer-review', 'seal-repair', 'seal-anchor', 'seal-dispatched', 'seal-request'] as const : ['none'] as const) test(`P1正式retry保留局部accept与原Native模型，SQLite冷恢复后仅派发未审owner parent=${parentSeed} defect=${defect}`, async t => {
+for (const parentSeed of [false, true]) for (const defect of parentSeed ? ['none', 'review-identity', 'newer-review', 'seal-repair', 'seal-anchor', 'seal-dispatched', 'seal-request', 'seal-fence'] as const : ['none'] as const) test(`P1正式retry保留局部accept与原Native模型，SQLite冷恢复后仅派发未审owner parent=${parentSeed} defect=${defect}`, async t => {
   const parentPath = '.spec/project/spec.md', parentId = 'REQ-PARENT-01', importPath = '.spec/project/beta/import-contract/spec.md'
   const sealRepair = defect.startsWith('seal-')
-  const afterDispatch = defect === 'seal-dispatched' || defect === 'seal-request'
+  const afterDispatch = defect === 'seal-dispatched' || defect === 'seal-request' || defect === 'seal-fence'
   const raw = '保留导出与导入两个模块的已有业务。'
   const parent = `---\ntitle: 共享接口\nstatus: pending\n---\n## raw source\n\n${raw}\n`
   const parentSource = `${parent}\n## expanded spec\n\n### REQ\n\n| id | goal | source | constraints | success | depends-on |\n| --- | --- | --- | --- | --- | --- |\n| ${parentId} | 保留两个模块 | user:raw | 保持既有业务 | 既有验收通过 | - |\n`.replace('status: pending', 'status: active\ncontract-schema: sync-v1')
@@ -7371,15 +7371,37 @@ for (const parentSeed of [false, true]) for (const defect of parentSeed ? ['none
   const previous = second.operation
   active = store.admitAndEnqueue(await prepareSyncAdmission(f.input, f.plan, { ingressKey: 'partial-p1-second-retry', rootCauseId: 'partial-p1-second-retry', retryOf: previous.id, model: 'zcode:default', origin: previous.origin, budget: previous.budget, managedRoot: f.managedRoot, baselineSelection: store.readBusinessBaselineSelection(previous.id), executionScope: previous.scope, impactDigest: previous.impactDigest }))
   active = store.ackDispatch(f.input.source.repositoryId, active.dispatchMessageId); f.useOperation(active); retryRound = 2
+  const controller = defect === 'seal-fence' ? new AbortController() : undefined
+  let abortScheduled = false
+  if (controller) {
+    const origin = interruptedRepair!, key = origin.dispatchPlans[0].key
+    store.findResource = (attemptId, requestKey) => {
+      if (!abortScheduled && attemptId === origin.id && requestKey === key) {
+        abortScheduled = true
+        queueMicrotask(() => controller.abort())
+      }
+      return findResource(attemptId, requestKey)
+    }
+  }
   if (defect === 'seal-request') {
     const origin = interruptedRepair!, dispatch = origin.dispatchPlans[0], original = findResource(origin.id, dispatch.key)!
     const plan = JSON.parse(readEvidence(commonDir, original.plan.planBlob).toString()) as NativeRunPlan
     const wrong = writeEvidence(commonDir, { ...plan, request: { ...plan.request, inputDigest: 'foreign-repair-request' } })
     store.findResource = (attemptId, key) => attemptId === origin.id && key === dispatch.key ? { ...original, plan: { ...original.plan, planBlob: wrong } } : findResource(attemptId, key)
   }
-  const third = await runSyncOperation(store, active.id, f.options)
+  const third = await runSyncOperation(store, active.id, controller ? { ...f.options, signal: controller.signal } : f.options)
   store.findResource = findResource
   const continued = calls.filter(call => call.operation === active.id)
+  if (controller) {
+    assert.ok(abortScheduled && controller.signal.aborted)
+    assert.equal(third.operation.control, 'pause')
+    assert.equal(third.failure, undefined)
+    assert.deepEqual(continued, [])
+    const stopped = store.readAttempt(third.operation.currentAttemptId!)
+    assert.deepEqual(stopped.dispatchPlans, [])
+    assert.ok(stages(third.operation, stopped).every(stage => !stage.stage?.endsWith(':readonly-repair-provenance')))
+    return
+  }
   if (defect === 'seal-anchor' || defect === 'seal-request') {
     assert.equal(third.failure?.code, 'partition_final_seal_binding', JSON.stringify(third.failure))
     assert.deepEqual(continued, [])

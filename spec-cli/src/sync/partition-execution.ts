@@ -24,6 +24,7 @@ import { historicalOwnerPaths, historicalRetiredIds, obligationPaths, projectPri
 import type { RawOnlyInterfaceSeedDescendant, RawOnlyInterfaceSeedEvidence, SyncPartition, SyncPartitionPlan } from './partitioning.js'
 import type { CodeBehaviorAnalysis, CodeBehaviorEvidence } from './writeback-types.js'
 
+type PartitionSealRepair = { prior: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>; repair: ReadonlySpecRepair }
 export type PartitionCheckpoints = {
   load<T>(key: string): T | null
   loadCandidateReviewRepair?(key: string, plan: SyncPartitionPlan, input: GenerationInput, candidate: NonNullable<GenerationResult['candidate']>): GenerationInput['reviewRepair'] | null
@@ -41,8 +42,8 @@ export type PartitionCheckpoints = {
   loadElaborationRepairSeed?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): ElaborationRepairSeed | null
   loadElaborationRepairDiagnostics?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): ElaborationRepairDiagnostics | null
   readonlyFactRepairSource?(key: string, repair: ReadonlySpecRepair): boolean
-  loadReadonlySpecRepair?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string, localInput: ElaborationInput): { prior: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>; repair: ReadonlySpecRepair; priorInput?: ElaborationInput } | null
-  loadPartitionSealRepair?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): { prior: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>; repair: ReadonlySpecRepair } | null
+  loadReadonlySpecRepair?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string, localInput: ElaborationInput): (PartitionSealRepair & { priorInput?: ElaborationInput }) | null
+  loadPartitionSealRepair?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): PartitionSealRepair | null | Promise<PartitionSealRepair | null>
   save(key: string, value: unknown): BlobRef
 }
 export type PartitionAnalysisFailure = { partitionId: string; code: string; message: string; error?: unknown }
@@ -424,7 +425,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
       return draft && cacheDraft ? { ...draft, errors: [...draft.errors, ...cacheDraft.errors] } : draft
     } : undefined
     const inputDigest = freezeElaborationInput(localInput).inputDigest
-    const readonlyRepair = checkpoints.loadReadonlySpecRepair?.(key, partitionBinding, inputDigest, localInput) ?? checkpoints.loadPartitionSealRepair?.(key, partitionBinding, inputDigest)
+    const readonlyRepair = checkpoints.loadReadonlySpecRepair?.(key, partitionBinding, inputDigest, localInput) ?? await checkpoints.loadPartitionSealRepair?.(key, partitionBinding, inputDigest)
     if (readonlyRepair) {
       const priorBase = 'priorInput' in readonlyRepair ? (readonlyRepair as { priorInput?: ElaborationInput }).priorInput ?? localInput : localInput
       const priorInput = readonlyRepair.prior.readonlySpecRepair ? readonlyRepairInput(priorBase, readonlyRepair.prior.readonlySpecRepair, checkpoints.readonlyFactRepairSource?.(key, readonlyRepair.prior.readonlySpecRepair) === true) : priorBase

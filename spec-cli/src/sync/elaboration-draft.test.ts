@@ -875,7 +875,7 @@ async function sealFixture(t: test.TestContext, sharedVerification = false, redu
   const key = 'partition:peer-contract:elaboration', prior = saved.get(key)!, generationRef = writeEvidence(f.commonDir, initial)
   const repair: ReadonlySpecRepair = { kind: 'partition_seal', baseInputDigest: prior.inputDigest, candidateDigest: initial.candidateDigest!, generationRef, acceptedRef: refs.get(key)!, changes: prior.changes, output: prior.rounds.at(-1)!.output, review: prior.rounds.at(-1)!.review, findings: initial.partitionSeal!.findings.filter(issue => issue.severity === 'error' && issue.path === peerPath) }
   const checkpoints: PartitionCheckpoints = { load: <T>(name: string) => saved.has(name) ? structuredClone(saved.get(name)) as T : null, save,
-    loadPartitionSealRepair: name => name === key ? { prior, repair } : null,
+    loadPartitionSealRepair: async name => name === key ? { prior, repair } : null,
   }
   const repaired = candidateSource(peerPath).replaceAll('FLOW-SHARED-01', 'FLOW-PEER-REPAIRED-01')
   return { ...f, input, plan, initial, prior, repair, checkpoints, saved, peerPath, sources, repaired, key }
