@@ -156,6 +156,8 @@ initial与spec共享P2入口。旧无planBlob operation先claim持久unsupported
 
 显式retryOf沿真实operation链读取同source/input/policy/request的持久accepted P1证据；保留原approved contract/AC及原attempt/evidence provenance，不重新细化弱化AC。完整未采纳交付的正式重验是批准复用断点；其余情况只有链上从未approved时才P1新派发；新operation重新执行generation/V1-V4，不借旧fence或receipt发布。
 
+复用带历史拒稿诊断的已审局部结果时，原resultRef和批准保持逐字一致。旧拒稿沿原操作认证及投影，遵循 [[sync-checkpoint-evidence]]。
+
 P4 显式重试按原 operation 已审扩展后的 scope 及最终 selection 重组同一 readSet，复用原 impactDigest；冻结 planBlob 和 policyDigest 不被扩展结果改写。原严格接入事务仍拒绝缺失路径、改变义务或不匹配的读取/选择，不能以重试丢弃已批准的实现范围。
 
 recoveryOnly在独占mutex后先于普通phase/claim运行：精确终止所有历史未removed资源，再仅恢复当前attempt已存在且绑定delivery的未settled journal。Docker恢复driver拒绝create/start，planned容器不存在保留未知恢复状态，不新建容器补齐。原生资源只以aborted既有请求桥取真实stop证据；无journal即使verified也不进入prepare/apply。错误返回recovery_required及诊断而不自动pause/run、扣budget或新建attempt；已有journal结算可登记真实receipt/原结论。

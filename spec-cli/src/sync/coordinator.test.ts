@@ -3834,15 +3834,16 @@ for (const target of ['code_behavior_analyze', 'elaboration_generate'] as const)
   assert.equal(f.calls.some(call => call.purpose === 'code_generate'), false)
 })
 
-for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-wrong-packet', 'format-wrong-candidate', 'legacy-review', 'v3-review', 'paused', 'paused-review', 'newer-generation', 'wrong-stop', 'wrong-candidate', 'wrong-task'] as const) test(`P1已结算${mode.startsWith('format') ? '格式失败独审' : 'session/events独审超时'}只重审同一Git候选 ${mode}`, async t => {
+for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-formal-retry', 'format-wrong-packet', 'format-wrong-candidate', 'legacy-review', 'v3-review', 'paused', 'paused-review', 'newer-generation', 'wrong-stop', 'wrong-candidate', 'wrong-task'] as const) test(`P1已结算${mode.startsWith('format') ? '格式失败独审' : 'session/events独审超时'}只重审同一Git候选 ${mode}`, async t => {
   const formatFailure = mode.startsWith('format')
   const formatTwice = mode === 'format-twice'
   const wrongPacket = mode === 'format-wrong-packet'
   const wrongCandidate = mode === 'wrong-candidate' || mode === 'format-wrong-candidate'
   const failureCode = formatFailure ? 'structured_output_format_invalid' : 'native_rpc_timeout'
-  const partitioned = mode === 'partition' || formatTwice
-  const plan = partitioned ? { version: 'sync-coordinator-v2' as const, direction: formatTwice ? 'code_to_spec' as const : 'spec_to_code' as const, sourcePaths: ['src/export.js'], ...(formatTwice ? { writePaths: ['.spec'], commitTrigger: { before: null, paths: ['src/export.js'] } } : {}), partitionPolicy: { version: 'sync-partition-policy-v1' as const, maxReadBytes: 524288, maxParallel: 1 } } : {}
-  const f = await fixture(t, { maxAttempts: ['newer-generation', 'paused-review', 'wrong-task', 'format-twice', 'format-wrong-packet'].includes(mode) ? 3 : 2, maxCalls: 30, maxRepairs: ['wrong-task', 'format-twice', 'format-wrong-packet'].includes(mode) ? 2 : 1, timeoutMs: 120_000 }, false, original, 'project', original, { ...plan, agentWorkflow: 'native-worktree-v1' }, undefined, formatTwice ? 'code' : 'spec', 'zcode:default', partitioned)
+  const formalRetry = mode === 'format-formal-retry', codeToSpec = formatTwice || formalRetry
+  const partitioned = mode === 'partition' || codeToSpec
+  const plan = partitioned ? { version: 'sync-coordinator-v2' as const, direction: codeToSpec ? 'code_to_spec' as const : 'spec_to_code' as const, sourcePaths: ['src/export.js'], ...(codeToSpec ? { writePaths: ['.spec'], commitTrigger: { before: null, paths: ['src/export.js'] } } : {}), partitionPolicy: { version: 'sync-partition-policy-v1' as const, maxReadBytes: 524288, maxParallel: 1 } } : {}
+  const f = await fixture(t, { maxAttempts: ['newer-generation', 'paused-review', 'wrong-task', 'format-twice', 'format-wrong-packet'].includes(mode) ? 3 : 2, maxCalls: 30, maxRepairs: ['wrong-task', 'format-twice', 'format-wrong-packet'].includes(mode) ? 2 : 1, timeoutMs: 120_000 }, false, original, 'project', original, { ...plan, agentWorkflow: 'native-worktree-v1' }, undefined, codeToSpec ? 'code' : 'spec', 'zcode:default', partitioned)
   const calls: ElaborationSessionRequest[] = []
   if (mode === 'paused' || mode === 'newer-generation') {
     const recordFailure = f.store.recordFailure.bind(f.store)
@@ -3924,6 +3925,7 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-wron
       return checkpoint(fence, { ...writeEvidence(commonDir, { ...wrapper, resultRef }), artifacts: syncCheckpointArtifacts(value, resultRef) })
     }
   }
+  if (formalRetry) f.store.expandContractScope = () => { throw new StructuredSessionError('unsupported', 'fixture在P1批准后、范围变化前停止') }
   f.store.startGeneration = () => { throw new StructuredSessionError('unsupported', 'fixture在P1正式独审通过后停止') }
   f.options.runner = async request => {
     calls.push(request)
@@ -4056,6 +4058,62 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-wron
   assert.deepEqual(reviewed.repairDiagnostics?.round, previous.rounds.at(-1))
   assert.deepEqual(reviewed.repairDiagnostics?.failure, previous.failure)
   assert.equal(result.operation.callsUsed, partitioned ? formatTwice ? 6 : 5 : mode === 'paused-review' ? 4 : 3)
+  if (formalRetry) {
+    const owner = result.operation, commonDir = f.input.source.commonDir
+    const source = readSyncCheckpoints(f.store, owner, retry)
+    const key = `partition:${reviewed.partitionBinding!.partitionId}:elaboration`
+    const sourceStages = source.json.map(({ value }) => value as { stage?: string; resultRef: BlobRef; readSetDigest?: string })
+    const sourceStage = sourceStages.find(value => value.stage === key)!
+    assert.equal(sourceStage.readSetDigest, owner.readSetDigest)
+    const packet = reviewed.repairDiagnostics!.round.rejectedOutput!
+    assert.ok(packet.ref)
+    const rawRef = packet.ref
+    assert.equal(packet.kind, 'untrusted_final')
+    assert.equal(packet.ownerRequestKey, `sync:${old.id}:elaborate:partition:${reviewed.partitionBinding!.partitionId}`)
+    assert.deepEqual(source.raw.get(rawRef.sha256), packet)
+    const admission = await prepareSyncAdmission(f.input, f.plan, { ingressKey: 'accepted-p1-format-retry', rootCauseId: 'accepted-p1-format-retry', retryOf: owner.id, model: 'claude:default', origin: owner.origin, budget: owner.budget, managedRoot: f.managedRoot, baselineSelection: f.store.readBusinessBaselineSelection(owner.id), executionScope: owner.scope, impactDigest: owner.impactDigest })
+    const next = f.store.admitAndEnqueue(admission)
+    const active = f.store.ackDispatch(f.input.source.repositoryId, next.dispatchMessageId)
+    const { fence } = f.store.claimQueuedAttempt({ operationId: active.id, source: active.input.source, scope: active.scope, leaseMs: 30_000, expectedRevision: active.revision })
+    f.store.bindComposedInput(fence, retry.composedInput!)
+    const baselineSelectionRef = writeEvidence(commonDir, f.store.readBusinessBaselineSelection(active.id))
+    const stageRef = (stage: string, value: unknown, readSetDigest = active.readSetDigest) => {
+      const resultRef = writeEvidence(commonDir, value)
+      const artifacts = [...syncCheckpointArtifacts(value, resultRef), { kind: 'json' as const, ref: baselineSelectionRef }]
+      return { ...writeEvidence(commonDir, { version: 'sync-stage-v1', operationId: active.id, attemptId: fence.attemptId, inputId: active.input.id, policyDigest: active.policyDigest, readSetDigest, baselineSelectionRef, stage, resultRef }), artifacts }
+    }
+    const lineage = { fromOperationId: owner.id, fromAttemptId: retry.id, resultRef: sourceStage.resultRef }
+    const provenanceKey = `${key}:provenance`, localRef = stageRef(key, reviewed)
+    const savedPlan = sourceStages.find(value => value.stage === 'partition-plan')!
+    const planRef = stageRef('partition-plan', JSON.parse(readEvidence(commonDir, savedPlan.resultRef).toString('utf8')))
+    f.store.checkpoint(fence, planRef)
+    f.store.checkpoint(fence, stageRef(provenanceKey, lineage))
+    const nextAttempt = f.store.checkpoint(fence, localRef), current = f.store.readOperation(active.id)
+    const foreignKey = 'partition:foreign-owner:elaboration'
+    for (const [reason, checkpointRefs] of [
+      ['缺来源', [localRef]],
+      ['来源operation不在重试链', [stageRef(provenanceKey, { ...lineage, fromOperationId: 'unrelated' }), localRef]],
+      ['来源attempt未批准', [stageRef(provenanceKey, { ...lineage, fromAttemptId: old.id }), localRef]],
+      ['缺来源resultRef', [stageRef(provenanceKey, { ...lineage, resultRef: undefined }), localRef]],
+      ['替换来源resultRef', [stageRef(provenanceKey, { ...lineage, resultRef: reviewed.repairDiagnostics!.resultRef }), localRef]],
+      ['读取范围漂移', [stageRef(provenanceKey, lineage), stageRef(key, reviewed, contentHash('foreign read set'))]],
+      ['换成其它owner', [stageRef(`${foreignKey}:provenance`, lineage), stageRef(foreignKey, reviewed)]],
+    ] as const) {
+      assert.throws(() => readSyncCheckpoints(f.store, current, { ...nextAttempt, checkpointRefs: [planRef, ...checkpointRefs] }), { code: 'checkpoint_artifact_binding' }, reason)
+    }
+    const copy = readSyncCheckpoints(f.store, current, nextAttempt)
+    const stages = copy.json.map(({ value }) => value as { stage?: string; resultRef: BlobRef })
+    assert.deepEqual(stages.find(value => value.stage === key)?.resultRef, sourceStage.resultRef)
+    const provenance = stages.find(value => value.stage === provenanceKey)!
+    assert.deepEqual(JSON.parse(readEvidence(commonDir, provenance.resultRef).toString('utf8')), lineage)
+    assert.deepEqual(nextAttempt.dispatchPlans, [])
+    assert.deepEqual(copy.raw.get(rawRef.sha256), packet)
+    assert.deepEqual(readEvidence(commonDir, rawRef), Buffer.from(packet.text, 'utf8'))
+    assert.equal(copy.json.some(({ ref }) => ref.sha256 === rawRef.sha256), false)
+    const directForeign = stageRef(key, originalResult)
+    assert.throws(() => readSyncCheckpoints(f.store, current, { ...nextAttempt, checkpointRefs: [directForeign, ...nextAttempt.checkpointRefs] }), { code: 'checkpoint_artifact_binding' }, '同一SHA已在原operation认证，直接绑定到新operation仍须拒绝')
+    assert.deepEqual(f.store.readAttempt(retry.id).checkpointRefs, retry.checkpointRefs)
+  }
   assert.equal(calls.some(call => call.purpose === 'code_generate'), false)
   assert.deepEqual(f.store.listJournals(f.operation.id), [])
   assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)

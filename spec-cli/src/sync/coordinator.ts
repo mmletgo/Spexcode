@@ -19,7 +19,7 @@ import { elaborate, hasApprovedElaborationReview, elaborationMaterialContext, fr
 import { outputErrors } from './elaboration-schema.js'
 import type { ElaborationResult, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ElaborationTrace, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial } from './elaboration-types.js'
 import { claimFileMutex } from './file-mutex.js'
-import { authenticateNativeFailure, authenticateNativeRejectedFinal, readSyncCheckpoints, syncCheckpointArtifacts } from './checkpoint-evidence.js'
+import { authenticateNativeFailure, authenticateNativeRejectedFinal, readSyncCheckpoints, retryOperationLineage, syncCheckpointArtifacts } from './checkpoint-evidence.js'
 import type { FileMutex } from './file-mutex.js'
 import { checkGenerationContractIntent, isSyncSpecPath, readFrozenContracts } from './frozen-contracts.js'
 import { decisionAuthorizationErrors, sameContractBusinessMeaning } from './contract-evolution.js'
@@ -282,17 +282,6 @@ function partitionStage<T>(store: SyncStore, operation: SyncOperation, attempt: 
     .find(value => value.version === 'sync-stage-v1' && value.stage === key && value.operationId === operation.id && value.attemptId === attempt.id && value.inputId === operation.input.id && value.policyDigest === operation.policyDigest && value.resultRef?.sha256 === resultRef.sha256)
   if (original?.readSetDigest !== operation.readSetDigest || operation.baselineSelection && original.baselineSelectionRef?.sha256 !== writeEvidence(operation.input.source.commonDir, sourceSelection ?? store.readBusinessBaselineSelection(operation.id)).sha256) return null
   return { result, resultRef }
-}
-
-function* retryOperationLineage(store: SyncStore, operation: SyncOperation): Generator<SyncOperation> {
-  const seen = new Set<string>()
-  let owner: SyncOperation | null = operation
-  while (owner) {
-    if (seen.has(owner.id) || owner.input.id !== operation.input.id || canonical(owner.input.source) !== canonical(operation.input.source) || owner.policyDigest !== operation.policyDigest || (owner.requestBlob?.sha256 ?? null) !== (operation.requestBlob?.sha256 ?? null) || owner.origin !== operation.origin) fail('retry_provenance_binding', '重试链不匹配固定来源、输入或政策')
-    seen.add(owner.id)
-    yield owner
-    owner = owner.retryOf ? store.readOperation(owner.retryOf) : null
-  }
 }
 
 /** 续修材料仍然未批准；原stage和Native身份由所属operation认证。 */
