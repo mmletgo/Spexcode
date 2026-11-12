@@ -1196,6 +1196,12 @@ test('V1真实caller区分投影seed与完整accepted target，VERIFY剔表不�
     loadReadonlySpecRepair: (_key, _binding, inputDigest) => ({ prior, repair: { ...repair, baseInputDigest: inputDigest }, wholeFileSourcePaths: ['src/marker.py'] }),
     loadElaborationDraft: (_key, _binding, schemaDigest, inputDigest) =>
       schemaDigest === oldDraft.schemaDigest && inputDigest === approvedRepair.inputDigest ? oldDraft : null,
+    loadElaborationDraftMaterial: (_key, _binding, _schemaDigest, request) => {
+      assert.ok(request)
+      assert.notEqual(request.binding.schemaDigest, oldDraft.schemaDigest)
+      assert.equal(elaborationMaterialContext(f.commonDir, f.requests[calls], request), null)
+      return null
+    },
   }, f.run((_request, workspace, draftPath) => {
     assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), originalDraftSource)
     assert.match(readFileSync(join(workspace, draftPath.replace(/\.json$/, '.schema.json')), 'utf8'), /code:src\/marker\.py/)

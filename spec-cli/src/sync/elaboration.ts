@@ -2,7 +2,7 @@ import { StructuredSessionError, assertRejectedOutput } from '../session-structu
 import { nativeWorktreePrompt } from '../native-worktree-runtime.js'
 import { captureStageDraft, DRAFT_RECEIPT_INSTRUCTIONS, DRAFT_RECEIPT_SCHEMA, overlayStageTree, readStageDraft, stageWorktree, STAGE_READING_INSTRUCTIONS, type StageDraftMaterialRequest } from './stage-worktree.js'
 import type { StageDraftBinding } from './stage-worktree.js'
-import { readEvidence, readTree, writeObject, writeTree } from './snapshot.js'
+import { contentHash, readEvidence, readObject, readTree, writeObject, writeTree } from './snapshot.js'
 import { isHostPrivatePath } from './candidate.js'
 import { isUtf8Text } from './composition.js'
 import { createHash } from 'node:crypto'
@@ -69,6 +69,9 @@ export function elaborationMaterialContext(commonDir: string, previous: Pick<Ela
   catch (error) { if (!(error instanceof SyntaxError)) throw error; invalid() }
   if (!task! || typeof task !== 'object' || Array.isArray(task) || !diagnostics! || typeof diagnostics !== 'object' || Array.isArray(diagnostics)) invalid()
   const oldEntries = readTree(commonDir, previous.worktree!.tree), newEntries = readTree(commonDir, current.worktree.tree)
+  const previousSchema = oldEntries.find(entry => entry.path === current.binding.path.replace(/\.json$/, '.schema.json'))
+  if (!previousSchema || previousSchema.mode !== '100644') return invalid()
+  if (contentHash(readObject(commonDir, previousSchema.oid)) !== current.binding.schemaDigest) return null
   const paths = [...task!.relatedSpecs?.map(spec => spec.path) ?? [], ...task!.repair?.baselines?.map(spec => spec.baselineSpecPath) ?? [], ...task!.repair?.specs?.map(spec => spec.diagnosticPath) ?? []]
   const overlayPath = (path: string): boolean => specPath(path) || /^\.spex-sync-diagnostics\/[a-f0-9]{64}\/\.spec\/.+\/spec\.md$/.test(path) && posix.normalize(path) === path && !path.includes('\\')
   const previousReadonlyOverlay = paths.map(path => { const entry = oldEntries.find(entry => entry.path === path); if (!overlayPath(path) || !entry || !['100644', '100755'].includes(entry.mode)) invalid(); return { path, mode: entry!.mode, oid: entry!.oid } })
