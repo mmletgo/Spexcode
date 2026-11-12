@@ -211,7 +211,8 @@ export class SyncStore {
   }
   private assertSelection(tx: ProtocolTransaction, source: WorktreeIdentity, selection: FrozenBaselineSelection, resources: BaselineResource[]): void {
     const selected = selection.bindings.map(binding => binding.resource)
-    if (resources.some(resource => !selected.some(item => resourceKey(item) === resourceKey(resource)))) fail('SYNC_BASELINE_STALE', 'selection must explicitly bind every operation write resource')
+    const selectedKeys = new Set(selected.map(resourceKey))
+    if (resources.some(resource => !selectedKeys.has(resourceKey(resource)))) fail('SYNC_BASELINE_STALE', 'selection must explicitly bind every operation write resource')
     const current = this.baselineSelection(tx, source, selected)
     if ('failure' in current) fail(current.failure.code, current.failure.message)
     if (digest(selection.source) !== digest(source) || selection.digest !== digest({ version: selection.version, source: selection.source, bindings: selection.bindings }) || current.selection.digest !== selection.digest) fail('SYNC_BASELINE_STALE', 'exact baseline frontier changed or selection is incomplete')
@@ -325,9 +326,9 @@ export class SyncStore {
     if (operation.currentAttemptId !== attempt.id || operation.generation !== fence.generation || attempt.generation !== fence.generation || attempt.operationId !== operation.id || operation.input.source.physicalFingerprint !== fence.sourceFingerprint || attempt.leaseToken !== fence.leaseToken || attempt.status === 'superseded' || attempt.status === 'settled' || attempt.status === 'failed') fail('SYNC_FENCE_EXPIRED', 'operation, attempt, generation or physical source changed')
     const applying = ['applying', 'cancelling', 'pausing', 'recovery_required'].includes(operation.phase)
     if ((!finishing && syncDeadlineExpired(operation.deadlineAtMs, this.now())) || operation.phase === 'superseded' || (!finishing && (operation.control !== 'run' || this.physicalControl(tx, physicalScope(operation.input.source)).control !== 'run')) || (attempt.expiresAtMs <= this.now() && !(finishing && applying))) fail('SYNC_FENCE_EXPIRED', 'write authority is expired or controlled')
-    const rows = tx.query('SELECT resource_key,token,attempt_id FROM sync_leases WHERE token=?', fence.leaseToken)
+    const ownedKeys = new Set(tx.query('SELECT resource_key FROM sync_leases WHERE token=? AND attempt_id=?', fence.leaseToken, attempt.id).map(row => row.resource_key))
     const required = this.leaseKeys(operation, scopeKeys(operation.readyScope))
-    if (!required.every(key => rows.some(row => row.resource_key === key && row.attempt_id === attempt.id))) fail('SYNC_FENCE_EXPIRED', 'a resource lease was released or replaced')
+    if (!required.every(key => ownedKeys.has(key))) fail('SYNC_FENCE_EXPIRED', 'a resource lease was released or replaced')
     if (!finishing && operation.baselineSelection) this.assertSelection(tx, operation.input.source, operation.baselineSelection, scopeResources(operation.scope))
     return { operation, attempt }
   }
