@@ -237,12 +237,12 @@ type ReadonlyOwnerRepair = { kind?: 'candidate_review'; reviewEvidence?: { parti
 export function readonlySpecRepairStalled(repair: Pick<ReadonlyOwnerRepair, 'candidateDigest' | 'findings' | 'owners'>, candidateDigest: string | undefined, findings: readonly ContractFinding[], attempt: Pick<SyncAttempt, 'id' | 'dispatchPlans'>): boolean {
   return candidateDigest === repair.candidateDigest && canonical(findings.filter(item => item.severity === 'error')) === canonical(repair.findings) && !attempt.dispatchPlans.some(dispatch => dispatch.purpose.startsWith('elaboration_') && repair.owners.some(owner => dispatch.key.startsWith(`sync:${attempt.id}:elaborate:partition:${owner.partitionId}:`)))
 }
-function stage<T>(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, name: string, usage: 'automatic' | 'evidence' = 'automatic', checkpoints: SyncCheckpointStageView = readSyncCheckpoints(store, operation, attempt)): T | null {
+function stage<T>(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, name: string, usage: 'automatic' | 'evidence' = 'automatic', checkpoints: SyncCheckpointStageView = readSyncCheckpoints(store, operation, attempt), matchesSelection = (value: Stage) => stageSelectionMatches(store, operation, value)): T | null {
   for (const { value: entry } of checkpoints.json) {
     const value = entry as Partial<Stage>
     if (value.version !== 'sync-stage-v1' || value.stage !== name) continue
     if (value.operationId !== operation.id || value.attemptId !== attempt.id || value.inputId !== operation.input.id || value.policyDigest !== operation.policyDigest || !value.resultRef) fail('stage_binding', '持久阶段身份不一致')
-    if (!stageSelectionMatches(store, operation, value as Stage)) continue
+    if (!matchesSelection(value as Stage)) continue
     if (usage === 'automatic' && behaviorAnalysisStage(name) && value.guidanceContractVersion !== CODE_BEHAVIOR_GUIDANCE_VERSION) return null
     if (checkpoints.raw.has(value.resultRef.sha256)) fail('stage_binding', '不可信拒稿不能成为阶段结果')
     const result = checkpoints.json.find(entry => entry.ref.sha256 === value.resultRef!.sha256)
@@ -252,8 +252,7 @@ function stage<T>(store: SyncStore, operation: SyncOperation, attempt: SyncAttem
 }
 type ReadonlyRepairBinding = { readonlyOwnerRepair?: ReadonlyOwnerRepair; readonlyBaseRef?: BlobRef }
 /** pending可以结束，已审返修的原始因果仍由同attempt最近完整原件负责。 */
-function readonlyRepairBinding(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt): ReadonlyRepairBinding | null {
-  const checkpoints = readSyncCheckpoints(store, operation, attempt)
+function readonlyRepairBinding(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, checkpoints: SyncCheckpointStageView = readSyncCheckpointStageIndex(store, operation, attempt)): ReadonlyRepairBinding | null {
   for (const entry of checkpoints.json.filter(({ value }) => (value as Partial<Stage>).stage === 'repair-input')) {
     const input = stage<ReadonlyRepairBinding>(store, operation, attempt, 'repair-input', 'evidence', { ...checkpoints, json: [entry] })
     if (input?.readonlyOwnerRepair) return { readonlyOwnerRepair: input.readonlyOwnerRepair, ...(input.readonlyBaseRef ? { readonlyBaseRef: input.readonlyBaseRef } : {}) }
@@ -589,26 +588,62 @@ function elaborationDraftTagged(store: SyncStore, operation: SyncOperation, atte
   return stage<{ version: string }>(store, operation, attempt, 'elaboration-draft-protocol')?.version === 'elaboration-draft-v1'
 }
 
+/** 一次来源核验共享同一历史快照；只保留认证后的wrapper和对应的批准依据。 */
+function readonlyElaborationHistory(store: SyncStore, operation: SyncOperation, readIndex = (attempt: SyncAttempt) => readSyncCheckpointStageIndex(store, operation, attempt)) {
+  const attempts = store.listAttempts(operation.id), commonDir = operation.input.source.commonDir
+  const indexes = new Map<string, SyncCheckpointStageView>(), selections = new Map<string, boolean>()
+  const checkpoints = (attempt: SyncAttempt): SyncCheckpointStageView => {
+    if (!indexes.has(attempt.id)) indexes.set(attempt.id, readIndex(attempt))
+    return indexes.get(attempt.id)!
+  }
+  const matchesSelection = (wrapper: Stage): boolean => {
+    const key = JSON.stringify({ readSetDigest: wrapper.readSetDigest, selectionRef: wrapper.baselineSelectionRef?.sha256 })
+    if (!selections.has(key)) selections.set(key, stageSelectionMatches(store, operation, wrapper))
+    return selections.get(key)!
+  }
+  const read = <T>(attempt: SyncAttempt, key: string): T | null => stage<T>(store, operation, attempt, key, 'automatic', checkpoints(attempt), matchesSelection)
+  const binding = (ref: BlobRef, wrapper: Stage): string => JSON.stringify({ ownerRef: ref.sha256, readSetDigest: wrapper.readSetDigest, selectionRef: wrapper.baselineSelectionRef?.sha256 })
+  const approvals = new Set<string>()
+  let scannedApprovals = 0
+  const approved = (ref: BlobRef, wrapper: Stage): boolean => {
+    const key = binding(ref, wrapper)
+    while (!approvals.has(key) && scannedApprovals < attempts.length) {
+      const attempt = attempts[scannedApprovals++]
+      const aggregate = read<SavedElaboration>(attempt, 'elaboration')
+      if (!aggregate?.structurePassed || !aggregate.reviewPassed || !aggregate.partitionEvidence?.length) continue
+      const aggregateRef = writeEvidence(commonDir, aggregate)
+      for (const { value } of checkpoints(attempt).json) {
+        const saved = value as Stage
+        if (saved.stage !== 'elaboration' || saved.resultRef?.sha256 !== aggregateRef.sha256) continue
+        for (const owner of aggregate.partitionEvidence) approvals.add(binding(owner.resultRef, saved))
+      }
+    }
+    return approvals.has(key)
+  }
+  const approvedOwners = new Map<string, Set<string>>()
+  const belongsTo = (ref: BlobRef, aggregateRef: BlobRef): boolean => {
+    if (!approvedOwners.has(aggregateRef.sha256)) {
+      const aggregate = JSON.parse(readEvidence(commonDir, aggregateRef).toString('utf8')) as SavedElaboration
+      approvedOwners.set(aggregateRef.sha256, new Set(aggregate.structurePassed && aggregate.reviewPassed ? aggregate.partitionEvidence?.map(owner => owner.resultRef.sha256) : []))
+    }
+    return approvedOwners.get(aggregateRef.sha256)!.has(ref.sha256)
+  }
+  return { attempts, checkpoints, read, approved, belongsTo }
+}
+
 /** null资源扩展沿原aggregate门禁；owner仍须逐字绑定其当时批准的同一readSet/selection。 */
-function readonlyLocalSource(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string, resultRef: BlobRef, aggregateRef: BlobRef): { result: SavedElaboration; resultRef: BlobRef } | null {
-  const result = stage<SavedElaboration>(store, operation, attempt, key), commonDir = operation.input.source.commonDir
+function readonlyLocalSource(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string, resultRef: BlobRef, aggregateRef: BlobRef, history: ReturnType<typeof readonlyElaborationHistory>): { result: SavedElaboration; resultRef: BlobRef } | null {
+  const result = history.read<SavedElaboration>(attempt, key), commonDir = operation.input.source.commonDir
   if (!result || writeEvidence(commonDir, result).sha256 !== resultRef.sha256) return null
-  const selectedAggregate = JSON.parse(readEvidence(commonDir, aggregateRef).toString('utf8')) as SavedElaboration
-  if (!selectedAggregate.structurePassed || !selectedAggregate.reviewPassed || !selectedAggregate.partitionEvidence?.some(owner => owner.resultRef.sha256 === resultRef.sha256)) fail('readonly_spec_repair_binding', '只读owner原件不属于精确选择的已审aggregate')
-  const checkpoints = readSyncCheckpoints(store, operation, attempt), history = store.listAttempts(operation.id)
+  if (!history.belongsTo(resultRef, aggregateRef)) fail('readonly_spec_repair_binding', '只读owner原件不属于精确选择的已审aggregate')
+  const checkpoints = history.checkpoints(attempt)
   const wrapper = checkpoints.json.map(({ value }) => value as Stage).find(value => value.stage === key && value.resultRef?.sha256 === resultRef.sha256)
-  if (wrapper?.readSetDigest && history.some(approved => {
-    const aggregate = stage<SavedElaboration>(store, operation, approved, 'elaboration')
-    return aggregate?.structurePassed && aggregate.reviewPassed && aggregate.partitionEvidence?.some(owner => owner.resultRef.sha256 === resultRef.sha256) && readSyncCheckpoints(store, operation, approved).json.some(({ value }) => {
-      const saved = value as Stage
-      return saved.version === 'sync-stage-v1' && saved.stage === 'elaboration' && saved.resultRef?.sha256 === writeEvidence(commonDir, aggregate).sha256 && saved.readSetDigest === wrapper.readSetDigest && saved.baselineSelectionRef?.sha256 === wrapper.baselineSelectionRef?.sha256
-    })
-  })) return { result, resultRef }
+  if (wrapper?.readSetDigest && history.approved(resultRef, wrapper)) return { result, resultRef }
   // 失败的续修可以已复制兄弟结果，但复制所在的 readSet 不产生新的全树批准。
   const copied = stage<{ fromOperationId: string; fromAttemptId: string; resultRef: BlobRef }>(store, operation, attempt, `${key}:provenance`, 'evidence', checkpoints)
   const origin = copied?.fromOperationId === operation.id && copied.resultRef.sha256 === resultRef.sha256
-    ? history.find(item => item.id === copied.fromAttemptId && item.number < attempt.number && ['failed', 'superseded', 'settled'].includes(item.status)) : undefined
-  const original = origin && canonical(origin.composedInput) === canonical(attempt.composedInput) ? stage<SavedElaboration>(store, operation, origin, key) : null
+    ? history.attempts.find(item => item.id === copied.fromAttemptId && item.number < attempt.number && ['failed', 'superseded', 'settled'].includes(item.status)) : undefined
+  const original = origin && canonical(origin.composedInput) === canonical(attempt.composedInput) ? history.read<SavedElaboration>(origin, key) : null
   if (original && writeEvidence(commonDir, original).sha256 === resultRef.sha256) return null
   fail('readonly_spec_repair_binding', '只读owner与精确已审aggregate的原readSet/selection不一致')
 }
@@ -836,11 +871,13 @@ export function failedCandidateReviewSource(store: SyncStore, operation: SyncOpe
 }
 
 /** 真实只读候选失败回到原P1写者；独审诊断不成为refinement或业务授权。 */
-function readonlyRepairFromAttempt(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt): ReadonlyOwnerRepair | null {
-  const saved = stage<SavedGeneration>(store, operation, attempt, 'generation')
+function readonlyRepairFromAttempt(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, readIndex = (source: SyncAttempt) => readSyncCheckpointStageIndex(store, operation, source)): ReadonlyOwnerRepair | null {
+  if (attempt.operationId !== operation.id) fail('readonly_spec_repair_binding', '只读V1续修来源属于另一操作')
+  const checkpoints = readIndex(attempt)
+  const saved = stage<SavedGeneration>(store, operation, attempt, 'generation', 'automatic', checkpoints)
   if (!saved) return null
-  operation = readonlyRepairContext(store, operation, attempt, writeEvidence(operation.input.source.commonDir, saved))
-  const generation = partitionStage<SavedGeneration>(store, operation, attempt, 'generation', operation.baselineSelection)
+  operation = readonlyRepairContext(store, operation, attempt, writeEvidence(operation.input.source.commonDir, saved), checkpoints)
+  const generation = partitionStage<SavedGeneration>(store, operation, attempt, 'generation', operation.baselineSelection, checkpoints)
   let allFindings = generation?.result.validationFindings.filter(item => item.severity === 'error') ?? []
   const semantic = generation?.result.candidateValidated === true && ['repair', 'failed'].includes(generation.result.status) && !generation.result.reviewPassed && generation.result.partitionEvidence?.some(item => item.review.verdict === 'repair')
   if (!generation?.result.candidate || !semantic && (generation.result.candidateValidated || !allFindings.length || allFindings.some(item => !isReadonlyCitationFailure(item)))) return null
@@ -849,14 +886,15 @@ function readonlyRepairFromAttempt(store: SyncStore, operation: SyncOperation, a
   const writable = generation.result.p2SpecWritePaths ?? (plan.direction === 'code_to_spec' ? [] : null)
   if (!writable) fail('readonly_spec_repair_permissions_unknown', '旧mixed候选没有真实P2 Spec写权限投影，停止而不猜owner权限', [generation.resultRef])
   if (!semantic && allFindings.every(finding => within(finding.path, writable))) return null
-  const approved = stage<SavedElaboration>(store, operation, attempt, 'elaboration')
+  const approved = stage<SavedElaboration>(store, operation, attempt, 'elaboration', 'automatic', checkpoints)
   const prior = approved ? { result: approved, resultRef: writeEvidence(operation.input.source.commonDir, approved) } : null
   if (!prior?.result.structurePassed || !prior.result.reviewPassed || prior.result.failure || !prior.result.partitionEvidence?.length || !['failed', 'superseded', 'settled'].includes(attempt.status) || attempt.failure?.kind !== 'repairable') fail('readonly_spec_repair_binding', '只读V1诊断缺少同输入已审P1及已结算失败')
   const planDigests = new Set(prior.result.partitionEvidence.map(owner => (JSON.parse(readEvidence(operation.input.source.commonDir, owner.resultRef).toString('utf8')) as SavedElaboration).partitionBinding?.planDigest))
-  const origins = store.listAttempts(operation.id).filter(item => item.number <= attempt.number)
+  const history = readonlyElaborationHistory(store, operation, readIndex)
+  const origins = history.attempts.filter(item => item.number <= attempt.number)
   let planSource: { attemptId: string; ref: BlobRef } | undefined
   for (const origin of origins) {
-    const approved = stage<SavedElaboration>(store, operation, origin, 'elaboration'), plan = stage<SyncPartitionPlan>(store, operation, origin, 'partition-plan')
+    const approved = history.read<SavedElaboration>(origin, 'elaboration'), plan = history.read<SyncPartitionPlan>(origin, 'partition-plan')
     if (approved && plan && writeEvidence(operation.input.source.commonDir, approved).sha256 === prior.resultRef.sha256 && planDigests.size === 1 && planDigests.has(plan.digest)
       && (!approved.analysisOnlyPartitions || authenticatedMixedElaborationCoverage(store, operation, origin, plan, approved))) { planSource = { attemptId: origin.id, ref: writeEvidence(operation.input.source.commonDir, plan) }; break }
   }
@@ -894,7 +932,7 @@ function readonlyRepairFromAttempt(store: SyncStore, operation: SyncOperation, a
   const sources = prior.result.partitionEvidence.flatMap(owner => {
     const key = `partition:${owner.partitionId}:elaboration`
     for (const origin of origins.filter(item => ['failed', 'superseded', 'settled'].includes(item.status))) {
-      const source = readonlyLocalSource(store, operation, origin, key, owner.resultRef, prior.resultRef)
+      const source = readonlyLocalSource(store, operation, origin, key, owner.resultRef, prior.resultRef, history)
       if (source?.resultRef.sha256 === owner.resultRef.sha256) return [{ owner: { key, partitionId: owner.partitionId, fromAttemptId: origin.id, resultRef: source.resultRef }, changes: source.result.changes }]
     }
     return []
@@ -911,10 +949,10 @@ function readonlyRepairFromAttempt(store: SyncStore, operation: SyncOperation, a
   return { ...(semantic ? { kind: 'candidate_review' as const, reviewEvidence } : {}), fromAttemptId: attempt.id, generationRef: generation.resultRef, priorRef: prior.resultRef, planAttemptId: planSource.attemptId, planRef: planSource.ref, candidateDigest: candidate.digest, findings, allFindings, owners: [...owners.values()] }
 }
 
-function readonlyRepairContext(store: SyncStore, operation: SyncOperation, source: SyncAttempt, generationRef: BlobRef): SyncOperation {
+function readonlyRepairContext(store: SyncStore, operation: SyncOperation, source: SyncAttempt, generationRef: BlobRef, checkpoints = readSyncCheckpointStageIndex(store, operation, source)): SyncOperation {
   let context = operation
   if (operation.baselineSelection) {
-    const basis = readSyncCheckpoints(store, operation, source).json.map(({ value }) => value as Stage).find(saved => saved.version === 'sync-stage-v1' && saved.stage === 'generation' && saved.operationId === operation.id && saved.attemptId === source.id && saved.inputId === operation.input.id && saved.policyDigest === operation.policyDigest && saved.resultRef?.sha256 === generationRef.sha256)
+    const basis = checkpoints.json.map(({ value }) => value as Stage).find(saved => saved.version === 'sync-stage-v1' && saved.stage === 'generation' && saved.operationId === operation.id && saved.attemptId === source.id && saved.inputId === operation.input.id && saved.policyDigest === operation.policyDigest && saved.resultRef?.sha256 === generationRef.sha256)
     if (!basis?.readSetDigest || !basis.baselineSelectionRef || !stageSelectionMatches(store, operation, basis)) fail('readonly_spec_repair_binding', '只读续修原generation绑定不属于当前合法null资源扩展')
     context = withCheckpointStageBasis(operation, basis.readSetDigest, JSON.parse(readEvidence(operation.input.source.commonDir, basis.baselineSelectionRef).toString('utf8')) as FrozenBaselineSelection)
   }
@@ -947,11 +985,11 @@ function refinementGeneration(store: SyncStore, operation: SyncOperation, attemp
   return previous
 }
 
-function reviewedReadonlyLocal(store: SyncStore, operation: SyncOperation, sourceAttempt: SyncAttempt, key: string, resultRef: BlobRef, aggregateRef: BlobRef, afterAttemptNumber = 0): SavedElaboration {
-  const source = readonlyLocalSource(store, operation, sourceAttempt, key, resultRef, aggregateRef)
+function reviewedReadonlyLocal(store: SyncStore, operation: SyncOperation, sourceAttempt: SyncAttempt, key: string, resultRef: BlobRef, aggregateRef: BlobRef, afterAttemptNumber = 0, history = readonlyElaborationHistory(store, operation)): SavedElaboration {
+  const source = readonlyLocalSource(store, operation, sourceAttempt, key, resultRef, aggregateRef, history)
   const prior = source?.result, round = prior?.rounds.at(-1)
   const generationTrace = round?.traces.find(trace => trace.purpose === 'elaboration_generate'), reviewTrace = round?.traces.find(trace => trace.purpose === 'elaboration_review')
-  if (!prior || !round || !elaborationGenerationSource(store, operation, sourceAttempt, round) || source.resultRef.sha256 !== resultRef.sha256 || !prior.structurePassed || !prior.reviewPassed || prior.failure || !hasApprovedElaborationReview(prior) || round.review!.inputDigest !== prior.inputDigest || round.review!.candidateDigest !== prior.candidateDigest || round.traces.length !== 2 || !generationTrace || !reviewTrace || generationTrace.sessionId === reviewTrace.sessionId || generationTrace.threadId === reviewTrace.threadId || generationTrace.resultDigest !== contentHash(JSON.stringify(round.output)) || reviewTrace.resultDigest !== contentHash(JSON.stringify(round.reviewOutput)) || !store.listAttempts(operation.id).some(attempt => attempt.number > afterAttemptNumber && readSyncCheckpoints(store, operation, attempt).json.some(({ ref }) => ref.sha256 === resultRef.sha256) && attempt.dispatchPlans.some(dispatch => dispatch.purpose === reviewTrace.purpose && dispatch.session?.sessionId === reviewTrace.sessionId && dispatch.session.threadId === reviewTrace.threadId && dispatch.session.turnId === reviewTrace.turnId))) fail('readonly_spec_repair_binding', '只读V1 owner原件、完整输入或独审派发绑定失配')
+  if (!prior || !round || !elaborationGenerationSource(store, operation, sourceAttempt, round) || source.resultRef.sha256 !== resultRef.sha256 || !prior.structurePassed || !prior.reviewPassed || prior.failure || !hasApprovedElaborationReview(prior) || round.review!.inputDigest !== prior.inputDigest || round.review!.candidateDigest !== prior.candidateDigest || round.traces.length !== 2 || !generationTrace || !reviewTrace || generationTrace.sessionId === reviewTrace.sessionId || generationTrace.threadId === reviewTrace.threadId || generationTrace.resultDigest !== contentHash(JSON.stringify(round.output)) || reviewTrace.resultDigest !== contentHash(JSON.stringify(round.reviewOutput)) || !history.attempts.some(attempt => attempt.number > afterAttemptNumber && attempt.dispatchPlans.some(dispatch => dispatch.purpose === reviewTrace.purpose && dispatch.session?.sessionId === reviewTrace.sessionId && dispatch.session.threadId === reviewTrace.threadId && dispatch.session.turnId === reviewTrace.turnId) && readSyncCheckpoints(store, operation, attempt).json.some(({ ref }) => ref.sha256 === resultRef.sha256))) fail('readonly_spec_repair_binding', '只读V1 owner原件、完整输入或独审派发绑定失配')
   return prior
 }
 
@@ -963,12 +1001,14 @@ function latestApprovedElaboration(store: SyncStore, operation: SyncOperation, a
     if (ancestor.input.id !== operation.input.id || canonical(ancestor.input.source) !== canonical(operation.input.source) || ancestor.policyDigest !== operation.policyDigest || (ancestor.requestBlob?.sha256 ?? null) !== (operation.requestBlob?.sha256 ?? null) || ancestor.origin !== operation.origin) fail('retry_provenance_binding', '重试链不能借用另一来源或原意的已接受契约')
     let selected: { result: SavedElaboration; attemptId: string } | undefined
     const lineage: ApprovedElaborationSource[] = []
-    for (const prior of store.listAttempts(ancestor.id).filter(item => ancestor!.id !== operation.id || item.number < attemptNumber)) {
-      const approved = stage<SavedElaboration>(store, ancestor, prior, 'elaboration')
+    const history = readonlyElaborationHistory(store, ancestor)
+    for (const prior of history.attempts.filter(item => ancestor!.id !== operation.id || item.number < attemptNumber)) {
+      const approved = history.read<SavedElaboration>(prior, 'elaboration')
       if (!approved?.structurePassed || !approved.reviewPassed || !['complete', 'needs_input', 'conflict'].includes(approved.status)) continue
       if (!selected) { selected = { result: approved, attemptId: prior.id }; lineage.push({ ...selected, operationId: ancestor.id, resultRef: writeEvidence(operation.input.source.commonDir, approved) }); continue }
-      const readonlyInput = readonlyRepairBinding(store, ancestor, prior), readonlySupplement = readonlyInput?.readonlyOwnerRepair
-      if (!readonlySupplement && readSyncCheckpoints(store, ancestor, prior).json.some(({ value }) => (value as Partial<Stage>).stage?.endsWith(':readonly-repair-provenance'))) fail('readonly_spec_repair_binding', '已审只读返修whole缺少同attempt原始因果绑定')
+      const checkpoints = history.checkpoints(prior)
+      const readonlyInput = readonlyRepairBinding(store, ancestor, prior, checkpoints), readonlySupplement = readonlyInput?.readonlyOwnerRepair
+      if (!readonlySupplement && checkpoints.json.some(({ value }) => (value as Partial<Stage>).stage?.endsWith(':readonly-repair-provenance'))) fail('readonly_spec_repair_binding', '已审只读返修whole缺少同attempt原始因果绑定')
       if (readonlySupplement && readonlyInput?.readonlyBaseRef && readonlyInput.readonlyBaseRef.sha256 !== writeEvidence(operation.input.source.commonDir, selected.result).sha256 && writeEvidence(operation.input.source.commonDir, approved).sha256 !== writeEvidence(operation.input.source.commonDir, selected.result).sha256) fail('readonly_spec_repair_binding', '只读装配base不是当前合法已审whole')
       if (readonlySupplement && (readonlyInput?.readonlyBaseRef ?? readonlySupplement.priorRef).sha256 === writeEvidence(operation.input.source.commonDir, selected.result).sha256) {
         validateReadonlyRepair(store, ancestor, readonlySupplement)
@@ -980,7 +1020,7 @@ function latestApprovedElaboration(store: SyncStore, operation: SyncOperation, a
         })) fail('readonly_spec_repair_binding', '只读续修必须响应原source且保留未修owner的最新原件')
         selected = { result: approved, attemptId: prior.id }; lineage.push({ ...selected, operationId: ancestor.id, resultRef: writeEvidence(operation.input.source.commonDir, approved) }); continue
       }
-      const supplementation = stage<{ refinement?: Refinement }>(store, ancestor, prior, 'repair-input')?.refinement
+      const supplementation = history.read<{ refinement?: Refinement }>(prior, 'repair-input')?.refinement
       if (!supplementation || canonical(supplementation.prior) !== canonical(selected.result) || !supplementation.diagnostics.length) continue
       const findings = supplementation.diagnostics.map(item => JSON.parse(item.message) as GenerationFinding)
       const contracts = selected.result.changes.flatMap(change => parseContract({ nodeId: change.nodeId, path: change.path, source: change.source }).contract ?? [])
@@ -998,8 +1038,9 @@ function latestApprovedElaboration(store: SyncStore, operation: SyncOperation, a
 /** 只选择同一候选仍未由owner新P1处理的真实诊断；复审与基础设施失败均不结算它。 */
 function pendingReadonlyRepair(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, approved: ApprovedElaboration | null): { repair: ReadonlyOwnerRepair; owners: ReadonlyOwnerRepair['owners'] } | null {
   if (!approved) return null
-  const history = store.listAttempts(operation.id), generations = history.filter(prior => prior.number < attempt.number).flatMap(prior => {
-    const result = stage<SavedGeneration>(store, operation, prior, 'generation')
+  const history = readonlyElaborationHistory(store, operation)
+  const generations = history.attempts.filter(prior => prior.number < attempt.number).flatMap(prior => {
+    const result = history.read<SavedGeneration>(prior, 'generation')
     return result?.candidate ? [{ prior, result }] : []
   })
   const candidate = generations.at(-1)?.result.candidate
@@ -1009,7 +1050,7 @@ function pendingReadonlyRepair(store: SyncStore, operation: SyncOperation, attem
   const candidateDigest = candidate.digest
   for (const { prior, result } of generations) {
     if (result.candidate?.digest !== candidateDigest || prior.failure?.kind !== 'repairable' || !['failed', 'superseded', 'settled'].includes(prior.status)) continue
-    const repair = readonlyRepairFromAttempt(store, operation, prior)
+    const repair = readonlyRepairFromAttempt(store, operation, prior, history.checkpoints)
     if (!repair) continue
     const owners: ReadonlyOwnerRepair['owners'] = []
     for (const owner of repair.owners) {
@@ -1019,9 +1060,9 @@ function pendingReadonlyRepair(store: SyncStore, operation: SyncOperation, attem
         return saved && result?.readonlySpecRepair?.generationRef.sha256 === repair.generationRef.sha256 && result.readonlySpecRepair.acceptedRef.sha256 === owner.resultRef.sha256 ? [{ base, saved }] : []
       }).at(-1)
       if (response) {
-        const origin = history.find(origin => origin.number > prior.number && readonlyLocalSource(store, operation, origin, owner.key, response.saved.resultRef, response.base.resultRef))
+        const origin = history.attempts.find(origin => origin.number > prior.number && readonlyLocalSource(store, operation, origin, owner.key, response.saved.resultRef, response.base.resultRef, history))
         if (!origin) fail('readonly_spec_repair_binding', '诊断结算缺少该owner的新P1来源')
-        const reviewed = reviewedReadonlyLocal(store, operation, origin, owner.key, response.saved.resultRef, response.base.resultRef, prior.number)
+        const reviewed = reviewedReadonlyLocal(store, operation, origin, owner.key, response.saved.resultRef, response.base.resultRef, prior.number, history)
         const original = JSON.parse(readEvidence(operation.input.source.commonDir, owner.resultRef).toString('utf8')) as SavedElaboration
         if (canonical(reviewed.partitionBinding) !== canonical(original.partitionBinding) || reviewed.readonlySpecRepair?.baseInputDigest !== (original.readonlySpecRepair?.baseInputDigest ?? original.inputDigest)) fail('readonly_spec_repair_binding', '诊断结算改变了原owner完整输入绑定')
         continue
@@ -1030,7 +1071,7 @@ function pendingReadonlyRepair(store: SyncStore, operation: SyncOperation, attem
       if (!current || current.resultRef.sha256 !== owner.resultRef.sha256) fail('readonly_spec_repair_binding', '待处理owner缺失或已换ref，不能以另一source响应清除诊断')
       owners.push(owner)
     }
-    if (owners.length) { validateReadonlyRepair(store, operation, repair); return { repair, owners } }
+    if (owners.length) return { repair, owners }
   }
   return null
 }
@@ -1734,13 +1775,16 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         }
       }
       const runner = options.runner ? injectedRunner(store, fence, options.runner) : createAttemptRunner(store, fence, { retireSettledWorktrees: true })
+      let readonlySourceHistory: ReturnType<typeof readonlyElaborationHistory> | undefined
+      const readonlySources = () => readonlySourceHistory ??= readonlyElaborationHistory(store, operation)
       const readonlyAccepted = (key: string, binding: NonNullable<ElaborationResult['partitionBinding']>, inputDigest: string): SavedElaboration | null => {
         if (!readonlyBase || readonlyActiveOwners.some(owner => owner.key === key)) return null
         const approved = readonlyBase!.result
         const expected = approved.partitionEvidence?.find(item => item.partitionId === binding.partitionId)
         if (!expected) return null
-        for (const origin of store.listAttempts(operation.id).filter(item => item.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(item.status)).reverse()) {
-          const source = readonlyLocalSource(store, operation, origin, key, expected.resultRef, readonlyBase!.resultRef)
+        const history = readonlySources()
+        for (const origin of history.attempts.filter(item => item.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(item.status)).reverse()) {
+          const source = readonlyLocalSource(store, operation, origin, key, expected.resultRef, readonlyBase!.resultRef, history)
           if (!source || !source.result.structurePassed || !source.result.reviewPassed || source.result.failure || source.result.rounds.at(-1)?.review?.verdict !== 'accept' || canonical(source.result.partitionBinding) !== canonical(binding) || (source.result.readonlySpecRepair?.baseInputDigest ?? source.result.inputDigest) !== inputDigest) continue
           saveStage(store, fence!, `${key}:provenance`, { fromOperationId: operation.id, fromAttemptId: origin.id, resultRef: source.resultRef })
           partitionCheckpoints.save(key, source.result)
@@ -2446,7 +2490,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           const owner = readonlyActiveOwners.find(owner => owner.key === key)
           if (!owner) return null
           const sourceAttempt = store.readAttempt(owner.fromAttemptId)
-          const prior = reviewedReadonlyLocal(store, operation, sourceAttempt, key, owner.resultRef, readonlyOwnerRepair!.priorRef), round = prior.rounds.at(-1)!
+          const prior = reviewedReadonlyLocal(store, operation, sourceAttempt, key, owner.resultRef, readonlyOwnerRepair!.priorRef, 0, readonlySources()), round = prior.rounds.at(-1)!
           const protocol = stage<{ generationGuidance?: ElaborationGenerationGuidance }>(store, operation, sourceAttempt, 'elaboration-draft-protocol')
           const priorInput = { ...localInput, generationGuidance: protocol?.generationGuidance }
           if (canonical(prior.partitionBinding) !== canonical(binding) || (prior.readonlySpecRepair?.baseInputDigest ?? prior.inputDigest) !== freezeElaborationInput(priorInput).inputDigest) fail('readonly_spec_repair_binding', '只读owner原件不匹配当前完整局部输入')
