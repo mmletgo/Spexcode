@@ -12,7 +12,7 @@ import { actualTreeDiff, exportCandidate, isHostPrivatePath, verifyCandidate } f
 import type { CodeBehaviorContinuation, CodeBehaviorMaterialRequest, CodeBehaviorPostGateReview } from './code-behavior.js'
 import { analyzeCodeBehavior, authoredContractChanges, CODE_BEHAVIOR_FAILURE_STATUS, CODE_BEHAVIOR_GUIDANCE_VERSION, codeBehaviorReviewSchema, codeBehaviorContinuationStatus, codeBehaviorDraftStatus, deriveBehaviorAuthorization, isCodeBehaviorContextTransport, readCodeBehaviorContext, type CodeBehaviorContextTransport, type CodeBehaviorReviewReference } from './code-behavior.js'
 import type { CodeBehaviorAnalysis, CodeBehaviorEvidence, SyncDecisionInput } from './writeback-types.js'
-import { adoptedDeliveryPaths, isUtf8Text, readCompositionEvidence, selectedRetiredIds, verifyBaselineSelection } from './composition.js'
+import { adoptedDeliveryPaths, baselineResourceKey, extendsWithUninitializedResources, isUtf8Text, readCompositionEvidence, selectedRetiredIds, verifyBaselineSelection } from './composition.js'
 import { readHistoryRequest, readReceiptHistoryRestorations } from './history-input.js'
 import { composeAuthoredInput } from './author-input.js'
 import { elaborate, hasApprovedElaborationReview, elaborationMaterialContext, freezeElaborationInput, gapBlockedFinding, verifyElaborationDraftCache } from './elaboration.js'
@@ -212,12 +212,6 @@ type Stage = { version: 'sync-stage-v1'; operationId: string; attemptId: string;
 const behaviorAnalysisStage = (name: string): boolean => name === 'analysis' || name.startsWith('partition:') && name.endsWith(':analysis')
 type SavedElaboration = Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>
 type SavedGeneration = Omit<GenerationResult, 'candidateFiles'> & { p2SpecWritePaths?: string[] }
-const baselineResourceKey = (binding: FrozenBaselineSelection['bindings'][number]): string => binding.resource.kind === 'path' ? `path:${binding.resource.path}` : `${binding.resource.kind}:${binding.resource.id}`
-function extendsWithUninitializedResources(before: FrozenBaselineSelection, after: FrozenBaselineSelection): boolean {
-  return canonical(before.source) === canonical(after.source)
-    && before.bindings.every(binding => after.bindings.some(next => baselineResourceKey(next) === baselineResourceKey(binding) && canonical(next) === canonical(binding)))
-    && after.bindings.every(binding => before.bindings.some(prior => baselineResourceKey(prior) === baselineResourceKey(binding)) || ('bytePair' in binding ? binding.bytePair : binding.intentPair) === null)
-}
 function stageSelectionMatches(store: SyncStore, operation: SyncOperation, saved: Stage): boolean {
   if (!operation.baselineSelection) return true
   if (!saved.baselineSelectionRef || !saved.readSetDigest) return false
@@ -1737,7 +1731,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         const approved = readonlyBase!.result
         const expected = approved.partitionEvidence?.find(item => item.partitionId === binding.partitionId)
         if (!expected) return null
-        for (const origin of store.listAttempts(operation.id).filter(item => item.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(item.status))) {
+        for (const origin of store.listAttempts(operation.id).filter(item => item.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(item.status)).reverse()) {
           const source = readonlyLocalSource(store, operation, origin, key, expected.resultRef, readonlyBase!.resultRef)
           if (!source || !source.result.structurePassed || !source.result.reviewPassed || source.result.failure || source.result.rounds.at(-1)?.review?.verdict !== 'accept' || canonical(source.result.partitionBinding) !== canonical(binding) || (source.result.readonlySpecRepair?.baseInputDigest ?? source.result.inputDigest) !== inputDigest) continue
           saveStage(store, fence!, `${key}:provenance`, { fromOperationId: operation.id, fromAttemptId: origin.id, resultRef: source.resultRef })

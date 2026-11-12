@@ -10,12 +10,15 @@ import type { NativeRunCheckpoint, NativeRunPlan } from './native-run.js'
 import { partitionedElaborationCoverageMatches, partitionedElaborationInputDigest } from './elaboration-types.js'
 import type { ElaborationResult, ElaborationRound } from './elaboration-types.js'
 import type { CodeBehaviorAnalysis } from './writeback-types.js'
-import type { BlobRef, SyncAttempt, SyncCheckpointRef, SyncOperation } from './operation-types.js'
+import { extendsWithUninitializedResources, verifyBaselineSelection } from './composition.js'
+import type { SyncCoordinatorPlan } from './coordinator-types.js'
+import type { BlobRef, FrozenBaselineSelection, SyncAttempt, SyncCheckpointRef, SyncOperation } from './operation-types.js'
 import type { SyncStore } from './store.js'
 
 type Saved = Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>
 export type RawFinalEvidence = RejectedStructuredOutput & { ownerInputDigest: string; ownerRequestKey: string }
-type Wrapper = { version: string; operationId: string; attemptId: string; inputId: string; policyDigest: string; readSetDigest?: string; stage: string; resultRef: BlobRef }
+type StageBasis = { readSetDigest?: string; baselineSelectionRef?: BlobRef }
+type Wrapper = StageBasis & { version: string; operationId: string; attemptId: string; inputId: string; policyDigest: string; stage: string; resultRef: BlobRef; composedTree?: string; composedContentDigest?: string }
 function fail(message: string): never { throw Object.assign(new Error(message), { code: 'checkpoint_artifact_binding' }) }
 const hash = (value: unknown): string => contentHash(JSON.stringify(value))
 /** 正式重试沿相同冻结来源、输入、政策与意图回溯。 */
@@ -135,15 +138,16 @@ function scanSyncCheckpoints(store: SyncStore, operation: SyncOperation, attempt
     if (!decoded.has(ref.sha256)) decoded.set(ref.sha256, readCheckpointJson(store, operation, ref))
     return decoded.get(ref.sha256) as T
   }
-  const stageResult = (owner: SyncOperation, source: SyncAttempt, key: string, digest?: string): BlobRef | null => {
+  const stageResult = (owner: SyncOperation, source: SyncAttempt, key: string, digest?: string, basis: StageBasis | null = { readSetDigest: owner.readSetDigest }): Wrapper | null => {
     for (const root of [...source.checkpointRefs].reverse()) {
       if (!root.artifacts?.some(artifact => artifact.kind === 'json')) continue
       const wrapper = read<Partial<Wrapper>>(root)
       const ref = wrapper?.resultRef
       if (wrapper?.version === 'sync-stage-v1' && wrapper.stage === key && wrapper.operationId === owner.id && wrapper.attemptId === source.id
         && wrapper.inputId === owner.input.id && wrapper.policyDigest === owner.policyDigest && isSyncBlobRef(ref)
-        && (wrapper.readSetDigest === owner.readSetDigest || key.endsWith(':provenance') && wrapper.readSetDigest === undefined && !owner.baselineSelection)
-        && (digest === undefined || ref.sha256 === digest) && root.artifacts.some(artifact => artifact.kind === 'json' && artifact.ref.sha256 === ref.sha256)) return ref
+        && (!basis || (wrapper.readSetDigest === basis.readSetDigest || key.endsWith(':provenance') && wrapper.readSetDigest === undefined && !owner.baselineSelection)
+          && (!basis.baselineSelectionRef || wrapper.baselineSelectionRef?.sha256 === basis.baselineSelectionRef.sha256 && root.artifacts.some(artifact => artifact.kind === 'json' && artifact.ref.sha256 === basis.baselineSelectionRef!.sha256)))
+        && (digest === undefined || ref.sha256 === digest) && root.artifacts.some(artifact => artifact.kind === 'json' && artifact.ref.sha256 === ref.sha256)) return wrapper as Wrapper
     }
     return null
   }
@@ -153,23 +157,54 @@ function scanSyncCheckpoints(store: SyncStore, operation: SyncOperation, attempt
       || !saved.partitionBinding || !isDeepStrictEqual(saved.partitionBinding, original.partitionBinding) || saved.inputDigest !== original.inputDigest) fail('跨重试raw诊断必须来自同一已审局部原件')
     const key = `partition:${saved.partitionBinding.partitionId}:elaboration`, digest = hash(saved)
     if (diagnostic.requestKey !== `sync:${origin.id}:elaborate:partition:${saved.partitionBinding.partitionId}`) fail('跨重试raw诊断不匹配原失败owner')
+    let basis: StageBasis = { readSetDigest: operation.readSetDigest }, scope = operation.scope
+    let expectedSelection = attempt.baselineSelectionDigest, expectedComposition = attempt.composedInput
+    let expandedAt: string | undefined
     lineage ??= [...retryOperationLineage(store, operation)]
     let owner = operation, source = attempt, position = 0
     for (;;) {
-      if (!stageResult(owner, source, key, digest)) fail('跨重试raw诊断缺少原批准resultRef')
+      if (!stageResult(owner, source, key, digest, basis)) {
+        if (expandedAt || owner.id !== operation.id) fail('跨重试raw诊断缺少原批准resultRef')
+        const local = stageResult(owner, source, key, digest, null)
+        if (!local?.readSetDigest || !local.baselineSelectionRef || !owner.baselineSelection || !expectedComposition || owner.planBlob?.sha256 !== owner.policyDigest) fail('跨重试raw诊断缺少原批准resultRef')
+        const before = read<FrozenBaselineSelection>(local.baselineSelectionRef)
+        basis = { readSetDigest: local.readSetDigest, baselineSelectionRef: local.baselineSelectionRef }
+        const originalScope = read<SyncCoordinatorPlan>(owner.planBlob).executionScope
+        const expansion = owner.contractScopeExpansions?.find(item => item.previousBaselineSelectionDigest === before.digest && item.baselineSelectionDigest === owner.baselineSelection!.digest)
+        const seal = expansion && stageResult(owner, source, 'elaboration', expansion.evidenceRef.sha256, basis)
+        const whole = seal && read<Saved>(seal.resultRef)
+        if (!originalScope || !expansion || !isDeepStrictEqual(expansion.paths, owner.scope.paths)
+          || !isDeepStrictEqual(expansion.contractIds, owner.scope.contractIds) || !isDeepStrictEqual(expansion.flowIds, owner.scope.flowIds)
+          || source.baselineSelectionDigest !== owner.baselineSelection.digest || !stageResult(owner, source, key, digest, basis)
+          || !seal || seal.composedTree !== expectedComposition.tree || seal.composedContentDigest !== expectedComposition.contentDigest
+          || !whole?.structurePassed || !whole.reviewPassed || whole.failure || whole.phase !== 'partitioned_final'
+          || !whole.partitionEvidence?.some(member => member.partitionId === saved.partitionBinding!.partitionId && member.resultRef.sha256 === digest)) fail('跨重试raw诊断缺少同阶段批准及正式扩域证明')
+        verifyBaselineSelection(owner.input, before)
+        if (!extendsWithUninitializedResources(before, owner.baselineSelection)) fail('跨重试raw诊断扩域改变原冻结选择')
+        scope = originalScope
+        expectedSelection = before.digest
+        expandedAt = source.id
+      }
       if (owner.id === origin.operationId) {
-        if (origin.number >= source.number || !stageResult(owner, origin, key, diagnostic.resultRef.sha256)) fail('跨重试raw诊断缺少原失败resultRef')
+        if (origin.number >= source.number || !stageResult(owner, origin, key, diagnostic.resultRef.sha256, basis)) fail('跨重试raw诊断缺少原失败resultRef')
         return owner
       }
-      const ref = stageResult(owner, source, `${key}:provenance`)
-      if (!ref) fail('跨重试raw诊断缺少已审复用来源')
-      const proof = read<{ fromOperationId?: string; fromAttemptId: string; resultRef: BlobRef }>(ref)
+      const wrapper = stageResult(owner, source, `${key}:provenance`, undefined, basis)
+      if (!wrapper) fail('跨重试raw诊断缺少已审复用来源')
+      const proof = read<{ fromOperationId?: string; fromAttemptId: string; resultRef: BlobRef }>(wrapper.resultRef)
       const nextPosition = lineage.findIndex(prior => prior.id === (proof.fromOperationId ?? owner.id))
       if (nextPosition < position || proof.resultRef?.sha256 !== digest) fail('跨重试raw诊断复用来源不匹配原批准resultRef')
       const previous = store.readAttempt(proof.fromAttemptId), previousOwner = lineage[nextPosition]
+      const composed = previous.composedInput
+      const unchangedComposition = source.id === expandedAt
+        ? composed && expectedComposition && composed.sourceInputId === expectedComposition.sourceInputId && composed.previousBaselinePairId === expectedComposition.previousBaselinePairId
+          && composed.tree === expectedComposition.tree && composed.contentDigest === expectedComposition.contentDigest && composed.baselineSelectionDigest === expectedSelection
+          && isDeepStrictEqual(composed.manifestBlob, expectedComposition.manifestBlob) && isDeepStrictEqual(composed.requestBlob, expectedComposition.requestBlob)
+        : isDeepStrictEqual(composed, expectedComposition)
       if (previous.operationId !== previousOwner.id || nextPosition === position && previous.number >= source.number || !['failed', 'superseded', 'settled'].includes(previous.status)
-        || previousOwner.readSetDigest !== operation.readSetDigest || !isDeepStrictEqual(previousOwner.scope, operation.scope)
-        || previous.baselineSelectionDigest !== attempt.baselineSelectionDigest || !isDeepStrictEqual(previous.composedInput, attempt.composedInput)) fail('跨重试raw诊断的原attempt或冻结范围失配')
+        || (!(expandedAt && previousOwner.id === operation.id) && (previousOwner.readSetDigest !== basis.readSetDigest || !isDeepStrictEqual(previousOwner.scope, scope)))
+        || previous.baselineSelectionDigest !== expectedSelection || !unchangedComposition) fail('跨重试raw诊断的原attempt或冻结范围失配')
+      expectedComposition = composed
       owner = previousOwner; source = previous; position = nextPosition
     }
   }

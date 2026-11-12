@@ -108,6 +108,20 @@ export type IntentArtifactResidual = {
 }
 const canonical = (value: unknown): string => JSON.stringify(value, (_key, item: unknown) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item)
 
+export const baselineResourceKey = ({ resource }: FrozenBaselineSelection['bindings'][number]): string =>
+  resource.kind === 'path' ? `path:${resource.path}` : `${resource.kind}:${resource.id}`
+
+export function extendsWithUninitializedResources(before: FrozenBaselineSelection, after: FrozenBaselineSelection): boolean {
+  if (canonical(before.source) !== canonical(after.source)) return false
+  const added = new Map(after.bindings.map(binding => [baselineResourceKey(binding), binding]))
+  for (const binding of before.bindings) {
+    const key = baselineResourceKey(binding)
+    if (canonical(binding) !== canonical(added.get(key))) return false
+    added.delete(key)
+  }
+  return [...added.values()].every(binding => ('bytePair' in binding ? binding.bytePair : binding.intentPair) === null)
+}
+
 /** 精确选择是边界输入；不接受遗漏、错误归属或由全局 latest 补出的基线。 */
 export function verifyBaselineSelection(input: InputSnapshot, selection: FrozenBaselineSelection, treeCache?: TreeReadCache): void {
   if (selection.version !== 'sync-baseline-selection-v1' || canonical(selection.source) !== canonical(input.source) || selection.digest !== contentHash(canonical({ version: selection.version, source: selection.source, bindings: selection.bindings }))) throw new Error('SYNC_BASELINE_SELECTION_INVALID: identity or digest')
