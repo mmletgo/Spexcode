@@ -254,7 +254,7 @@ P1 `session/events` 独审超时回归用真实Git提交、隔离SQLite及受控
 
 P1独审格式失败回归使用真实Git、隔离SQLite及受控Native资源桥，覆盖单体、Code→Spec分区连续两次失败、原正式拒稿失配和候选正文失配。候选、Git生成对象、原生成追踪、review schema与保护树保持，只读seed每轮只增加当轮所需的上一份拒稿原字节，后续正常审查返回前无批准。原checkpoint未存CAS ref时仍原样保留；错packet不能派发新会话；Code→Spec零代码生成。已有V3超时请求与同策略新独审在相同候选下提示逐字相等。
 
-正式 retryOf 复制含已拒格式原文的已审 P1 分区时，用真实 Git 提交、隔离 SQLite、受控 Native 格式失败及后续独审，按生产 wrapper 写入同一原局部 resultRef 和来源。冷读保留批准与原失败 owner、原文和摘要，拒稿只能从 untrusted_final 读取。缺失来源、未批准来源 attempt、缺失或替换来源 resultRef、转接给其它 owner 均拒绝。
+正式换模型 retryOf 复制含已拒格式原文的已审 P1 分区时，用真实 Git 提交、隔离 SQLite、受控 Native 格式失败及后续独审，按生产 wrapper 写入同一原局部 resultRef 和来源。冷读保留批准与原失败 owner、原文和摘要，拒稿只能从 untrusted_final 读取。缺失来源、来源不在重试链、未批准来源 attempt、缺失或替换来源 resultRef、读集漂移、转接给其它 owner 或直接把同一拒稿 SHA 绑定为新轮失败证据均拒绝。
 
 已有code映射、P1新增managed AC.test时无需implementation_plan；Native scratch实际创建测试后若评审格式失败，P1映射的原null扩域仍可承接，只续review，保持原candidate及原oracle/source/index。该路径与真实file-writer扩域分别证明，不借related或source字段取得写权。
 

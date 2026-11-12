@@ -15,7 +15,7 @@ import type { SyncStore } from './store.js'
 
 type Saved = Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>
 export type RawFinalEvidence = RejectedStructuredOutput & { ownerInputDigest: string; ownerRequestKey: string }
-type Wrapper = { version: string; operationId: string; attemptId: string; inputId: string; policyDigest: string; stage: string; resultRef: BlobRef }
+type Wrapper = { version: string; operationId: string; attemptId: string; inputId: string; policyDigest: string; readSetDigest?: string; stage: string; resultRef: BlobRef }
 function fail(message: string): never { throw Object.assign(new Error(message), { code: 'checkpoint_artifact_binding' }) }
 const hash = (value: unknown): string => contentHash(JSON.stringify(value))
 /** 正式重试沿相同冻结来源、输入、政策与意图回溯。 */
@@ -132,6 +132,7 @@ export function readSyncCheckpoints(store: SyncStore, operation: SyncOperation, 
       const ref = wrapper?.resultRef
       if (wrapper?.version === 'sync-stage-v1' && wrapper.stage === key && wrapper.operationId === owner.id && wrapper.attemptId === source.id
         && wrapper.inputId === owner.input.id && wrapper.policyDigest === owner.policyDigest && isSyncBlobRef(ref)
+        && (wrapper.readSetDigest === owner.readSetDigest || key.endsWith(':provenance') && wrapper.readSetDigest === undefined && !owner.baselineSelection)
         && (digest === undefined || ref.sha256 === digest) && root.artifacts.some(artifact => artifact.kind === 'json' && artifact.ref.sha256 === ref.sha256)) return ref
     }
     return null
