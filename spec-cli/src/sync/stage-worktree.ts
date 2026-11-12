@@ -4,7 +4,7 @@ import type { ElaborationDraft, ElaborationSessionRequest, ElaborationSessionRes
 import type { CandidateChanges } from './candidate.js'
 import { actualTreeDiff, isHostPrivatePath } from './candidate.js'
 import { isUtf8Text } from './composition.js'
-import { contentHash, objectGit, readObject, readTree, sourceGit, validateRepositoryPath, writeObject, writeTree } from './snapshot.js'
+import { contentHash, objectGit, readObject, readTree, sourceGit, validateRepositoryPath, writeNumberedBlobs, writeTree, type TreeEntry } from './snapshot.js'
 
 export type StageWorktree = NonNullable<ElaborationSessionRequest['worktree']>
 export type StageOverlay = { path: string; source: string | null; mode?: '100644' | '100755' | '120000' | null }
@@ -22,15 +22,22 @@ export function stageWorktree(commonDir: string, parent: string, tree: string, m
 export function overlayStageTree(commonDir: string, tree: string, changes: readonly StageOverlay[]): string {
   if (!changes.length) return tree
   const entries = new Map(readTree(commonDir, tree).map(entry => [entry.path, entry]))
-  for (const change of changes) {
-    const path = validateRepositoryPath(change.path)
-    if (path.split('/').slice(0, -1).some((_, index, segments) => entries.get(segments.slice(0, index + 1).join('/'))?.mode === '120000')) throw new Error(`阶段overlay不能穿过symlink: ${path}`)
-    if (change.source === null) { entries.delete(path); continue }
-    const bytes = Buffer.from(change.source, 'utf8'), previous = entries.get(path)
-    if (!isUtf8Text(bytes) || bytes.toString('utf8') !== change.source || previous?.mode === '120000' || change.mode === '120000') throw new Error(`阶段overlay必须为UTF8普通文件: ${path}`)
-    entries.set(path, { path, mode: change.mode ?? previous?.mode ?? '100644', oid: writeObject(commonDir, bytes), digest: contentHash(bytes) })
-  }
-  return writeTree(commonDir, [...entries.values()])
+  const staged: TreeEntry[] = [], directory = mkdtempSync(join(tmpdir(), 'spex-sync-overlay-'))
+  try {
+    for (const change of changes) {
+      const path = validateRepositoryPath(change.path)
+      if (path.split('/').slice(0, -1).some((_, index, segments) => entries.get(segments.slice(0, index + 1).join('/'))?.mode === '120000')) throw new Error(`阶段overlay不能穿过symlink: ${path}`)
+      if (change.source === null) { entries.delete(path); continue }
+      const bytes = Buffer.from(change.source, 'utf8'), previous = entries.get(path)
+      if (!isUtf8Text(bytes) || bytes.toString('utf8') !== change.source || previous?.mode === '120000' || change.mode === '120000') throw new Error(`阶段overlay必须为UTF8普通文件: ${path}`)
+      const entry = { path, mode: change.mode ?? previous?.mode ?? '100644', oid: '', digest: contentHash(bytes) }
+      writeFileSync(join(directory, String(staged.length)), bytes, { flag: 'wx', mode: 0o600 })
+      staged.push(entry)
+      entries.set(path, entry)
+    }
+    writeNumberedBlobs(commonDir, directory, staged)
+    return writeTree(commonDir, [...entries.values()])
+  } finally { rmSync(directory, { recursive: true, force: true }) }
 }
 
 /** 公开结果同时绑定固定seed和真实不可变Git对象，summary不能替代此证明。 */
@@ -180,5 +187,6 @@ export function captureStageDraft(commonDir: string, seed: StageWorktree, result
   objectGit(commonDir, ['update-ref', `refs/spex-sync/drafts/${binding.ownerDigest}/${actual.headCommit}`, actual.headCommit])
   return { version: 'elaboration-draft-v1', ...binding, seed: { ...seed, mode: 'edit' }, resultCommit: actual.headCommit, resultTree: actual.tree, oid: entry.oid, errors: [] }
 }
-import { lstatSync, readFileSync, readlinkSync, realpathSync } from 'node:fs'
+import { lstatSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
