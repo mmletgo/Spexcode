@@ -17,7 +17,7 @@ import { readHistoryRequest, readReceiptHistoryRestorations } from './history-in
 import { composeAuthoredInput } from './author-input.js'
 import { elaborate, hasApprovedElaborationReview, elaborationMaterialContext, freezeElaborationInput, gapBlockedFinding, verifyElaborationDraftCache } from './elaboration.js'
 import { outputErrors } from './elaboration-schema.js'
-import type { ElaborationResult, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ElaborationTrace, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial } from './elaboration-types.js'
+import type { ElaborationResult, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ElaborationTrace, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ReadonlySpecRepair } from './elaboration-types.js'
 import { claimFileMutex } from './file-mutex.js'
 import { authenticateNativeFailure, authenticateNativeRejectedFinal, readSyncCheckpoints, readSyncCheckpointStageIndex, retryOperationLineage, syncCheckpointArtifacts } from './checkpoint-evidence.js'
 import type { SyncCheckpointStageView } from './checkpoint-evidence.js'
@@ -304,6 +304,30 @@ function settledApprovalSource(store: SyncStore, source: SyncOperation): boolean
     && !store.sourceContinuityState(source.input.source.commonDir).leasedOperationIds.includes(source.id)
     && !store.listRecoverableResources().some(item => item.operation.id === source.id)
     && store.listJournals(source.id).every(journal => journal.status === 'settled')
+}
+
+/** 返修接续只读原派发的输入，历史生成结果没有新的批准权。 */
+function settledSealRepairRequest(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, dispatch: SyncAttempt['dispatchPlans'][number]) {
+  const resource = store.findResource(attempt.id, dispatch.key)
+  if (resource?.phase !== 'removed' || resource.operationId !== operation.id || resource.attemptId !== attempt.id || resource.generation !== attempt.generation
+    || resource.plan.kind !== 'native_session' || resource.plan.key !== dispatch.key || resource.plan.inputId !== operation.input.id || resource.plan.payloadDigest !== dispatch.requestDigest) return null
+  const commonDir = operation.input.source.commonDir
+  const plan = JSON.parse(readEvidence(commonDir, resource.plan.planBlob).toString('utf8')) as NativeRunPlan
+  const checkpoint = JSON.parse(readEvidence(commonDir, resource.checkpointRef).toString('utf8')) as NativeRunCheckpoint
+  const sessionId = sessionIdForCreateKey(dispatch.sessionCreateKey)
+  const stopped = checkpoint.stop?.nativeStopped === true && checkpoint.stop.sessionId === sessionId
+    && (checkpoint.stop.threadId ?? null) === checkpoint.session.threadId && (checkpoint.stop.turnId ?? null) === checkpoint.session.turnId
+  const completed = checkpoint.status === 'completed' && checkpoint.nativeState === 'completed' && checkpoint.result?.sessionId === sessionId
+    && checkpoint.result.threadId === checkpoint.session.threadId && checkpoint.result.turnId === checkpoint.session.turnId
+  const settled = checkpoint.nativeCallRequested ? stopped || completed : stopped && !checkpoint.nativeStarted && checkpoint.stop?.nativeStatus === 'notDispatched'
+  if ([plan, checkpoint].some(evidence => evidence.schemaVersion !== 1 || evidence.operationId !== operation.id || evidence.attemptId !== attempt.id || evidence.inputId !== operation.input.id
+    || evidence.candidateDigest !== resource.plan.candidateDigest || evidence.requestDigest !== dispatch.requestDigest || evidence.expectedSessionId !== sessionId)
+    || checkpoint.phase !== 'removed' || checkpoint.session.sessionId !== sessionId || !settled
+    || dispatch.session && (dispatch.session.sessionId !== sessionId || dispatch.session.threadId && dispatch.session.threadId !== checkpoint.session.threadId || dispatch.session.turnId && dispatch.session.turnId !== checkpoint.session.turnId)
+    || plan.sessionCreateKey !== dispatch.sessionCreateKey || plan.request.requestKey !== dispatch.key || plan.request.purpose !== dispatch.purpose || plan.request.model !== syncModel(operation)
+    || plan.request.frozenContext || plan.request.worktree?.mode !== (dispatch.purpose === 'elaboration_generate' ? 'edit' : 'read') || contentHash(JSON.stringify(plan.request)) !== dispatch.requestDigest) return null
+  const task = plan.request.prompt.split('\n任务:\n', 2)[1]?.split('\n', 1)[0]
+  return task ? (JSON.parse(task) as { repair?: Pick<ReadonlySpecRepair, 'kind' | 'generationRef' | 'acceptedRef' | 'candidateDigest' | 'findings'> & { owner: NonNullable<ElaborationResult['partitionBinding']> } }).repair ?? null : null
 }
 
 /** Git保活本身不证明模型完成；未认证的Native稿不能遮蔽更早合格原稿。 */
@@ -1986,23 +2010,30 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         if (!partitions) return null
         const current = store.listAttempts(operation.id).filter(item => item.number < attempt!.number).reverse().map(prior => ({ owner: operation, prior }))
         const ancestors = operation.retryOf ? retryDraftSources(store, operation, attempt!.number).filter(({ owner }) => owner.id !== operation.id) : []
-        let interrupted: { owner: SyncOperation; prior: SyncAttempt; checkpoints: SyncCheckpointStageView } | undefined
+        const suffix = ':elaboration:readonly-repair-provenance'
+        const interrupted: { owner: SyncOperation; prior: SyncAttempt; checkpoints: SyncCheckpointStageView; anchors: SyncCheckpointStageView['json'] }[] = []
         for (const { owner, prior } of [...current, ...ancestors]) {
           const crossOperation = owner.id !== operation.id, repairable = prior.failure?.kind === 'repairable' || prior.status === 'superseded' && !prior.failure
           if (!['failed', 'superseded', 'settled'].includes(prior.status) || crossOperation && !settledApprovalSource(store, owner)) return null
-          if (!repairable && (!crossOperation || interrupted || prior.failure?.code !== 'review_retry_binding' || prior.dispatchPlans.length || prior.candidate || prior.verification || prior.currentSession || prior.publicationBase !== undefined)) return null
+          if (!repairable && !crossOperation) return null
           if (prior.status === 'superseded' && !prior.failure && !prior.checkpointRefs.length && !prior.dispatchPlans.length && prior.composedInput === null && prior.candidate === null && prior.verification === null && prior.currentSession === null && prior.publicationBase === undefined && prior.baselineSelectionDigest === operation.baselineSelection?.digest) continue
           const checkpoints = readSyncCheckpointStageIndex(store, owner, prior)
           const plan = partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan', undefined, checkpoints)
           if (!plan || canonical(plan.result) !== canonical(partitions) || !priorElaborationInputMatches(prior, { planDigest: partitions.digest, partitionId: '', ...(analysis ? { analysisRef: analysis.ref } : {}) }, owner, checkpoints)) return null
-          if (!repairable) {
-            interrupted = { owner, prior, checkpoints }
-            continue
-          }
           const source = partitionStage<SavedElaboration>(store, owner, prior, 'elaboration', undefined, checkpoints)
           if (source?.result.structurePassed && source.result.reviewPassed && !source.result.failure) return null
           if (!source || source.result.failure?.code !== 'partition_final_seal_failed') {
-            if (interrupted || crossOperation && prior.dispatchPlans.length) return null
+            if (crossOperation) {
+              const anchors = checkpoints.json.filter(({ value }) => (value as Stage).stage.startsWith('partition:') && (value as Stage).stage.endsWith(suffix))
+              if (anchors.length) {
+                if (prior.candidate || prior.verification || prior.publicationBase !== undefined
+                  || !prior.dispatchPlans.length && (prior.currentSession || prior.failure?.code !== 'review_retry_binding' && !repairable))
+                  fail('partition_final_seal_binding', '未结算或已有候选的全局seal返修不能继承')
+                interrupted.push({ owner, prior, checkpoints, anchors })
+                continue
+              }
+            }
+            if (!repairable || interrupted.length || crossOperation && prior.dispatchPlans.length) return null
             continue
           }
           if (crossOperation && (prior.failure?.code !== 'partition_final_seal_failed' || !prior.failure.evidenceRefs.some(ref => ref.sha256 === source.resultRef.sha256))) fail('partition_final_seal_binding', '跨操作返修必须引用原正式失败的精确全局seal')
@@ -2020,15 +2051,25 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           if (result.analysisOnlyPartitions ? !authenticatedMixedElaborationCoverage(store, owner, prior, partitions, result) : locals.size !== partitions.partitions.length || partitions.partitions.some(partition => !locals.has(partition.id))) fail('partition_final_seal_binding', '全局seal诊断没有完整分区来源')
           const owners = partitionSealRepairOwners(partitions, result, new Map([...locals].map(([id, local]) => [id, local.result])))
           if (!owners.size) fail('partition_final_seal_unroutable', '失败全局seal没有可反馈的真实error')
-          const interruption = interrupted
-          if (interruption) {
-            const suffix = ':elaboration:readonly-repair-provenance'
-            const anchors = interruption.checkpoints.json.filter(({ value }) => (value as Stage).stage.startsWith('partition:') && (value as Stage).stage.endsWith(suffix))
-            if (!anchors.length || anchors.some(entry => {
+          for (const interruption of interrupted) {
+            const anchors = new Map<string, BlobRef>()
+            for (const entry of interruption.anchors) {
               const key = (entry.value as Stage).stage, partitionId = key.slice('partition:'.length, -suffix.length)
               const saved = stage<{ fromOperationId?: string; fromAttemptId: string; resultRef: BlobRef; generationRef: BlobRef }>(store, interruption.owner, interruption.prior, key, 'automatic', { ...interruption.checkpoints, json: [entry] })
-              return !saved || (saved.fromOperationId ?? interruption.owner.id) !== owner.id || saved.fromAttemptId !== prior.id || saved.generationRef.sha256 !== source.resultRef.sha256 || !owners.has(partitionId) || saved.resultRef.sha256 !== locals.get(partitionId)?.resultRef.sha256
-            })) fail('partition_final_seal_binding', '中断的全局seal返修缺少原候选和受影响owner的精确来源')
+              if (!saved || (saved.fromOperationId ?? interruption.owner.id) !== owner.id || saved.fromAttemptId !== prior.id || saved.generationRef.sha256 !== source.resultRef.sha256
+                || !owners.has(partitionId) || saved.resultRef.sha256 !== locals.get(partitionId)?.resultRef.sha256) fail('partition_final_seal_binding', '中断的全局seal返修缺少原候选和受影响owner的精确来源')
+              anchors.set(partitionId, saved.resultRef)
+            }
+            for (const dispatch of interruption.prior.dispatchPlans) {
+              const partitionId = dispatch.key.split(':')[4]
+              const bound = anchors.get(partitionId)
+              const request = bound && ['elaboration_generate', 'elaboration_review'].includes(dispatch.purpose)
+                && dispatch.key.startsWith('sync:' + interruption.prior.id + ':elaborate:partition:' + partitionId + ':')
+                ? settledSealRepairRequest(store, interruption.owner, interruption.prior, dispatch) : null
+              if (!request || request.kind !== 'partition_seal' || canonical(request.owner) !== canonical(locals.get(partitionId)?.result.partitionBinding)
+                || request.generationRef.sha256 !== source.resultRef.sha256 || request.acceptedRef.sha256 !== bound?.sha256 || request.candidateDigest !== seal.candidateDigest
+                || canonical(request.findings) !== canonical(owners.get(partitionId))) fail('partition_final_seal_binding', '已派发的全局seal返修缺少精确Native请求及结算')
+            }
           }
           sealRepairSource = { attempt: prior, ...source, locals, owners }
           return sealRepairSource

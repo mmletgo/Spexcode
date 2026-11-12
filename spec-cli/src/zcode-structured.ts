@@ -43,6 +43,7 @@ const bytesDigest = (path: string): string => createHash('sha256').update(readFi
 const sleep = (milliseconds: number): Promise<void> => new Promise(resolve => setTimeout(resolve, milliseconds))
 const active = new Map<string, { interrupt(): void }>()
 const fixedPolicy = (execution: ZCodeStructuredExecution) => execution.policy === 'native-worktree-v1' ? structuredExecutionPolicy(execution) : ({ ...structuredExecutionPolicy(execution), version: execution.timeoutMs === null ? 5 : 4, policy: 'zcode-frozen-read-only-v1' })
+const UNPUBLISHED_ZCODE_LAUNCH = 'ZCode spawned ownership could not be durably published; exact stop is required'
 
 /** 只认证本次精确失败终态；原生正文不进入错误诊断，停止权限仍由既有adapter独立证明。 */
 export class ZCodeNativeTurnFailedError extends StructuredSessionError {
@@ -289,7 +290,7 @@ async function ownedProcessesStopped(plan: NativePlan, terminate = false, deadli
   return stopped
 }
 
-function verifyPlan(plan: NativePlan, root: string, prompt: string | undefined, execution: ZCodeStructuredExecution): void {
+function verifyPlan(plan: NativePlan, root: string, prompt: string | undefined, execution: ZCodeStructuredExecution, unpublishedLaunch = false): void {
   const native = execution.zcodeNative
   const generic = execution.nativeConfiguration === 'cli-config-v1'
   const requested = generic ? zcodeNativeConfigSelection(execution.model, execution.effort) : zcodeNativeSelection(execution.model, execution.effort)
@@ -307,7 +308,7 @@ function verifyPlan(plan: NativePlan, root: string, prompt: string | undefined, 
   if (plan.version !== expectedVersion || native?.version !== plan.version || plan.nativeConfiguration !== execution.nativeConfiguration || !isDeepStrictEqual(plan.toolDenylist, execution.zcodeToolPolicy?.toolDenylist)
     || execution.policy === 'native-worktree-v1' && plan.worktreeProcessBaseline !== 1 || plan.root !== root || native?.root !== root || plan.sessionId !== native.sessionId || plan.inputId !== native.inputId
     || plan.policyDigest !== digest(fixedPolicy(execution)) || prompt !== undefined && plan.requestDigest !== requestDigest(prompt, execution)
-    || !runtimeIdentityValid || !selectionMatches || native.turnId && native.turnId !== plan.turnId || native.pid !== plan.pid || native.receiptFile && native.receiptFile !== plan.receiptFile
+    || !runtimeIdentityValid || !selectionMatches || native.turnId && native.turnId !== plan.turnId || !unpublishedLaunch && native.pid !== plan.pid || native.receiptFile && native.receiptFile !== plan.receiptFile
     || execution.threadId && execution.threadId !== plan.sessionId || execution.turnId && execution.turnId !== plan.turnId)
     throw new StructuredSessionError('stale_result', 'ZCode fixed native plan or durable identity differs')
   if (existsSync(join(root, 'send.json')) && (!plan.modelSnapshotDigest || !existsSync(join(root, 'model-snapshot.json')) || plan.modelSnapshotDigest !== digest(JSON.parse(readFileSync(join(root, 'model-snapshot.json'), 'utf8'))))) throw new StructuredSessionError('stale_result', 'ZCode saved pre-send model selection differs')
@@ -496,14 +497,26 @@ export async function stopZCodeStructuredTurn(execution: ZCodeStructuredExecutio
   const path = join(native.root, 'plan.json')
   if (!existsSync(path)) return { nativeStopped: false, acknowledged: false, error: 'ZCode exact launch plan is missing' }
   const plan = JSON.parse(readFileSync(path, 'utf8')) as NativePlan
-  try { verifyPlan(plan, native.root, undefined, execution) }
+  const unpublishedLaunch = execution.policy === 'native-worktree-v1' && execution.state === 'cancelling' && execution.error === UNPUBLISHED_ZCODE_LAUNCH && execution.turnStartRequested === true
+    && native.pid === undefined && native.receiptFile === undefined && !native.turnId && !plan.turnId && !execution.threadId && !execution.turnId
+    && !existsSync(join(native.root, 'send.json')) && !existsSync(join(native.root, 'terminal.json'))
+  try { verifyPlan(plan, native.root, undefined, execution, unpublishedLaunch) }
   catch { return { nativeStopped: false, acknowledged: false, error: 'ZCode fixed launch policy or native identity differs' } }
   if (!execution.turnStartRequested && !plan.pid) return { nativeStopped: true, acknowledged: false, nativeStatus: 'notStarted' }
-  if (!plan.pid || plan.pid !== native.pid || plan.receiptFile !== native.receiptFile) return { nativeStopped: false, acknowledged: false, error: 'ZCode launch/process identity differs' }
+  if (!plan.pid || !unpublishedLaunch && (plan.pid !== native.pid || plan.receiptFile !== native.receiptFile)) return { nativeStopped: false, acknowledged: false, error: 'ZCode launch/process identity differs' }
+  if (unpublishedLaunch) {
+    const ownedPath = join(native.root, 'owned-processes.json')
+    if (plan.receiptFile !== join(native.root, 'process.json') || !existsSync(ownedPath) || !detachedRuntimeIsGone(plan.pid, plan.receiptFile))
+      return { nativeStopped: false, acknowledged: false, error: 'ZCode unpublished launch has no exact stopped process-group witness' }
+    const receipt = JSON.parse(readFileSync(plan.receiptFile, 'utf8')) as ProcessIdentity
+    const owned = JSON.parse(readFileSync(ownedPath, 'utf8')) as ProcessIdentity[]
+    if (!owned.some(identity => identity.pid === plan.pid && identity.startToken === receipt.startToken.replace(/\s+/g, ' ')))
+      return { nativeStopped: false, acknowledged: false, error: 'ZCode unpublished launch has no captured original leader' }
+  }
   if (Date.now() >= deadline) return { nativeStopped: false, acknowledged: false, error: 'ZCode native stop deadline expired' }
-  const local = active.get(native.root)
+  const local = unpublishedLaunch ? undefined : active.get(native.root)
   if (local) local.interrupt()
-  else if (!detachedRuntimeIsGone(plan.pid, plan.receiptFile)) {
+  else if (!unpublishedLaunch && !detachedRuntimeIsGone(plan.pid, plan.receiptFile)) {
     if (!verifyDetachedRuntime(plan.pid, plan.receiptFile).ok) return { nativeStopped: false, acknowledged: false, error: 'ZCode detached runtime identity is unproven' }
     try { await sampleOwnedProcesses(plan, deadline) }
     catch (error) { if (error instanceof StructuredSessionError && error.code === 'cancellation_pending') return { nativeStopped: false, acknowledged: false, error: error.message }; throw error }
@@ -516,7 +529,7 @@ export async function stopZCodeStructuredTurn(execution: ZCodeStructuredExecutio
     try { const stopped = await ownedProcessesStopped(plan, terminate, deadline); return Date.now() < deadline && stopped }
     catch (error) { if (error instanceof StructuredSessionError && error.code === 'cancellation_pending') return false; throw error }
   }
-  while (Date.now() < deadline && !(await stoppedProcesses(!local))) await sleep(50)
+  while (Date.now() < deadline && !(await stoppedProcesses(!local && !unpublishedLaunch))) await sleep(50)
   const stopped = await stoppedProcesses(), exitPath = join(native.root, 'exit.json')
   const exit = existsSync(exitPath) ? JSON.parse(readFileSync(exitPath, 'utf8')) as StopEvidence : undefined
   return { nativeStopped: stopped, acknowledged: exit?.acknowledged ?? false, nativeStatus: stopped ? 'stopped' : 'unknown', ...(!stopped ? { error: 'ZCode owned app/MCP processes remain unproven' } : {}) }
@@ -583,15 +596,29 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
   const child: ChildProcessWithoutNullStreams = spawn(launch.command, [...launch.args, 'app-server', '--cwd', workspace], { cwd: workspace, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
   child.once('error', () => { launchFailure = new StructuredSessionError('cancellation_pending', 'ZCode native process failed during launch') })
   if (!child.pid) throw new StructuredSessionError('failed', 'ZCode isolated process could not start')
+  const pid = child.pid
+  let launchStartToken: string | undefined
+  const launchStillOwned = (): boolean => {
+    if (!launchStartToken) return false
+    const live = verifyDetachedRuntime(pid, plan.receiptFile)
+    return live.ok && live.identity.startToken === launchStartToken
+  }
   let exited = false
   const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => child.once('close', (code, signal) => { exited = true; resolve({ code, signal }) }))
   try {
-    writeDetachedRuntimeReceipt(child.pid, plan.receiptFile)
-    plan = { ...plan, pid: child.pid }; writeJson(join(root, 'plan.json'), plan); await sampleOwnedProcesses(plan); await callbacks.onNative(native())
+    launchStartToken = writeDetachedRuntimeReceipt(pid, plan.receiptFile).startToken
+    plan = { ...plan, pid }; writeJson(join(root, 'plan.json'), plan)
+    await callbacks.onNative(native())
+    try { await sampleOwnedProcesses(plan) }
+    catch (error) {
+      if (!worktree || !(error instanceof StructuredSessionError) || error.code !== 'cancellation_pending' || callbacks.signal?.aborted
+        || !launchStillOwned()) throw error
+      await sampleOwnedProcesses(plan)
+    }
   } catch {
-    try { process.kill(-child.pid, 'SIGTERM') } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error }
+    if (launchStillOwned()) try { process.kill(-pid, 'SIGTERM') } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error }
     child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy(); child.unref()
-    throw new StructuredSessionError('cancellation_pending', 'ZCode spawned ownership could not be durably published; exact stop is required')
+    throw new StructuredSessionError('cancellation_pending', UNPUBLISHED_ZCODE_LAUNCH)
   }
   let nextId = 0, protocolError: Error | undefined = launchFailure, abortRequested = false, timedOut = false, acknowledged = false, sessionCreated = false, sent = false, closeAcknowledged = false, idle = false
   const pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>()
