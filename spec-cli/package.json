@@ -30,7 +30,7 @@
     "prepublishOnly": "node ../scripts/release-publish.mjs --from-package-publish",
     "serve": "npm run build && node bin/spex.mjs serve",
     "lint": "npm run build && node bin/spex.mjs spec lint",
-    "test": "tsx --import ../scripts/test-home.mjs --test src/*.test.ts"
+    "test": "tsx --import ../scripts/test-home.mjs --test src/*.test.ts src/sync/runtime-freeze.test.ts"
   },
   "dependencies": {
     "@spexcode/archify": "0.7.0",

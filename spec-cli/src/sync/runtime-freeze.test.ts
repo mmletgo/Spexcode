@@ -132,6 +132,24 @@ test('缺失的可选files候选可跳过，真实入口和依赖加载仍闭合
   assert.equal(existsSync(join(root, 'unsafe-files')), false)
 })
 
+test('files 否定排除精确子树和递归匹配，必需入口仍闭合', t => {
+  const root = temporary(t), cli = cliFixture(root), metadata = JSON.parse(readFileSync(join(cli, 'package.json'), 'utf8'))
+  const files = [...metadata.files, '!dist/locales', '!**/.gitattributes', '!dist/debug-*.js', '!bin/spex.mjs']
+  json(cli, { ...metadata, files })
+  const omitted = ['dist/locales/unused.js', 'dist/nested/.gitattributes', 'dist/debug-trace.js']
+  for (const path of omitted) put(cli, path, 'excluded fixture')
+  put(cli, 'dist/nested/published.js', 'published fixture')
+
+  const runtime = freezeDeliveryRuntime(join(root, 'runtime'), cli)
+  const frozen = dirname(dirname(runtime.toolEntry))
+  assert.ok(omitted.every(path => !existsSync(join(frozen, path))))
+  assert.ok(existsSync(join(frozen, 'dist/nested/published.js')))
+  assert.ok(existsSync(join(frozen, 'bin/spex.mjs')))
+
+  json(cli, { ...metadata, files: [...files, '!../outside'] })
+  rejection(() => freezeDeliveryRuntime(join(root, 'unsafe-exclusion'), cli))
+})
+
 test('缺编译入口/模板/依赖及未知workspace发布/exports拒绝，不留已发布目录', t => {
   const root = temporary(t), cli = cliFixture(root), metadata = JSON.parse(readFileSync(join(cli, 'package.json'), 'utf8'))
   for (const broken of [{ ...metadata, files: undefined }, { ...metadata, files: ['**/*.js'] }, { ...metadata, dependencies: { 'missing-runtime-package': '1' } }, { ...metadata, dependencies: { '..': '1' } }, { ...metadata, bin: { spex: 'bin/missing.mjs' } }, { ...metadata, exports: 'outside.js' }]) {
