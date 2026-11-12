@@ -164,26 +164,28 @@ function scanSyncCheckpoints(store: SyncStore, operation: SyncOperation, attempt
     let owner = operation, source = attempt, position = 0
     for (;;) {
       if (!stageResult(owner, source, key, digest, basis)) {
-        if (expandedAt || owner.id !== operation.id) fail('跨重试raw诊断缺少原批准resultRef')
+        if (basis.baselineSelectionRef || owner.id !== operation.id) fail('跨重试raw诊断缺少原批准resultRef')
         const local = stageResult(owner, source, key, digest, null)
         if (!local?.readSetDigest || !local.baselineSelectionRef || !owner.baselineSelection || !expectedComposition || owner.planBlob?.sha256 !== owner.policyDigest) fail('跨重试raw诊断缺少原批准resultRef')
         const before = read<FrozenBaselineSelection>(local.baselineSelectionRef)
         basis = { readSetDigest: local.readSetDigest, baselineSelectionRef: local.baselineSelectionRef }
         const originalScope = read<SyncCoordinatorPlan>(owner.planBlob).executionScope
         const expansion = owner.contractScopeExpansions?.find(item => item.previousBaselineSelectionDigest === before.digest && item.baselineSelectionDigest === owner.baselineSelection!.digest)
-        const seal = expansion && stageResult(owner, source, 'elaboration', expansion.evidenceRef.sha256, basis)
+        const earlierAttempt = source.baselineSelectionDigest === before.digest && expectedComposition.baselineSelectionDigest === before.digest
+        const seal = !earlierAttempt && expansion && stageResult(owner, source, 'elaboration', expansion.evidenceRef.sha256, basis)
         const whole = seal && read<Saved>(seal.resultRef)
         if (!originalScope || !expansion || !isDeepStrictEqual(expansion.paths, owner.scope.paths)
           || !isDeepStrictEqual(expansion.contractIds, owner.scope.contractIds) || !isDeepStrictEqual(expansion.flowIds, owner.scope.flowIds)
-          || source.baselineSelectionDigest !== owner.baselineSelection.digest || !stageResult(owner, source, key, digest, basis)
+          || !stageResult(owner, source, key, digest, basis)) fail('跨重试raw诊断缺少同阶段批准及正式扩域证明')
+        if (!earlierAttempt && (source.baselineSelectionDigest !== owner.baselineSelection.digest
           || !seal || seal.composedTree !== expectedComposition.tree || seal.composedContentDigest !== expectedComposition.contentDigest
-          || !whole?.structurePassed || !whole.reviewPassed || whole.failure || whole.phase !== 'partitioned_final'
-          || !whole.partitionEvidence?.some(member => member.partitionId === saved.partitionBinding!.partitionId && member.resultRef.sha256 === digest)) fail('跨重试raw诊断缺少同阶段批准及正式扩域证明')
+          || !whole || !whole.structurePassed || !whole.reviewPassed || whole.failure || whole.phase !== 'partitioned_final'
+          || !whole.partitionEvidence?.some(member => member.partitionId === saved.partitionBinding!.partitionId && member.resultRef.sha256 === digest))) fail('跨重试raw诊断缺少同阶段批准及正式扩域证明')
         verifyBaselineSelection(owner.input, before)
         if (!extendsWithUninitializedResources(before, owner.baselineSelection)) fail('跨重试raw诊断扩域改变原冻结选择')
         scope = originalScope
         expectedSelection = before.digest
-        expandedAt = source.id
+        if (!earlierAttempt) expandedAt = source.id
       }
       if (owner.id === origin.operationId) {
         if (origin.number >= source.number || !stageResult(owner, origin, key, diagnostic.resultRef.sha256, basis)) fail('跨重试raw诊断缺少原失败resultRef')
@@ -202,7 +204,7 @@ function scanSyncCheckpoints(store: SyncStore, operation: SyncOperation, attempt
           && isDeepStrictEqual(composed.manifestBlob, expectedComposition.manifestBlob) && isDeepStrictEqual(composed.requestBlob, expectedComposition.requestBlob)
         : isDeepStrictEqual(composed, expectedComposition)
       if (previous.operationId !== previousOwner.id || nextPosition === position && previous.number >= source.number || !['failed', 'superseded', 'settled'].includes(previous.status)
-        || (!(expandedAt && previousOwner.id === operation.id) && (previousOwner.readSetDigest !== basis.readSetDigest || !isDeepStrictEqual(previousOwner.scope, scope)))
+        || (!(basis.baselineSelectionRef && previousOwner.id === operation.id) && (previousOwner.readSetDigest !== basis.readSetDigest || !isDeepStrictEqual(previousOwner.scope, scope)))
         || previous.baselineSelectionDigest !== expectedSelection || !unchangedComposition) fail('跨重试raw诊断的原attempt或冻结范围失配')
       expectedComposition = composed
       owner = previousOwner; source = previous; position = nextPosition

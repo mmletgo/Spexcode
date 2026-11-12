@@ -250,6 +250,8 @@ partition_seal反馈不能删除此前已接受的稳定ID，也不能弱化作�
 
 正式复用含原格式拒稿的局部批准后，回归通过原全局 P1 证据扩域并重绑组合。扩域前批准及原文在完整和紧凑读取中保持；缺正式扩域证据和组合树改变均拒绝，读取过程零新增模型调用。
 
+扩域后的历史读取也覆盖尚无全局聚合的早期 attempt。其原 selection 与原组合绑定必须同时匹配记录的扩域起点；绑定漂移仍被拒绝。
+
 真实Git/隔离SQLite与createAttemptRunner受控原生record贯通P1失败保存及正式readCurrentSyncAnalysis、readOperation/detail、readEvidence：语法坏、schema坏和伪stage raw均以untrusted证据可读，legacy flat引用不改，正式cancelled/removed保旧错误仍可读；新wrapper每次发布后即可读取且全部JSON/raw refs保活。后续非elaboration checkpoint嵌套旧repairDiagnostics同样认证；generic failed可读不改续修资格，unknown损坏JSON、伪role和坏canonical packet拒绝。生成成功后review raw失败仍保原generation/candidate/digest，review不升accept；raw正文伪sha不扩BFS可达范围。此证据不冒充真实模型、实际Scene恢复或完整Native协议positive。
 
 旧raw packet只有正文摘要而无ref时，collector不发明CAS pin，正式证据查询仍可读原JSON且缺席raw摘要返回404，读取不改历史记录。

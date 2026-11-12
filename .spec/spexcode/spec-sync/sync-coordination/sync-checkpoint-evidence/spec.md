@@ -25,6 +25,8 @@ code:
 
 已审 P1 扩域后，读取前一阶段的局部批准须核对原 selection、readSet、同阶段全局聚合中的精确局部引用，以及正式 scope expansion 原件。原组合树和正文身份必须保持，新增资源只允许未初始化绑定。同一操作后续 attempt 可沿正式复用引用找到完成扩域的来源。旧拒稿仍按扩域前冻结的 scope、组合与正式复用链认证，不能将扩域后的业务权限赋给原诊断。
 
+早于正式扩域的历史 attempt 保持自己的原 selection 和组合身份。查询历史时以已记录的扩域起点及该 attempt 原绑定验证其局部结果，仍按精确 provenance 和原失败引用回溯。完整聚合要求适用于完成扩域的 attempt；历史局部结果不借用后续聚合的批准。
+
 partitionEvidence容器中的rounds是原局部结果的副本，不能以聚合的inputDigest/failure替原owner认证。读取先核唯一partitionId与原local绑定、完整rounds按引用顺序精确拼接；全局partitioned_final重算同planDigest及各local输入摘要，早退单local容器保原binding/inputDigest。随后仅沿各原resultRef执行既有完整Native强认证；嵌套refinement.prior/repair-input沿同一机制，错ref、错输入、删改重排round或重复owner均显式失败。
 
 同一原Native强认证接缝也供精确code_review格式续审的原result/plan/checkpoint引用读取复用，核原canonical record、请求/schema/prompt/模型、失败身份及停止状态；不新增raw role或平铺pin，不给旧缺席补ref，不解析原文取得stage、accept或业务权限。

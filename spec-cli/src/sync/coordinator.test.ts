@@ -4163,8 +4163,11 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-form
     const rebound = f.store.bindComposedInput(fence, { ...retry.composedInput!, baselineSelectionDigest: expanded.baselineSelection!.digest }, { readSetDigest: expandedReadSet })
     const after = f.store.readOperation(active.id)
     assert.deepEqual(readSyncCheckpoints(f.store, after, rebound).raw.get(rawRef.sha256), packet)
+    assert.deepEqual(readSyncCheckpoints(f.store, after, nextAttempt).raw.get(rawRef.sha256), packet)
     for (const scan of [readSyncCheckpoints, readSyncCheckpointStageIndex]) {
       assert.equal(scan(f.store, after, rebound).raw.has(rawRef.sha256), true)
+      assert.equal(scan(f.store, after, nextAttempt).raw.has(rawRef.sha256), true)
+      assert.throws(() => scan(f.store, after, { ...nextAttempt, baselineSelectionDigest: '0'.repeat(64) }), { code: 'checkpoint_artifact_binding' })
       assert.throws(() => scan(f.store, { ...after, contractScopeExpansions: [] }, rebound), { code: 'checkpoint_artifact_binding' })
       assert.throws(() => scan(f.store, after, { ...rebound, composedInput: { ...rebound.composedInput!, tree: '0'.repeat(40) } }), { code: 'checkpoint_artifact_binding' })
     }
