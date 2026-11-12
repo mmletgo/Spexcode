@@ -239,6 +239,51 @@ test('Tree-sitter extractors reject syntax recovery instead of returning partial
   }
 })
 
+test('TypeScript anchors resolve when the shipped WASM rejects valid property names', async () => {
+  const source = [
+    '/** Generated paths */',
+    'export',
+    'interface paths { route: string; }',
+    'export interface components {',
+    '  Draft: { abstract: string; };',
+    '  Source: { abstract?: string | null; };',
+    '}',
+    'export class Builder {',
+    '  make() {}',
+    '  [method]() {}',
+    '}',
+    'export interface Duplicate {}',
+    'export interface Duplicate {}',
+    '',
+  ].join('\n')
+  for (const extension of ['ts', 'mts', 'cts', 'tsx']) {
+    const filename = `generated/openapi.${extension}`
+    const extractor = treeSitter(extension)
+    const content = extension === 'tsx' ? `${source}export const view = () => <div />;\n` : source
+    const result = await extractCachedBlob(content, filename, extractor, blobShaForContent(content))
+    assert.ok('units' in result, JSON.stringify(result))
+    assert.deepEqual(resolveAnchor(result.units, 'paths'), {
+      ok: { name: 'paths', kind: 'interface', start: 3, end: 3, typeOnly: true },
+    })
+    assert.deepEqual(resolveAnchor(result.units, 'components'), {
+      ok: { name: 'components', kind: 'interface', start: 4, end: 7, typeOnly: true },
+    })
+    assert.deepEqual(resolveAnchor(result.units, 'Builder.make'), {
+      ok: { name: 'Builder.make', kind: 'method', start: 9, end: 9 },
+    })
+    assert.deepEqual(resolveAnchor(result.units, 'Builder.[method]'), {
+      ok: { name: 'Builder.[method]', kind: 'method', start: 10, end: 10 },
+    })
+    assert.deepEqual(resolveAnchor(result.units, 'make'), { dead: true })
+    assert.deepEqual(resolveAnchor(result.units, 'Duplicate'), { ambiguous: 2 })
+    if (extension === 'tsx') assert.deepEqual(resolveAnchor(result.units, 'view'), {
+      ok: { name: 'view', kind: 'const-fn', start: 14, end: 14 },
+    })
+    await assert.rejects(async () => extractor.extract(`${content}export const broken = ;`, filename),
+      /Tree-sitter syntax errors and TypeScript reports [1-9]/)
+  }
+})
+
 test('Tree-sitter parses the current governed TypeScript source before anchor resolution', async () => {
   const x = treeSitter()
   await assert.doesNotReject(async () => {

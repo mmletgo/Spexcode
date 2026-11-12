@@ -21,7 +21,8 @@
   },
   "dependencies": {
     "@babel/parser": "7.29.8",
-    "@vscode/tree-sitter-wasm": "0.3.1"
+    "@vscode/tree-sitter-wasm": "0.3.1",
+    "typescript": "5.9.3"
   },
   "publishConfig": {
     "access": "public"

@@ -31,14 +31,14 @@ depend on directly.
 
 Every runtime package ships its own `dist` and exports JavaScript from that directory. Package builds emit a
 fresh sibling tree and replace `dist` only after the compile succeeds, so development readers never observe a
-partially written artifact. TypeScript, tsx, Vite,
-and esbuild are development/build tools only; an installed user never compiles SpexCode and does not carry
-tsx or esbuild in the default install closure. The CLI package carries its templates and hooks as runtime
+partially written artifact. An installed user runs compiled SpexCode and the default install closure
+omits tsx, Vite, and esbuild. The CLI package carries its templates and hooks as runtime
 assets beside `dist`. Its launcher and all internal self-spawns run compiled entries through Node, so no
 published callback reaches a `src/*.ts` path.
-The full TypeScript compiler is deliberately not runtime cargo: it remains a development dependency for
-SpexCode's own typecheck and JS anchors, while an adopter's optional JS-anchor extractor resolves that
-adopter's TypeScript and fails loud when it is absent ([[code-anchor]]).
+Spec core supplies a pinned TypeScript runtime dependency for its lazy syntax-only retry when the bundled
+TypeScript or TSX WASM grammar rejects a file ([[anchor-extractors]]). The clean production install smoke
+resolves such an anchor with the installed CLI and verifies that extraction never loads the governed
+project's TypeScript module.
 
 **The package-build invariant is shared by every runtime leaf.** A package emits production modules from `src`
 to `dist` with NodeNext resolution and declarations; tests remain development-only; consumers receive the

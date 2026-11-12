@@ -154,7 +154,7 @@ it has always had. Measured on the reference corpus, the two questions differ by
 (52.6 MB) versus 307 (21.9 MB) for the same 858 booleans.
 
 **Where the rest of the engine lives.** The pinned range semantics and image identity behind every hunk read
-are [[hunk-ranges]]'s; the language seam — extractors as data rows over one Tree-sitter runtime, the memo key,
+are [[hunk-ranges]]'s; the language seam — extractor rows, trusted parsers, the memo key,
 the declaration vocabulary — is [[anchor-extractors]]'s; the local ref-scoped gate that judges a pending commit
 before its ref advances is [[candidate-gate]]'s; and the measured bounds on the reference history plus the
 oracle discipline any faster implementation must pass are [[anchor-validation]]'s.
