@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url'
 import { applyComponentMigrations, openProtocol, type SqlParam } from '@spexcode/session-protocol'
 import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
 import { putBlob, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
-import { authenticateNativeRejectedFinal, readSyncCheckpoints, syncCheckpointArtifacts } from './checkpoint-evidence.js'
+import { authenticateNativeRejectedFinal, readSyncCheckpoints, readSyncCheckpointStageIndex, syncCheckpointArtifacts } from './checkpoint-evidence.js'
 import { outputErrors } from './elaboration-schema.js'
 import type { ContractCell, GeneratedElaboration, GeneratedTables } from './elaboration-markdown.js'
 import { sameContractBusinessMeaning } from './contract-evolution.js'
@@ -109,6 +109,13 @@ test('历史checkpoint的相同SHA只解码一次，每次仍核CAS且返回独�
 
   const attempt = attempts[0], resultRef = attempt.checkpointRefs[0].artifacts![0].ref
   const first = readSyncCheckpoints(store, operation, attempt), original = first.json.find(entry => entry.ref.sha256 === resultRef.sha256)!
+  const index = readSyncCheckpointStageIndex(store, operation, attempt)
+  assert.deepEqual(index.json.map(entry => entry.ref.sha256), attempt.checkpointRefs.map(ref => ref.sha256).reverse())
+  assert.ok(index.json.every(({ value }) => (value as { version?: string }).version === 'sync-stage-v1'))
+  assert.equal(index.json.some(entry => entry.ref.sha256 === resultRef.sha256), false)
+  const header = index.json[0].value as { stage: string }
+  header.stage = '调用者污染'
+  assert.equal((readSyncCheckpointStageIndex(store, operation, attempt).json[0].value as { stage: string }).stage, 'history:63')
   const material = original.value as { material: { text: string }[] }
   material.material[0].text = '调用者污染'
   assert.equal((readSyncCheckpoints(store, operation, attempt).json.find(entry => entry.ref.sha256 === resultRef.sha256)!.value as { material: { text: string }[] }).material[0].text, '完整历史材料')
@@ -116,8 +123,33 @@ test('历史checkpoint的相同SHA只解码一次，每次仍核CAS且返回独�
   assert.deepEqual(readSyncCheckpoints(store, operation, next).json, [], '当前refs移除后不得沿旧attempt快照暴露材料')
   const falseRole = { ...writeEvidence(commonDir, { diagnostic: '新role不能借缓存取得认证' }), artifacts: [{ kind: 'untrusted_final' as const, ref: resultRef }] }
   assert.throws(() => readSyncCheckpoints(store, operation, { ...attempt, checkpointRefs: [...attempt.checkpointRefs, falseRole] }), { code: 'checkpoint_artifact_binding' })
+  assert.throws(() => readSyncCheckpointStageIndex(store, operation, { ...attempt, checkpointRefs: [...attempt.checkpointRefs, falseRole] }), { code: 'checkpoint_artifact_binding' })
   writeFileSync(join(commonDir, 'spexcode/evidence', resultRef.sha256), '{"tampered":true}')
   assert.throws(() => readSyncCheckpoints(store, operation, attempt), /证据摘要不匹配/, '命中解码缓存仍逐次核CAS摘要')
+  assert.throws(() => readSyncCheckpointStageIndex(store, operation, attempt), /证据摘要不匹配/, '索引模式仍校验被引用正文')
+})
+
+test('历史checkpoint超过解码缓存上界时继续按原件读取', t => {
+  const commonDir = mkdtempSync(join(tmpdir(), 'checkpoint-decode-bound-'))
+  t.after(() => rmSync(commonDir, { recursive: true, force: true }))
+  const store = {} as SyncStore, operation = { id: 'history-operation', input: { id: 'input', source: { commonDir } }, policyDigest: 'policy' } as SyncOperation
+  const refs = [17, 17, 33].map((mib, index) => writeEvidence(commonDir, { checkpointDecodeBound: index, body: 'x'.repeat(mib * 1024 * 1024) }))
+  const parse = JSON.parse
+  let decodes = 0
+  t.mock.method(JSON, 'parse', (source: string) => {
+    if (source.startsWith('{"checkpointDecodeBound":')) decodes++
+    return parse(source)
+  })
+  const scan = (index: number): void => {
+    const attempt = { id: `history-${index}`, checkpointRefs: [refs[index]] } as SyncAttempt
+    assert.deepEqual(readSyncCheckpointStageIndex(store, operation, attempt).json, [])
+  }
+  scan(0); scan(0)
+  assert.equal(decodes, 1)
+  scan(1); scan(0)
+  assert.equal(decodes, 3, '累计超出上界释放先前解码')
+  scan(2); scan(2)
+  assert.equal(decodes, 5, '单份超出上界仍核验并读取')
 })
 
 test('内部CAS读取不解码JSON，缺失与不合法SHA继续显式拒绝', t => {
@@ -4103,6 +4135,10 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-form
     }
     const copy = readSyncCheckpoints(f.store, current, nextAttempt)
     const stages = copy.json.map(({ value }) => value as { stage?: string; resultRef: BlobRef })
+    const compact = readSyncCheckpointStageIndex(f.store, current, nextAttempt)
+    assert.equal(compact.raw.has(rawRef.sha256), true)
+    assert.deepEqual(compact.json, copy.json.filter(({ ref }) => nextAttempt.checkpointRefs.some(root => root.sha256 === ref.sha256)))
+    assert.equal(compact.json.some(({ ref }) => ref.sha256 === sourceStage.resultRef.sha256), false)
     assert.deepEqual(stages.find(value => value.stage === key)?.resultRef, sourceStage.resultRef)
     const provenance = stages.find(value => value.stage === provenanceKey)!
     assert.deepEqual(JSON.parse(readEvidence(commonDir, provenance.resultRef).toString('utf8')), lineage)
