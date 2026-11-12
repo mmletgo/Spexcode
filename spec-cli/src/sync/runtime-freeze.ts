@@ -54,6 +54,17 @@ function packagePath(path: string): string {
   if (!clean || isAbsolute(clean) || clean.includes('\\') || clean.split('/').some(part => !part || part === '..' || part === '.') || /[\0{}[\]!]/.test(clean)) unsupported('未知或越界发布路径')
   return clean
 }
+function publishedNamePattern(name: string): string {
+  return name.replace(/[.+^$()|\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]')
+}
+
+function publishedExclusion(declaration: string): RegExp {
+  const path = packagePath(declaration.slice(1)), parent = dirname(path), name = basename(path)
+  if (parent !== '**' && /[*?]/.test(parent)) unsupported('未支持的发布排除 glob')
+  const prefix = parent === '**' ? '(?:[^/]+/)*' : parent === '.' ? '' : publishedNamePattern(parent) + '/'
+  return new RegExp('^' + prefix + publishedNamePattern(name) + '(?:/|$)')
+}
+
 function safeParents(root: string, path: string, allowMissing = false): boolean {
   const parts = path.split('/')
   for (let count = 1; count < parts.length; count++) {
@@ -76,7 +87,7 @@ function publishedPaths(root: string, declaration: string, allowMissing = false)
     }
     return [path]
   }
-  const pattern = new RegExp(`^${name.replace(/[.+^$()|\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`)
+  const pattern = new RegExp('^' + publishedNamePattern(name) + '$')
   return readdirSync(join(root, parent)).filter(entry => pattern.test(entry)).sort().map(entry => parent === '.' ? entry : `${parent}/${entry}`)
 }
 const privateMetadata = (path: string): boolean => path.split('/').some(name => ['node_modules', '.git', '.hg', '.svn', '.npmrc', '.yarnrc', '.ssh', '.aws', '.codex', '.claude', '.spex', '.spexcode', '.npm', '.config', '.cache', '.DS_Store', 'auth.json', 'credentials.json', 'credentials', 'package-lock.json', '.package-lock.json', 'npm-debug.log'].includes(name) || name === '.env' || name.startsWith('.env.') || /\.(?:pem|key)$/i.test(name))
@@ -124,9 +135,11 @@ export function freezeDeliveryRuntime(ownedDestination: string, trustedCliPackag
     const packageRoot = (item: Package): string => join(temporaryRoot, 'packages', item.id)
     for (const item of packages.values()) {
       const output = packageRoot(item), copied = new Set<string>()
+      const declarations = item.json.files ?? readdirSync(item.root).sort()
+      const exclusions = item.json.files ? declarations.filter(path => path.startsWith('!')).map(publishedExclusion) : []
       mkdirSync(output, { recursive: true })
-      const copy = (path: string): void => {
-        if (copied.has(path)) return
+      const copy = (path: string, required = false): void => {
+        if (copied.has(path) || (!required && exclusions.some(pattern => pattern.test(path)))) return
         copied.add(path)
         if (privateMetadata(path)) { excluded.push({ packageId: item.id, path, reason: 'private_metadata' }); return }
         safeParents(item.root, path)
@@ -140,16 +153,16 @@ export function freezeDeliveryRuntime(ownedDestination: string, trustedCliPackag
         } else if (stat.isFile()) { copyFileSync(source, target); chmodSync(target, stat.mode & 0o777) }
         else unsupported(`发布 package 含特殊文件: ${path}`)
       }
-      const declarations = item.json.files ?? readdirSync(item.root).sort()
       const bins = typeof item.json.bin === 'string' ? [item.json.bin] : Object.values(item.json.bin ?? {})
       const mandatory = ['package.json', ...(item.json.main ? [item.json.main] : []), ...bins, ...readdirSync(item.root).filter(name => /^(?:readme|licen[cs]e|copying|notice)(?:\.|$)/i.test(name))]
       for (const declaration of declarations) {
+        if (item.json.files && declaration.startsWith('!')) continue
         if (privateMetadata(declaration)) { excluded.push({ packageId: item.id, path: declaration, reason: 'private_metadata' }); continue }
         for (const path of publishedPaths(item.root, declaration, item.json.files !== undefined)) copy(path)
       }
       for (const declaration of mandatory) {
         if (privateMetadata(declaration)) { excluded.push({ packageId: item.id, path: declaration, reason: 'private_metadata' }); continue }
-        for (const path of publishedPaths(item.root, declaration)) copy(path)
+        for (const path of publishedPaths(item.root, declaration)) copy(path, true)
       }
       if (hash(readFileSync(join(output, 'package.json'))) !== item.identity.packageJsonDigest) unsupported('冻结过程中来源 package 元数据已变化')
       for (const declaration of [...(item.json.main ? [item.json.main] : []), ...bins]) if (!lstatSync(join(output, packagePath(declaration)), { throwIfNoEntry: false })?.isFile()) unsupported('声明的 main/bin 不是闭合的普通发布文件')
