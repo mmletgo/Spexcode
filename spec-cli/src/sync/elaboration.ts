@@ -657,8 +657,13 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
   }
   const anchorRepairBrief = anchorRepair ? { kind: 'readonly_v1_anchor', baseInputDigest: anchorRepair.baseInputDigest, candidateDigest: anchorRepair.candidateDigest, generationRef: anchorRepair.generationRef, acceptedRef: anchorRepair.acceptedRef,
     ...(citationRepair ? { applicability: anchorRepair.applicability, findings: [...citationGroups.values()].map(issue => ({ ...issue, itemIds: [...issue.itemIds] })) } : { findings: anchorRepair.findings }),
+    ...(anchorRepair.wholeFileSourcePaths?.length ? { wholeFileSourcePaths: anchorRepair.wholeFileSourcePaths } : {}),
     baselines: anchorBaselines.map(({ nodeId, path, baselineSpecPath }) => ({ nodeId, path, baselineSpecPath })) } : undefined
-  const citationInstructions = '\n只修任务repair.findings中的具体引用。先读对应repair.baselines文件；source只修列出的itemIds，保留原来源类型与所有其他字段。code保持治理文件，related可纠正错误路径。保留每条引用及原粒度，锚点用真实声明的精确Unit.name，不能删除选择器、改为通配符或猜替代。标题、描述、raw、prose、所有业务字段、稳定ID、AC.test及VERIFY保持。源码和测试只读，可按需读取。'
+  const wholeFileRepair = anchorRepair?.wholeFileSourcePaths?.length || anchorRepair?.findings.some(finding => finding.code === 'anchor-selector-required')
+  const citationGranularity = wholeFileRepair
+    ? '保留每条引用。repair.wholeFileSourcePaths 列出的文件已由冻结解析器确认没有命名声明。仅对应的 source 行可在同一路径改为 code:路径，独审核对整个文件确实支持该断言。anchor-selector-required 的 source 在同一路径补实际声明。其余引用保留粒度，用真实声明的精确Unit.name，禁止通配符或猜测。'
+    : '保留每条引用及原粒度，锚点用真实声明的精确Unit.name，不能删除选择器、改为通配符或猜替代。'
+  const citationInstructions = '\n只修任务repair.findings中的具体引用。先读对应repair.baselines文件；source只修列出的itemIds，保留原来源类型与所有其他字段。code保持治理文件，related可纠正错误路径。' + citationGranularity + '标题、描述、raw、prose、所有业务字段、稳定ID、AC.test及VERIFY保持。源码和测试只读，可按需读取。'
   const sealRepair = draftMode && input.worktree && input.readonlySpecRepair?.kind === 'partition_seal' ? partitionSealRepairContext(input) : null
   const sealRepairBrief = sealRepair ? { kind: 'partition_seal', owner: input.partitionBinding, candidateDigest: input.readonlySpecRepair!.candidateDigest, generationRef: input.readonlySpecRepair!.generationRef, acceptedRef: input.readonlySpecRepair!.acceptedRef,
     findings: input.readonlySpecRepair!.findings,
