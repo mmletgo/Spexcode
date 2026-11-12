@@ -335,10 +335,15 @@ export function assertZCodeStoppedDraftSource(prompt: string, execution: ZCodeSt
   verifyPlan(plan, native.root, prompt, execution)
   if (plan.workspace !== worktreePath || !plan.pid || !detachedRuntimeIsGone(plan.pid, plan.receiptFile)) throw new StructuredSessionError('stale_result', 'stopped ZCode draft differs from its exact workspace/process')
   const send = read('send.json'), snapshot = read('model-snapshot.json') as { sessionId: string; model: NativeModel }, events = read('events.json') as NativeEvent[]
+  const terminals = events.filter(event => ['turn.completed', 'turn.failed', 'turn.cancelled'].includes(event.type))
   const completedEventsRpc = isZCodeEventsRpcTimeout(execution)
   let terminal: NativeEvent
   try { terminal = read('terminal.json') as NativeEvent }
-  catch (error) { if (completedEventsRpc && (error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error }
+  catch (error) {
+    const cancelledWithoutTerminal = execution.state === 'cancelled' && execution.errorCode === undefined && !sealed && terminals.length === 0
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT' && (completedEventsRpc || cancelledWithoutTerminal)) return null
+    throw error
+  }
   let exit: StopEvidence
   try { exit = read('exit.json') as StopEvidence }
   catch (error) {
@@ -346,7 +351,7 @@ export function assertZCodeStoppedDraftSource(prompt: string, execution: ZCodeSt
     if (sealed) throw new StructuredSessionError('stale_result', 'ZCode unpublished completion lacks its original exit evidence')
     return null
   }
-  const starts = events.filter(event => event.type === 'turn.started'), terminals = events.filter(event => ['turn.completed', 'turn.failed', 'turn.cancelled'].includes(event.type)), requests = events.filter(event => event.type === 'session.updated')
+  const starts = events.filter(event => event.type === 'turn.started'), requests = events.filter(event => event.type === 'session.updated')
   const nonSuccess = completedEventsRpc && (terminal.type !== 'turn.completed' || terminal.payload.resultType === 'cancelled' && typeof terminal.payload.response === 'string')
   const exitMatches = nonSuccess ? exit.stopped === true && (exit.code === null || Number.isSafeInteger(exit.code) && exit.code >= 0)
     && (exit.signal === null || exit.code === null && typeof exit.signal === 'string' && Object.hasOwn(constants.signals, exit.signal)) : !!exit.stopped && exit.code === 0 && exit.signal === null

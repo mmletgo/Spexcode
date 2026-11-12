@@ -379,6 +379,15 @@ for (const profile of ['cli-config-v1-explicit', 'cli-config-v1-default', 'legac
         assert.throws(() => assertZCodeStoppedDraftSource(prompt, stoppedExecution, workspace), { code: 'ENOENT' }, '缺失plan仍显式失败')
         writeFileSync(planPath, planFileBytes)
         const eventsPath = join(root, 'events.json'), terminalPath = join(root, 'terminal.json'), eventsBytes = readFileSync(eventsPath), terminalBytes = readFileSync(terminalPath)
+        const cancelledExecution: ZCodeStructuredExecution = { ...stoppedExecution, state: 'cancelled' }
+        rmSync(terminalPath)
+        assert.throws(() => assertZCodeStoppedDraftSource(prompt, cancelledExecution, workspace), { code: 'ENOENT' }, '已记录终态却缺失原件仍失败')
+        writeFileSync(eventsPath, JSON.stringify(events.slice(0, -1)))
+        assert.equal(assertZCodeStoppedDraftSource(prompt, cancelledExecution, workspace), null, '已停普通取消没有终态时跳过该材料来源')
+        assert.throws(() => assertZCodeStoppedDraftSource(prompt, stoppedExecution, workspace), { code: 'ENOENT' }, '失败会话仍需原终态')
+        writeFileSync(terminalPath, '{CORRUPT_TERMINAL')
+        assert.throws(() => assertZCodeStoppedDraftSource(prompt, cancelledExecution, workspace), SyntaxError, '已有坏终态仍显式失败')
+        writeFileSync(eventsPath, eventsBytes)
         const cancelled = { ...JSON.parse(terminalBytes.toString('utf8')), type: 'turn.cancelled', payload: { inputId, resultType: 'cancelled', response: '' } }
         writeFileSync(eventsPath, JSON.stringify([...JSON.parse(eventsBytes.toString('utf8')).slice(0, -1), cancelled]))
         writeFileSync(terminalPath, JSON.stringify(cancelled))
