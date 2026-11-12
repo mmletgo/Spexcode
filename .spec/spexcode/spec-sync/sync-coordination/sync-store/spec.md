@@ -28,7 +28,7 @@ bindComposedInput 同时核对 operation.requestBlob 与 composed.requestBlob �
 
 所有结果动作核对 operation/attempt/generation/物理来源/全部资源 lease。范围冲突按实际 paths 与 contractIds/flowIds 检查；独立范围可并行；释放后每资源 generation 不归零。superseded 或过期 fence 拒绝新候选、验证和 beginApply。native 会话创建、Git、blob/文件读取均在事务外，checkpoint 保存 executor runId 对应的内容寻址记录，不另建执行数据库。
 
-assertWriteFence 在同一只读事务复用普通 checkFence 门禁并返回当前 operation/attempt，供等待外部文件锁后的真实副作用入口再次确认完整写权。它不续租、不改变 phase/预算、不采用 finishing 例外；暂停/取消、物理 control、失效/替换 lease、过期和 baseline 绑定仍完整核对。调用者在最后一个 await 后、副作用前复核，并另用既有 publication 门槛确认冻结发布权，不能拿先前的快照代替当前权限。
+assertWriteFence 在同一只读事务复用普通 checkFence 门禁并返回当前 operation/attempt，供等待外部文件锁后的真实副作用入口再次确认完整写权。 围栏在当前事务按精确资源键核对所需租约及冻结选择的覆盖，匹配工作量随资源数线性增长。租约仍须由当前 attempt 持有，冻结选择仍复核实际成对基线。它不续租、不改变 phase/预算、不采用 finishing 例外；暂停/取消、物理 control、失效/替换 lease、过期和 baseline 绑定仍完整核对。调用者在最后一个 await 后、副作用前复核，并另用既有 publication 门槛确认冻结发布权，不能拿先前的快照代替当前权限。
 
 P3冻结恢复只允许未来业务ID扩展；P4已审P1可同时登记真实精确新paths。高层输入尚无未来业务 ID 时，expandContractScope(fence, {contractIds, flowIds}, evidenceRef) 在结构校验及独立评审已通过的内部可信细化结果上登记完整单调 ID 集合。先核证据 blob 的真实 SHA256，再在同一 protocol 事务核当前 run/fence，以既有 path/rule 资源键原子取得新增 ID 租约，并扩展 operation.scope 与可供分区的 readyScope。参数不得含 paths 或其它字段，原业务 ID 不可删除；input/payload/路径授权、generation、预算/截止时间和派发消息不改。冲突整体回滚并保留旧租约；每资源 generation 仍递增且释放不重置。operation 保存可选 contractScopeExpansions 证据记录，精确 ref+集合幂等，同 ref 不同集合拒绝；重复不会派发或计费。retry 通过已有 expanded scope 领取租约，幂等重放仍核当前 fence 与真实持有资源。
 

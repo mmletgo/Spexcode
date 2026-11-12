@@ -1161,8 +1161,15 @@ test('V1真实caller区分投影seed与完整accepted target，VERIFY剔表不�
   const acceptedRef = writeEvidence(f.commonDir, prior), generationRef = writeEvidence(f.commonDir, { candidate })
   const repair: ReadonlySpecRepair = { ...f.repair, candidateDigest: candidate.digest, acceptedRef, generationRef, changes: prior.changes, output: prior.rounds.at(-1)!.output, review: prior.rounds.at(-1)!.review }
   const native = f.run(() => JSON.stringify(f.corrected)), calls = f.requests.length
+  let repairInputDigest: string | undefined
   const result = await elaborateSyncPartitions({ ...input, requestKey: 'v1-caller-repair' }, plan, 1, { load: () => null, save,
     loadReadonlySpecRepair: (_key, _binding, inputDigest) => ({ prior, repair: { ...repair, baseInputDigest: inputDigest } }),
+    loadAcceptedElaboration: (_key, _binding, inputDigest) => { repairInputDigest = inputDigest; return null },
+    loadElaborationDraft: (_key, _binding, _schemaDigest, expectedInputDigest) => {
+      assert.ok(repairInputDigest && repairInputDigest !== prior.inputDigest)
+      assert.equal(expectedInputDigest, repairInputDigest, '已审建规格草稿不能被当作当前只读返修的续稿')
+      return null
+    },
   }, async request => {
     const task = JSON.parse(request.prompt.split('任务:\n')[1].split(request.purpose === 'elaboration_generate' ? '\n失败诊断' : '\n候选范围')[0]) as { repair: { baselines: { baselineSpecPath: string }[] } }
     const entries = readTree(f.commonDir, request.worktree!.tree), baselineEntry = entries.find(entry => entry.path === task.repair.baselines[0].baselineSpecPath)!
