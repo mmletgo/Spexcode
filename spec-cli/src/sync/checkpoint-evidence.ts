@@ -12,7 +12,7 @@ import type { ElaborationResult, ElaborationRound } from './elaboration-types.js
 import type { CodeBehaviorAnalysis } from './writeback-types.js'
 import { extendsWithUninitializedResources, verifyBaselineSelection } from './composition.js'
 import type { SyncCoordinatorPlan } from './coordinator-types.js'
-import type { BlobRef, FrozenBaselineSelection, SyncAttempt, SyncCheckpointRef, SyncOperation } from './operation-types.js'
+import type { BlobRef, ComposedInputRef, FrozenBaselineSelection, SyncAttempt, SyncCheckpointRef, SyncOperation } from './operation-types.js'
 import type { SyncStore } from './store.js'
 
 type Saved = Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>
@@ -41,6 +41,13 @@ export function* retryOperationLineage(store: SyncStore, operation: SyncOperatio
     yield owner
     owner = owner.retryOf ? store.readOperation(owner.retryOf) : null
   }
+}
+
+/** 仅在正式 null 扩域已核实后，允许同一冻结树按新选择重算合成元数据。 */
+export function composedBeforeNullExpansionMatches(before: ComposedInputRef | null, after: ComposedInputRef | null, selectionDigest: string | undefined): boolean {
+  return !!before && !!after && before.sourceInputId === after.sourceInputId && before.previousBaselinePairId === after.previousBaselinePairId
+    && before.tree === after.tree && before.contentDigest === after.contentDigest && before.baselineSelectionDigest === selectionDigest
+    && isDeepStrictEqual(before.manifestBlob, after.manifestBlob) && isDeepStrictEqual(before.requestBlob, after.requestBlob)
 }
 
 type DecodedCheckpoint = { value: unknown } | { error: SyntaxError }
@@ -208,9 +215,7 @@ function scanSyncCheckpoints(store: SyncStore, operation: PhaseOperation, attemp
       const previous = store.readAttempt(proof.fromAttemptId), previousOwner = lineage[nextPosition]
       const composed = previous.composedInput
       const unchangedComposition = source.id === expandedAt
-        ? composed && expectedComposition && composed.sourceInputId === expectedComposition.sourceInputId && composed.previousBaselinePairId === expectedComposition.previousBaselinePairId
-          && composed.tree === expectedComposition.tree && composed.contentDigest === expectedComposition.contentDigest && composed.baselineSelectionDigest === expectedSelection
-          && isDeepStrictEqual(composed.manifestBlob, expectedComposition.manifestBlob) && isDeepStrictEqual(composed.requestBlob, expectedComposition.requestBlob)
+        ? composedBeforeNullExpansionMatches(composed, expectedComposition, expectedSelection)
         : isDeepStrictEqual(composed, expectedComposition)
       if (previous.operationId !== previousOwner.id || nextPosition === position && previous.number >= source.number || !['failed', 'superseded', 'settled'].includes(previous.status)
         || (!(basis.baselineSelectionRef && previousOwner.id === operation.id) && (previousOwner.readSetDigest !== basis.readSetDigest || !isDeepStrictEqual(previousOwner.scope, scope)))

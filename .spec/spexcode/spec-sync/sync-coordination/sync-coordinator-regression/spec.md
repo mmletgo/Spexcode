@@ -16,7 +16,7 @@ related:
 
 ## expanded spec
 
-正式重试回归核对普通 P1 结构诊断不会阻断已审 P0 原件复用。P1 实际使用旧稿时继续校验原 owner、schema 和 Git 引用。
+正式重试回归核对普通 P1 结构诊断不会阻断已审 P0 原件复用。P1 实际使用旧稿时继续校验原 owner、schema 和 Git 引用。 两次正式重试复用的局部批准须可作为只读 V1 返修基线冷验，删除重试关系或当作当前诊断后的新独审均拒绝。
 
 Claude P0暂停/失败与ZCode P1已提交稿经正式close后，在新attempt沿原Native/CAS/owner/schema及source/tests保护面取同一原JSON，继承未批准材料而非从零派发。私有fixture从首个session创建起固定cwd/commonDir；临时恢复后目录再移除，原record/Native文件、checkpoint/resource及archive SHA逐字不变。callback失败、restore后半失败和registry前出现matching checkout的边界由[[sync-native-run-regression]]证明；均不得启动旧Native或改旧批准。
 
