@@ -19,7 +19,7 @@ import { elaborate, hasApprovedElaborationReview, elaborationMaterialContext, fr
 import { outputErrors } from './elaboration-schema.js'
 import type { ElaborationResult, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ElaborationTrace, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ReadonlySpecRepair } from './elaboration-types.js'
 import { claimFileMutex } from './file-mutex.js'
-import { authenticateNativeFailure, authenticateNativeRejectedFinal, readSyncCheckpoints, readSyncCheckpointStageIndex, retryOperationLineage, syncCheckpointArtifacts, withCheckpointStageBasis } from './checkpoint-evidence.js'
+import { authenticateNativeFailure, authenticateNativeRejectedFinal, composedBeforeNullExpansionMatches, readSyncCheckpoints, readSyncCheckpointStageIndex, retryOperationLineage, syncCheckpointArtifacts, withCheckpointStageBasis } from './checkpoint-evidence.js'
 import type { SyncCheckpointStageView } from './checkpoint-evidence.js'
 import type { FileMutex } from './file-mutex.js'
 import { checkGenerationContractIntent, isSyncSpecPath, readFrozenContracts } from './frozen-contracts.js'
@@ -284,11 +284,13 @@ function partitionStage<T>(store: SyncStore, operation: SyncOperation, attempt: 
 }
 
 /** 续修材料仍然未批准；原stage和Native身份由所属operation认证。 */
-function retryDraftSources(store: SyncStore, operation: SyncOperation, attemptNumber: number): { owner: SyncOperation; prior: SyncAttempt }[] {
+function retryDraftSources(store: SyncStore, operation: SyncOperation, attemptNumber: number, stageSelection?: FrozenBaselineSelection): { owner: SyncOperation; prior: SyncAttempt }[] {
   const sources: { owner: SyncOperation; prior: SyncAttempt }[] = []
-  const selection = canonical(store.readBusinessBaselineSelection(operation.id))
+  const selection = canonical(stageSelection ?? store.readBusinessBaselineSelection(operation.id))
   for (const owner of retryOperationLineage(store, operation)) {
-    if (owner.readSetDigest !== operation.readSetDigest || canonical(store.readBusinessBaselineSelection(owner.id)) !== selection || canonical(owner.scope) !== canonical(operation.scope)) break
+    if (owner.readSetDigest !== operation.readSetDigest || canonical(owner.scope) !== canonical(operation.scope)) break
+    const ownerSelection = owner.id === operation.id && stageSelection ? stageSelection : store.readBusinessBaselineSelection(owner.id)
+    if (canonical(ownerSelection) !== selection) break
     sources.push(...store.listAttempts(owner.id).filter(prior => (owner.id !== operation.id || prior.number < attemptNumber) && ['failed', 'superseded', 'settled'].includes(prior.status)).reverse().map(prior => ({ owner, prior })))
   }
   return sources
@@ -548,23 +550,28 @@ function authenticatedApprovedElaboration(store: SyncStore, owner: SyncOperation
 }
 
 /** 复制的局部批准只能沿同一原件回到实际Native派发。 */
-function elaborationDraftGenerationSource(store: SyncStore, owner: SyncOperation, prior: SyncAttempt, key: string, source: { result: SavedElaboration; resultRef: BlobRef }, round: ElaborationResult['rounds'][number], sources: ReturnType<typeof retryDraftSources>, readCheckpoints: (owner: SyncOperation, prior: SyncAttempt) => SyncCheckpointStageView) {
+function elaborationDraftGenerationSource(store: SyncStore, owner: SyncOperation, prior: SyncAttempt, key: string, source: { result: SavedElaboration; resultRef: BlobRef }, round: ElaborationResult['rounds'][number], sources: ReturnType<typeof retryDraftSources>, readCheckpoints: (owner: SyncOperation, prior: SyncAttempt) => SyncCheckpointStageView, basis?: { selection: FrozenBaselineSelection; recomposed: boolean }) {
   const direct = elaborationGenerationSource(store, owner, prior, round)
   if (direct) return { ...direct, ownerId: owner.id }
   const { result, resultRef } = source, binding = result.partitionBinding
   if (!binding || key !== 'partition:' + binding.partitionId + ':elaboration' || !result.structurePassed || !result.reviewPassed || result.failure || round !== result.rounds.at(-1)) return null
   let index = sources.findIndex(item => item.owner.id === owner.id && item.prior.id === prior.id)
   if (index < 0) return null
-  let planRef: string | undefined
+  let planRef: string | undefined, composition = prior.composedInput, recomposed = basis?.recomposed ?? false
+  const selected = basis?.selection.digest ?? prior.baselineSelectionDigest
   for (;;) {
     const origin = sources[index], checkpoints = readCheckpoints(origin.owner, origin.prior)
-    const plan = partitionStage<SyncPartitionPlan>(store, origin.owner, origin.prior, 'partition-plan', undefined, checkpoints)
-    const saved = partitionStage<SavedElaboration>(store, origin.owner, origin.prior, key, undefined, checkpoints)
+    const plan = partitionStage<SyncPartitionPlan>(store, origin.owner, origin.prior, 'partition-plan', basis?.selection, checkpoints)
+    const saved = partitionStage<SavedElaboration>(store, origin.owner, origin.prior, key, basis?.selection, checkpoints)
+    const expandedSource = recomposed && origin.prior.id === prior.id
+    const composed = origin.prior.composedInput
+    const matches = expandedSource || (recomposed ? composedBeforeNullExpansionMatches(composed, composition, selected) : canonical(composed) === canonical(composition))
     if (plan?.result.digest !== binding.planDigest || planRef && plan.resultRef.sha256 !== planRef || saved?.resultRef.sha256 !== resultRef.sha256
-      || canonical(origin.prior.composedInput) !== canonical(prior.composedInput) || origin.prior.baselineSelectionDigest !== prior.baselineSelectionDigest
+      || !matches || !expandedSource && origin.prior.baselineSelectionDigest !== selected
       || origin.owner.id !== owner.id && !settledApprovalSource(store, origin.owner)) return null
+    if (!expandedSource) { composition = composed; recomposed = false }
     planRef = plan.resultRef.sha256
-    const provenance = partitionStage<{ fromOperationId: string; fromAttemptId: string; resultRef: BlobRef }>(store, origin.owner, origin.prior, key + ':provenance', undefined, checkpoints)
+    const provenance = partitionStage<{ fromOperationId: string; fromAttemptId: string; resultRef: BlobRef }>(store, origin.owner, origin.prior, key + ':provenance', basis?.selection, checkpoints)
     if (!provenance) {
       if (!authenticatedApprovedElaboration(store, origin.owner, origin.prior, result, true)) return null
       const generation = elaborationGenerationSource(store, origin.owner, origin.prior, round)
@@ -592,9 +599,15 @@ function elaborationDraftTagged(store: SyncStore, operation: SyncOperation, atte
 function readonlyElaborationHistory(store: SyncStore, operation: SyncOperation, readIndex = (attempt: SyncAttempt) => readSyncCheckpointStageIndex(store, operation, attempt)) {
   const attempts = store.listAttempts(operation.id), commonDir = operation.input.source.commonDir
   const indexes = new Map<string, SyncCheckpointStageView>(), selections = new Map<string, boolean>()
-  const checkpoints = (attempt: SyncAttempt): SyncCheckpointStageView => {
-    if (!indexes.has(attempt.id)) indexes.set(attempt.id, readIndex(attempt))
+  const checkpoints = (attempt: SyncAttempt, owner = operation): SyncCheckpointStageView => {
+    if (!indexes.has(attempt.id)) indexes.set(attempt.id, owner.id === operation.id ? readIndex(attempt) : readSyncCheckpointStageIndex(store, owner, attempt))
     return indexes.get(attempt.id)!
+  }
+  const retrySources = new Map<string, ReturnType<typeof retryDraftSources>>()
+  const inheritedSources = (owner: SyncOperation, attempt: SyncAttempt, selection: FrozenBaselineSelection) => {
+    const key = JSON.stringify([owner.readSetDigest, selection.digest, attempt.number])
+    if (!retrySources.has(key)) retrySources.set(key, retryDraftSources(store, owner, attempt.number + 1, selection))
+    return retrySources.get(key)!
   }
   const matchesSelection = (wrapper: Stage): boolean => {
     const key = JSON.stringify({ readSetDigest: wrapper.readSetDigest, selectionRef: wrapper.baselineSelectionRef?.sha256 })
@@ -628,17 +641,17 @@ function readonlyElaborationHistory(store: SyncStore, operation: SyncOperation, 
     }
     return approvedOwners.get(aggregateRef.sha256)!.has(ref.sha256)
   }
-  return { attempts, checkpoints, read, approved, belongsTo }
+  return { attempts, checkpoints, inheritedSources, read, approved, belongsTo }
 }
 
 /** null资源扩展沿原aggregate门禁；owner仍须逐字绑定其当时批准的同一readSet/selection。 */
-function readonlyLocalSource(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string, resultRef: BlobRef, aggregateRef: BlobRef, history: ReturnType<typeof readonlyElaborationHistory>): { result: SavedElaboration; resultRef: BlobRef } | null {
+function readonlyLocalSource(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string, resultRef: BlobRef, aggregateRef: BlobRef, history: ReturnType<typeof readonlyElaborationHistory>): { result: SavedElaboration; resultRef: BlobRef; wrapper: Stage } | null {
   const result = history.read<SavedElaboration>(attempt, key), commonDir = operation.input.source.commonDir
   if (!result || writeEvidence(commonDir, result).sha256 !== resultRef.sha256) return null
   if (!history.belongsTo(resultRef, aggregateRef)) fail('readonly_spec_repair_binding', '只读owner原件不属于精确选择的已审aggregate')
   const checkpoints = history.checkpoints(attempt)
   const wrapper = checkpoints.json.map(({ value }) => value as Stage).find(value => value.stage === key && value.resultRef?.sha256 === resultRef.sha256)
-  if (wrapper?.readSetDigest && history.approved(resultRef, wrapper)) return { result, resultRef }
+  if (wrapper?.readSetDigest && history.approved(resultRef, wrapper)) return { result, resultRef, wrapper }
   // 失败的续修可以已复制兄弟结果，但复制所在的 readSet 不产生新的全树批准。
   const copied = stage<{ fromOperationId: string; fromAttemptId: string; resultRef: BlobRef }>(store, operation, attempt, `${key}:provenance`, 'evidence', checkpoints)
   const origin = copied?.fromOperationId === operation.id && copied.resultRef.sha256 === resultRef.sha256
@@ -985,11 +998,43 @@ function refinementGeneration(store: SyncStore, operation: SyncOperation, attemp
   return previous
 }
 
-function reviewedReadonlyLocal(store: SyncStore, operation: SyncOperation, sourceAttempt: SyncAttempt, key: string, resultRef: BlobRef, aggregateRef: BlobRef, afterAttemptNumber = 0, history = readonlyElaborationHistory(store, operation)): SavedElaboration {
+function inheritedReadonlyLocal(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string, source: NonNullable<ReturnType<typeof readonlyLocalSource>>, round: ElaborationResult['rounds'][number], history: ReturnType<typeof readonlyElaborationHistory>): boolean {
+  const { wrapper } = source, commonDir = operation.input.source.commonDir
+  if (!operation.retryOf || !operation.baselineSelection || !wrapper.baselineSelectionRef || !wrapper.readSetDigest) return false
+  const selection = JSON.parse(readEvidence(commonDir, wrapper.baselineSelectionRef).toString('utf8')) as FrozenBaselineSelection
+  const composed = attempt.composedInput
+  if (!composed || composed.baselineSelectionDigest !== attempt.baselineSelectionDigest) return false
+  const recomposed = attempt.baselineSelectionDigest !== selection.digest
+  let scope = operation.scope
+  if (selection.digest !== operation.baselineSelection.digest) {
+    if (operation.planBlob?.sha256 !== operation.policyDigest) return false
+    const plan = JSON.parse(readEvidence(commonDir, operation.planBlob).toString('utf8')) as SyncCoordinatorPlan
+    const expansion = operation.contractScopeExpansions?.find(item => item.previousBaselineSelectionDigest === selection.digest && item.baselineSelectionDigest === operation.baselineSelection!.digest)
+    if (!plan.executionScope || !expansion || !extendsWithUninitializedResources(selection, operation.baselineSelection)
+      || canonical(expansion.paths) !== canonical(scope.paths) || canonical(expansion.contractIds) !== canonical(scope.contractIds) || canonical(expansion.flowIds) !== canonical(scope.flowIds)) return false
+    if (recomposed) {
+      const approved = history.read<SavedElaboration>(attempt, 'elaboration')
+      if (attempt.baselineSelectionDigest !== operation.baselineSelection.digest || !approved?.structurePassed || !approved.reviewPassed || approved.failure
+        || writeEvidence(commonDir, approved).sha256 !== expansion.evidenceRef.sha256
+        || !approved.partitionEvidence?.some(owner => owner.partitionId === source.result.partitionBinding?.partitionId && owner.resultRef.sha256 === source.resultRef.sha256)
+        || !elaborationComposedBinding(store, operation, attempt, approved, composed, history.checkpoints(attempt))) return false
+    }
+    scope = { paths: unique(plan.executionScope.paths), contractIds: unique(plan.executionScope.contractIds), flowIds: unique(plan.executionScope.flowIds) }
+  } else if (recomposed) return false
+  const basis = { ...withCheckpointStageBasis(operation, wrapper.readSetDigest, selection), scope }
+  const sources = history.inheritedSources(basis, attempt, selection)
+  return !!elaborationDraftGenerationSource(store, basis, attempt, key, source, round, sources, (owner, prior) => history.checkpoints(prior, owner), { selection, recomposed })
+}
+
+export function reviewedReadonlyLocal(store: SyncStore, operation: SyncOperation, sourceAttempt: SyncAttempt, key: string, resultRef: BlobRef, aggregateRef: BlobRef, afterAttemptNumber = 0, history = readonlyElaborationHistory(store, operation)): SavedElaboration {
   const source = readonlyLocalSource(store, operation, sourceAttempt, key, resultRef, aggregateRef, history)
   const prior = source?.result, round = prior?.rounds.at(-1)
   const generationTrace = round?.traces.find(trace => trace.purpose === 'elaboration_generate'), reviewTrace = round?.traces.find(trace => trace.purpose === 'elaboration_review')
-  if (!prior || !round || !elaborationGenerationSource(store, operation, sourceAttempt, round) || source.resultRef.sha256 !== resultRef.sha256 || !prior.structurePassed || !prior.reviewPassed || prior.failure || !hasApprovedElaborationReview(prior) || round.review!.inputDigest !== prior.inputDigest || round.review!.candidateDigest !== prior.candidateDigest || round.traces.length !== 2 || !generationTrace || !reviewTrace || generationTrace.sessionId === reviewTrace.sessionId || generationTrace.threadId === reviewTrace.threadId || generationTrace.resultDigest !== contentHash(JSON.stringify(round.output)) || reviewTrace.resultDigest !== contentHash(JSON.stringify(round.reviewOutput)) || !history.attempts.some(attempt => attempt.number > afterAttemptNumber && attempt.dispatchPlans.some(dispatch => dispatch.purpose === reviewTrace.purpose && dispatch.session?.sessionId === reviewTrace.sessionId && dispatch.session.threadId === reviewTrace.threadId && dispatch.session.turnId === reviewTrace.turnId) && readSyncCheckpoints(store, operation, attempt).json.some(({ ref }) => ref.sha256 === resultRef.sha256))) fail('readonly_spec_repair_binding', '只读V1 owner原件、完整输入或独审派发绑定失配')
+  const reject = (): never => fail('readonly_spec_repair_binding', '只读V1 owner原件、完整输入或独审派发绑定失配')
+  if (!source || !prior || !round || source.resultRef.sha256 !== resultRef.sha256 || !prior.structurePassed || !prior.reviewPassed || prior.failure || !hasApprovedElaborationReview(prior) || round.review!.inputDigest !== prior.inputDigest || round.review!.candidateDigest !== prior.candidateDigest || round.traces.length !== 2 || !generationTrace || !reviewTrace || generationTrace.sessionId === reviewTrace.sessionId || generationTrace.threadId === reviewTrace.threadId || generationTrace.resultDigest !== contentHash(JSON.stringify(round.output)) || reviewTrace.resultDigest !== contentHash(JSON.stringify(round.reviewOutput))) return reject()
+  const generated = elaborationGenerationSource(store, operation, sourceAttempt, round)
+  if (!generated && afterAttemptNumber === 0 && inheritedReadonlyLocal(store, operation, sourceAttempt, key, source, round, history)) return prior
+  if (!generated || !history.attempts.some(attempt => attempt.number > afterAttemptNumber && attempt.dispatchPlans.some(dispatch => dispatch.purpose === reviewTrace.purpose && dispatch.session?.sessionId === reviewTrace.sessionId && dispatch.session.threadId === reviewTrace.threadId && dispatch.session.turnId === reviewTrace.turnId) && readSyncCheckpoints(store, operation, attempt).json.some(({ ref }) => ref.sha256 === resultRef.sha256))) return reject()
   return prior
 }
 

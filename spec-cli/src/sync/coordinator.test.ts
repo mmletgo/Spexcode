@@ -7288,6 +7288,7 @@ for (const parentSeed of [false, true]) for (const defect of parentSeed ? ['none
   const f = await fixture(t, { maxAttempts: sealRepair ? 2 : 1, maxCalls: 24, maxRepairs: sealRepair ? 1 : 0, timeoutMs: 180_000 }, false, rawOnly(original), 'project', original, {
     version: 'sync-coordinator-v2', direction: 'spec_to_code', agentWorkflow: 'native-worktree-v1', intentNodeId: parentSeed ? 'project' : 'export-contract', sourcePaths: ['src'], verifications, mandatoryTests,
     targets: [...(parentSeed ? [{ nodeId: 'project', path: parentPath, rawSource: raw }] : []), { nodeId: 'export-contract', path: contractPath }, { nodeId: 'import-contract', path: importPath }],
+    ...(!parentSeed ? { executionScope: { paths: [contractPath, importPath], contractIds: [], flowIds: [] } } : {}),
     partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 },
   }, undefined, 'spec', 'claude:MiniMax-M3.1-Flash', true, { ...(parentSeed ? { [parentPath]: parent } : {}), [importPath]: rawOnly(other), 'src/beta/import.js': readFileSync(new URL('src/export.js', fixturePath), 'utf8'), 'tests/import.test.mjs': readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', 'IMPORT').replaceAll('src/export.js', 'src/beta/import.js') })
   let store = f.store, active = f.operation, approvedLeaf = '', retryRound = 0
@@ -7478,6 +7479,16 @@ for (const parentSeed of [false, true]) for (const defect of parentSeed ? ['none
   if (defect === 'newer-review') assert.equal(continued[0].nodeId, 'project', '同owner较新的真实业务repair不得被更早accept遮蔽')
   assert.ok(continued.every(call => call.model === active.model))
   assert.equal(third.failure?.message, '完整P1已重新封口', JSON.stringify(third.failure))
+  if (!parentSeed) {
+    const attempt = store.readAttempt(third.operation.currentAttemptId!)
+    const final = stages(third.operation, attempt).find(stage => stage.stage === 'elaboration')!
+    const local = approved.find(stage => (JSON.parse(readEvidence(commonDir, stage.resultRef).toString()) as ElaborationResult).changes.some(change => change.nodeId === approvedLeaf))!
+    const authenticate = (operation: SyncOperation, after = 0) => continuationCoordinator.reviewedReadonlyLocal(store, operation, attempt, local.stage!, local.resultRef, final.resultRef, after)
+    assert.equal(contentHash(JSON.stringify(authenticate(third.operation))), local.resultRef.sha256)
+    assert.throws(() => authenticate(third.operation, 1), /readonly_spec_repair_binding/)
+    assert.throws(() => authenticate({ ...third.operation, retryOf: undefined }), /readonly_spec_repair_binding/)
+    assert.throws(() => authenticate({ ...third.operation, contractScopeExpansions: [] }), /readonly_spec_repair_binding/)
+  }
   assert.deepEqual(store.listRecoverableResources(), [])
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
