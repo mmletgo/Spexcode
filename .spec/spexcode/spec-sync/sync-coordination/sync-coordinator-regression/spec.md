@@ -244,6 +244,8 @@ candidate-present控制桥回归先以真实Git/私有SQLite生成FLOW.req误引
 
 partition_seal反馈不能删除此前已接受的稳定ID，也不能弱化作者既有AC：两种负例仍在新独审前被原结构/授权门拒绝，源码及外部oracle字节保持。
 
+正式重试等待已结算的封口来源时收到取消，保持暂停状态，零新预留、零新派发、零新封口返修来源写入。旧封口和局部原件仍可供之后正式重试。
+
 真实Git/隔离SQLite与createAttemptRunner受控原生record贯通P1失败保存及正式readCurrentSyncAnalysis、readOperation/detail、readEvidence：语法坏、schema坏和伪stage raw均以untrusted证据可读，legacy flat引用不改，正式cancelled/removed保旧错误仍可读；新wrapper每次发布后即可读取且全部JSON/raw refs保活。后续非elaboration checkpoint嵌套旧repairDiagnostics同样认证；generic failed可读不改续修资格，unknown损坏JSON、伪role和坏canonical packet拒绝。生成成功后review raw失败仍保原generation/candidate/digest，review不升accept；raw正文伪sha不扩BFS可达范围。此证据不冒充真实模型、实际Scene恢复或完整Native协议positive。
 
 旧raw packet只有正文摘要而无ref时，collector不发明CAS pin，正式证据查询仍可读原JSON且缺席raw摘要返回404，读取不改历史记录。

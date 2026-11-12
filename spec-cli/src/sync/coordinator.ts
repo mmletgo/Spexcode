@@ -263,9 +263,9 @@ function readonlyRepairBinding(store: SyncStore, operation: SyncOperation, attem
   return null
 }
 type ElaborationComposedBinding = { composedTree: string; composedContentDigest: string }
-function elaborationComposedBinding(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, result: SavedElaboration, composed: ComposedInputRef): ElaborationComposedBinding | null {
+function elaborationComposedBinding(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, result: SavedElaboration, composed: ComposedInputRef, checkpoints: SyncCheckpointStageView = readSyncCheckpoints(store, operation, attempt)): ElaborationComposedBinding | null {
   const resultDigest = contentHash(JSON.stringify(result))
-  const original = readSyncCheckpoints(store, operation, attempt).json.map(({ value }) => value as Partial<Stage>)
+  const original = checkpoints.json.map(({ value }) => value as Partial<Stage>)
     .find(value => value.version === 'sync-stage-v1' && value.stage === 'elaboration' && value.operationId === operation.id && value.attemptId === attempt.id && value.inputId === operation.input.id && value.policyDigest === operation.policyDigest && value.resultRef?.sha256 === resultDigest && stageSelectionMatches(store, operation, value as Stage))
   return original?.composedTree === composed.tree && original.composedContentDigest === composed.contentDigest
     ? { composedTree: original.composedTree, composedContentDigest: original.composedContentDigest } : null
@@ -551,7 +551,7 @@ function authenticatedApprovedElaboration(store: SyncStore, owner: SyncOperation
 }
 
 /** 复制的局部批准只能沿同一原件回到实际Native派发。 */
-function elaborationDraftGenerationSource(store: SyncStore, owner: SyncOperation, prior: SyncAttempt, key: string, source: { result: SavedElaboration; resultRef: BlobRef }, round: ElaborationResult['rounds'][number], sources: ReturnType<typeof retryDraftSources>) {
+function elaborationDraftGenerationSource(store: SyncStore, owner: SyncOperation, prior: SyncAttempt, key: string, source: { result: SavedElaboration; resultRef: BlobRef }, round: ElaborationResult['rounds'][number], sources: ReturnType<typeof retryDraftSources>, readCheckpoints: (owner: SyncOperation, prior: SyncAttempt) => SyncCheckpointStageView) {
   const direct = elaborationGenerationSource(store, owner, prior, round)
   if (direct) return { ...direct, ownerId: owner.id }
   const { result, resultRef } = source, binding = result.partitionBinding
@@ -560,7 +560,7 @@ function elaborationDraftGenerationSource(store: SyncStore, owner: SyncOperation
   if (index < 0) return null
   let planRef: string | undefined
   for (;;) {
-    const origin = sources[index], checkpoints = readSyncCheckpointStageIndex(store, origin.owner, origin.prior)
+    const origin = sources[index], checkpoints = readCheckpoints(origin.owner, origin.prior)
     const plan = partitionStage<SyncPartitionPlan>(store, origin.owner, origin.prior, 'partition-plan', undefined, checkpoints)
     const saved = partitionStage<SavedElaboration>(store, origin.owner, origin.prior, key, undefined, checkpoints)
     if (plan?.result.digest !== binding.planDigest || planRef && plan.resultRef.sha256 !== planRef || saved?.resultRef.sha256 !== resultRef.sha256
@@ -1797,10 +1797,17 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         }
         return null
       }
+      const historicalStageIndexes = new Map<string, SyncCheckpointStageView>()
+      const historyCheckpoints = (owner: SyncOperation, prior: SyncAttempt): SyncCheckpointStageView => {
+        const checkpoints = historicalStageIndexes.get(prior.id) ?? readSyncCheckpointStageIndex(store, owner, prior)
+        historicalStageIndexes.set(prior.id, checkpoints)
+        return checkpoints
+      }
       const draftMaterialStage = (owner: SyncOperation, prior: SyncAttempt, key: string): { result: SavedElaboration; resultRef: BlobRef } | null => {
-        const exact = partitionStage<SavedElaboration>(store, owner, prior, key)
+        const checkpoints = historyCheckpoints(owner, prior)
+        const exact = partitionStage<SavedElaboration>(store, owner, prior, key, undefined, checkpoints)
         if (exact || !owner.baselineSelection || owner.id !== operation.id) return exact
-        const result = stage<SavedElaboration>(store, owner, prior, key)
+        const result = stage<SavedElaboration>(store, owner, prior, key, 'automatic', checkpoints)
         return result ? { result, resultRef: writeEvidence(operation.input.source.commonDir, result) } : null
       }
       const loadElaborationDraft = (key: string, binding?: NonNullable<ElaborationResult['partitionBinding']>, schemaDigest?: string): ElaborationDraft | null => {
@@ -1810,9 +1817,9 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           if (!source || source.result.phase === 'partitioned_final' || source.result.partitionBinding?.partitionId !== binding?.partitionId) continue
           for (const round of [...source.result.rounds].reverse()) {
             const draft = round.draft
-            if (!draft || owner.id !== operation.id && (!schemaDigest || draft.schemaDigest !== schemaDigest || binding && (source.result.partitionBinding?.planDigest !== binding.planDigest || partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan')?.result.digest !== binding.planDigest))) continue
+            if (!draft || owner.id !== operation.id && (!schemaDigest || draft.schemaDigest !== schemaDigest || binding && (source.result.partitionBinding?.planDigest !== binding.planDigest || partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan', undefined, historyCheckpoints(owner, prior))?.result.digest !== binding.planDigest))) continue
             const generation = round.candidate
-              ? elaborationDraftGenerationSource(store, owner, prior, key, source, round, sources)
+              ? elaborationDraftGenerationSource(store, owner, prior, key, source, round, sources, historyCheckpoints)
               : authenticatedDraftResult(store, owner, prior, `sync:${prior.id}:elaborate${binding ? `:partition:${binding.partitionId}` : ''}:${round.index}:elaboration_generate`, 'elaboration_generate', draft)
             if (round.candidate && !generation) fail('review_retry_binding', '已生成P1候选的原Native生成身份失配，不能回退为重新生成')
             if (!generation) continue
@@ -1825,7 +1832,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       }
       const assertMaterialFence = (): void => {
         const current = store.readOperation(operation.id), active = store.readAttempt(attempt!.id)
-        if (current.control !== 'run' || current.currentAttemptId !== active.id || current.generation !== fence!.generation || active.generation !== fence!.generation || active.leaseToken !== fence!.leaseToken || ['failed', 'superseded', 'settled'].includes(active.status) || active.expiresAtMs <= Date.now() || store.readPhysicalControl(current.input.source).control !== 'run') fail('cancelled', '新草稿材料观察已失去当前运行fence')
+        if (signal.aborted || current.control !== 'run' || current.currentAttemptId !== active.id || current.generation !== fence!.generation || active.generation !== fence!.generation || active.leaseToken !== fence!.leaseToken || ['failed', 'superseded', 'settled'].includes(active.status) || active.expiresAtMs <= Date.now() || store.readPhysicalControl(current.input.source).control !== 'run') fail('cancelled', '新草稿材料观察已失去当前运行fence')
       }
       let materialCheckpoints: ReturnType<typeof readSyncCheckpoints> | undefined
       const loadElaborationDraftMaterial = async (key: string, binding?: NonNullable<ElaborationResult['partitionBinding']>, schemaDigest?: string, request?: StageDraftMaterialRequest): Promise<ElaborationDraftMaterial | null> => {
@@ -1844,14 +1851,16 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         }
         const sources = retryDraftSources(store, operation, attempt!.number), existingDraft = request?.existingDraft
         const identity = ({ errors: _errors, ...draft }: ElaborationDraft) => canonical(draft)
-        const existingOrigin = existingDraft ? (() => {
+        const existingOrigin = existingDraft ? await (async () => {
           for (const { owner, prior } of sources) {
+            await yieldToControl()
+            assertMaterialFence()
             const source = draftMaterialStage(owner, prior, key)
             if (!source || source.result.partitionBinding?.partitionId !== binding?.partitionId) continue
             for (const round of [...source.result.rounds].reverse()) {
               if (!round.draft || identity(round.draft) !== identity(existingDraft)) continue
               const dispatchKey = `sync:${prior.id}:elaborate${binding ? `:partition:${binding.partitionId}` : ''}:${round.index}:elaboration_generate`
-              const generation = round.candidate ? elaborationDraftGenerationSource(store, owner, prior, key, source, round, sources) : authenticatedDraftResult(store, owner, prior, dispatchKey, 'elaboration_generate', round.draft) ? { attempt: prior, key: dispatchKey, ownerId: owner.id } : null
+              const generation = round.candidate ? elaborationDraftGenerationSource(store, owner, prior, key, source, round, sources, historyCheckpoints) : authenticatedDraftResult(store, owner, prior, dispatchKey, 'elaboration_generate', round.draft) ? { attempt: prior, key: dispatchKey, ownerId: owner.id } : null
               if (!generation) continue
               const sourceIndex = sources.findIndex(item => item.owner.id === generation.ownerId && item.prior.id === generation.attempt.id), roundIndex = /:(\d+):elaboration_generate$/.exec(generation.key)?.[1]
               if (sourceIndex >= 0 && roundIndex !== undefined) return { sourceIndex, roundIndex: Number(roundIndex) }
@@ -1860,10 +1869,13 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           return null
         })() : null
         for (const [sourceIndex, { owner, prior }] of sources.entries()) {
+          await yieldToControl()
+          assertMaterialFence()
+          const checkpoints = historyCheckpoints(owner, prior)
           const source = draftMaterialStage(owner, prior, key), round = source?.result.rounds.at(-1)
           if (!source || !round || source.result.phase === 'partitioned_final' || source.result.partitionBinding?.partitionId !== binding?.partitionId) continue
           if (existingDraft && (!existingOrigin || sourceIndex > existingOrigin.sourceIndex || sourceIndex === existingOrigin.sourceIndex && round.index <= existingOrigin.roundIndex)) continue
-          if (request && schemaDigest === request.binding.schemaDigest && (!binding || source.result.partitionBinding?.planDigest === binding.planDigest && partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan')?.result.digest === binding.planDigest) && !round.draft && (owner.id !== operation.id || priorElaborationInputMatches(prior, binding))) {
+          if (request && schemaDigest === request.binding.schemaDigest && (!binding || source.result.partitionBinding?.planDigest === binding.planDigest && partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan', undefined, checkpoints)?.result.digest === binding.planDigest) && !round.draft && (owner.id !== operation.id || priorElaborationInputMatches(prior, binding, operation, checkpoints))) {
             const requestKey = `sync:${prior.id}:elaborate${binding ? `:partition:${binding.partitionId}` : ''}:${round.index}:elaboration_generate`, resource = store.findResource(prior.id, requestKey)
             if (resource?.phase === 'removed' && resource.plan.inputId === operation.input.id) {
               const native = JSON.parse(readEvidence(operation.input.source.commonDir, resource.plan.planBlob).toString()) as NativeRunPlan
@@ -1883,6 +1895,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
                     if (zcode && failed === null) { skipSource = true; return null }
                     if (!zcode) assertClaudeStoppedDraftSource(prompt, state, proof.record.worktreePath)
                     assertMaterialFence()
+                    store.assertWriteFence(fence!)
                     const physical = readStoppedPhysicalDraft(commonDir, proof.record.worktreePath, native.request.worktree!, request.binding, { allowCommitted })
                     if (physical && (!completedEventsRpc || physical.committedOid)) {
                       if (zcode && !failed) fail('stale_result', 'ZCode物理细化草稿没有原精确失败终态')
@@ -1905,7 +1918,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
               }
             }
           }
-          if (existingDraft || round.draft || stage<{ version: string }>(store, owner, prior, 'elaboration-draft-protocol')?.version === 'elaboration-draft-v1') continue
+          if (existingDraft || round.draft || stage<{ version: string }>(store, owner, prior, 'elaboration-draft-protocol', 'automatic', checkpoints)?.version === 'elaboration-draft-v1') continue
           const rejectedGeneration = round.rejectedOutput?.purpose === 'elaboration_generate' ? round.rejectedOutput : undefined
           const rejectedReview = round.rejectedOutput?.purpose === 'elaboration_review' ? round.rejectedOutput : undefined
           const version = (round.output as { version?: unknown } | null)?.version
@@ -1913,7 +1926,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           if (text === undefined) continue
           let nativeMaterial: { nativePlanRef: BlobRef; checkpointRef: BlobRef; sourceKind: 'native_output' | 'native_rejected' } | undefined
           if (owner.id !== operation.id) {
-            if (!schemaDigest || binding && (source.result.partitionBinding?.planDigest !== binding.planDigest || partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan')?.result.digest !== binding.planDigest)) continue
+            if (!schemaDigest || binding && (source.result.partitionBinding?.planDigest !== binding.planDigest || partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan', undefined, checkpoints)?.result.digest !== binding.planDigest)) continue
             const requestKey = `sync:${prior.id}:elaborate${binding ? `:partition:${binding.partitionId}` : ''}:${round.index}:elaboration_generate`, resource = store.findResource(prior.id, requestKey)
             if (!resource) continue
             const native = JSON.parse(readEvidence(operation.input.source.commonDir, resource.plan.planBlob).toString()) as NativeRunPlan
@@ -2003,21 +2016,20 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         return null
       }
       type SealRepairSource = { attempt: SyncAttempt; result: SavedElaboration; resultRef: BlobRef; locals: Map<string, { result: SavedElaboration; resultRef: BlobRef }>; owners: Map<string, ContractFinding[]> }
-      let sealRepairSource: SealRepairSource | null | undefined
-      const loadSealRepairSource = (): SealRepairSource | null => {
-        if (sealRepairSource !== undefined) return sealRepairSource
-        sealRepairSource = null
+      const findSealRepairSource = async (): Promise<SealRepairSource | null> => {
         if (!partitions) return null
         const current = store.listAttempts(operation.id).filter(item => item.number < attempt!.number).reverse().map(prior => ({ owner: operation, prior }))
         const ancestors = operation.retryOf ? retryDraftSources(store, operation, attempt!.number).filter(({ owner }) => owner.id !== operation.id) : []
         const suffix = ':elaboration:readonly-repair-provenance'
         const interrupted: { owner: SyncOperation; prior: SyncAttempt; checkpoints: SyncCheckpointStageView; anchors: SyncCheckpointStageView['json'] }[] = []
         for (const { owner, prior } of [...current, ...ancestors]) {
+          await yieldToControl()
+          assertMaterialFence()
           const crossOperation = owner.id !== operation.id, repairable = prior.failure?.kind === 'repairable' || prior.status === 'superseded' && !prior.failure
           if (!['failed', 'superseded', 'settled'].includes(prior.status) || crossOperation && !settledApprovalSource(store, owner)) return null
           if (!repairable && !crossOperation) return null
           if (prior.status === 'superseded' && !prior.failure && !prior.checkpointRefs.length && !prior.dispatchPlans.length && prior.composedInput === null && prior.candidate === null && prior.verification === null && prior.currentSession === null && prior.publicationBase === undefined && prior.baselineSelectionDigest === operation.baselineSelection?.digest) continue
-          const checkpoints = readSyncCheckpointStageIndex(store, owner, prior)
+          const checkpoints = historyCheckpoints(owner, prior)
           const plan = partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan', undefined, checkpoints)
           if (!plan || canonical(plan.result) !== canonical(partitions) || !priorElaborationInputMatches(prior, { planDigest: partitions.digest, partitionId: '', ...(analysis ? { analysisRef: analysis.ref } : {}) }, owner, checkpoints)) return null
           const source = partitionStage<SavedElaboration>(store, owner, prior, 'elaboration', undefined, checkpoints)
@@ -2038,10 +2050,12 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           }
           if (crossOperation && (prior.failure?.code !== 'partition_final_seal_failed' || !prior.failure.evidenceRefs.some(ref => ref.sha256 === source.resultRef.sha256))) fail('partition_final_seal_binding', '跨操作返修必须引用原正式失败的精确全局seal')
           const result = source.result, seal = result.partitionSeal
-          if (result.phase !== 'partitioned_final' || result.structurePassed || !result.reviewPassed || !seal || seal.passed || result.candidateDigest !== seal.candidateDigest || !elaborationComposedBinding(store, owner, prior, result, view.composed)
+          if (result.phase !== 'partitioned_final' || result.structurePassed || !result.reviewPassed || !seal || seal.passed || result.candidateDigest !== seal.candidateDigest || !elaborationComposedBinding(store, owner, prior, result, view.composed, checkpoints)
             || seal.candidateDigest !== contentHash(JSON.stringify({ inputDigest: seal.inputDigest, changes: seal.changes, applicability: seal.applicability, nodeChanges: seal.nodeChanges }))) fail('partition_final_seal_binding', '全局seal诊断缺少原失败候选及精确组合树绑定')
           const locals = new Map<string, { result: SavedElaboration; resultRef: BlobRef }>()
           for (const member of result.partitionEvidence ?? []) {
+            await yieldToControl()
+            assertMaterialFence()
             const local = partitionStage<SavedElaboration>(store, owner, prior, `partition:${member.partitionId}:elaboration`, undefined, checkpoints)
             if (!local || local.resultRef.sha256 !== member.resultRef.sha256 || local.result.partitionBinding?.planDigest !== partitions.digest || local.result.partitionBinding.partitionId !== member.partitionId || !local.result.structurePassed || !local.result.reviewPassed || local.result.failure || local.result.rounds.at(-1)?.review?.verdict !== 'accept' || locals.has(member.partitionId)) fail('partition_final_seal_binding', '全局seal诊断缺少同计划真实已审局部原件')
             const round = local.result.rounds.at(-1)!
@@ -2052,6 +2066,8 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           const owners = partitionSealRepairOwners(partitions, result, new Map([...locals].map(([id, local]) => [id, local.result])))
           if (!owners.size) fail('partition_final_seal_unroutable', '失败全局seal没有可反馈的真实error')
           for (const interruption of interrupted) {
+            await yieldToControl()
+            assertMaterialFence()
             const anchors = new Map<string, BlobRef>()
             for (const entry of interruption.anchors) {
               const key = (entry.value as Stage).stage, partitionId = key.slice('partition:'.length, -suffix.length)
@@ -2071,11 +2087,12 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
                 || canonical(request.findings) !== canonical(owners.get(partitionId))) fail('partition_final_seal_binding', '已派发的全局seal返修缺少精确Native请求及结算')
             }
           }
-          sealRepairSource = { attempt: prior, ...source, locals, owners }
-          return sealRepairSource
+          return { attempt: prior, ...source, locals, owners }
         }
         return null
       }
+      let sealRepairSource: ReturnType<typeof findSealRepairSource> | undefined
+      const loadSealRepairSource = () => sealRepairSource ??= findSealRepairSource()
       let p0StatusOnly = false
       const storedPartitionFailure = ({ error: _error, ...item }: PartitionAnalysisFailure) => p0StatusOnly ? { ...item, message: CODE_BEHAVIOR_FAILURE_STATUS } : item
       const loadBehaviorDraftMaterial = async (key: string, purpose: string, schemaDigest: string, inputDigest: string, request: CodeBehaviorMaterialRequest, planDigest?: string, existingDraft?: ElaborationDraft): Promise<ElaborationDraftMaterial | null> => {
@@ -2278,12 +2295,6 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       let elaborationApprovalSources: ReturnType<typeof retryDraftSources> | undefined
       const settledApprovalOperations = new Map<string, boolean>()
       const elaborationApprovalDiagnostics = new Map<string, Set<string>>()
-      const approvalHistory = new Map<string, SyncCheckpointStageView>()
-      const approvalCheckpoints = (owner: SyncOperation, origin: SyncAttempt): SyncCheckpointStageView => {
-        const original = approvalHistory.get(origin.id) ?? readSyncCheckpointStageIndex(store, owner, origin)
-        approvalHistory.set(origin.id, original)
-        return original
-      }
       const loadAcceptedRetryElaboration = (key: string, binding: NonNullable<ElaborationResult['partitionBinding']>, inputDigest: string, interfaceSeed: boolean): SavedElaboration | null => {
         if (!operation.retryOf) return null
         elaborationApprovalSources ??= retryDraftSources(store, operation, attempt!.number)
@@ -2293,7 +2304,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
             if (!settledApprovalOperations.get(owner.id)) return null
           }
           if (canonical(prior.composedInput) !== canonical(view.composed)) continue
-          const checkpoints = approvalCheckpoints(owner, prior), plan = partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan', undefined, checkpoints)
+          const checkpoints = historyCheckpoints(owner, prior), plan = partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan', undefined, checkpoints)
           if (plan?.result.digest !== binding.planDigest || canonical(plan.result) !== canonical(partitions)) continue
           if (stage<Refinement>(store, owner, prior, 'refinement', 'automatic', checkpoints) || stage<{ refinement?: Refinement }>(store, owner, prior, 'repair-input', 'automatic', checkpoints)?.refinement) return null
           if (!elaborationApprovalDiagnostics.has(prior.id)) {
@@ -2390,7 +2401,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           const planRef = contentHash(JSON.stringify(plan)), selection = store.readBusinessBaselineSelection(operation.id)
           for (const { owner, prior } of approvalAncestors) {
             if (canonical(prior.composedInput) !== canonical(view.composed)) continue
-            const checkpoints = (origin: SyncAttempt): SyncCheckpointStageView => approvalCheckpoints(owner, origin)
+            const checkpoints = (origin: SyncAttempt): SyncCheckpointStageView => historyCheckpoints(owner, origin)
             const original = checkpoints(prior), savedPlan = partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan', selection, original)
             if (savedPlan?.resultRef.sha256 !== planRef) continue
             const source = partitionStage<CodeBehaviorAnalysis>(store, owner, prior, key, selection, original)
@@ -2441,9 +2452,12 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           saveStage(store, fence!, `${key}:readonly-repair-provenance`, { fromAttemptId: sourceAttempt.id, resultRef: owner.resultRef, generationRef: readonlyOwnerRepair!.generationRef })
           return { prior, priorInput, repair: { ...(readonlyOwnerRepair!.kind ? { kind: readonlyOwnerRepair!.kind, reviewEvidence: readonlyOwnerRepair!.reviewEvidence } : {}), baseInputDigest: inputDigest, candidateDigest: readonlyOwnerRepair!.candidateDigest, generationRef: readonlyOwnerRepair!.generationRef, acceptedRef: owner.resultRef, changes: prior.changes, output: round.output, review: round.review, findings } }
         },
-        loadPartitionSealRepair: (key, binding, inputDigest) => {
-          const source = loadSealRepairSource(), local = source?.locals.get(binding.partitionId), findings = source?.owners.get(binding.partitionId)
+        loadPartitionSealRepair: async (key, binding, inputDigest) => {
+          const source = await loadSealRepairSource()
+          assertMaterialFence()
+          const local = source?.locals.get(binding.partitionId), findings = source?.owners.get(binding.partitionId)
           if (!source || !local || !findings) return null
+          store.assertWriteFence(fence!)
           const prior = local.result, round = prior.rounds.at(-1)!
           if (canonical(prior.partitionBinding) !== canonical(binding) || (prior.readonlySpecRepair?.baseInputDigest ?? prior.inputDigest) !== inputDigest) return null
           if (prior.changes.some(change => !within(change.path, options.plan.writePaths) || options.plan.mandatoryTests.some(test => overlap(change.path, test.testPath)))) fail('partition_final_seal_binding', '全局seal返修owner越过原冻结写范围')
@@ -2787,7 +2801,9 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         requireSettledRpcSources(store, operation, store.readAttempt(attempt.id), failureSources, issue.evidenceRefs)
         if (elaboration.failure?.code === 'cancellation_pending') fail('cancellation_pending', issue.message, issue.evidenceRefs)
         if (elaboration.failure?.code === 'partition_final_seal_failed') {
-          const source = loadSealRepairSource(), currentAttempt = store.readAttempt(attempt.id)
+          const source = await loadSealRepairSource()
+          assertMaterialFence()
+          const { attempt: currentAttempt } = store.assertWriteFence(fence)
           const previous = source?.result ?? store.listAttempts(operation.id).filter(prior => prior.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(prior.status)).reverse().map(prior => stage<SavedElaboration>(store, operation, prior, 'elaboration')).find(result => result?.failure?.code === 'partition_final_seal_failed')
           const owners = source ? [...source.owners.keys()] : []
           if (previous?.candidateDigest === elaboration.candidateDigest && canonical(previous.partitionSeal!.findings.filter(finding => finding.severity === 'error')) === canonical(elaboration.partitionSeal!.findings.filter(finding => finding.severity === 'error')) && !currentAttempt.dispatchPlans.some(dispatch => dispatch.purpose.startsWith('elaboration_') && (!owners.length || owners.some(owner => dispatch.key.startsWith(`sync:${attempt!.id}:elaborate:partition:${owner}:`))))) fail('partition_final_seal_stalled', '同一全局候选和error没有对应owner新派发，停止缓存重播', issue.evidenceRefs)
