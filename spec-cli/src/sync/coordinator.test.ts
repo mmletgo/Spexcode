@@ -7425,6 +7425,50 @@ for (const parentSeed of [false, true]) for (const defect of parentSeed ? ['none
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
 
+for (const mode of ['observation', 'ordinary', 'mixed'] as const) test(`P1已结算进程观测失败后，同操作保持原上限并逐个派发返修 failure=${mode}`, async t => {
+  const importPath = '.spec/project/beta/import-contract/spec.md'
+  const other = original.replaceAll('export-job', 'import-job').replaceAll('EXPORT', 'IMPORT').replaceAll('export-contract', 'import-contract').replaceAll('src/export.js', 'src/beta/import.js').replaceAll('tests/export.test.mjs', 'tests/import.test.mjs')
+  const rawOnly = (source: string) => source.slice(0, source.indexOf('## expanded spec')).replace('contract-schema: sync-v1\n', '')
+  const budget = { maxAttempts: 2, maxCalls: 24, maxRepairs: 1, timeoutMs: 120_000 }
+  const f = await fixture(t, budget, false, rawOnly(original), 'project', original, {
+    version: 'sync-coordinator-v2', direction: 'spec_to_code', agentWorkflow: 'native-worktree-v1', intentNodeId: 'export-contract', sourcePaths: ['src'],
+    targets: [{ nodeId: 'export-contract', path: contractPath }, { nodeId: 'import-contract', path: importPath }],
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524_288, maxParallel: 2 },
+  }, undefined, 'spec', 'cursor:default', false, {
+    [importPath]: rawOnly(other), 'src/beta/import.js': 'export class ImportService {}\n',
+    'tests/import.test.mjs': readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', 'IMPORT').replaceAll('src/export.js', 'src/beta/import.js'),
+  })
+  const originalRunner = f.options.runner!, waves = new Map<number, { started: number; running: number; peak: number; release?: () => void }>()
+  f.options.runner = async request => {
+    if (request.purpose !== 'elaboration_generate') return originalRunner(request)
+    const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!)
+    const wave = waves.get(attempt.number) ?? { started: 0, running: 0, peak: 0 }
+    waves.set(attempt.number, wave)
+    const observationFailure = mode === 'observation' || (mode === 'mixed' && wave.started === 1)
+    wave.started++
+    wave.running++
+    wave.peak = Math.max(wave.peak, wave.running)
+    if (wave.running > 1) wave.release?.()
+    else await new Promise<void>(resolve => {
+      const timer = setTimeout(resolve, 2_000)
+      wave.release = () => { clearTimeout(timer); resolve() }
+    })
+    wave.running--
+    throw new StructuredSessionError('failed', observationFailure ? 'Cursor periodic native process observation did not recover' : 'ordinary execution failure')
+  }
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  const prior = f.store.listAttempts(f.operation.id)[0]
+  if (mode === 'mixed') assert.equal(prior.failure?.message, 'ordinary execution failure')
+  assert.equal(prior.failure?.serialElaborationRetry, mode === 'ordinary' ? undefined : true)
+  assert.equal(waves.get(1)?.peak, 2, JSON.stringify(result.failure))
+  assert.equal(waves.get(2)?.peak, mode === 'ordinary' ? 2 : 1, JSON.stringify(result.failure))
+  assert.equal(result.operation.input.id, f.input.id)
+  assert.equal(result.operation.policyDigest, f.operation.policyDigest)
+  assert.equal(result.operation.model, f.operation.model)
+  assert.deepEqual(result.operation.budget, f.operation.budget)
+  assert.equal(f.store.listRecoverableResources().length, 0)
+})
+
 test('P0正式retry只重新派发未独审通过的分区，保留原模型和Git独审证明', async t => {
   const importPath = '.spec/project/import-contract/spec.md', importSpec = original.replaceAll('export-job', 'import-job').replaceAll('EXPORT', 'IMPORT').replaceAll('export-contract', 'import-contract').replaceAll('src/export.js', 'src/import.js').replaceAll('tests/export.test.mjs', 'tests/import.test.mjs')
   const f = await fixture(t, { maxAttempts: 2, maxCalls: 24, maxRepairs: 1, timeoutMs: 120_000 }, false, original, 'project', original, {
