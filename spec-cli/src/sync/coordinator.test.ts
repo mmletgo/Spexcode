@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url'
 import { applyComponentMigrations, openProtocol, type SqlParam } from '@spexcode/session-protocol'
 import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
 import { putBlob, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
-import { authenticateNativeRejectedFinal, readSyncCheckpoints, readSyncCheckpointStageIndex, syncCheckpointArtifacts } from './checkpoint-evidence.js'
+import { authenticateNativeRejectedFinal, readSyncCheckpoints, readSyncCheckpointStageIndex, syncCheckpointArtifacts, withCheckpointStageBasis } from './checkpoint-evidence.js'
 import { outputErrors } from './elaboration-schema.js'
 import type { ContractCell, GeneratedElaboration, GeneratedTables } from './elaboration-markdown.js'
 import { sameContractBusinessMeaning } from './contract-evolution.js'
@@ -4164,6 +4164,11 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-form
     const after = f.store.readOperation(active.id)
     assert.deepEqual(readSyncCheckpoints(f.store, after, rebound).raw.get(rawRef.sha256), packet)
     assert.deepEqual(readSyncCheckpoints(f.store, after, nextAttempt).raw.get(rawRef.sha256), packet)
+    const originalPhase = withCheckpointStageBasis(after, active.readSetDigest, active.baselineSelection)
+    assert.equal(originalPhase.readSetDigest, active.readSetDigest)
+    assert.equal(originalPhase.baselineSelection?.digest, active.baselineSelection?.digest)
+    assert.deepEqual(readSyncCheckpoints(f.store, originalPhase, nextAttempt).raw.get(rawRef.sha256), packet)
+    assert.equal(readSyncCheckpointStageIndex(f.store, originalPhase, rebound).raw.has(rawRef.sha256), true)
     for (const scan of [readSyncCheckpoints, readSyncCheckpointStageIndex]) {
       assert.equal(scan(f.store, after, rebound).raw.has(rawRef.sha256), true)
       assert.equal(scan(f.store, after, nextAttempt).raw.has(rawRef.sha256), true)
