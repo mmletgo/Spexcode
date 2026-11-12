@@ -37,6 +37,33 @@ test('冻结输入在不存在的宿主目录仍重建真实契约、源码锚�
   assert.deepEqual(checkGenerationContractIntent(state, state, policy(state)), [])
 })
 
+test('V1只接受精确冻结文件中的无名声明代码来源', async () => {
+  const files = inputs()
+  files.set('src/pkg/empty.py', '')
+  files.set('src/pkg/comments.py', '# 模块说明\n')
+  files.set('src/pkg/docs.py', '"""模块说明。"""\n')
+  files.set('src/pkg/broken.py', 'def bad(\n')
+  files.set('src/pkg/unknown.zzz', '')
+  const cases = [
+    ['src/pkg/empty.py', []],
+    ['src/pkg/comments.py', []],
+    ['src/pkg/docs.py', []],
+    ['src/export.js#ExportService', []],
+    ['src/export.js', ['anchor-selector-required']],
+    ['src/pkg/broken.py', ['anchor-parse-error']],
+    ['src/pkg/unknown.zzz', ['anchor-language-unsupported']],
+    ['src/pkg/missing.py', ['missing-source-file', 'anchor-file-missing']],
+    ['src/pkg', ['missing-source-file', 'anchor-file-missing']],
+  ] as const
+  for (const [ref, codes] of cases) {
+    files.set(spec, source.replace('decision:EXPORT-POLICY | REQ-EXPORT-01', `code:${ref} | REQ-EXPORT-01`))
+    const state = await readFrozenContracts('/no-such-frozen-input', files, new Set(files.keys()))
+    assert.deepEqual(state.findings.filter(finding => finding.severity === 'error').map(finding => finding.code), codes, ref)
+    assert.deepEqual(state.findings.filter(finding => finding.citation).map(finding => [finding.itemId, finding.citation]),
+      codes.some(code => code.startsWith('anchor-')) ? [['RULE-EXPORT-01', { origin: 'source', ref }]] : [], ref)
+  }
+})
+
 test('实例插件契约不进入业务图，plugin-system产品规格及普通业务义务保留', async () => {
   const files = inputs()
   files.set('.spec/export/.plugins/spec.md', '---\ntitle: 插件实例\n---\n## raw source\n工具配置。\n')

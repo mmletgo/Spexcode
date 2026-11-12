@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { Extractor } from '@spexcode/spec-core'
 import { buildContractGraph, type Contract } from '@spexcode/spec-core/contracts'
-import { isReadonlyCitationFailure, validateFrozenAnchors } from './frozen-anchors.js'
+import { findWholeFileSourcePaths, isReadonlyCitationFailure, validateFrozenAnchors } from './frozen-anchors.js'
 
 function contract(code: string[], related: string[] = [], source = 'src/export.ts#Exporter.run'): Contract {
   return { schema: 'sync-v1', nodeId: 'export', path: '.spec/export/spec.md', rawSource: '导出数据', expandedSpec: '', code, related,
@@ -19,6 +19,32 @@ test('V1解析冻结的TS/Python、related和代码来源，不要求宿主存�
   assert.equal(result.anchors.length, 4)
   assert.ok(result.anchors.every(x => x.unit))
   assert.equal(result.anchors.find(x => x.origin === 'source')!.itemId, 'RULE-EXPORT-01')
+})
+
+test('V1文件级来源保留精确路径和空选择器，不改变裸治理及相关路径的语义', async () => {
+  const files = new Map([['src/export.ts', 'export const value = 1'], ['src/related.py', 'def run(): pass\n'], ['src/docs.py', '"""说明。"""\n']])
+  const graph = buildContractGraph([contract(['src/export.ts'], ['src/related.py'], 'src/docs.py')])
+  const result = await validateFrozenAnchors(graph, files)
+  assert.deepEqual(result.findings, [])
+  assert.deepEqual(result.anchors, [{ nodeId: 'export', path: 'src/docs.py', declarationPath: '.spec/export/spec.md',
+    line: 12, itemId: 'RULE-EXPORT-01', origin: 'source', selector: null, unit: null }])
+  const requiresSelector = await validateFrozenAnchors(buildContractGraph([contract([], [], 'src/export.ts')]), files)
+  assert.equal(requiresSelector.findings[0].code, 'anchor-selector-required')
+  assert.deepEqual(requiresSelector.findings[0].citation, { origin: 'source', ref: 'src/export.ts' })
+  assert.ok(isReadonlyCitationFailure(requiresSelector.findings[0]))
+})
+
+test('文件级候选只返回解析成功且零命名声明的精确冻结路径', async () => {
+  const files = new Map([
+    ['src/z.py', '# comment\n'],
+    ['src/a.py', ''],
+    ['src/unoffered.py', ''],
+    ['src/named.py', 'value = 1\n'],
+    ['src/broken.py', 'def broken(\n'],
+    ['src/unknown.zzz', ''],
+  ])
+  const paths = ['src/z.py', 'src/named.py', 'src', 'src/missing.py', 'src/z.py', 'src/broken.py', 'src/unknown.zzz', 'src/a.py', 'src/A.py']
+  assert.deepEqual(await findWholeFileSourcePaths(files, paths), ['src/a.py', 'src/z.py'])
 })
 
 test('V1分别拒绝实际候选中的改名、歧义和语法错误', async () => {
@@ -53,6 +79,7 @@ test('V1缺失related/source文件、未知语言与不可用解析器不能静�
   const unavailable: Extractor = { id: 'unavailable', claims: () => true, ready: () => '缺少语法包', extract: () => { throw new Error('不可执行回退') }, memoKey: path => path }
   const blocked = await validateFrozenAnchors(buildContractGraph([contract(['src/export.ts#run'], [], 'src/export.ts#run')]), new Map([['src/export.ts', 'run']]), [unavailable])
   assert.ok(blocked.findings.every(x => x.code === 'anchor-extractor-unavailable'))
+  assert.deepEqual(await findWholeFileSourcePaths(new Map([['src/export.ts', '']]), ['src/export.ts'], [unavailable]), [])
 })
 
 test('V1在异步解析前固定输入，多个锚点共享同一冻结文件解析', async () => {

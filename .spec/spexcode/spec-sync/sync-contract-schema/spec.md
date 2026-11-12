@@ -31,7 +31,7 @@ Spec Markdown 是唯一可编辑业务契约。原始需求、详细规则与实
 
 ID 使用 `类型-业务域-稳定后缀`（ASCII 大写字母、数字和连字符）；`VERIFY` 使用 `VERIFY-业务域-稳定后缀`。身份不依赖标题或路径，移动保持 ID，复制生成新 ID，退役身份不得用于新业务对象。同一历史对象只能由显式 revert、原已结算 receipt 和真实 parent 的固定请求证明恢复，仍走完整演进与验证，不能由普通 raw 或模型自授。`req/flow/steps/rules/from/event/to/covers/depends-on/affects` 引用同范围或其他启用节点的稳定 ID：req 为 REQ 列表；flow 为单 FLOW；steps 为 STEP 列表；rules 为 RULE 列表；from/to 为单 STATE（不适用目标除外）；event 为单 EVENT；covers/depends-on/affects 为业务 ID 列表。`FLOW.terminal` 为 STATE 列表或 `END`（无状态流程结束，须写明可观察结果及不适用依据）。`STEP.next` 为 STEP/TR/STATE 引用列表或 `END`（终止）；正常和失败分支可引用对应 TR，拒绝及结束的可观察结果写在 output 与权威规则中。文本条件和动作不作 ID 解析。`STATE.object`、`EVENT.object` 与 `TR.object` 是稳定业务对象名；每个对象单独命名事件，由 EVENT.object 确定状态×事件适用域。TR.disposition 为 `transition/reject/idempotent/not_applicable`；transition 的目标是有效状态，reject/idempotent 的目标等于原状态，not_applicable 的目标为 `-` 且 reason 必填。condition 不成立的边界仍须有明确规则和验收。
 
-来源使用 `user:raw`、`user:REQ-ID`、`decision:裁决ID`、`rule:RULE-ID`、`derived:稳定ID` 或 `code:仓库相对路径#符号`。用户原意只在 raw 定义一次；结构化 REQ 用 `source: user:raw` 提取目标。`depends-on` 保存推导依赖，代码来源仍要验证与上层原意相容。`RULE.authority` 为唯一定义规则的节点 ID；其他节点引用该 RULE-ID，不能复制同义政策。来源不替代运行证据。
+来源使用 `user:raw`、`user:REQ-ID`、`decision:裁决ID`、`rule:RULE-ID`、`derived:稳定ID` 或 `code:仓库相对文件路径#符号`。只有可信语言解析器成功确认没有命名声明的冻结文件才可用 `code:仓库相对文件路径`，由 [[sync-frozen-anchors]] 在 V1 核验。用户原意只在 raw 定义一次；结构化 REQ 用 `source: user:raw` 提取目标。`depends-on` 保存推导依赖，代码来源仍要验证与上层原意相容。`RULE.authority` 为唯一定义规则的节点 ID；其他节点引用该 RULE-ID，不能复制同义政策。来源不替代运行证据。
 
 `GAP.kind` 为 `missing_fact/conflict`；每个 GAP 必须写明未知或互斥事实、影响 ID、证据与所需具体裁决。未决 GAP 阻断依赖项，不能以置信度或空值通过。
 
