@@ -6,7 +6,7 @@ import { createInterface } from 'node:readline'
 import type { Readable } from 'node:stream'
 import { Ajv } from 'ajv'
 import { detachedRuntimeIsGone, verifyDetachedRuntime, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
-import { nativeWorktreeLaunch, periodicNativeWorktreeSampler, sampleNativeWorktreeProcesses, waitForNativeWorktreeProcessesStopped } from './native-worktree-runtime.js'
+import { NATIVE_PERIODIC_OBSERVATION_FAILURE, nativeWorktreeLaunch, periodicNativeWorktreeSampler, sampleNativeWorktreeProcesses, waitForNativeWorktreeProcessesStopped } from './native-worktree-runtime.js'
 import { sessionIdentityEnvVars } from './harness-shim.js'
 import { assertRejectedOutput, rejectedFinalOutput, structuredExecutionPolicy, structuredExecutionTimer, StructuredSessionError, type StructuredExecution } from './session-structured-policy.js'
 
@@ -293,7 +293,7 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
     if (callbacks.signal?.aborted || timedOut || existsSync(join(root, 'cancel.json'))) abort()
     else child.stdin.end('start\n')
     if (deadline === undefined) census = setInterval(periodicNativeWorktreeSampler(owned, () => deadline !== undefined, error => {
-      observerFailure ??= Object.assign(new StructuredSessionError('failed', 'Grok periodic native process observation did not recover'), { cause: error })
+      observerFailure ??= Object.assign(new StructuredSessionError('failed', NATIVE_PERIODIC_OBSERVATION_FAILURE.grok), { cause: error })
       abort()
     }), 250)
     const ended = await Promise.race([Promise.all([closed, observed]), expiry])

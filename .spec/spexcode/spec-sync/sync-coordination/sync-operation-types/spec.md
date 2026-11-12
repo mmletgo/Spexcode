@@ -18,6 +18,8 @@ code:
 
 operation 保存不可变输入和 previousBaselinePair、generation/revision、根因及接入键、政策/影响/读集合摘要、8.2 全部阶段、控制与预算、真实 paths/contractIds/flowIds 范围、ready/blocked/delivered 范围及交付目标。attempt 独立保存稳定派发与 session 创建键、原生会话引用、完整 manifest 与实际 diff blob 候选、验证、checkpoint blob 与明确失败类型。fence 绑定 operation、attempt、generation、源物理身份与 lease token。
 
+失败记录的可选 `serialElaborationRetry` 只供同一 operation 正式结算后的 P1 调度，保留原失败代码、消息和证据引用。
+
 operation 可保存 contractScopeExpansions：P3每项只含完整 contractIds/flowIds 和可信细化 evidenceRef；P4可增加已审P1发现的精确paths及扩展前后selection摘要，供范围扩展幂等、重启/retry、组合readSet重绑与证据保活，不携正文。旧数据库无此字段表示尚未通过动作门禁扩展。既有初始 payload 身份不因细化新增 ID 改写。
 
 受控编辑或裁决可提供 requestBlob 保存额外用户意图的不可变引用。input 仍表示实际采集的来源字节，不能为了接收 Dashboard 编辑而谎称 main 已改变或先单独提交 Spec；组合输入在已验证原文条件后叠加请求。纯文件观察事件无需 requestBlob。请求引用参与接入幂等摘要、恢复与证据保活。

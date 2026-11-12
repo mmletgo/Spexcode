@@ -8,7 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { Ajv } from 'ajv'
 import { detachedRuntimeIsGone, verifyDetachedRuntime, writeDetachedRuntimeReceipt, type ProcessIdentity } from '@spexcode/spec-core'
 import { sessionIdentityEnvVars } from './harness-shim.js'
-import { nativeWorktreeLaunch, periodicNativeWorktreeSampler, sampleNativeWorktreeProcesses, waitForNativeWorktreeProcessesStopped } from './native-worktree-runtime.js'
+import { NATIVE_PERIODIC_OBSERVATION_FAILURE, nativeWorktreeLaunch, periodicNativeWorktreeSampler, sampleNativeWorktreeProcesses, waitForNativeWorktreeProcessesStopped } from './native-worktree-runtime.js'
 import { assertRejectedOutput, rejectedFinalOutput, StructuredSessionError, structuredExecutionPolicy, structuredExecutionTimer, type StructuredExecution } from './session-structured-policy.js'
 
 export type CursorNativeState = { version: 1; root: string; sessionId?: string; requestId?: string; pid?: number; receiptFile?: string }
@@ -432,7 +432,7 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
   }
   const fault = (error: unknown): void => { failure ??= error; shutdown() }
   const observationFault = (error: unknown): void => {
-    fault(Object.assign(failed('Cursor periodic native process observation did not recover'), { cause: error }))
+    fault(Object.assign(failed(NATIVE_PERIODIC_OBSERVATION_FAILURE.cursor), { cause: error }))
   }
   child.once('error', fault); stdin.once('error', fault); gate.once('error', fault)
   activeInterrupts.set(root, abort)

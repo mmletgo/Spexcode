@@ -32,7 +32,7 @@ export const SYNC_PHASES = ['detected', 'queued', 'analyzing', 'elaborating', 'g
 export type SyncPhase = typeof SYNC_PHASES[number]
 export type SyncControl = 'run' | 'pause' | 'cancel'
 export type SyncBudget = { maxAttempts: number; maxCalls: number; maxRepairs: number; timeoutMs: number } | { mode: 'unlimited' }
-export type SyncFailure = { code: string; message: string; kind: 'repairable' | 'environment' | 'conflict' | 'missing_input' | 'unsupported' | 'budget'; evidenceRefs: BlobRef[] }
+export type SyncFailure = { code: string; message: string; kind: 'repairable' | 'environment' | 'conflict' | 'missing_input' | 'unsupported' | 'budget'; evidenceRefs: BlobRef[]; serialElaborationRetry?: true }
 export type BaselinePair = {
   id: string
   repositoryId: string

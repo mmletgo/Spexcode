@@ -44,7 +44,7 @@ import { withoutSessionApplicationExecutionWake } from '../session-application.j
 import { assertFrozenBinding, readFrozenManifest, readFrozenRange } from '../frozen-context.js'
 import { assertClaudeStoppedDraftSource, observeClaudeStoppedWorktreeFailure } from '../claude-structured.js'
 import { assertZCodeStoppedDraftSource, isZCodeEventsRpcTimeout, type ZCodeStructuredExecution } from '../zcode-structured.js'
-import { nativeWorktreePrompt, nativeWorktreeResult } from '../native-worktree-runtime.js'
+import { NATIVE_PERIODIC_OBSERVATION_FAILURE, NATIVE_PROCESS_OBSERVATION_PENDING, nativeWorktreePrompt, nativeWorktreeResult } from '../native-worktree-runtime.js'
 import { readRecord } from '../session-record.js'
 import { structuredExecutionPolicy, StructuredSessionError } from '../session-structured-policy.js'
 import { SettledSessionCreateTimeoutError } from '../session-structured.js'
@@ -74,6 +74,9 @@ const structuredAnalysisRepairCodes = new Set(['structured_output_retries_exhaus
 const reviewFormatRepairCodes = new Set(['structured_output_retries_exhausted', 'structured_output_format_invalid'])
 const completedReviewRepairCodes = new Set(['review_location_format'])
 const analysisRepairDiagnosticCodes = new Set([...behaviorAnalysisRepairCodes, ...structuredAnalysisRepairCodes])
+const nativeObservationFailures = new Set<string>([NATIVE_PROCESS_OBSERVATION_PENDING, ...Object.values(NATIVE_PERIODIC_OBSERVATION_FAILURE)])
+const isNativeObservationFailure = (failure: Pick<SyncFailure, 'code' | 'message'> | null): boolean =>
+  failure?.code === 'failed' && nativeObservationFailures.has(failure.message)
 function requireSettledRpcSources(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, sources: readonly { status: string; failure: { code: string; message: string; sessionId?: string; threadId?: string; turnId?: string; requestKey?: string; inputDigest?: string } | null }[], evidenceRefs: BlobRef[]): void {
   if (!sources.some(source => source.failure?.code === 'native_rpc_timeout')) return
   const blocked = sources.find(source => source.failure?.code === 'cancellation_pending') ?? sources.find(source => ['unsupported', 'cancelled', 'conflict', 'needs_input'].includes(source.status))
@@ -2787,7 +2790,11 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           const draft = loadElaborationDraft('elaboration', undefined, schemaDigest)
           return draft && cacheDraft ? { ...draft, errors: [...draft.errors, ...cacheDraft.errors] } : draft
         } : undefined
-        const result = partitions ? await elaborateSyncPartitions(elaborationInput, partitions, options.plan.version === 'sync-coordinator-v2' ? options.plan.partitionPolicy.maxParallel : 1, partitionCheckpoints, runner, view.composed) : await elaborate(elaborationInput, { runner, draft: cacheDraft, loadDraft, loadDraftMaterial: draftProtocol ? (schemaDigest, request) => loadElaborationDraftMaterial('elaboration', undefined, schemaDigest, request) : undefined, seed: loadElaborationRepairSeed('elaboration', freezeElaborationInput(elaborationInput).inputDigest) ?? undefined, repairDiagnostics: loadElaborationRepairDiagnostics('elaboration', freezeElaborationInput(elaborationInput).inputDigest) ?? undefined })
+        const maxParallel = options.plan.version === 'sync-coordinator-v2' ? options.plan.partitionPolicy.maxParallel : 1
+        const serialRetry = partitions && draftProtocol && maxParallel > 1 && attempt.number > 1 && store.listAttempts(operation.id).some(prior =>
+          prior.number < attempt!.number && prior.status === 'superseded' && prior.failure?.kind === 'repairable'
+          && (prior.failure.serialElaborationRetry || isNativeObservationFailure(prior.failure)))
+        const result = partitions ? await elaborateSyncPartitions(elaborationInput, partitions, serialRetry ? 1 : maxParallel, partitionCheckpoints, runner, view.composed) : await elaborate(elaborationInput, { runner, draft: cacheDraft, loadDraft, loadDraftMaterial: draftProtocol ? (schemaDigest, request) => loadElaborationDraftMaterial('elaboration', undefined, schemaDigest, request) : undefined, seed: loadElaborationRepairSeed('elaboration', freezeElaborationInput(elaborationInput).inputDigest) ?? undefined, repairDiagnostics: loadElaborationRepairDiagnostics('elaboration', freezeElaborationInput(elaborationInput).inputDigest) ?? undefined })
         const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = result
         elaboration = compact; saveStage(store, fence, 'elaboration', compact, !operation.baselineSelection ? { readSetDigest: operation.readSetDigest } : undefined, { composedTree: view.composed.tree, composedContentDigest: view.composed.contentDigest })
       }
@@ -2800,6 +2807,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         const failureSources = elaboration.partitionEvidence?.map(owner => JSON.parse(readEvidence(operation.input.source.commonDir, owner.resultRef).toString('utf8')) as SavedElaboration) ?? [elaboration]
         requireSettledRpcSources(store, operation, store.readAttempt(attempt.id), failureSources, issue.evidenceRefs)
         if (elaboration.failure?.code === 'cancellation_pending') fail('cancellation_pending', issue.message, issue.evidenceRefs)
+        if (partitions && options.plan.agentWorkflow && kind === 'repairable' && failureSources.some(source => isNativeObservationFailure(source.failure))) issue.serialElaborationRetry = true
         if (elaboration.failure?.code === 'partition_final_seal_failed') {
           const source = await loadSealRepairSource()
           assertMaterialFence()

@@ -67,6 +67,10 @@ type NativeProcessBaseline = NativeProcessRow[] | { identityDomain: typeof linux
 
 export const NATIVE_PROCESS_OBSERVATION_LIMIT_MS = 10_000
 export const NATIVE_PROCESS_OBSERVATION_PENDING = 'native worktree process observation remains unproven'
+export const NATIVE_PERIODIC_OBSERVATION_FAILURE = {
+  cursor: 'Cursor periodic native process observation did not recover',
+  grok: 'Grok periodic native process observation did not recover',
+} as const
 
 const observing = new Map<string, Promise<unknown>>()
 const probes = new Map<string, { child: ReturnType<typeof spawn>; closed: boolean }>()
