@@ -2755,7 +2755,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           let behaviorProtocol = stage<{ version: 'code-behavior-draft-v1'; contextTransport?: CodeBehaviorContextTransport }>(store, operation, attempt, 'behavior-draft-protocol')
           if (behaviorProtocol && Object.hasOwn(behaviorProtocol, 'contextTransport') && !isCodeBehaviorContextTransport(behaviorProtocol.contextTransport)) fail('behavior_context_transport_unsupported', '持久P0 contextTransport字段存在但不受支持；仅字段缺席允许legacy运输')
           if (!behaviorProtocol && options.plan.agentWorkflow && !attempt.dispatchPlans.some(dispatch => dispatch.purpose.startsWith('code_behavior_'))) {
-            behaviorProtocol = { version: 'code-behavior-draft-v1', contextTransport: 'git-json-v4' }
+            behaviorProtocol = { version: 'code-behavior-draft-v1', contextTransport: 'git-json-v5' }
             saveStage(store, fence, 'behavior-draft-protocol', behaviorProtocol)
           }
           p0StatusOnly = behaviorProtocol?.contextTransport !== undefined && behaviorProtocol.contextTransport !== 'git-json-v1'

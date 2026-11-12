@@ -28,6 +28,8 @@ P0 的 git-json-v2 与 git-json-v3 共用正文格式。Git context 只承载当
 
 git-json-v4 保留 v3 分析自检及 v2 正文，在独审请求尾段追加只读路径检查。以最初业务树及历史角色的精确 Git 树对象列出实际文件，排除仅存在于评审 seed 的协议和临时稿。只向当前会话报告评审稿中不存在的 checkedPaths，保留仓库相对路径原字节。由独审会话重新检查真实文件并正常修改原稿。命令不写文件，不填 checkedPaths，不持久化诊断；正式范围、路径语法、私密文件、必审覆盖、真实业务及独审门禁继续执行。历史请求及已批准来源保持。
 
+git-json-v5 沿用 v4 的分析覆盖与独审路径自检。分析的只读 context 另附冻结前后未变化且本区不可写的既有 REQ/RULE/TR 来源，使用正式验收更新的同一判据。分析自检逐项报告当前草稿非 user:raw 的 acceptanceChanges 命中这些来源的 AC ID、依据 ID 与所属 Spec；续修读取原 Git 草稿，在原文件核实后修正。实际草稿、context 与 schema 仍只由现有协议写入或保护。检查输出只用于当次执行，既有失败状态、业务摘要、草稿和批准的承接保持。user:raw、已改变的只读来源及所有其他授权条件继续由正式校验和独审认定。
+
 P1精确后置门禁可对已审refactor分类提出非权威回审：只接同operation、原输入/组合/读取及计划绑定的已结算拒绝round，finding须命中原refactor的affectedIds与其真实changedPaths治理owner。原analysisRef及原分析、P1 resultRef/candidateDigest、完整finding、匹配原beforeDigest的真实旧/新业务行与代码差量一并进入postGateReview。该语义质疑参与新的分析inputDigest，使旧accept及readyAnalysis不跨质疑承接；真实Agent重新analyze并由独立Agent审查，可改判allowed_change，也可维持refactor要求P1恢复错误改写。程序不改kind、不采纳被拒候选为事实或raw，不扩AC/VERIFY/生命周期授权。认证原Git分析稿仅按原bytes迁为本轮临时材料，明确来源且不继承已校验资格；旧只读成功Native输出须沿原完整请求、schema、seed、trace及completed资源认证后才迁为临时JSON，不能伪造历史Git稿。
 
 新Native P0在本attempt尚无code_behavior派发时显式冻结code-behavior-draft-v1；已有reserved/read请求不补协议。分析与独审共用[[sync-stage-worktree]]的真实Git临时JSON草稿：每个owner与purpose独立路径，业务schema作为同seed只读sidecar，只有该草稿可正常提交；业务JSON只写入Git草稿，Native final只返回符合`DRAFT_RECEIPT_SCHEMA`的单一JSON对象，形如`{"summary":"..."}`，前后不附说明或Markdown代码围栏。程序先保活原blob再解析JSON及验证精确schema；syntax/schema错误和原bytes留在原Git证明中，下一attempt沿同input/readSet/selection/partition/schema/owner接线，只overlay原字节到当前真实seed，不在prompt重答正文，不将失败材料升格为raw、事实、批准或业务候选。repairDiagnostics仍绑定真实prompt/request，但不改变该协议的业务inputDigest；输入、schema、seed与原正常提交身份继续核验。
