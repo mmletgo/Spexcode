@@ -37,4 +37,6 @@ P0/P1草稿业务JSON与Native final回执是两份不同内容：业务JSON只�
 
 工作树允许自由读取完整仓库，readPaths/files只表示任务上下文及程序校验数据。只读阶段终态HEAD和tree必须等于seed；编辑阶段必须有真实clean提交且HEAD为seed后代。公开结果必须精确绑定baseCommit/baseTree，实际headCommit的tree必须等于结果tree；不接受旧frozen读取证明充当此证据。
 
+阶段 overlay 共用 [[sync-input-snapshot]] 的无过滤批量对象写入。按已校验的路径及原字节准备整批普通文件，一次写入 Git。重复路径顺序、删除、文件模式和固定输入其他对象保持，来源 HEAD、index 和工作文件不参与写入。
+
 P2只把实际seed→HEAD对象差量投影为原CandidateChanges，beforeDigest/mode来自原composed对象，内容与新mode来自真实结果对象；不相信summary中的补丁。原scope、不可改oracle、host-private、UTF8、普通文件及原CAS保护继续执行；已审Spec同时进入最终唯一candidate。私有seed不是交付提交，之后仍须分区/跨边独审、V1–V4、真实Docker、receipt和正式采纳。

@@ -195,6 +195,14 @@ export function visitObjectBatch(commonDir: string, oids: readonly string[], vis
   readObjects(commonDir, objects, (bytes, index) => visit(unique[index], bytes))
 }
 export function writeObject(commonDir: string, bytes: Buffer): string { return objectGit(commonDir, ['hash-object', '-w', '--stdin'], bytes).toString().trim() }
+/** 将同序编号的临时原始字节一次写入对象库，并回填各路径的真实 blob OID。 */
+export function writeNumberedBlobs(commonDir: string, directory: string, entries: TreeEntry[]): void {
+  if (!entries.length) return
+  const input = Buffer.from(entries.map((_, index) => `${index}\n`).join(''))
+  const oids = objectGit(commonDir, ['hash-object', '-w', '--no-filters', '--stdin-paths'], input, undefined, directory).toString().trim().split('\n')
+  if (oids.length !== entries.length || oids.some(oid => !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(oid))) throw new Error('Git batch 对象写入响应不匹配')
+  entries.forEach((entry, index) => { entry.oid = oids[index] })
+}
 export function writeTree(commonDir: string, entries: TreeEntry[]): string {
   const temp = mkdtempSync(join(tmpdir(), 'spex-sync-index-')), index = join(temp, 'index')
   writeFileSync(join(temp, 'HEAD'), 'ref: refs/heads/spex-sync-temporary\n')
@@ -270,11 +278,7 @@ async function observe(root: string): Promise<Observation> {
       entries.push({ path, mode, oid: '', digest: contentHash(bytes) })
       stamps.push(`${path}:${stat.dev}:${stat.ino}:${stat.mtimeNs}:${stat.ctimeNs}:${mode}:${contentHash(bytes)}`)
     }
-    if (entries.length) {
-      const oids = objectGit(source.commonDir, ['hash-object', '-w', '--no-filters', '--stdin-paths'], Buffer.from(entries.map((_, index) => `${index}\n`).join('')), undefined, objects).toString().trim().split('\n')
-      if (oids.length !== entries.length || oids.some(oid => !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(oid))) throw new Error('Git batch 对象写入响应不匹配')
-      entries.forEach((entry, index) => { entry.oid = oids[index] })
-    }
+    writeNumberedBlobs(source.commonDir, objects, entries)
   } finally { rmSync(objects, { recursive: true, force: true }) }
   return { source, head, indexTree, sharedIndexDigest: contentHash(JSON.stringify(sharedDigests)), indexDigest: contentHash(indexBytes ?? Buffer.alloc(0)), entries, fileStamp: contentHash(JSON.stringify(stamps)) }
 }

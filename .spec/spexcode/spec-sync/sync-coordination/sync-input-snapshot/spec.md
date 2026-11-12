@@ -40,6 +40,8 @@ code:
 
 读树调用者可同时接收同次批量校验后的条目和完整原始 bytes，复用已经读取的正文，避免摘要之后再逐对象启动 Git。回调只在该对象 framing、完整字节与 OID 核对成功后交出字节，返回的 TreeEntry 顺序、digest 和全部快照身份计算保持不变；带 `onObject` 的调用每次逐调用完整读取，不共享缓存。
 
+[[sync-stage-worktree]] 的 overlay 共用此原始字节批量写入接缝。由受控临时文件编号回填逐条 Git OID，两个入口均保留原 path、mode 和摘要，临时文件在本轮完成或失败时清理。
+
 [[sync-coordinator]] 的一次输入装配或当前性检查可显式传递本地树缓存，按该调用已绑定的 commonDir 与完整 tree OID 复用完整校验成功的 entries，命中返回独立副本。缓存不保存快照验证结论：各次 verifySnapshot 仍核原 HEAD/tree/index、manifest SHA、contentDigest 和身份；原/现快照各保留一次完整对象读取。作者投影、真实组合正文、只读引用闭包和 index/HEAD 清单沿用同一读取接缝；不同 OID 不混用，onObject 仍完整读回并逐对象交出真实 bytes。缓存只在该业务调用内传递，不进入持久状态或跨调用复用，也不扩大只读 HTTP 查询作用域。
 
 仅只读 HTTP status/detail 查询可用 `withReadonlySnapshotQuery` 在本次异步上下文内重用无回调且完整读回/OID 核验成功的 TreeEntry。key 同时绑定 commonDir 的 realpath、既有物理 dev/ino/birthtime 与完整 tree OID；命中返回独立副本。`onObject` 始终走原批量字节路径并交出每个对象；失败读不留下成功项。作用域结束或失败后立即停用并清空，继承上下文的遗留异步任务也不能命中。verifySnapshot 每次仍核对 HEAD/tree、manifest blob、contentDigest 与 snapshot id，不缓存验证结论。业务写入、派发、采纳、验证交付等真实动作入口保持在作用域外；只读查询保留快照自身原有 owned private evidence/ref 写入。未显式传入调用级树缓存且无只读查询作用域的读树继续逐次完整读取。

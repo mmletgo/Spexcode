@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import childProcess, { execFileSync } from 'node:child_process'
 import fs, { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { fileURLToPath } from 'node:url'
@@ -27,6 +27,42 @@ function result(seed: ReturnType<typeof stageWorktree>, headCommit = seed.baseCo
   const output = { summary: '摘要声称的补丁不作为候选' }
   return { sessionId: 'session', threadId: 'thread', turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)), worktree: { baseCommit: seed.baseCommit, baseTree: seed.tree, headCommit, tree, worktreePath: '/historical/closed-worktree' } }
 }
+
+test('阶段overlay一次批量写入原始字节并保留path、mode与来源树', t => {
+  const f = fixture(t), indexPath = join(f.commonDir, 'index'), index = readFileSync(indexPath)
+  const changes = Array.from({ length: 40 }, (_, number) => ({ path: `specs/原稿 ${number}.md`, source: `第 ${number} 项\r\n` }))
+  const execute = execFileSync, hashes: string[][] = []
+  t.mock.method(childProcess, 'execFileSync', (...args: Parameters<typeof execFileSync>) => {
+    if (args[0] === 'git' && Array.isArray(args[1]) && args[1].includes('hash-object')) hashes.push(args[1])
+    return Reflect.apply(execute, childProcess, args)
+  })
+  syncBuiltinESMExports()
+  let tree: string
+  try {
+    tree = overlayStageTree(f.commonDir, f.tree, [
+      ...changes,
+      { path: 'source.mjs', source: '临时内容', mode: '100755' },
+      { path: 'source.mjs', source: '真实结果\r\n' },
+      { path: 'discarded.md', source: '' },
+      { path: 'discarded.md', source: null },
+    ])
+  } finally { t.mock.restoreAll(); syncBuiltinESMExports() }
+  assert.equal(hashes.length, 1)
+  assert.ok(hashes[0].includes('--stdin-paths') && hashes[0].includes('--no-filters'))
+  const scratch = hashes[0].find(arg => arg.startsWith('--work-tree='))
+  assert.ok(scratch)
+  assert.equal(existsSync(scratch.slice('--work-tree='.length)), false)
+  const base = new Map(readTree(f.commonDir, f.tree).map(entry => [entry.path, entry]))
+  const overlaid = new Map(readTree(f.commonDir, tree).map(entry => [entry.path, entry]))
+  for (const { path, source } of [...changes, { path: 'source.mjs', source: '真实结果\r\n' }]) {
+    assert.equal(overlaid.get(path)?.oid, writeObject(f.commonDir, Buffer.from(source)))
+  }
+  assert.equal(overlaid.get('source.mjs')?.mode, '100755')
+  assert.equal(overlaid.has('discarded.md'), false)
+  assert.deepEqual(overlaid.get('oracle.test.mjs'), base.get('oracle.test.mjs'))
+  assert.deepEqual(readFileSync(indexPath), index)
+  assert.equal(git(f.root, 'rev-parse', 'HEAD'), f.parent)
+})
 
 for (const mode of ['canonical', 'host-text', 'payload', 'payload-link', 'paired-edit', 'late-source-bytes', 'late-source-mode', 'foreign-path', 'foreign-filter', 'foreign-exec-config', 'outside-link'] as const) test(`stopped committed draft requires exact canonical filter projection: ${mode}`, t => {
   const f = fixture(t), root = join(realpathSync(f.root), 'linked'), ownerDigest = 'e'.repeat(64), path = `.spex-sync-drafts/${ownerDigest}.json`, schema = '{}'
