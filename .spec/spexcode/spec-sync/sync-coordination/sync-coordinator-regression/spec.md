@@ -87,6 +87,8 @@ code→Spec的分区AC提案引用未变只读父规则时，完整原proposal�
 
 正式retry全局封口回归以真实Git、SQLite和受控Native运行复用早前已批准分区。当前独审完成后以完整封口发现父REQ缺FLOW，在写入返修来源后、Native预留前模拟原身份核验中断。正式重试沿原局部resultRef与原Native身份读取Git草稿，保留原封口诊断并对命中owner实际生成、独审及重新严格封口。中断记录引用非同owner原件时零派发拒绝。
 
+同一正式封口返修夹具核对新提示仅带摘要绑定的目录入口。真实 Git seed 包含完整失败并集的诊断文件，原生成草稿字节、独审、封口及错误原件拒绝继续核验。
+
 混合行为分析失败回归证明业务拒绝与unsupported并存时仍不自动续修；同operation经显式pause→resume、且旧资源已结算后启动新attempt，只有已保存的 `behavior_analysis_invalid` / `behavior_review_failed` 原件按partitionId进入对应失败分区，unsupported/基础设施失败不进入诊断，已accept分区沿原ref复用而不重新派发。资源仍未知时沿原 `recovery_required` 门禁停止且不运行新attempt；本用例不扩大自动修复资格或预算。
 
 ZCode 严格 JSON 文本格式失败以精确错误码验证同预算有限重试、逐轮完整反馈及分区隔离；失败区的新分析和独审收到原格式诊断，已接受区不重派发，普通 stale_result 不取得修复资格。确定性接缝测试不冒充真实 Native 完成。

@@ -7244,10 +7244,15 @@ for (const parentSeed of [false, true]) for (const defect of parentSeed ? ['none
     if (!behavior && active.id === f.operation.id && nodeId !== 'project' && approvedLeaf && approvedLeaf !== nodeId) throw Object.assign(new Error('兄弟owner尚未完成，保留局部独审'), { code: 'unsupported' })
     if (retryRound === 1 && request.purpose === 'elaboration_review' && defect !== 'newer-review' && !sealRepair) throw Object.assign(new Error('待审owner在新独审入口停止'), { code: 'unsupported' })
     if (retryRound === 2 && sealRepair && request.purpose === 'elaboration_generate') {
-      const repair = (task as { repair?: Pick<ReadonlySpecRepair, 'kind' | 'generationRef' | 'findings'> }).repair
+      const repair = (task as { repair?: Pick<ReadonlySpecRepair, 'kind' | 'generationRef' | 'findings'> & { diagnosticRoot: string } }).repair
       assert.equal(repair?.kind, 'partition_seal')
       assert.deepEqual(repair.generationRef, sealRef)
       assert.ok(repair.findings.some(finding => finding.code === 'missing-requirement-flow' && finding.itemId === parentId))
+      assert.equal(repair.diagnosticRoot, '.spex-sync-diagnostics/' + repair.generationRef.sha256)
+      assert.equal(Object.hasOwn(repair, 'specs'), false)
+      const seal = (JSON.parse(readEvidence(f.input.source.commonDir, repair.generationRef).toString()) as ElaborationResult).partitionSeal!
+      const overlayPaths = f.git('ls-tree', '-r', '--name-only', request.worktree!.baseCommit, '--', repair.diagnosticRoot).trim().split('\n').sort()
+      assert.deepEqual(overlayPaths, seal.changes.map(change => repair.diagnosticRoot + '/' + change.path).sort())
       if (nodeId === approvedLeaf) assert.equal(f.git('rev-parse', request.worktree!.baseCommit + ':' + approvedLeafDraft!.path).trim(), approvedLeafDraft!.oid, '实际新seed逐字包含已回收原Native的Git草稿')
     }
     let output: unknown = retryRound === 1 && request.purpose === 'elaboration_review' && defect === 'newer-review'
