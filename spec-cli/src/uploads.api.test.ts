@@ -24,7 +24,6 @@ const LOCAL_RETRY_DELAY_MS = 25
 const LARGE_FILE_CHUNK_COUNT = 16
 const LARGE_FILE_TAIL_BYTES = 19
 const INTERRUPTED_PREFIX_BYTES = BYTES_PER_MEBIBYTE
-const INTERRUPT_SETTLE_MS = 50
 const POLL_TIMEOUT_MS = 10_000
 const POLL_INTERVAL_MS = 25
 const STOP_GRACE_MS = 3_000
@@ -137,14 +136,17 @@ test('real backend resumes a configured large attachment and promotes only the c
     })
     interrupted.on('error', () => {})
     interrupted.write(Buffer.alloc(INTERRUPTED_PREFIX_BYTES, 0x5a))
-    await new Promise((resolve) => setTimeout(resolve, INTERRUPT_SETTLE_MS))
+    await waitFor(async () => {
+      const response = await fetch(`${base}/api/uploads/${transfer.id}`)
+      return response.ok && (await response.json() as { offset: number }).offset === INTERRUPTED_PREFIX_BYTES
+    }, 'backend to persist the interrupted request prefix')
     interrupted.destroy()
     let resumed: { offset: number; chunkBytes: number } | null = null
     await waitFor(async () => {
       const response = await fetch(`${base}/api/uploads/${transfer.id}`)
       if (!response.ok) return false
       resumed = await response.json() as { offset: number; chunkBytes: number }
-      return resumed.offset > 0
+      return resumed.offset === INTERRUPTED_PREFIX_BYTES
     }, 'interrupted upload prefix to become resumable')
     const resumedTransfer = resumed as unknown as { offset: number; chunkBytes: number }
     assert.ok(resumedTransfer.offset < transfer.chunkBytes, `interrupted request committed a whole chunk: ${resumedTransfer.offset}`)
