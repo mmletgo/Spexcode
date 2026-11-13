@@ -4380,7 +4380,8 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
   const extras = Object.fromEntries(definitions.slice(1).flatMap(definition => [[definition.path, multi && definition === definitions[2] ? sources.get(definition.nodeId)!.slice(0, sources.get(definition.nodeId)!.indexOf('## expanded spec')).replace('contract-schema: sync-v1\n', '') : sources.get(definition.nodeId)!], [definition.sourcePath, readFileSync(new URL('src/export.js', fixturePath), 'utf8')], [definition.testPath, readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', definition.upper).replaceAll('src/export.js', definition.sourcePath)]]).filter(([path]) => !newLeaf || path !== badOwner.path))
   const verifications = definitions.map(definition => { const item = parseContract({ nodeId: definition.nodeId, path: definition.path, source: sources.get(definition.nodeId)! }).contract!.items.find(item => item.kind === 'VERIFY')!; assert.equal(item.kind, 'VERIFY'); return { definition: { id: item.id, command: item.command, cwd: item.cwd, timeoutMs: item.timeoutMs }, environment: { version: 'trusted-test-v1' as const, image: 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392', platform: 'linux/arm64' as const, memoryBytes: 128 * 1024 * 1024, cpus: 1, pidsLimit: 64, scratchBytes: 16 * 1024 * 1024, logBytes: 128 * 1024 } } })
   const mandatoryTests = definitions.map(definition => ({ verificationId: `VERIFY-${definition.upper}-01`, testPath: definition.testPath, testId: `AC-${definition.upper}-01` }))
-  const f = await fixture(t, formatFinite ? { maxAttempts: 3, maxCalls: 30 + formatRemaining, maxRepairs: 2, timeoutMs: 300000 } : { mode: 'unlimited' }, false, baseSpec, 'project', baseSpec, { version: 'sync-coordinator-v2', direction: 'code_to_spec', targets: definitions.filter(item => !newLeaf || item !== badOwner).map(({ nodeId, path }) => ({ nodeId, path })), sourcePaths: ['src'], writePaths: ['.spec'], verifications, mandatoryTests, partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, commitTrigger: { before: null, paths: definitions.map(item => item.sourcePath) } }, undefined, 'code', undefined, true, extras)
+  const nativeContinuation = reuse || mode === 'existing'
+  const f = await fixture(t, formatFinite ? { maxAttempts: 3, maxCalls: 30 + formatRemaining, maxRepairs: 2, timeoutMs: 300000 } : { mode: 'unlimited' }, false, baseSpec, 'project', baseSpec, { version: 'sync-coordinator-v2', direction: 'code_to_spec', ...(nativeContinuation ? { agentWorkflow: 'native-worktree-v1' } : {}), targets: definitions.filter(item => !newLeaf || item !== badOwner).map(({ nodeId, path }) => ({ nodeId, path })), sourcePaths: ['src'], writePaths: ['.spec'], verifications, mandatoryTests, partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, commitTrigger: { before: null, paths: definitions.map(item => item.sourcePath) } }, undefined, 'code', nativeContinuation ? 'claude:default' : undefined, true, extras)
   const renewals: { attemptId: string; at: number }[] = []
   if (formatInterleaved) {
     const renew = f.store.renewLease.bind(f.store)
@@ -4394,7 +4395,9 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
   let partialFailed = false
   const generatedPerOwner = new Map<string, number>()
   const originalBusiness = new Map<string, string>()
-  f.transform((output, request) => {
+  const stageValues = (attempt: SyncAttempt): { stage: string; resultRef: BlobRef }[] => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
+  const reviewInput = (attempt: SyncAttempt, stage: string) => restoreGenerationInput(JSON.parse(readEvidence(f.input.source.commonDir, stageValues(attempt).find(value => value.stage === stage + ':input')!.resultRef).toString()))
+  const respond = (output: unknown, request: ElaborationSessionRequest) => {
     const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!)
     if (request.purpose.startsWith('code_behavior_')) {
       const context = JSON.parse(request.prompt.split('冻结三方输入:\n')[1].split('\n待审分析:')[0]) as { changedPaths: string[] }
@@ -4402,7 +4405,7 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
       if (request.purpose === 'code_behavior_analyze') return { ...(output as object), changes: (output as { changes: object[] }).changes.map(change => ({ ...change, ...(newLeaf && badOwners.includes(definition) ? { kind: 'allowed_change', affectedIds: [], ruleIds: [] } : { affectedIds: [`RULE-${definition.upper}-05`], ruleIds: [`RULE-${definition.upper}-05`] }) })), newNodes: newLeaf && definition === badOwner ? [{ codePath: definition.sourcePath, parentNodeId: 'export-contract', basis: '真实新增无治理模块具有父raw对应的服务职责' }] : [] }
     }
     if (request.purpose.startsWith('elaboration_')) {
-      const context = JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as { targets: { nodeId: string; path: string }[]; readonlySpecRepair?: ElaborationResult['readonlySpecRepair'] }
+      const context = (nativeContinuation ? nativeTask(request, f.input.source.commonDir) : JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0])) as { targets: { nodeId: string; path: string }[]; readonlySpecRepair?: ElaborationResult['readonlySpecRepair']; repair?: { kind: 'readonly_v1_anchor'; baselines: { nodeId: string; baselineSpecPath: string }[] } }
       const definition = definitions.find(item => item.nodeId === context.targets[0].nodeId)!
       ownerCalls.push({ attempt: attempt.number, nodeId: definition.nodeId, purpose: request.purpose })
       if (prose || partial) {
@@ -4412,15 +4415,17 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
       }
       if (attempt.number > 1) {
         assert.ok(badOwners.includes(definition) || sibling && attempt.number === 3 && definition === definitions[2], '其它owner不得因兄弟失败再派发')
-        assert.ok(context.readonlySpecRepair, '真实late V1原件诊断必须进入owner冻结输入')
+        assert.ok(context.readonlySpecRepair || context.repair || nativeContinuation && request.prompt.includes('readonlyFindings'), '真实late V1原件诊断必须进入owner冻结输入')
       }
       if (mode === 'review-p1-fail' && attempt.number === 2 && definition === badOwner && request.purpose === 'elaboration_review') return { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ code: 'oracle-evidence', kind: 'repair', affectedIds: [`AC-${definition.upper}-01`], evidence: '候选仍过度声称父目录断言', decision: '准确保持raw并修正证据表述', message: 'oracle只测文件absence，当前候选声明过度' }] }
       if (request.purpose === 'elaboration_generate') {
         const generated = rows(sources.get(definition.nodeId)!, definition.path)
         generated.changes[0].nodeId = definition.nodeId
-        if (!semantic && context.readonlySpecRepair) {
-          const original = context.readonlySpecRepair.changes.find(change => change.nodeId === definition.nodeId)!
-          generated.changes[0].description = String(parseFrontmatter(original.source).fm.desc ?? '')
+        if (!semantic && (context.readonlySpecRepair || context.repair)) {
+          const prior = context.repair
+            ? readObject(f.input.source.commonDir, readTree(f.input.source.commonDir, request.worktree!.tree).find(entry => entry.path === context.repair!.baselines.find(value => value.nodeId === definition.nodeId)!.baselineSpecPath)!.oid).toString()
+            : context.readonlySpecRepair!.changes.find(change => change.nodeId === definition.nodeId)!.source
+          generated.changes[0].description = String(parseFrontmatter(prior).fm.desc ?? '')
           generated.changes[0].prose = null
           if (mixedCitations && attempt.number === 2) generated.changes[0].description = '未获授权的业务描述改动'
         }
@@ -4432,15 +4437,16 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
           }
           if (rebinding && definition === badOwner && number >= 2) generated.changes[0].tables.AC.push({ ...generated.changes[0].tables.AC[0], id: `AC-${definition.upper}-ADDED-REVIEW` })
           if (attempt.number > 1) {
-            const repair = context.readonlySpecRepair as { kind: string; reviewEvidence: unknown[] }
-            assert.equal(repair.kind, 'candidate_review'); assert.ok(repair.reviewEvidence.length)
+            const repair = context.readonlySpecRepair as { kind: string; reviewEvidence: unknown[] } | undefined
+            if (nativeContinuation) assert.ok(request.prompt.includes('readonlyFindings'))
+            else { assert.equal(repair?.kind, 'candidate_review'); assert.ok(repair.reviewEvidence.length) }
             if (partial) assert.equal((repair as unknown as { findings: unknown[] }).findings.length, 3)
             if (prose) {
               const findings = (repair as unknown as { findings: { itemId?: string; relatedIds: string[]; message: string }[] }).findings
               assert.equal(findings.length, partial ? 3 : 2)
               assert.ok(findings.every(finding => finding.itemId === undefined && finding.relatedIds.length === 2 && JSON.parse(finding.message).ruleLocation.includes(' — expanded spec 段落')))
             }
-            assert.ok(request.prompt.includes('不是新的业务事实或授权'))
+            if (!nativeContinuation) assert.ok(request.prompt.includes('不是新的业务事实或授权'))
           }
         } else if (definition.nodeId === badOwner.nodeId && ++badGenerations < 3) {
           for (const [index, acceptance] of generated.changes[0].tables.AC.entries()) acceptance.source = `code:${definition.sourcePath}#${index % 2 ? 'options' : 'process.stdout.write'}`
@@ -4451,13 +4457,16 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
     }
     assert.notEqual(request.purpose, 'code_generate', '只读方向不得调用代码生成器')
     if (request.purpose === 'code_review') {
+      const local = nativeContinuation ? reviewInput(attempt, `partition:${request.requestKey.split(':final:')[1].slice(0, -':code_review'.length)}:candidate-review`) : promptInput(request)
       if (reuse) {
         reviewCalls.push({ attempt: attempt.number, key: request.requestKey.split(':final:')[1] })
         if (formatContinuation) {
-          const local = promptInput(request), isB = local.elaboratedSpecs.some(spec => spec.path === badOwner.path), isA = formatInterleaved && local.elaboratedSpecs.some(spec => spec.path === definitions[4].path)
+          const isB = local.elaboratedSpecs.some(spec => spec.path === badOwner.path), isA = formatInterleaved && local.elaboratedSpecs.some(spec => spec.path === definitions[4].path)
           if (attempt.number > 1) {
             assert.ok(isB || isA && attempt.number === 2, '只续失败组，已accept兄弟不能重新派发')
-            assert.ok(request.prompt.includes('原评审完整回答：'))
+            const path = /草稿文件=([^；]+)/.exec(request.prompt)![1]
+            const original = readTree(f.input.source.commonDir, request.worktree!.tree).find(entry => entry.path === path)!
+            assert.ok(readObject(f.input.source.commonDir, original.oid).toString().startsWith('原评审完整回答：'))
             if (isA) return output
             if (attempt.number >= (formatFinite ? 2 : formatInterleaved ? 4 : 3)) throw Object.assign(new Error('目标多轮续审已证，在Docker前停止'), { code: 'unsupported' })
           }
@@ -4465,14 +4474,14 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
           return rejectedReviewFixture(f, request, '原评审完整回答：\n' + JSON.stringify(output))
         }
         if (attempt.number >= 4) throw Object.assign(new Error('cached accept与fresh repair已由owner处理；Docker前停止'), { code: 'unsupported' })
-        if (promptInput(request).elaboratedSpecs.some(spec => spec.path === badOwner.path)) {
+        if (local.elaboratedSpecs.some(spec => spec.path === badOwner.path)) {
           if (reuseRepair && attempt.number === 3) return { ...(output as object), verdict: 'repair', findings: [{ kind: 'repair', affectedIds: [`AC-${badOwner.upper}-01`], ruleLocation: `contract:${badOwner.path}#AC-${badOwner.upper}-01`, codeLocation: badOwner.sourcePath, evidence: '本轮真实独审要求复核已接受表述', counterexample: '旧accept不能代替本轮repair的owner回应', message: '沿原raw/source复核，允许critic误读而保持正文，不增加授权' }] }
           throw Object.assign(new Error('固定失败分区；其余真实accept必须按同输入承接'), { code: attempt.number >= 3 ? 'unsupported' : 'failed' })
         }
         return output
       }
       if (semantic) {
-        const frozen = promptInput(request)
+        const frozen = local
         if (sibling && attempt.number === 2) {
           const owner = crossSource ? badOwner : definitions[2], id = `AC-${owner.upper}-01`
           return { ...(output as object), verdict: frozen.readyIds.includes(id) ? 'repair' : 'accept', findings: frozen.readyIds.includes(id) ? [1, 2].map(number => ({ kind: 'repair', affectedIds: [id, `RULE-${owner.upper}-05`], ruleLocation: `${owner.path} — expanded spec 段落「新兄弟复核${number}」`, codeLocation: `${owner.sourcePath}#ExportService`, evidence: '后续独审要求兄弟澄清，P1可核对后认定误审并保持正文', counterexample: '单凭定位不足以授权业务变化', message: '沿原raw复核，不授新权' })) : [] }
@@ -4515,7 +4524,42 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
       finalReview = true; throw Object.assign(new Error('fixture在全候选真实V1通过后、Docker之前停止'), { code: 'unsupported' })
     }
     return output
-  })
+  }
+  if (!nativeContinuation) f.transform(respond)
+  else f.options.runner = async request => {
+    f.calls.push(request)
+    const seed = request.worktree!, commonDir = f.input.source.commonDir
+    const readJson = (marker: string) => JSON.parse(request.prompt.split(marker)[1].split('\n')[0])
+    let output: unknown
+    if (request.purpose.startsWith('code_behavior_')) {
+      const context = readCodeBehaviorContext(request, commonDir), paths = context.task.requiredChangedPaths as string[]
+      const pending = context.pendingAnalysis
+      output = pending ? { inputDigest: request.inputDigest, analysisDigest: pending.analysisDigest, verdict: 'accept', checkedPaths: paths, checkedChangeIds: pending.analysis.changes.map(change => change.id), findings: [] }
+        : { changes: paths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '遵守导出原意', previousBehavior: '导出任务结果不变', sourceBehavior: '实现重构，导出结果不变', deliveryBehavior: '共同已验证语义不变', evidence: `冻结源码/断言 ${path}`, counterexample: '重复COMPLETE保首次结果，未改变此断言' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+      if (!pending) output = await respond(output, { ...request, prompt: inlineBehaviorPrompt(request, commonDir) })
+    } else {
+      if (request.purpose === 'code_review') {
+        const identity = readJson('候选绑定:\n') as { inputId: string; candidateDigest: string; requiredIds: string[] }
+        output = { inputId: identity.inputId, candidateDigest: identity.candidateDigest, verdict: 'accept', checkedIds: identity.requiredIds, findings: [] }
+      } else if (request.purpose === 'elaboration_review') output = { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+      else assert.equal(request.purpose, 'elaboration_generate')
+      output = await respond(output, request)
+      if (request.purpose === 'elaboration_generate') {
+        output = adaptElaborationNativeOutput(request, output)
+        const generated = output as { applicability: { affectedIds: string[] }[] }
+        const task = nativeTask(request, commonDir) as { targets: { nodeId: string }[]; repair?: { applicability?: typeof generated.applicability } }
+        const definition = definitions.find(item => item.nodeId === task.targets[0].nodeId)!
+        if (task.repair?.applicability) generated.applicability = task.repair.applicability
+        else for (const item of generated.applicability) item.affectedIds = [`REQ-${definition.upper}-01`]
+      }
+    }
+    const workspace = join(f.parent, 'native-' + contentHash(request.requestKey))
+    const worktree = seed.mode === 'edit' ? committedDraftFixture(f, request, output, workspace) : undefined
+    if (seed.mode === 'edit' && request.purpose !== 'code_review') output = { summary: '提交并保留对应 owner 的原稿' }
+    const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!)
+    const dispatch = attempt.dispatchPlans.find(item => item.key === request.requestKey)!
+    return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `independent-thread-${request.requestKey}`, turnId: 'turn-1', output, resultDigest: contentHash(JSON.stringify(output)), ...(worktree ? { worktree } : {}) }
+  }
   const claim = f.store.claimQueuedAttempt.bind(f.store)
   const recordFailure = f.store.recordFailure.bind(f.store)
   const listAttempts = f.store.listAttempts.bind(f.store)
@@ -4828,10 +4872,7 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
       const plan = JSON.parse(readEvidence(f.input.source.commonDir, wrappers[1].find(stage => stage.stage === 'candidate-partition-plan').resultRef).toString())
       const key = `sync:${sourceAttempt.id}:generation:final:${saved.stage.slice('partition:'.length, -':candidate-review'.length)}:code_review`
       const request = f.calls.find(call => call.requestKey === key)!
-      type Input = import('./generation-types.js').GenerationInput
-      const serialized = JSON.parse(request.prompt.split('冻结原意和基线完整输入:\n')[1].split('\n实际候选身份')[0]) as Omit<Input, 'files'> & { files: [string, string][]; manifestProjection?: unknown; completeManifestDigest?: string }
-      const { manifestProjection: _projection, completeManifestDigest: _digest, ...context } = serialized
-      const input: Input = { ...context, files: new Map(context.files), manifest: { version: 1, entries: readTree(f.input.source.commonDir, context.composed?.tree ?? context.snapshot.immutableTree) }, priorContext: context.priorContext?.map(prior => ({ ...prior, files: new Map(prior.files) })) }
+      const input = reviewInput(sourceAttempt, saved.stage)
       const operation = f.store.readOperation(f.operation.id)
       const history = new WeakMap<SyncAttempt, ReturnType<typeof readSyncCheckpointStageIndex>>()
       const readIndex = (source: SyncAttempt) => { const view = history.get(source) ?? readSyncCheckpointStageIndex(f.store, operation, source); history.set(source, view); return view }
@@ -4874,7 +4915,7 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
       const { signal: _signal, ...payload } = request
       const originalFind = f.store.findResource.bind(f.store), dispatch = sourceAttempt.dispatchPlans.find(dispatch => dispatch.key === key)!
       const injected = JSON.parse(readEvidence(f.input.source.commonDir, wrappers[1].find(stage => stage.stage === `injected:${key}`).resultRef).toString())
-      for (const frozen of [false, true]) {
+      for (const frozen of payload.worktree ? [false] : [false, true]) {
         const nativeRequest = frozen ? prepareFrozenPrompt({ ...payload, frozenEntries: [{ id: 'task', label: 'Complete original task and frozen context', kind: 'utf8' as const, text: payload.prompt }] }, { directory: join(f.root, '..', 'review-context'), binding: { attemptId: sourceAttempt.id, policyDigest: operation.policyDigest } }) : payload
         const requestDigest = contentHash(JSON.stringify(nativeRequest)), identity = { operationId: operation.id, attemptId: sourceAttempt.id, inputId: operation.input.id, candidateDigest: candidate.digest }
         const native: NativeRunPlan = { schemaVersion: 1, ...identity, request: nativeRequest, requestDigest, sessionCreateKey: dispatch.sessionCreateKey, expectedSessionId: injected.result.sessionId }
