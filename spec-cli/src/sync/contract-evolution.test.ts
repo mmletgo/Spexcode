@@ -203,6 +203,34 @@ test('preserve_business允许精确冻结raw-only旧节点首次建契约，且�
   assert.ok(validateContractEvolution(rawlessBefore, rawlessAfter, policy({ mode: 'preserve_business', newNodeRawSources: new Map([[path, raw]]) })).some(issue => issue.code === 'refactor_business_item_added'))
 })
 
+test('preserve_business允许已有空schema标记的raw-only目标首次建契约', async () => {
+  const rawOnlySource = `${source.split('## expanded spec')[0].trimEnd()}\n`
+  const raw = parseParts(rawOnlySource)!.rawSource
+  const beforeFiles = files(); beforeFiles.set(path, rawOnlySource)
+  const before = await readFrozenContracts('/frozen', beforeFiles)
+  assert.equal(before.contracts[0].schema, 'sync-v1')
+  assert.deepEqual(before.contracts[0].items, [])
+  assert.equal(before.contracts[0].expandedSpec, '')
+  const snapshot: ElaborationInput = {
+    ...input(), mode: 'preserve_business', intent: { nodeId: 'export-contract', rawSource: raw },
+    targets: [{ nodeId: 'export-contract', path, source: rawOnlySource, sourceDigest: elaborationDigest(rawOnlySource) }], files: beforeFiles,
+  }
+  const result = await elaborate(snapshot, { runner: runner(build(source)) })
+  assert.equal(result.status, 'complete', JSON.stringify(result.rounds[0].findings.map(issue => issue.code)))
+  assert.equal(result.contracts.find(contract => contract.path === path)?.rawSource, raw)
+  assert.equal(result.reviewPassed, true)
+
+  const after = await readFrozenContracts('/frozen', files())
+  const noFrozenRaw = validateContractEvolution(before, after, policy({ mode: 'preserve_business' }))
+  assert.ok(noFrozenRaw.some(issue => issue.code === 'refactor_business_item_added'))
+
+  const withProse = new Map(beforeFiles)
+  withProse.set(path, `${rawOnlySource}\n## expanded spec\n\n既有业务说明。\n`)
+  const proseBefore = await readFrozenContracts('/frozen', withProse)
+  const withExistingProse = validateContractEvolution(proseBefore, after, policy({ mode: 'preserve_business', newNodeRawSources: new Map([[path, raw]]) }))
+  assert.ok(withExistingProse.some(issue => issue.code === 'refactor_business_item_added'))
+})
+
 test('用户明确raw变化的简单REQ来源能授权AC更新，不要求虚构中间RULE', async () => {
   const before = await readFrozenContracts('/frozen', files()), analysis = evidence()
   analysis.analysis.authorizedChanges = [{ ...proposal, source: 'user:raw', ruleIds: ['REQ-EXPORT-01'], reason: '用户原意明确要求同键结果包含当前状态' }]

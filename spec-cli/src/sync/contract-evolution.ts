@@ -310,7 +310,9 @@ export function validateContractEvolution(before: FrozenContracts, after: Frozen
   }
   const frozenRawOnlyNodes = new Map(before.nodes.flatMap(node => {
     const next = after.nodes.find(candidate => candidate.path === node.path)
-    const eligible = node.rawSource !== null && !before.contracts.some(contract => contract.path === node.path) && next?.id === node.id && next.rawSource === node.rawSource && policy.newNodeRawSources.get(node.path) === node.rawSource
+    const previous = before.contracts.find(contract => contract.path === node.path)
+    const eligible = node.rawSource !== null && (!previous || !previous.items.length && !previous.expandedSpec.trim())
+      && next?.id === node.id && next.rawSource === node.rawSource && policy.newNodeRawSources.get(node.path) === node.rawSource
     return eligible ? [[node.path, node.id] as const] : []
   }))
   if (policy.mode === 'preserve_business') for (const item of after.graph.items.values()) {

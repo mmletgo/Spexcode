@@ -25,7 +25,7 @@ update_acceptance 必须绑定真实内容摘要的冻结行为分析；分析�
 
 preserve_business 保持 raw、expanded 业务正文和全部业务字段，只允许必要实现、来源符号及测试定位变化，以及移动导致的 canonical 权威身份调整。reelaborate 接受合法意图细化；未经授权不能弱化已有验收。所有检查独立于当前 active AC 数量，不以空验收或 GAP 跳过旧图和退役检查；GAP 仍只影响真实依赖分支。
 
-preserve_business 允许 raw-only 旧节点第一次建立契约，但仅限该节点已存在于冻结旧图的 nodes 中，候选继续使用同一 canonical nodeId 与 path，冻结旧图的 contracts 没有该 path，调用者以 newNodeRawSources 精确绑定该 path 且其值与旧节点非空 rawSource 逐字相同，候选该 path 的 rawSource 也逐字保持该冻结值。此例外只免除首次业务项新增门禁；已有 sync-v1 节点新增项、身份或路径变化、缺少冻结 raw、raw 改动仍拒绝，其他既有业务语义、authority、退役及引用门禁不变。
+preserve_business 允许 raw-only 旧节点第一次建立契约，但仅限该节点已存在于冻结旧图的 nodes 中，候选继续使用同一 canonical nodeId 与 path，冻结旧图的 contracts 没有该 path，或该 path 仅登记 sync-v1 标记且没有契约项和 expanded 正文。调用者以 newNodeRawSources 精确绑定该 path 且其值与旧节点非空 rawSource 逐字相同，候选该 path 的 rawSource 也逐字保持该冻结值。此例外只免除首次业务项新增门禁；已有契约项或 expanded 正文的 sync-v1 节点新增项、身份或路径变化、缺少冻结 raw、raw 改动仍拒绝，其他既有业务语义、authority、退役及引用门禁不变。
 
 用户已经编辑 raw/详细规则、保留旧 AC 时，真实作者 old→new 差量由程序生成并纳入同一独审分析：changedIds 包含合法来源，定位匹配该来源节点，afterRaw 必须精确匹配当前冻结原意。它证明用户变更已经发生，不要求细化再改一次规则；模型不能填此作者差量，旧合法分析不能跨输入复用，版本绑定由协调器核对。
 
