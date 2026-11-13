@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
 import fs from 'node:fs'
 import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
-import { syncBuiltinESMExports } from 'node:module'
+import { createRequire, syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -8788,7 +8788,23 @@ for (const boundary of ['failed', 'superseded-zero-call'] as const) test(`P2混�
   const readAttempt = store.readAttempt.bind(store), listResources = store.listResources.bind(store)
   const settled = { ...readAttempt(repair.fromAttemptId), status: 'superseded' as const, failure: null }
   store.readAttempt = id => id === settled.id ? settled : readAttempt(id)
-  assert.doesNotThrow(() => continuationCoordinator.validateReadonlyRepair(store, store.readOperation(f.operation.id), repair), '完整已结算aggregate可直接认证superseded/null来源，不补失败状态')
+  const treeReads: string[] = [], originalExec = execFileSync
+  t.mock.method(createRequire(import.meta.url)('node:child_process'), 'execFileSync', (...args: Parameters<typeof execFileSync>) => {
+    const command = args[1] as string[]
+    if (args[0] === 'git' && command.includes('ls-tree') && command.includes('-rlz')) treeReads.push(command.at(-1)!)
+    return Reflect.apply(originalExec, undefined, args)
+  })
+  syncBuiltinESMExports()
+  try {
+    assert.doesNotThrow(() => continuationCoordinator.validateReadonlyRepair(store, store.readOperation(f.operation.id), repair), '完整已结算aggregate可直接认证superseded/null来源，不补失败状态')
+  } finally {
+    t.mock.restoreAll()
+    syncBuiltinESMExports()
+  }
+  const frozenTree = initialGeneration.candidate!.tree
+  const rereads = treeReads.filter(tree => tree === frozenTree).length
+  t.diagnostic(JSON.stringify({ totalTreeReads: treeReads.length, frozenCandidateTreeReads: rereads, candidateReviewGroups: roles.size }))
+  assert.equal(rereads, 1, '同一结算候选的完整Git树只核一次')
   const missing = { ...settled, checkpointRefs: settled.checkpointRefs.filter(ref => !read<{ stage?: string }>(ref).stage?.endsWith(':candidate-review')).concat(settled.checkpointRefs.filter(ref => read<{ stage?: string }>(ref).stage?.endsWith(':candidate-review')).slice(1)) }
   store.readAttempt = id => id === settled.id ? missing : readAttempt(id)
   assert.throws(() => continuationCoordinator.validateReadonlyRepair(store, store.readOperation(f.operation.id), repair), /readonly_spec_repair_binding/, '缺一个required outcome不能接回失租约业务诊断')
