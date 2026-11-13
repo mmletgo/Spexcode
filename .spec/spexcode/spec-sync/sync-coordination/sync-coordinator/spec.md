@@ -17,6 +17,8 @@ related:
 
 ## expanded spec
 
+长候选的冷恢复逐组核验原分区请求、结果和正式结算，同一次完整认证只读取每棵 Git 树一次。已领取恢复轮在组间检查原控制和租约，取消时停止后续认证。
+
 候选独审的已审来源校验沿 [[sync-input-composition]] 的原 v1 分段摘要核精确冻结选择；大范围共享 pair 时也保持原字节顺序及全部身份。
 
 同一冻结 operation 的 code→spec 原生 P1 完整候选可复核本轮新提议的 code/derived missing_fact GAP。复用原 runner、request/session、fence、调用/返修预算和阶段 refs；严格核 original aggregate/local Git/独审、plan、readSet/selection、composed、完整输入与只读 Native 请求及正式结果。合法 repair 只派原 GAP owner 续稿并新独审，旧 accept 不改成失败；仍须当前严格 seal 和全部 P2 门。已复核的真实未知、冲突或无新发现保持原 blocked，冷恢复重验原结果而不重复模型调用；错绑定或无合法独审不能授予续稿。JSON合法但ID、边界或独立性协议未过时，在原预算下一attempt只续只读审查；previousReviewRef严格指向同operation较早的同候选失败原件，拒因和原输出仅在当次prompt现读，原owner批准保持。合法负例不走该续审。新 checkpoint 只引用已有结果原件和稳定身份，不重复归档诊断正文，不把临时诊断或草稿纳入产品 Git。

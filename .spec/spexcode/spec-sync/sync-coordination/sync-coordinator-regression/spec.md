@@ -16,11 +16,15 @@ related:
 
 ## expanded spec
 
+混合候选的冷验计数检查同一真实冻结 Git 树只完整读取一次。原候选、已拒稿及全部独审结论保持完整认证。
+
 P2 混合失败使用真实 Git/Native 资源记录与 SQLite 冷开：普通 repair 排首、后组 contract-omission、另一组格式失败和一个 accept 同轮结算。冷续只重派原格式稿，保相同 candidate、合法 repair/accept 的原 resultRef；之后只回相应 P1 owner，保未命中原件与旧 CAS。覆盖完整 aggregate 后失租约的 superseded/null、零调用中间 attempt、缺 required outcome 及资源未 removed；不得补旧失败或收据。权限回归另在同 owner 核 ordinary 白名单与 omission 的已接受字段保护，不以并集扩权。
 
 同一矩阵另含尚未结清的新候选 GAP，仅在隔离控制前置模拟历史可选 GAP 复核 stage 缺席，其余真实 Git、SQLite、Native 和 CAS 字节保持。冷恢复仍只续 P2 格式组；普通与遗漏 owner 新独审及严格 seal 后才派新 aggregate 的 GAP 复核，协议阶段无 P1 或 GAP 派发，原 GAP 各字段与旧 verdict/ref 保持。
 
 同 owner 的后续 GAP 续稿分别覆盖已批准 RULE.basis 事实修正与合法新增 AC。新并集 GAP 独审后再次重开 SQLite，仅命中 owner 沿最新 acceptedRef 和 Git 草稿继续；新输入不携旧普通或遗漏权限，所有非 GAP 项、元数据、raw 与原 checkpoint 字节保持，最后重做 strict seal。回滚事实或丢弃新增 AC 的负例须以 candidate_gap_scope_changed 在独审前拒绝，不靠扩大原 P0 或合并诊断修绿。
+
+当前协议的只读候选续审回归通过真实 Git 草稿取得 P0 v8 和 P1 原件。有限预算、多个格式拒稿、独审缓存和锚点返修均从各阶段的冻结输入与精确 Git seed 检查。冻结上下文旧运输另由历史请求验证。
 
 多 owner 候选独审失败回归从全局 generation 保存到失败结算统计阶段读取。每轮局部结论只共用一份索引，完整历史对象克隆为零，继续核原预算、格式续审范围和旧审批。
 

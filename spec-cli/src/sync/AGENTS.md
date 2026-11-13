@@ -9,6 +9,7 @@
 - 新计划的 contextVerifications 只供全图 seal 校验未选 owner 的冻结定义；局部模型和 V3 保原登记及运行范围，旧 plan 缺席不从实时配置补入。writer47 只追加 marker；停稳并结算旧 writer 后 online backup，回滚恢复一致 v46 库及配套证据/Git refs，不删 marker。
 - 新计划的历史未执行资格只由 historical-coverage 按精确已采纳 pair/receipt/report 和三份 Git 对象冷验；P1 全图 seal 与 V1 共用逐 ID 判据，局部请求与当前义务保持严格。证明沿原 planBlob，旧缺席不补写。writer50 只追加 marker；停稳结算并 online backup，回滚恢复一致 v49 库及配套证据/Git refs。
 - P2 混合结果先保同候选已认证结论，仅续审格式拒稿，不插入GAP复核/续稿；随后按精确 owner 处理普通与契约遗漏发现并逐值保GAP，新并集strict seal后才独审GAP。writer51 围栏保护新增持久判别值；冷升级先停稳、结算与 online backup，回滚恢复一致 v50 库及原证据。
+- writer52 保护候选 GAP 独审与 owner 续稿的原件引用。停稳并结算后由原组件迁移保存一致 online backup，回滚恢复 v51 库、证据和 Git 引用。
 - 共享分区调度每项结束均须真正让出事件循环，缓存、末项与失败亦然；让原心跳与控制运行，不延长租约或弱化fence。P1只按最近有真实P1派发的已结算观测故障收紧下一次返修，故障消失后恢复冻结并发；无派发或仅复用检查点的控制重启不消耗或重置该次返修。
 - 每阶段绑定真实 seed commit/tree：分析使用 composed，细化包含已审祖先，构建包含已审 Spec，独审使用实际候选。缓存同时核验实际可见 tree；不能只传原 HEAD 而漏掉受控 Spec 修改，也不能混入提交后的 index/WIP。
 - 实现 Agent 在工作树真实修改、测试并正常提交；候选从实际 Git 对象差量导入。程序检查写范围、CAS、原测试和契约演进，生成摘要或自报补丁不能替代实际修改。

@@ -15,12 +15,23 @@ export type TreeReadCache = Map<string, TreeEntry[]>
 type ReadonlySnapshotQuery = { active: boolean; trees: Map<string, TreeEntry[]> }
 const readonlySnapshotQuery = new AsyncLocalStorage<ReadonlySnapshotQuery>()
 
-/** 为一次只读查询建立短命的完整 tree 校验结果作用域。 */
-export async function withReadonlySnapshotQuery<T>(read: () => T | Promise<T>): Promise<T> {
+/** 为单次查询或候选冷验建立短命的完整 tree 校验作用域。 */
+export function withReadonlySnapshotQuery<T>(read: () => T): T {
+  if (readonlySnapshotQuery.getStore()?.active) return read()
   const query: ReadonlySnapshotQuery = { active: true, trees: new Map() }
-  return readonlySnapshotQuery.run(query, async () => {
-    try { return await read() }
-    finally { query.active = false; query.trees.clear() }
+  const clear = (): void => { query.active = false; query.trees.clear() }
+  return readonlySnapshotQuery.run(query, () => {
+    let asynchronous = false
+    try {
+      const result = read()
+      if (result instanceof Promise) {
+        asynchronous = true
+        return result.finally(clear) as T
+      }
+      return result
+    } finally {
+      if (!asynchronous) clear()
+    }
   })
 }
 

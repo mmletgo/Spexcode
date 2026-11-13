@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+writer51→52 复用真实 SQLite marker 迁移回归，核对原表行和旧迁移记录、事务失败回滚、旧 writer 拒绝和可恢复的在线备份。
+
 writer49→50 复用隔离 SQLite 迁移回归，验证旧 writer 拒绝、事务失败回滚、原观察及旧表行保持和在线备份可恢复。具体历史资格与新收据行为由 [[sync-historical-coverage]] 验收。
 
 观察存储回归以已结算 pair 建立同一 selection 的新旧两种记录，验证旧行原字节、GC引用、消费顺序、去重条件和前端覆盖保持。新记录只存业务覆盖投影及原摘要，完整 selection 继续由受权准入与收据使用。
