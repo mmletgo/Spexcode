@@ -75,6 +75,8 @@ AC-APPLICATION-P4-06 使用真实Git root移动/重建，验证持久健康、�
 
 AC-APPLICATION-P4-07 验证重新授权后旧root确实撤权，已注册root被删除时仍在missing范围且保留真实node_unknown观测，不把它显示为空项目正常。
 
+AC-APPLICATION-06 使用 Spec 驱动的实现交付验证真实 Docker、普通 Git hooks 和新的收据提交。原分支保留初始 HEAD，完成后重放原请求及恢复固定工具描述均保持原共同基线、收据和调用数。
+
 AC-APPLICATION-P4-08 真实Git/SQLite、正式观察服务、compiled hooks与Docker验证无浏览器提交触发自动交付；native runner是明确确定性替身。输入冻结commit，代码提交只更新已审Spec、不派code_generate，交付的全部非Spec Git对象与提交输入保持一致；未采纳前原source/index/HEAD保持，补偿及scope外作者编辑不新开回声operation，scope外变化不错误标stale。
 
 AC-APPLICATION-P4-09 真实失败后scope外编辑不改变stale/重试资格，同request重放沿原receipt，新retry绑定原input；相关原始意图变动则stale并拒绝旧输入重试。

@@ -464,6 +464,7 @@ resume 继续原操作，--retry-of 建立关联新操作；三个入口各自�
 --retry-of 显式重试可重试的失败操作，保留原正文意图并关联旧结果；不能同时传 --patch-file。
 只有显式重试建立新操作和新预算，普通重复请求继续归并。未结算资源或已变输入拒绝重试。
 show/status 展示真实失败、GAP、过期和交付工作树；workspace_synced 不代表原输入树已落地。
+启用的主来源完成新同步并结算验证后，服务会在干净原工作树上按真实收据自动采纳。
 adopt 显式采纳已验证且结算的交付，只安全快进干净原工作树；未提交改动或分叉明确拒绝并保留交付。
 show/status 的 adoptionEligibility 给出资格与具体原因，sourceSynced 与 canonicalSynced 分别表示原树采纳和主分支同步。
 手动 --origin code|combined 接入外部代码变更并分析业务冲突；来源不构成采用新业务的授权。

@@ -67,3 +67,5 @@ SyncBudget 保持既有四个 numeric 字段对象逐字语义，另接受精确
 SyncCheckpointRef仅在attempt checkpoint引用上可选携artifacts:{kind:json|untrusted_final,ref}，普通业务BlobRef保持仅sha256。新wrapper及其全部材料引用同次提交，旧缺席保持，无新增事实/候选/授权。
 
 持久 `recordUnverifiedCoverage` 绑定手动请求与操作。其通过的 `VerificationResultBlob` 单列 `unexecutedContractIds`，实际 V3 运行原件由层引用保留。
+
+operation、admission 和 ingress 可保存 `automaticSourceAdoption: canonical-source-v1`，表示可信应用为新 initial/spec/code/combined 操作冻结的自动主来源采纳政策。它进入 payload 与规范语义身份，不是外部请求开关，也不证明 Git 已采纳。旧字段缺席保持显式采纳；同请求、alias 和正式 retry 保留原政策，重复观察不能给旧操作补权。
