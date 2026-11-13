@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+readBaselinePair(id) 在既有 assertSchema 事务中按精确主键只读取得一个持久 pair，缺失明确报错，供 [[sync-historical-coverage]] 冷验。它不读取或推进当前 heads，不枚举历史，不改写原件或增加表结构。
+
 listResources(attemptId)在既有只读事务枚举该attempt全部真实资源，包含removed历史，不过滤kind或阶段、不修改记录，供协调器逐项冷验候选续验后继；它不改变retry准入、幂等、资源恢复或writer/schema约定。
 
 sourceContinuityState仅在既有assertSchema事务只读汇总同commonDir的完整来源、有效current attempt/lease、未removed资源及未settled journal，不限列表条数、不读会话正文、不改CAS。登记层结合observer/owner事实拒绝活跃的另一raw namespace；过期running元数据本身不证明活跃。连续性不修改原operation/input/预算或既有blob。

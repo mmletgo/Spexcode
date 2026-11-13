@@ -13,6 +13,8 @@ code:
 
 ## expanded spec
 
+可选 historicalCoverageDigest 只绑定 [[sync-historical-coverage]] 的程序证明，进入完整封口 inputDigest；局部投影和模型任务移除它。实际证明原件仍由原 planBlob 与协调器持有，不复制进 ElaborationInput 或旧结果，也不表示历史测试已在本轮执行。
+
 P1生成指导保留V1–V4原值，并以ac-test-flow-review-verify-fact-repair-v5作为新阶段缺省。只有V5完整叶candidate_review返修可取得[[sync-elaboration]]的窄事实资格；该资格进入当前返修业务摘要，不改历史摘要，也不让无repair的兄弟批准失效。readonlySpecRepair本身不新增能力字段，旧缺席或旧指导不追补。新持久语义由[[sync-migrations]]的writer33围栏保护。
 
 partitioned_final的analysisOnlyPartitions仅在存在无写义务的已审P0分区时保存本区P0原件ref和whole P0 ref。它们按原分区顺序进入全局inputDigest，与真实partitionEvidence分开。无该字段的原聚合摘要保持原字节；rounds只来自真实P1局部，不为仅分析组补建review、candidate或trace。

@@ -3006,7 +3006,7 @@ for (const prior of [34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44] as const) test(
   } finally { backup?.close(); f.cleanup() }
 })
 
-for (const prior of [46, 47, 48] as const) test(`从writer${prior}升级保留自动采纳索引及原件，旧writer拒绝且备份可回滚`, async () => {
+for (const prior of [46, 47, 48, 49] as const) test(`从writer${prior}升级保留自动采纳索引及原件，旧writer拒绝且备份可回滚`, async () => {
   assert.equal(SYNC_MIGRATIONS[prior]?.version, prior + 1, '新持久语义必须有独立 writer 围栏')
   const f = await fixture()
   let backup: ReturnType<typeof openProtocol> | undefined

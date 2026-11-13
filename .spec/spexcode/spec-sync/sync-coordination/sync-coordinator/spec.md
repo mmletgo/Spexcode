@@ -17,6 +17,8 @@ related:
 
 ## expanded spec
 
+P1 全图 seal 与完整候选 V1 仅从原 planBlob 的 [[sync-historical-coverage]] 描述构造同一逐 ID 冷验。完整政策摘要、真实 input/composed/candidate 与原收据绑定后才保留历史 warning；不读当前资源头、扩大 ready/coveredScope 或将其记成本轮已执行验收。P1 局部只收到原业务输入。
+
 P1 输入只透传原 planBlob 已冻结的 contextVerifications，供 [[sync-partition-execution]] 的全图封口引用校验；局部模型和 V3 继续使用原 verifications 与 mandatoryTests。旧计划没有该字段时不读取当前 settings 补签。
 
 P0 后置回审先按实际受影响的冻结 owner 及 `refactor_business_meaning_changed` 发现筛选原轮。普通 P1 结构、测试绑定或审查诊断留在 P1。跨操作重验命中的 Git 草稿用原已认证 Native 任务的完整 targets 计算 owner，包括 P0 已审后才加入的规格叶，继续核原 schema、真实 Git 对象及保活引用。
