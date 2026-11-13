@@ -6,7 +6,7 @@ import { createInterface } from 'node:readline'
 import type { Readable } from 'node:stream'
 import { Ajv } from 'ajv'
 import { detachedRuntimeIsGone, verifyDetachedRuntime, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
-import { NATIVE_PERIODIC_OBSERVATION_FAILURE, nativeWorktreeLaunch, periodicNativeWorktreeSampler, sampleNativeWorktreeProcesses, waitForNativeWorktreeProcessesStopped } from './native-worktree-runtime.js'
+import { NATIVE_PERIODIC_OBSERVATION_FAILURE, nativeWorktreeLaunch, periodicNativeWorktreeSampler, sampleNativeWorktreeProcesses, stopNativeWorktreeDescendants, waitForNativeWorktreeProcessesStopped } from './native-worktree-runtime.js'
 import { sessionIdentityEnvVars } from './harness-shim.js'
 import { assertRejectedOutput, rejectedFinalOutput, structuredExecutionPolicy, structuredExecutionTimer, StructuredSessionError, type StructuredExecution } from './session-structured-policy.js'
 
@@ -246,7 +246,8 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
   const env: NodeJS.ProcessEnv = { ...process.env, TMPDIR: tmp }
   for (const key of sessionIdentityEnvVars()) delete env[key]
   const child = spawn('/bin/sh', ['-c', 'IFS= read -r ready && [ "$ready" = start ] || exit 1; exec "$@"', 'spex-grok-launch', launch.command, ...launch.args, ...args], { cwd: worktreePath, env, detached: true, stdio: ['pipe', 'pipe', 'ignore'] })
-  const exited = new Promise<Exit>(resolve => child.once('exit', (code, signal) => { armStop(); resolve({ code, signal }) }))
+  let exitObserved = false
+  const exited = new Promise<Exit>(resolve => child.once('exit', (code, signal) => { exitObserved = true; armStop(); resolve({ code, signal }) }))
   let processFailed = false
   child.stdin.once('error', () => { processFailed = true })
   let owned: OwnedLaunch | undefined
@@ -294,7 +295,8 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
     try { writeDetachedRuntimeReceipt(child.pid, receiptFile) }
     catch (error) { throw Object.assign(pending('Grok detached process ownership could not be recorded'), { cause: error }) }
     const binding = { planDigest: digest(plan), pid: child.pid, receiptFile, receiptDigest: sha256(readFileSync(receiptFile)) }
-    owned = { ...plan, ...binding }
+    const ownedLaunch = { ...plan, ...binding }
+    owned = ownedLaunch
     writeEvidence(root, 'launch.json', binding)
     const running = { ...native, pid: binding.pid, receiptFile }
     await callbacks.onNative(running)
@@ -306,11 +308,29 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
       observerFailure ??= Object.assign(new StructuredSessionError('failed', NATIVE_PERIODIC_OBSERVATION_FAILURE.grok), { cause: error })
       abort()
     }), 250)
-    const ended = await Promise.race([Promise.all([exited, Promise.race([terminalSeen, observed])]), expiry])
+    const terminalOrStream = Promise.race([terminalSeen, observed])
+    let reapTimer: ReturnType<typeof setTimeout> | undefined
+    let exit: Exit
+    try {
+      const ended = await Promise.race([terminalOrStream.then(async () => {
+        if (terminal?.stopReason === 'end_turn' && deadline !== undefined && !exitObserved && !observerFailure) {
+          const exitDeadline = deadline
+          const stillWaiting = (): boolean => !exitObserved && !timedOut && !observerFailure && !processFailed && !callbacks.signal?.aborted
+            && !existsSync(join(root, 'cancel.json')) && sha256(readFileSync(receiptFile)) === binding.receiptDigest
+          await Promise.race([exited, new Promise<void>(resolve => { reapTimer = setTimeout(resolve, 500) })])
+          if (stillWaiting()) {
+            await stopNativeWorktreeDescendants(ownedLaunch, exitDeadline, stillWaiting).catch(error => {
+              if (!(error instanceof StructuredSessionError && error.code === 'cancellation_pending')) throw error
+            })
+          }
+        }
+        return exited
+      }), expiry])
+      if (!ended) throw pending('Grok native exit or terminal remains unproven')
+      exit = ended
+    } finally { clearTimeout(reapTimer) }
     armStop()
-    if (!ended) throw pending('Grok native exit or terminal remains unproven')
     clearTimeout(stopTimer)
-    const [exit] = ended
     const interrupted = callbacks.signal?.aborted === true || timedOut
     const successfulExit = !observerFailure && !processFailed && terminal?.stopReason === 'end_turn' && exit.code === 0 && exit.signal === null
     const stopDeadline = successfulExit && !interrupted ? Date.now() + STOP_MS : deadline!

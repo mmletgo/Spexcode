@@ -15,7 +15,7 @@ const schema = { type: 'object', properties: { marker: { type: 'string' } }, req
 const finalText = '{"marker":"终态"}'
 const sha256 = (text: string): string => createHash('sha256').update(text).digest('hex')
 
-type Scenario = 'success' | 'wrong-session' | 'wrong-cwd' | 'missing-request' | 'duplicate-terminal' | 'missing-terminal' | 'wrong-format' | 'bad-schema' | 'hang' | 'read' | 'periodic' | 'split-settlement-window' | 'cancel-during-settlement' | 'inherited-stdout' | 'inherited-stdout-trailing' | 'unowned-stdout'
+type Scenario = 'success' | 'wrong-session' | 'wrong-cwd' | 'missing-request' | 'duplicate-terminal' | 'missing-terminal' | 'wrong-format' | 'bad-schema' | 'hang' | 'read' | 'periodic' | 'split-settlement-window' | 'cancel-during-settlement' | 'inherited-stdout' | 'inherited-stdout-trailing' | 'parent-awaits-owned-child' | 'unowned-stdout'
 
 function fixture(t: TestContext, scenario: Scenario, model = 'grok:default') {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'spex-grok-fixture-')))
@@ -92,6 +92,15 @@ if (scenario === 'split-settlement-window' || scenario === 'cancel-during-settle
   const descendant = spawn(process.execPath, ['-e', childCode, join(dirname(promptFile), 'descendant-ready')], { cwd: outside, detached: true, stdio: ['ignore', 'inherit', 'ignore'] })
   descendant.unref()
   finish()
+} else if (scenario === 'parent-awaits-owned-child') {
+  const ready = join(dirname(promptFile), 'descendant-ready')
+  const childCode = "const {writeFileSync}=require('node:fs');const keep=setTimeout(()=>{},21000);process.on('SIGTERM',()=>clearTimeout(keep));writeFileSync(process.argv[1],'ready')"
+  spawn(process.execPath, ['-e', childCode, ready], { stdio: ['ignore', 'inherit', 'ignore'] })
+  const poll = setInterval(() => {
+    if (!existsSync(ready)) return
+    clearInterval(poll)
+    setTimeout(finish, 600)
+  }, 20)
 } else if (scenario === 'inherited-stdout' || scenario === 'inherited-stdout-trailing') {
   const childCode = "const {writeFileSync}=require('node:fs');const keep=setTimeout(()=>{},19000);process.on('SIGTERM',()=>{" +
     (scenario === 'inherited-stdout-trailing' ? "process.stdout.write('{\"type\":\"text\",\"data\":\"late\"}\\n');" : '') +
@@ -246,6 +255,24 @@ test('Grok settles a natural exit while a recorded descendant still holds stdout
   const settlement = JSON.parse(readFileSync(join(f.sessionRoot, 'settlement.json'), 'utf8'))
   assert.deepEqual(settlement.exit, { code: 0, signal: null })
   assert.equal((await stopGrokStructuredTurn(f.state(), 5_000)).nativeStopped, true)
+})
+
+test('Grok settles a successful terminal when its parent waits for a recorded child', { timeout: 25_000 }, async t => {
+  const f = fixture(t, 'parent-awaits-owned-child')
+  try {
+    const result = await f.run()
+    assert.equal(result.text, finalText)
+    assert.equal(result.turnId, f.requestId)
+    const settlement = JSON.parse(readFileSync(join(f.sessionRoot, 'settlement.json'), 'utf8'))
+    assert.deepEqual(settlement.exit, { code: 0, signal: null })
+  } finally {
+    const pid = f.state().grokNative?.pid
+    if (pid) {
+      try { process.kill(pid, 0); await delay(6_000) }
+      catch (error) { assert.equal((error as NodeJS.ErrnoException).code, 'ESRCH') }
+    }
+    assert.equal((await stopGrokStructuredTurn(f.state(), 5_000)).nativeStopped, true)
+  }
 })
 
 test('Grok still rejects data after the terminal when an owned descendant closes stdout', { timeout: 25_000 }, async t => {
