@@ -33,6 +33,14 @@ related:
 
 同一冻结候选的 GAP 复核经 [[sync-coordinator]] 认证后，只可触发原 owner 的候选误报续稿。资格由独立 review 的 affectedIds 精确命中本轮新提议、code/derived 来源的 missing_fact GAP，不能从说明文字推测。新 gapRepair 仅引用原复核及 accepted owner；临时读取原结果诊断、原已审并集和 Git 草稿，不改旧批准。只可移除命中的临时 GAP 及指向已移除 GAP 的 typed 引用，原 metadata、raw、说明、其他业务列、稳定 ID、AC/VERIFY 和适用性逐值保持；真实未知可原样保留。新独审须与原生成、原独审、GAP 复核和当前生成独立，完整结构、演进和严格全图封口照常执行。诊断不能自行清除 GAP、取得人工裁决或改变实现权限。
 
+同一已审候选的 owner 契约遗漏复用只读返修容器，以 contract_omission 区分普通 candidate_review 事实诊断。只从已认证的专用 marker、同 owner 既有 ID 和原候选派生局部 refinement；保留其原已审正文、raw、稳定身份及 REQ/RULE/AC/VERIFY 全部列与测试/来源绑定。现有 reelaborate、P0 影响范围和原意支持仍决定能否新增细节；refinement 不把未变化 P0 或普通事实诊断变成业务变更授权。不适用的差量继续明确拒绝。
+
+同 owner 同时含普通事实与遗漏时，两类资格分别检查。普通事实只消费 candidate-review-repair 的 typed relatedIds；遗漏发现的 relatedIds 不进入事实白名单。原 V5 资格、description/prose/命中 RULE.basis 范围保持；遗漏不能改既有政策或验收，普通事实不能增删业务行。局部独审、冷缓存及最终全图 seal 继续复验，不能用两个范围的并集放开整个 owner。
+
+普通 candidate_review 与 contract_omission 返修都逐值保留原已审候选内的 GAP 身份、类别、未知项、影响项、证据、决定、来源与依赖。此保护由局部候选和严格全图 seal 共用，不能借普通事实或遗漏诊断提前删除、改类或重绑 GAP；独立 GAP 续稿仍只消费自己的已认证诊断。
+
+同一次全图封口先按原证据核局部事实与遗漏的可编辑范围，再按各 ID 的历史验证资格核验完整图。历史未执行资格不扩大当前 owner 的返修权限。
+
 完整 seal 在已经构建的唯一契约图上消费 [[sync-historical-coverage]] 冷验通过的 ID，仅改变原 missing-acceptance 的未执行资格，其他结构与演进门保持。历史资格摘要参与完整输入绑定，但不进入生成或独审模型任务，局部验证不取得该豁免。
 
 完整分区封口将可信 contextVerifications 与本轮 verifications 合并后冻结，逐项校验完整候选中未选 owner 的既有 AC/VERIFY 引用。GAP 首次复核与冷恢复重验共用这一完整输入和严格 seal，并重新消费原历史覆盖冷验；缺证明、登记或完整输入失配时不得派发或承接诊断。局部生成和独审保持原登记，不据此增加可写目标、业务义务或实际验收运行；重复、错误与未知定义继续拒绝，旧输入缺席不补入。

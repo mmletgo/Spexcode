@@ -8,6 +8,7 @@
 - 分区复用 partitioning/partition-execution 的唯一计划，共用 operation、fence、预算与最终 candidate/journal/receipt。任务只交付变更 Spec、相关接口和明确目标；Agent 在独立 worktree 自由读取，不以分块读取或逐字消费证明作为同步门禁。
 - 新计划的 contextVerifications 只供全图 seal 校验未选 owner 的冻结定义；局部模型和 V3 保原登记及运行范围，旧 plan 缺席不从实时配置补入。writer47 只追加 marker；停稳并结算旧 writer 后 online backup，回滚恢复一致 v46 库及配套证据/Git refs，不删 marker。
 - 新计划的历史未执行资格只由 historical-coverage 按精确已采纳 pair/receipt/report 和三份 Git 对象冷验；P1 全图 seal 与 V1 共用逐 ID 判据，局部请求与当前义务保持严格。证明沿原 planBlob，旧缺席不补写。writer50 只追加 marker；停稳结算并 online backup，回滚恢复一致 v49 库及配套证据/Git refs。
+- P2 混合结果先保同候选已认证结论，仅续审格式拒稿，不插入GAP复核/续稿；随后按精确 owner 处理普通与契约遗漏发现并逐值保GAP，新并集strict seal后才独审GAP。writer51 围栏保护新增持久判别值；冷升级先停稳、结算与 online backup，回滚恢复一致 v50 库及原证据。
 - 共享分区调度每项结束均须真正让出事件循环，缓存、末项与失败亦然；让原心跳与控制运行，不延长租约或弱化fence。P1只按最近有真实P1派发的已结算观测故障收紧下一次返修，故障消失后恢复冻结并发；无派发或仅复用检查点的控制重启不消耗或重置该次返修。
 - 每阶段绑定真实 seed commit/tree：分析使用 composed，细化包含已审祖先，构建包含已审 Spec，独审使用实际候选。缓存同时核验实际可见 tree；不能只传原 HEAD 而漏掉受控 Spec 修改，也不能混入提交后的 index/WIP。
 - 实现 Agent 在工作树真实修改、测试并正常提交；候选从实际 Git 对象差量导入。程序检查写范围、CAS、原测试和契约演进，生成摘要或自报补丁不能替代实际修改。
@@ -43,6 +44,7 @@
 - 原生工作树使用结构化策略 v6，sync v31 组件 marker 拒绝旧 writer；ZCode 新 read 请求冻结精准 ExitPlanMode denylist 与 NativePlan v2，旧资源/记录及仅 reserved dispatch 的字段缺席保持，后者只以完整请求摘要确证；内部创建键首建保留上游冻结字段并严格验策略，不能恢复时补默认。旧数字与 null 的只读 v1–v5 原样恢复。unlimited 模型调用期限为 null，创建、租约、stop/close 及 Docker 期限仍独立有限。升级先停全部旧 backend/queue 并结算资源、备份数据库；回滚恢复升级前备份，不能只删 marker 或改工具描述。
 - 新P1按owner显式冻结elaboration-draft-v1，精确schema在同seed只读sidecar，v6 edit只写真实Git临时草稿并正常提交、小summary回执；程序读指定blob后再JSON/schema/renderer/独审。失败正文留Git refs，checkpoint只记身份和errors并保留原finding定位及severity，旧缺席不补写；诊断不进入raw role/业务candidate；跨父输入只迁draft不迁旧树，accept仍核完整摘要及冷Git/schema/最终正文渲染绑定，原source tag不向legacy补签；仅验证时允许保留hooks的正常空提交，不造业务diff。已冻结/仅reserved旧请求不补协议。该草稿协议由writer22围栏保护；完整生成与独审的测试绑定和流程提示由新attempt原stage的generationGuidance冻结，writer31保护v3；旧v1/v2及字段缺席按原提示恢复；精准回归：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/elaboration-draft.test.ts`。
 - 格式/schema拒绝的final仅经adapter原请求/身份/停止认证后保存为可选rejectedOutput诊断；历史只读请求的原文ref/SHA与完整正文进入同owner下一prompt，不能填成功output或候选、继承accept、读取thinking或追补旧缺席。review失败保留此前合法generation和candidate。 仅格式失败续审沿原P1/null扩域证明保partition计划及候选，认证原Native refs只给精确失败组的只读诊断seed；兄弟accept仍核完整原请求，ZCode policy按saved原字段重建，不追补缺席。
+- P2混合失败先沿同候选补协议，合法repair与accept均冷验原件并保各自verdict；业务再消费完整分区finding，普通事实与omission按各自权限回原owner。完整aggregate后superseded/null只可凭全部required outcomes及精确removed原件回接，不补旧failure；新owner遗漏kind发布须独立writer围栏。
 
 
 - 跨boot显式continuity用offline `sync source-continuity`，先停稳并清资源，核原op/input/revision、enabled原字节SHA与三旧dev双哈希；commonDir共享enable/register锁。v23拒旧writer，成功仅暂停原PhysicalControl并登记v2；旧op/input/CAS不改。私有runtime/sync/continuity-evidence保原enabled及proof链，不依赖DB-only GC；回滚配套恢复DB/启用原件/证据。正常身份只投影已证明哈希并保actual branch/path，失效不fallback；raw仅显式证明及资源清理可用。

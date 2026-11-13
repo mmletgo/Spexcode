@@ -25,6 +25,8 @@ related:
 
 ## expanded spec
 
+contract_omission 与普通事实同 owner 时，事实修正仍只认原 candidate-review-repair 的 relatedIds 和 V5/未变化 owner 资格；遗漏项不能扩大可改 basis 或绕过 unchangedTargetOutput。其余渲染、raw、稳定行和来源绑定规则保持。
+
 目标影响归属复用[[sync-governance-owners]]的低层纯治理判定，不经分区装配模块加载配置或细化schema；行渲染、事实权限与既有请求字节保持原合同。
 
 连续事实修复以认证的上一轮确定事实值为行差量基线，未列行照常继承。新relatedIds不含的旧RULE.basis既不能自由再改，也不能因省略而回滚到原作者旧值；全部非事实字段仍逐值等于作者基线。
