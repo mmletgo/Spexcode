@@ -56,7 +56,11 @@ reads a historical `(commit,path)` image, its blob, and an ordinary `(commit,pat
 each node's own selector set and emits findings in declaration order.
 
 The Tree-sitter rows preserve one shared declaration vocabulary. TypeScript/TSX expose top-level functions,
-classes and class methods, simple variable declarations, enums, interfaces, and type aliases; Python
+classes and class methods, simple variable declarations, enums, interfaces, type aliases, and local
+default exports. JS-family rows expose the direct `export default` statement as the module's
+`default` unit, covering the full statement. The TypeScript syntax retry uses the same range and
+marks a default-exported type as type-only. A named default declaration also retains its original
+unit. Export lists, re-exports and TypeScript's `export =` do not create this unit. Python
 exposes module-scope assignments that bind a value (including annotated, chained, and destructuring targets,
 also when nested in module control-flow blocks), `def`, `async def`, and classes with lexical qualification;
 imported names and function/class-local assignments remain outside the capability; Go exposes constants,

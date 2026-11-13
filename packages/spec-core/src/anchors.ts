@@ -129,7 +129,7 @@ export function parseRelation(raws: string[], relation: 'code' | 'related'): Rel
 // with. If it cannot resolve, ready() returns a loud unverified verdict and lint skips these anchors
 // without crashing (no bundled compiler, regex fallback, or fake pass for JS).
 const JS_EXTS = new Set(['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'mts', 'cts'])
-const TS_AST_MEMO_SCHEMA = 'ts-ast-memo-v1'
+const TS_AST_MEMO_SCHEMA = 'ts-ast-memo-v2'
 const TS_SIMPLE_VARIABLE_NAME = /^[A-Za-z_$][\w$]*$/u
 
 function tsAstUnits(ts: typeof TypeScript, content: string, filename: string, matchTreeSitter = false): Unit[] {
@@ -157,12 +157,16 @@ function tsAstUnits(ts: typeof TypeScript, content: string, filename: string, ma
     return line((first ?? node).getStart(sf))
   }
   const units: Unit[] = []
-  const push = (name: string, kind: string, node: TypeScript.Node, typeOnly = false) =>
-    units.push({ name, kind, start: start(node), end: line(node.end), ...(typeOnly ? { typeOnly } : {}) })
+  const push = (name: string, kind: string, node: TypeScript.Node, typeOnly = false, firstLine = start(node)) =>
+    units.push({ name, kind, start: firstLine, end: line(node.end), ...(typeOnly ? { typeOnly } : {}) })
   const declarationName = (name: TypeScript.Identifier) => matchTreeSitter ? name.getText(sf) : name.text
   const nameOrDefault = (name?: TypeScript.Identifier) => name ? declarationName(name) : matchTreeSitter ? null : '(default)'
   for (const st of sf.statements) {
-    if (modifiers(st).some((m) => m.kind === ts.SyntaxKind.DeclareKeyword)) continue
+    const list = modifiers(st)
+    if (list.some((m) => m.kind === ts.SyntaxKind.DeclareKeyword)) continue
+    if (matchTreeSitter && (ts.isExportAssignment(st) && !st.isExportEquals || list.some(m => m.kind === ts.SyntaxKind.DefaultKeyword))) {
+      push('default', 'export-default', st, ts.isInterfaceDeclaration(st) || ts.isTypeAliasDeclaration(st), line(st.getStart(sf)))
+    }
     if (ts.isFunctionDeclaration(st)) {
       const name = nameOrDefault(st.name)
       if (name && (!matchTreeSitter || (st.body && !st.asteriskToken))) push(name, 'function', st)
@@ -506,6 +510,11 @@ function tsTreeUnits(root: TreeSitterNode): Unit[] {
     }
   }
   for (const raw of nodeChildren(root)) {
+    if (raw.type === 'export_statement' && nodeAllChildren(raw).some(child => child.type === 'default')) {
+      const declaration = nodeField(raw, 'declaration')
+      if (declaration || nodeField(raw, 'value'))
+        add('default', 'export-default', raw, declaration?.type === 'interface_declaration' || declaration?.type === 'type_alias_declaration')
+    }
     const top = raw.type === 'export_statement' ? nodeChildren(raw) : [raw]
     for (const node of top) {
       if (node.type === 'function_declaration') add(nodeText(nodeField(node, 'name')), 'function', node)
@@ -713,9 +722,9 @@ const trustedTsSyntaxFallback: Pick<Extractor, 'extract' | 'memoKey'> = {
 }
 
 export const TREE_SITTER_ROWS: TreeSitterLanguageRow[] = [
-  { id: 'tree-sitter-typescript', extensions: ['ts', 'mts', 'cts'], grammar: 'typescript', schema: 'ts-v1', units: tsTreeUnits, syntaxFallback: trustedTsSyntaxFallback },
-  { id: 'tree-sitter-tsx', extensions: ['tsx'], grammar: 'tsx', schema: 'tsx-v1', units: tsTreeUnits, syntaxFallback: trustedTsSyntaxFallback },
-  { id: 'tree-sitter-javascript', extensions: ['js', 'jsx', 'mjs', 'cjs'], grammar: 'javascript', schema: 'js-v1', units: tsTreeUnits },
+  { id: 'tree-sitter-typescript', extensions: ['ts', 'mts', 'cts'], grammar: 'typescript', schema: 'ts-v2', units: tsTreeUnits, syntaxFallback: trustedTsSyntaxFallback },
+  { id: 'tree-sitter-tsx', extensions: ['tsx'], grammar: 'tsx', schema: 'tsx-v2', units: tsTreeUnits, syntaxFallback: trustedTsSyntaxFallback },
+  { id: 'tree-sitter-javascript', extensions: ['js', 'jsx', 'mjs', 'cjs'], grammar: 'javascript', schema: 'js-v2', units: tsTreeUnits },
   { id: 'tree-sitter-python', extensions: ['py', 'pyi'], grammar: 'python', schema: 'python-v1', units: pythonTreeUnits },
   { id: 'tree-sitter-go', extensions: ['go'], grammar: 'go', schema: 'go-v1', units: goTreeUnits },
   { id: 'tree-sitter-rust', extensions: ['rs'], grammar: 'rust', schema: 'rust-v1', units: rustTreeUnits },

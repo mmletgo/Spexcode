@@ -169,6 +169,28 @@ test('the Tree-sitter registry extracts the shared declaration vocabulary for ev
   assert.deepEqual(resolveAnchor(units, 'Command.run'), { ambiguous: 2 })
 })
 
+test('JS family anchors keep the exact default export range and existing named declarations', async () => {
+  const source = 'const named = "value"\nexport default build({\n  named,\n})\n'
+  for (const extension of ['js', 'mjs', 'ts', 'tsx']) {
+    const extractor = treeSitter(extension), filename = `src/config.${extension}`
+    const units = await extractor.extract(source, filename)
+    assert.deepEqual(resolveAnchor(units, 'default'), { ok: { name: 'default', kind: 'export-default', start: 2, end: 4 } })
+    assert.deepEqual(resolveAnchor(units, 'named'), { ok: { name: 'named', kind: 'const-data', start: 1, end: 1 } })
+    assert.deepEqual(selectorsHitRanges(units, ['default', 'named'], [[3, 3]]), ['default'])
+    assert.deepEqual(resolveAnchor(await extractor.extract('export default function named() {}', filename), 'named'),
+      { ok: { name: 'named', kind: 'function', start: 1, end: 1 } })
+    assert.deepEqual(resolveAnchor(await extractor.extract('export default 1\nexport default 2', filename), 'default'), { ambiguous: 2 })
+    assert.deepEqual(resolveAnchor(await extractor.extract('export { shared as default } from "./other.js"', filename), 'default'), { dead: true })
+  }
+  const extractor = treeSitter('ts')
+  const ts = 'interface Shape { abstract?: string | null; }\nexport default build({\n  enabled: true,\n})\n'
+  assert.deepEqual(resolveAnchor(await extractor.extract(ts, 'src/fallback.ts'), 'default'),
+    { ok: { name: 'default', kind: 'export-default', start: 2, end: 4 } })
+  assert.deepEqual(resolveAnchor(await extractor.extract('export default interface Settings {}', 'src/types.ts'), 'default'),
+    { ok: { name: 'default', kind: 'export-default', start: 1, end: 1, typeOnly: true } })
+  assert.deepEqual(resolveAnchor(await extractor.extract('export = value', 'src/legacy.ts'), 'default'), { dead: true })
+})
+
 test('Python anchors resolve module assignments without claiming imports or scoped assignments', async () => {
   const python = extractorFor(extractors(ROOT), 'py')!
   const source = [

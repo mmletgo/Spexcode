@@ -74,7 +74,11 @@ export async function validateFrozenAnchors(graph: ContractGraph, files: Readonl
     const verdict = resolveSelectors(parsed.units, [query.selector])[0]
     if ('dead' in verdict) {
       const alternatives = [...new Set(parsed.units.map(unit => unit.name).filter(name => name.endsWith(`.${query.selector}`)))].slice(0, 5)
-      report(query, 'anchor-dead', `${query.path}#${query.selector} 不存在于冻结候选${alternatives.length ? `；同一文件中的限定名备选 ${alternatives.join(', ')}` : ''}`)
+      const defaultExport = resolveSelectors(parsed.units, ['default'])[0]
+      const localDefault = 'ok' in defaultExport && defaultExport.ok.kind === 'export-default' && !defaultExport.ok.typeOnly
+        ? `；同一文件的本地默认导出 ${query.path}#default（第 ${defaultExport.ok.start}–${defaultExport.ok.end} 行），核实它是否支持该断言`
+        : ''
+      report(query, 'anchor-dead', `${query.path}#${query.selector} 不存在于冻结候选${alternatives.length ? `；同一文件中的限定名备选 ${alternatives.join(', ')}` : ''}${localDefault}`)
     }
     else if ('ambiguous' in verdict) report(query, 'anchor-ambiguous', `${query.path}#${query.selector} 匹配 ${verdict.ambiguous} 个符号`)
     else {

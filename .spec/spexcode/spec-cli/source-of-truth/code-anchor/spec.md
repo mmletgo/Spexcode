@@ -39,8 +39,9 @@ keeps today's advisory-only drift, forever.
 
 ## expanded spec
 
-**Vocabulary.** An anchor names one top-level unit: a function, an arrow/const declaration (data
-too), a class, an enum, or a class method (`#Class.method`). A type/interface resolves but
+**Vocabulary.** An anchor names one unit: a function, an arrow/const declaration (data
+too), a class, an enum, a class method (`#Class.method`), or a JS-family local default export
+(`#default`). A type/interface resolves but
 warns — anchoring a type is usually wrong. A `code:` entry may carry **any number of selectors, all on
 the same exact base file** — measured evidence: the drift-replay benchmark's multi-anchor roster (its
 1–3 cap was annotation rubric, never product syntax — no selector-count cap exists).

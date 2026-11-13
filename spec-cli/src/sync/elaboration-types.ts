@@ -51,6 +51,8 @@ export type ElaborationInput = {
   compactSealDiagnostics?: true
   /** 只读V1引用返修的历史诊断展示版本。 */
   citationRepairDiagnostics?: 'actionable-v1'
+  /** 只读引用返修提示支持JS族本地默认导出。 */
+  defaultExportCitation?: true
   /** 仅由分区执行器用于无源码writer的初始或既有纯父接口；结果不是完整P1或实现就绪。 */
   phase?: 'interface_seed'
   /** 原分区计划及后验纯父分类证据，只绑定本区来源，不授予写权限或完成度。 */
