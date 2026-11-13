@@ -512,8 +512,7 @@ export class SyncStore {
           if ([previous, ...siblings].some(source => source.delivery || !contains(emptyScope(), source.deliveredScope)
             || source !== previous && !this.retryEligibility(tx, source).eligible
             || tx.query("SELECT id FROM sync_attempts WHERE operation_id=? AND status NOT IN ('failed','superseded','settled') LIMIT 1", source.id).length
-            || tx.query("SELECT id FROM sync_resources WHERE operation_id=? AND kind='verification' LIMIT 1", source.id).length
-            || tx.query('SELECT id FROM sync_apply_journals WHERE operation_id=? LIMIT 1', source.id).length)) fail('SYNC_RETRY_BUDGET_BINDING', '原操作和此前的模型交接都必须正式结算且未进入交付验证')
+            || this.verificationOrJournalExists(tx, source.id))) fail('SYNC_RETRY_BUDGET_BINDING', '原操作和此前的模型交接都必须正式结算且未进入交付验证')
           retryBudgetSource = previous
         }
       }
@@ -1051,6 +1050,13 @@ export class SyncStore {
     }
     return this.write(tx => this.retryEligibility(tx, this.operation(tx, operationId), proof))
   }
+  private verificationOrJournalExists(tx: ProtocolTransaction, operationId: string): boolean {
+    return tx.query(`SELECT EXISTS (SELECT 1 FROM sync_apply_journals WHERE operation_id=?)
+      OR EXISTS (SELECT 1 FROM sync_resources WHERE operation_id=? AND kind='verification')
+      OR EXISTS (SELECT 1 FROM sync_attempts WHERE operation_id=? AND json_type(record_json,'$.verification')='object') AS found`, operationId, operationId, operationId)[0].found === 1
+  }
+  /** 查指定操作曾否进入验证或应用，避免把尝试与资源原件搬到协调器。 */
+  hasVerificationOrJournal(operationId: string): boolean { return this.write(tx => this.verificationOrJournalExists(tx, operationId)) }
   /** 仅核指定已替换操作的结算事实；原批准与输入绑定仍由调用者认证。 */
   isSupersededOperationSettled(operationId: string): boolean {
     return this.write(tx => {

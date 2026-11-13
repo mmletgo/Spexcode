@@ -1666,6 +1666,7 @@ test('模型续审交接仅在前一模型正式结算后沿原父候选使用�
     const original = f.claim(input)
     f.store.reserveDispatch(original.fence, { key: 'original-review', purpose: 'code_review', requestDigest: 'original-review' })
     const parent = f.store.requestControl(original.operation.id, 'cancel')
+    assert.equal(f.store.hasVerificationOrJournal(parent.id), false)
     const handoff: AdmitSyncInput = { ...input, retryOf: parent.id, inheritRetryBudget: true, model: 'grok:default', ingressKey: 'grok-review', rootCauseId: 'grok-review' }
     const first = f.store.admitAndEnqueue(handoff)
     const nextInput: AdmitSyncInput = { ...handoff, model: 'claude:default', ingressKey: 'claude-review', rootCauseId: 'claude-review' }
@@ -1727,6 +1728,7 @@ test('superseded结算资格逐项拒绝活租约、历史未removed资源和未
   try {
     const ready = f.ready(), planned = f.put({ phase: 'planned' })
     const resource = f.store.planResource(ready.fence, { key: 'settlement-proof', kind: 'verification', payloadDigest: 'fixed-proof', inputId: ready.operation.input.id, candidateDigest: ready.candidate.digest, planBlob: planned, checkpointRef: planned })
+    assert.equal(f.store.hasVerificationOrJournal(ready.operation.id), true)
     const binding = { operationId: resource.operationId, attemptId: resource.attemptId, inputId: resource.plan.inputId, candidateDigest: resource.plan.candidateDigest }
     const terminal = f.put({ phase: 'terminal' }), removed = f.put({ phase: 'removed' })
     f.store.recordResourceCheckpoint(resource.id, { ...binding, phase: 'terminal', expectedCheckpointRef: planned, checkpointRef: terminal })
