@@ -10,6 +10,7 @@ import { mintIds } from '@spexcode/spec-core'
 import { contractAuthorizationErrors, resolvedDecisionGapIds, validateContractEvolution } from './contract-evolution.js'
 import { isReadonlyCitationFailure } from './frozen-anchors.js'
 import type { FrozenContracts } from './frozen-contracts.js'
+import { historicalCoverageFinding } from './frozen-contracts.js'
 import type { HistoricalCoverageCheck } from './historical-coverage.js'
 import { posix } from 'node:path'
 import { buildContractGraph, contractReferences, CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts, projectContractCoverage, validateContractGraph } from '@spexcode/spec-core/contracts'
@@ -444,7 +445,8 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
     .filter(issue => input.phase === 'interface_seed'
       ? !interfaceSeedCoverageFinding.has(issue.code)
       : strictContextCoverage || targetNodeIds.has(issue.nodeId) || !contextCoverageFinding.has(issue.code))
-    .map(issue => {
+    .map(original => {
+      const issue = historicalCoverageFinding(original, historical)
       const readonlyTest = ['missing-test-file', 'missing-test-case'].includes(issue.code) && input.readonlyTestPaths?.some(path => issue.message.includes(path))
       return (input.implementationWritePaths?.length === 0 || readonlyTest) && implementationFinding(issue) ? { ...issue, code: 'readonly_implementation_gap', message: `本轮实现或测试只读，不能延后补写代码或测试；${issue.message}` } : issue
     })

@@ -18,6 +18,8 @@ related:
 
 完整候选可由可信调用者提供 [[sync-historical-coverage]] 的逐 ID 冷验回调，在本函数的唯一 ContractGraph 上验证实际文件后，仅给原 validateContractGraph 增加精确未执行资格。不能过滤范围外错误、另建覆盖图或改变原结构、引用及实现检查。
 
+完整 seal 与 V1 共用精确历史 warning 的文案投影，明确“历史上未执行”且不计入本轮已执行覆盖；code、severity、ID 与定位保持，其余 warning/error 不改。
+
 本节点复用 [[sync-contract-schema]] 的解析器、唯一节点身份、完整性和覆盖投影，在冻结文本上执行 [[sync-verification]] 的 V1 与生成约束检查，不从宿主工作区读取另一版本。异步前复制输入文件。结构、代码与测试引用检查包括候选全部声明，符号验证由 [[sync-frozen-anchors]] 承担。
 
 完整候选验证另接收同一 candidate tree 的完整路径清单，复用 [[spec-lint]] 的关系完整性检查，拒绝不存在的 code/related 路径、关系格式错误及违反 one-govern 的元数据。部分正文 readset 不冒充全仓路径清单；合法未读取文件、非文本对象和目录通过清单证明存在。业务 ID 或节点 ID 不能冒充 related 文件路径，该错误在 V1 作为可修复发现返回，不等到严格 Git hook 拒绝后才发现；原 hook、提交 intent 与真实 receipt 门禁保持。

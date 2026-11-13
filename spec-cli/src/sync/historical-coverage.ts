@@ -7,7 +7,7 @@ import { isSyncSpecPath, readFrozenContracts } from './frozen-contracts.js'
 import type { BaselinePair, BlobRef, FrozenBaselineSelection, InputSnapshot, SyncScope, VerificationResultBlob } from './operation-types.js'
 import { obligationPaths } from './prior-context.js'
 import { assertSourceAdoptionComplete, isSourceCommitAncestor, settledReceipt } from './source-adoption.js'
-import { contentHash, readEvidence, readObject, verifySnapshot, writeObject } from './snapshot.js'
+import { contentHash, readEvidence, readObjectBatch, verifySnapshot, writeObject } from './snapshot.js'
 import type { TreeEntry } from './snapshot.js'
 import type { SyncStore } from './store.js'
 
@@ -51,44 +51,60 @@ function candidateEntries(input: InputSnapshot, entries: readonly TreeEntry[], f
   return result
 }
 
-function unchangedHistoricalId(input: InputSnapshot, scope: SyncScope, id: string, prior: PriorProof, graph: ContractGraph, original: ReadonlyMap<string, TreeEntry>, candidate: ReadonlyMap<string, TreeEntry>, files: ReadonlyMap<string, string>): boolean {
-  const item = graph.items.get(id)
-  if (!item || !['REQ', 'RULE', 'TR'].includes(item.kind) || scope.contractIds.includes(id) || within(item.path, scope.paths) || !prior.unexecuted.has(id) || !prior.pair.coveredScope.contractIds.includes(id)) return false
-  const delivered = new Map(prior.entries.map(entry => [entry.path, entry])), owner = delivered.get(item.path)
-  if (!owner || owner.mode === '120000' || !sameEntry(owner, original.get(item.path)) || !sameEntry(owner, candidate.get(item.path))) return false
-  const before = parseContract({ nodeId: item.nodeId, path: item.path, source: readObject(input.source.commonDir, owner.oid).toString('utf8') }).contract?.items.find(previous => previous.id === id)
-  if (!before || before.kind !== item.kind || before.nodeId !== item.nodeId || before.path !== item.path || !isDeepStrictEqual((before as Exclude<ContractItem, { kind: 'VERIFY' }>).source, (item as Exclude<ContractItem, { kind: 'VERIFY' }>).source) || !sameContractBusinessMeaning(before, item)) return false
-  const pending = [id], seen = new Set<string>(), owners = new Set<string>()
-  while (pending.length) {
-    const next = pending.pop()!
-    if (seen.has(next)) continue
-    seen.add(next)
-    const contract = graph.owners.get(next)
-    if (!contract) return false
-    if (owners.has(contract.path)) continue
-    owners.add(contract.path)
-    for (const entry of contract.items) for (const reference of contractReferences(entry)) {
-      if (!graph.items.has(reference.id)) return false
-      pending.push(reference.id)
-    }
+function unchangedHistoricalIds(input: InputSnapshot, scope: SyncScope, ids: readonly string[], prior: PriorProof, graph: ContractGraph, original: ReadonlyMap<string, TreeEntry>, candidate: ReadonlyMap<string, TreeEntry>, files: ReadonlyMap<string, string>): string[] {
+  const delivered = new Map(prior.entries.map(entry => [entry.path, entry])), covered = new Set(prior.pair.coveredScope.contractIds), current = new Set(scope.contractIds)
+  const items = ids.flatMap(id => {
+    const item = graph.items.get(id)
+    if (!item || !['REQ', 'RULE', 'TR'].includes(item.kind) || current.has(id) || within(item.path, scope.paths) || !prior.unexecuted.has(id) || !covered.has(id)) return []
+    const owner = delivered.get(item.path)
+    return owner && owner.mode !== '120000' && sameEntry(owner, original.get(item.path)) && sameEntry(owner, candidate.get(item.path)) ? [{ item, owner }] : []
+  })
+  const sources = readObjectBatch(input.source.commonDir, items.map(({ owner }) => owner.oid)), previous = new Map<string, Map<string, ContractItem>>()
+  for (const { item, owner } of items) if (!previous.has(item.path)) {
+    const contract = parseContract({ nodeId: item.nodeId, path: item.path, source: sources.get(owner.oid)!.toString('utf8') }).contract
+    previous.set(item.path, new Map(contract?.items.map(entry => [entry.id, entry])))
   }
   const inventory = [...new Set([...delivered.keys(), ...original.keys(), ...candidate.keys()])]
-  for (const path of owners) {
-    const source = files.get(path)
-    if (source === undefined) return false
-    for (const protectedPath of obligationPaths(source, path, inventory, true)) {
-      const entry = delivered.get(protectedPath), current = candidate.get(protectedPath)
-      if (!sameEntry(entry, original.get(protectedPath)) || !sameEntry(entry, current) || current && files.has(protectedPath) && contentHash(files.get(protectedPath)!) !== current.digest) return false
+  const pathChecks = new Map<string, boolean>(), ownerChecks = new Map<string, boolean>(), closureChecks = new Map<string, boolean>()
+  return items.filter(({ item }) => {
+    const before = previous.get(item.path)!.get(item.id)
+    if (!before || before.kind !== item.kind || before.nodeId !== item.nodeId || before.path !== item.path || !isDeepStrictEqual((before as Exclude<ContractItem, { kind: 'VERIFY' }>).source, (item as Exclude<ContractItem, { kind: 'VERIFY' }>).source) || !sameContractBusinessMeaning(before, item)) return false
+    if (!closureChecks.has(item.path)) {
+      const pending = [item.id], owners = new Set<string>()
+      let valid = true
+      while (pending.length && valid) {
+        const contract = graph.owners.get(pending.pop()!)
+        if (!contract) { valid = false; break }
+        if (owners.has(contract.path)) continue
+        owners.add(contract.path)
+        if (!ownerChecks.has(contract.path)) {
+          const source = files.get(contract.path)
+          ownerChecks.set(contract.path, source !== undefined && obligationPaths(source, contract.path, inventory, true, contract).every(path => {
+            if (!pathChecks.has(path)) {
+              const entry = delivered.get(path), next = candidate.get(path)
+              pathChecks.set(path, sameEntry(entry, original.get(path)) && sameEntry(entry, next) && (!next || !files.has(path) || contentHash(files.get(path)!) === next.digest))
+            }
+            return pathChecks.get(path)!
+          }))
+        }
+        if (!ownerChecks.get(contract.path)) { valid = false; break }
+        for (const entry of contract.items) for (const reference of contractReferences(entry)) {
+          if (!graph.items.has(reference.id)) valid = false
+          else pending.push(reference.id)
+        }
+      }
+      closureChecks.set(item.path, valid)
     }
-  }
-  return true
+    return closureChecks.get(item.path)!
+  }).map(({ item }) => item.id)
 }
 
 /** 新接入仅冻结精确已采纳旧缺口的身份；以后不依赖可变资源头。 */
 export async function freezeHistoricalCoverage(store: SyncStore, input: InputSnapshot, scope: SyncScope, selection: FrozenBaselineSelection): Promise<HistoricalCoverage | undefined> {
   verifyBaselineSelection(input, selection)
   if (!selection.bindings.some(binding => binding.resource.kind === 'contract' && 'intentPair' in binding && binding.intentPair)) return undefined
-  const entries = verifySnapshot(input), files = new Map(entries.filter(entry => entry.mode !== '120000' && isSyncSpecPath(entry.path)).map(entry => [entry.path, readObject(input.source.commonDir, entry.oid).toString('utf8')]))
+  const entries = verifySnapshot(input), specs = entries.filter(entry => entry.mode !== '120000' && isSyncSpecPath(entry.path)), sources = readObjectBatch(input.source.commonDir, specs.map(entry => entry.oid))
+  const files = new Map(specs.map(entry => [entry.path, sources.get(entry.oid)!.toString('utf8')]))
   const frozen = await readFrozenContracts(input.source.canonicalRoot, files)
   const missing = new Set(projectContractCoverage(frozen.graph).items.filter(item => !item.acceptanceIds.length && !item.blockedBy.length).map(item => item.id))
   const groups = new Map<string, string[]>()
@@ -101,7 +117,7 @@ export async function freezeHistoricalCoverage(store: SyncStore, input: InputSna
   for (const [pairId, ids] of groups) {
     const prior = priorProof(store, input, pairId)
     if (!prior) continue
-    const contractIds = ids.filter(id => unchangedHistoricalId(input, scope, id, prior, frozen.graph, original, original, files)).sort()
+    const contractIds = unchangedHistoricalIds(input, scope, ids, prior, frozen.graph, original, original, files).sort()
     if (contractIds.length) proofs.push({ pairId, receiptId: prior.pair.receiptId, verificationRef: prior.verificationRef, contractIds })
   }
   if (!proofs.length) return undefined
@@ -122,8 +138,8 @@ export function historicalCoverageCheck(store: SyncStore, input: InputSnapshot, 
       for (const id of record.contractIds) {
         if (ids.has(id) || !prior.unexecuted.has(id) || !prior.pair.coveredScope.contractIds.includes(id)) fail('历史覆盖ID重复或未由原正式报告覆盖')
         ids.add(id)
-        if (unchangedHistoricalId(input, scope, id, prior, graph, original, candidate, files)) accepted.add(id)
       }
+      for (const id of unchangedHistoricalIds(input, scope, record.contractIds, prior, graph, original, candidate, files)) accepted.add(id)
     }
     return accepted
   }

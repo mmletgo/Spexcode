@@ -18,6 +18,12 @@ export type FrozenContracts = {
 /** 插件实例是工具配置，不参与业务意图及契约同步。 */
 export const isSyncSpecPath = (path: string): boolean => path.startsWith('.spec/') && path.endsWith('/spec.md') && !path.split('/').includes(PLUGIN_INSTANCE_ROOT)
 
+/** 历史资格只保留原未执行事实，不表述为本轮已执行或新跳测许可。 */
+export function historicalCoverageFinding(finding: ContractFinding, historical?: ReadonlySet<string>): ContractFinding {
+  return finding.code === 'acceptance-not-executed' && finding.severity === 'warning' && finding.itemId && historical?.has(finding.itemId)
+    ? { ...finding, message: `历史上未执行：${finding.itemId}；原已采纳报告保留未执行事实，本轮不将它计入已执行覆盖。` } : finding
+}
+
 /** 使用现有节点身份与契约解析器读取固定文本；root 只表示来源，不读取它的工作文件。 */
 export async function readFrozenContracts(root: string, input: ReadonlyMap<string, string>, inventory?: ReadonlySet<string>, recordUnverifiedAcceptance?: (id: string) => boolean, historicalCoverage?: HistoricalCoverageCheck): Promise<FrozenContracts> {
   const files = new Map(input), paths = inventory && new Set(inventory)
@@ -28,7 +34,7 @@ export async function readFrozenContracts(root: string, input: ReadonlyMap<strin
   const graph = buildContractGraph(contracts)
   const historical = historicalCoverage?.(graph, files)
   const unexecuted = recordUnverifiedAcceptance || historical?.size ? (id: string) => Boolean(recordUnverifiedAcceptance?.(id) || historical?.has(id)) : undefined
-  const findings = [...parsed.flatMap(result => result.findings), ...validateContractGraph(graph, { mode: 'final', files, nodeIds: new Set(nodes.map(node => node.id)), recordUnverifiedAcceptance: unexecuted })]
+  const findings = [...parsed.flatMap(result => result.findings), ...validateContractGraph(graph, { mode: 'final', files, nodeIds: new Set(nodes.map(node => node.id)), recordUnverifiedAcceptance: unexecuted })].map(finding => historicalCoverageFinding(finding, historical))
   if (paths) {
     const directories = new Set([...paths].flatMap(path => path.split('/').slice(0, -1).map((_part, index, parts) => parts.slice(0, index + 1).join('/'))))
     const byId = new Map(nodes.map(node => [node.id, node]))
