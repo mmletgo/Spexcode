@@ -9,11 +9,13 @@ code:
 
 ## raw source
 
-用户从 Dashboard 或 CLI 将已验证完整交付采纳到原输入工作树。只接受真实已结算提交，保留本地修改和正常 Git hooks，不因按钮点击写入虚假的主分支完成状态。
+已启用主分支自动采纳已验证完整交付。用户也可从 Dashboard 或 CLI 显式采纳到原输入工作树。只接受真实已结算提交，保留本地修改和正常 Git hooks，主分支完成状态取自实际 Git。
 
 ## expanded spec
 
 [[sync-application]] 的详情资格与实际采纳使用同一后端判据。只接受完整 workspace_synced/awaiting_landing/canonical_synced 操作：没有未决范围、全部实际交付覆盖操作范围、当前尝试及全部 journal 已 settled，同来源没有未结算原生资源或交付日志，物理写入未暂停。未完成态先给出明确拒因，再读取固定 runtime 和完整证据。
+
+自动路径在同一来源发布锁中复核主分支、观察实例、冻结自动采纳标记与当前 HEAD 的直接正式后继。每次只快进到一份实际收据，下一次以最新 HEAD 查询。前序未采纳的旧手动收据没有自动授权时，后续候选仍保留为待采纳。原显式路径仍核同一工作树与 Git 快进资格。
 
 复核 [[sync-private-delivery]] 已持久的 input、candidate、四层 pass 验证、apply plan、文件步骤、receipt、commit intent 与真实 Git tree/parent/effect 绑定，不重造证据。receipt.actualCommit 必须真实存在；交付快照的 HEAD、工作树、index 和 manifest 等于已验证完整候选。unchanged intent 仅复用原 parent；普通提交必须匹配原 parent 和 effect。固定 runtime、canonical hooks 及执行配置须可静态证明。
 
