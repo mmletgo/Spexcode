@@ -231,7 +231,6 @@ type SavedGeneration = Omit<GenerationResult, 'candidateFiles'> & { p2SpecWriteP
 function stageSelectionMatches(store: SyncStore, operation: SyncOperation, saved: Stage, businessSelection?: FrozenBaselineSelection): boolean {
   if (!operation.baselineSelection) return true
   if (!saved.baselineSelectionRef || !saved.readSetDigest) return false
-  businessSelection ??= checkpointStageSelection(operation)
   const scope = frozenAnalysisScope.getStore(), cache = scope?.active ? scope.selectionMatches : undefined
   const key = cache && JSON.stringify([operation.id, operation.input.id, operation.readSetDigest, operation.baselineSelection.digest, saved.readSetDigest, saved.baselineSelectionRef.sha256, businessSelection?.digest])
   if (key && cache!.has(key)) return cache!.get(key)!
@@ -296,12 +295,13 @@ function elaborationRepairSeed(result: SavedElaboration | null, requestKey: stri
 }
 
 function partitionStage<T>(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string, sourceSelection?: FrozenBaselineSelection, checkpoints: SyncCheckpointStageView = readStageCheckpoints(store, operation, attempt), selectionCheck?: { expectedRef: BlobRef; matches: (value: Stage) => boolean }, usage: 'automatic' | 'evidence' = 'automatic'): { result: T; resultRef: BlobRef } | null {
-  const result = stage<T>(store, operation, attempt, key, usage, checkpoints, selectionCheck?.matches)
+  const phaseSelection = checkpointStageSelection(operation)
+  const result = stage<T>(store, operation, attempt, key, usage, checkpoints, selectionCheck?.matches ?? (phaseSelection ? value => stageSelectionMatches(store, operation, value, phaseSelection) : undefined))
   if (!result) return null
   const resultRef = writeEvidence(operation.input.source.commonDir, result)
   const original = checkpoints.json.map(({ value }) => value as Partial<Stage>)
     .find(value => value.version === 'sync-stage-v1' && value.stage === key && value.operationId === operation.id && value.attemptId === attempt.id && value.inputId === operation.input.id && value.policyDigest === operation.policyDigest && value.resultRef?.sha256 === resultRef.sha256)
-  if (original?.readSetDigest !== operation.readSetDigest || operation.baselineSelection && original.baselineSelectionRef?.sha256 !== (selectionCheck?.expectedRef ?? writeEvidence(operation.input.source.commonDir, sourceSelection ?? checkpointStageSelection(operation) ?? store.readBusinessBaselineSelection(operation.id))).sha256) return null
+  if (original?.readSetDigest !== operation.readSetDigest || operation.baselineSelection && original.baselineSelectionRef?.sha256 !== (selectionCheck?.expectedRef ?? writeEvidence(operation.input.source.commonDir, sourceSelection ?? phaseSelection ?? store.readBusinessBaselineSelection(operation.id))).sha256) return null
   return { result, resultRef }
 }
 

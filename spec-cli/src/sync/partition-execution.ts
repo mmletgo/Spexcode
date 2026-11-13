@@ -477,9 +477,11 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
       const seed = checkpoints.loadElaborationRepairSeed?.(key, partitionBinding, repairInputDigest) ?? undefined
       const schemaPurpose = localInput.phase === 'interface_seed' ? 'interface_seed' : 'generation'
       const oldSchemaDigest = usesWholeFiles ? contentHash(JSON.stringify(elaborationSchema(originalRepairInput, { purpose: schemaPurpose }))) : undefined
+      const approvedDraft = prior.rounds.at(-1)?.draft
+      const citationDraft = readonlyRepair && !readonlyRepair.repair.kind && approvedDraft?.schemaDigest === contentHash(JSON.stringify(elaborationSchema(repairedInput, { purpose: schemaPurpose }))) ? approvedDraft : undefined
       const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = await elaborate(repairedInput, {
         runner, partitionSealFiles: sealInput.files, seed,
-        draft: oldSchemaDigest && cacheDraft?.schemaDigest === oldSchemaDigest ? undefined : cacheDraft ?? (gapRepair || prior.gapRepair ? prior.rounds.at(-1)?.draft : undefined),
+        draft: oldSchemaDigest && cacheDraft?.schemaDigest === oldSchemaDigest ? undefined : cacheDraft ?? (gapRepair || prior.gapRepair ? approvedDraft : citationDraft),
         loadDraft: loadDraft ? schemaDigest => loadDraft(schemaDigest, repairInputDigest) : undefined,
         loadDraftMaterial: localInput.draftProtocol ? async (schemaDigest, request) => {
           const material = await checkpoints.loadElaborationDraftMaterial?.(key, partitionBinding, schemaDigest, request)
