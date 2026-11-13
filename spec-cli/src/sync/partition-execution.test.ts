@@ -918,7 +918,10 @@ test('历史accepted审查不覆盖当前repair，跨边保原件且取消后不
   const resumed: PartitionCheckpoints = {
     load: <T>(key: string) => current.get(key) as T ?? null,
     save: (key, value) => { current.set(key, value); return writeEvidence(input.snapshot.source.commonDir, value) },
-    loadCompletedCandidateReview: key => { assert.notEqual(key, failedKey); accepted.push(key); return checkpoints.load(key) },
+    loadCompletedCandidateReview: (key, _plan, _input, _candidate, _builders, current) => {
+      if (key === failedKey) { assert.equal(current?.review?.verdict, 'repair'); assert.equal(current?.reviewPassed, false); return current! }
+      accepted.push(key); return checkpoints.load(key)
+    },
   }
   const calls = runtime.calls.length
   const result = await generateSyncPartitions({ ...input, requestKey: 'next-attempt' }, plan, 1, true, { runner: async () => assert.fail('current repair与其它accepted原件均已结算'), validateCandidate: async () => { gates++; return [] } }, resumed)
