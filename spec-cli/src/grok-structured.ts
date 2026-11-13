@@ -315,13 +315,16 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
       const ended = await Promise.race([terminalOrStream.then(async () => {
         if (terminal?.stopReason === 'end_turn' && deadline !== undefined && !exitObserved && !observerFailure) {
           const exitDeadline = deadline
-          const stillWaiting = (): boolean => !exitObserved && !timedOut && !observerFailure && !processFailed && !callbacks.signal?.aborted
-            && !existsSync(join(root, 'cancel.json')) && sha256(readFileSync(receiptFile)) === binding.receiptDigest
-          await Promise.race([exited, new Promise<void>(resolve => { reapTimer = setTimeout(resolve, 500) })])
-          if (stillWaiting()) {
-            await stopNativeWorktreeDescendants(ownedLaunch, exitDeadline, stillWaiting).catch(error => {
+          const stillWaiting = (): boolean => Date.now() < exitDeadline && !exitObserved && !timedOut && !observerFailure && !processFailed
+            && !callbacks.signal?.aborted && !existsSync(join(root, 'cancel.json')) && sha256(readFileSync(receiptFile)) === binding.receiptDigest
+          const signaled = new Map<number, string>()
+          while (stillWaiting()) {
+            await Promise.race([exited, new Promise<void>(resolve => { reapTimer = setTimeout(resolve, 500) })])
+            clearTimeout(reapTimer)
+            if (!stillWaiting()) break
+            await Promise.race([exited, stopNativeWorktreeDescendants(ownedLaunch, exitDeadline, stillWaiting, signaled).catch(error => {
               if (!(error instanceof StructuredSessionError && error.code === 'cancellation_pending')) throw error
-            })
+            })])
           }
         }
         return exited
