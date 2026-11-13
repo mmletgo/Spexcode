@@ -74,6 +74,11 @@ function readonlyRepairInput(input: ElaborationInput, repair: ReadonlySpecRepair
   }
   const sources = new Map(repair.changes.map(change => [change.path, change]))
   if (repair.changes.some(change => !input.targets.some(target => target.nodeId === change.nodeId && target.path === change.path))) reject('只读V1修复不能取得其它owner目标')
+  if (repair.kind === 'contract_omission') return { ...input, implementationWritePaths: [], readonlySpecRepair: repair,
+    refinement: { candidateDigest: repair.candidateDigest, diagnostics: repair.findings.filter(finding => finding.code === 'candidate-review-contract-omission').map(finding => ({ code: 'contract_boundary_omission', message: finding.message })) },
+    targets: input.targets.map(target => { const source = sources.get(target.path)?.source ?? target.source; return { ...target, source, sourceDigest: source === null ? null : contentHash(source) } }),
+    files: new Map([...input.files ?? [], ...repair.changes.map(change => [change.path, change.source] as const)]),
+  }
   if (repair.kind === 'candidate_review') {
     const targets = inheritFacts && input.generationGuidance === ELABORATION_GENERATION_GUIDANCE && input.phase !== 'interface_seed' ? input.targets.map(target => {
       const accepted = sources.get(target.path)
@@ -517,7 +522,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
   const candidateChanges = (projection?.changes ?? reviewedChanges).map(({ nodeId, path, beforeDigest, source }) => ({ nodeId, path, beforeDigest, source }))
   const changes = candidateChanges.map(change => ({ ...change, contentDigest: contentHash(change.source) }))
   const applicability = partitionApplicability(results)
-  const seal = sealPartitionedElaboration(sealInput, candidateChanges, applicability, results.flatMap(result => result.readonlySpecRepair?.kind === 'candidate_review' ? [result.readonlySpecRepair] : []), factBaselines)
+  const seal = sealPartitionedElaboration(sealInput, candidateChanges, applicability, results.flatMap(result => result.readonlySpecRepair && ['candidate_review', 'contract_omission'].includes(result.readonlySpecRepair.kind ?? '') ? [result.readonlySpecRepair] : []), factBaselines)
   const readiness = seal.seal.passed ? projectElaborationFlowReadiness(seal.graph, seal.coverage) : { readyFlowIds: [], blockedFlows: [] }
   const gaps = seal.contracts.flatMap(contract => contract.items.filter((item): item is import('@spexcode/spec-core/contracts').Gap => item.kind === 'GAP'))
   const localStructurePassed = results.every(result => result.structurePassed)
