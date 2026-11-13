@@ -32,6 +32,8 @@ needs a repository nor enters the noun-first command map.
 
 ## expanded spec
 
+同步帮助列出 `--inherit-retry-budget` 与正式 `--retry-of`、`--model` 的组合用法。交接门禁见 [[sync-cli]]。
+
 **The grammar.** `spex <noun> <verb> [object] [flags]` — the verb is always the token immediately
 after its noun, so an id can never occupy a verb slot and no id is a reserved word. Seven noun drawers
 (`spec` · `diagram` · `session` · `peer` · `issue` · `evidence` · `sync`), plus bare project verbs (`graph` ·

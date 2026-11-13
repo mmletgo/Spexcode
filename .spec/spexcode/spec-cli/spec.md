@@ -44,6 +44,8 @@ among them, and their boundary checks belong to [[spec-dashboard]].
 
 ## expanded spec
 
+同步 run 的 HTTP 接入传递原候选模型交接授权，由 [[sync-application]] 核对正式重试、原预算及冻结来源。独立 verify 拒绝交接字段。
+
 `spec-cli` is the backend. It owns the read path (turn `.spec` + git into JSON) and the write path
 (the `spex` CLI driving worktrees/sessions); the dashboard is a thin HTTP caller. `index.ts` is the
 HTTP entrypoint — a Hono app that wires the loaders and the session state machine to routes — and is

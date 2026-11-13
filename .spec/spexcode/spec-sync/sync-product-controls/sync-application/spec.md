@@ -20,6 +20,8 @@ related:
 
 ## expanded spec
 
+同步 run 接受显式 `retryOf`、新 `model` 和 `inheritRetryBudget: true` 交接尚未验证交付的代码→Spec 候选。接入使用正式 retry 资格及原预算、输入、政策与授权范围，独立保存新模型的工具绑定。幂等重放核对该授权，verify 不接受交接字段。派发前的原候选及独审认证由 [[sync-coordinator]] 执行。
+
 真正新接入可从同一冻结 input 的完整发现选择派生 [[sync-historical-coverage]]，内联原 planBlob 并参与政策摘要；复用原计划的重复请求及正式 retry 不重读 live heads 或补写历史资格。实际 executionScope、选择、验证登记与强制测试保持。
 
 正式 configuredSyncApplication 与 configuredSyncResourceRecoveryApplication 共用 [[verification-transport]] 的可信 server 装配。可由 server 的 SPEX_VERIFICATION_SSH_ALIAS 与 SPEX_VERIFICATION_SSH_ROOT 选择既有 SSH 配置和远端独占 root，必须成对提供；缺席保持本地。alias/host 权限和认证不进入候选 Spec、项目 sync settings 或模型请求，凭据沿 SSH 原生机制，不能因当前配置改变而重绑定旧 v1/v2 resource。此装配不增加 P0/readiness 阶段或第二业务状态机。

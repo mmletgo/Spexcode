@@ -393,7 +393,7 @@ export class SyncStore {
     return syncSemanticDigest({ ...input, requestBlob: { sha256: digest({ ...request, origin }) } })
   }
   private saveIngressReceipt(tx: ProtocolTransaction, input: AdmitSyncInput, operationId: string, payloadDigest: string): void {
-    const receipt: SyncIngressReceipt = { operationId, payloadDigest, ...syncModelBinding(input.model), input: clone(input.input), origin: input.origin, ...(input.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), ...(input.automaticSourceAdoption ? { automaticSourceAdoption: input.automaticSourceAdoption } : {}), ...(input.requestBlob ? { requestBlob: input.requestBlob } : {}), budget: input.budget, deliveryPlan: input.deliveryPlan, previousBaselinePair: input.previousBaselinePair ?? null, ...(input.baselineSelection ? { baselineSelection: clone(input.baselineSelection) } : {}) }
+    const receipt: SyncIngressReceipt = { operationId, payloadDigest, ...syncModelBinding(input.model), input: clone(input.input), origin: input.origin, ...(input.inheritRetryBudget ? { inheritRetryBudget: true } : {}), ...(input.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), ...(input.automaticSourceAdoption ? { automaticSourceAdoption: input.automaticSourceAdoption } : {}), ...(input.requestBlob ? { requestBlob: input.requestBlob } : {}), budget: input.budget, deliveryPlan: input.deliveryPlan, previousBaselinePair: input.previousBaselinePair ?? null, ...(input.baselineSelection ? { baselineSelection: clone(input.baselineSelection) } : {}) }
     tx.exec('INSERT INTO sync_ingress_receipts(ingress_key,operation_id,payload_digest,record_json) VALUES(?,?,?,?)', input.ingressKey, operationId, payloadDigest, JSON.stringify(receipt))
   }
   /** 稳定接入记录与既有消息派发计划共享一个 SQL 事务。 */
@@ -406,6 +406,7 @@ export class SyncStore {
     const { model, ...withoutModel } = input
     input = { ...withoutModel, ...syncModelBinding(model) }
     if (input.retryOf !== undefined && (typeof input.retryOf !== 'string' || !input.retryOf.trim())) fail('SYNC_RETRY_BINDING', '显式重试需要有效的原operation身份')
+    if (input.inheritRetryBudget !== undefined && (input.inheritRetryBudget !== true || !input.retryOf || !input.model || !input.planBlob || observation || input.delivery)) fail('SYNC_RETRY_BUDGET_BINDING', '候选续审交接需要已固定计划、原操作及明确的新模型')
     this.blob(input.input.manifestBlob)
     if (input.retryOf && (this.readOperation(input.retryOf).requestBlob?.sha256 ?? null) !== (input.requestBlob?.sha256 ?? null)) fail('SYNC_RETRY_BINDING', '显式重试必须继承原始用户请求引用')
     const parent = input.retryOf ? this.readOperation(input.retryOf) : null
@@ -417,9 +418,13 @@ export class SyncStore {
         const plan = JSON.parse(bytes.toString('utf8')) as SyncCoordinatorPlan
         if (plan.version !== 'sync-coordinator-v2' || !plan.agentWorkflow || plan.direction !== 'code_to_spec' || !plan.mandatoryTests.length) fail('SYNC_COVERAGE_AUTHORITY', '冻结计划须使用原生只读同步及保护测试')
       }
+      if (input.inheritRetryBudget) {
+        const plan = JSON.parse(bytes.toString('utf8')) as SyncCoordinatorPlan
+        if (plan.version !== 'sync-coordinator-v2' || !plan.agentWorkflow || plan.direction !== 'code_to_spec') fail('SYNC_RETRY_BUDGET_BINDING', '候选续审交接需要原生只读代码→Spec计划')
+      }
     }
     if (input.delivery && (input.delivery.canonicalRoot !== input.deliveryPlan.canonicalRoot || input.delivery.branch !== input.deliveryPlan.branch || input.delivery.repositoryId !== input.input.source.repositoryId)) fail('SYNC_DELIVERY_BINDING', 'bound delivery differs from durable plan')
-    const payload = { input: inputPayload(input.input), ...syncModelBinding(input.model), ...(input.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), ...(input.automaticSourceAdoption ? { automaticSourceAdoption: input.automaticSourceAdoption } : {}), ...(input.requestBlob ? { requestBlob: input.requestBlob } : {}), ...(input.planBlob ? { planBlob: input.planBlob } : {}), ...(input.retryOf ? { retryOf: input.retryOf } : {}), scope: canonicalScope(input.scope), policyDigest: input.policyDigest, impactDigest: input.impactDigest, readSetDigest: input.readSetDigest, deliveryPlan: input.deliveryPlan, previousBaselinePairId: input.previousBaselinePair?.id ?? null, ...(input.baselineSelection ? { baselineSelectionDigest: input.baselineSelection.digest } : {}), budget: input.budget }
+    const payload = { input: inputPayload(input.input), ...syncModelBinding(input.model), ...(input.inheritRetryBudget ? { inheritRetryBudget: true } : {}), ...(input.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), ...(input.automaticSourceAdoption ? { automaticSourceAdoption: input.automaticSourceAdoption } : {}), ...(input.requestBlob ? { requestBlob: input.requestBlob } : {}), ...(input.planBlob ? { planBlob: input.planBlob } : {}), ...(input.retryOf ? { retryOf: input.retryOf } : {}), scope: canonicalScope(input.scope), policyDigest: input.policyDigest, impactDigest: input.impactDigest, readSetDigest: input.readSetDigest, deliveryPlan: input.deliveryPlan, previousBaselinePairId: input.previousBaselinePair?.id ?? null, ...(input.baselineSelection ? { baselineSelectionDigest: input.baselineSelection.digest } : {}), budget: input.budget }
     const legacyPayloadDigest = digest(payload), payloadDigest = digest({ ...payload, origin: input.origin })
     const requestType = input.requestBlob ? JSON.parse(this.blob(input.requestBlob).toString('utf8')) as { type?: string } : null
     const decision = requestType?.type === 'sync.decision' ? readControlledDecision(input.input, input.requestBlob!) : null
@@ -442,6 +447,7 @@ export class SyncStore {
       if (observation && input.baselineSelection) this.assertSelection(tx, input.input.source, input.baselineSelection, scopeResources(input.scope))
       const finish = (operation: SyncOperation, outcome: 'admitted' | 'coalesced' | 'duplicate'): SyncOperation => {
         if (syncModel(operation) !== syncModel(input)) fail('SYNC_MODEL_RETRY_REQUIRED', '相同业务输入切换模型必须使用正式 retryOf')
+        if (operation.inheritRetryBudget !== input.inheritRetryBudget) fail('SYNC_RETRY_BUDGET_BINDING', '同一重试输入须保留原候选交接授权')
         if (operation.recordUnverifiedCoverage !== input.recordUnverifiedCoverage) fail('SYNC_COVERAGE_AUTHORITY', '接入与既有操作的验收覆盖授权不同')
         if (!observation && operation.automaticSourceAdoption !== input.automaticSourceAdoption) fail('SYNC_AUTOMATIC_ADOPTION_POLICY', '同一业务输入必须保留原自动采纳政策')
         if (observation) { observation.operationId = operation.id; observation.outcome = outcome; this.saveObservation(tx, observation) }
@@ -487,6 +493,7 @@ export class SyncStore {
       const sameInput = compatible ?? tx.query('SELECT record_json FROM sync_operations WHERE normalized_semantic_digest IN (?,?) ORDER BY rowid DESC LIMIT ?', semanticDigest, otherAdoptionPolicyDigest, replaceUnclaimedInitial ? -1 : 1).map(row => parseRecord<SyncOperation>(row)!).find(retainMatch)
       if (sameInput) { saveAlias(sameInput); return finish(sameInput, 'duplicate') }
       if (input.baselineSelection) this.assertSelection(tx, input.input.source, input.baselineSelection, scopeResources(input.scope))
+      let retryBudgetSource: SyncOperation | undefined
       if (input.retryOf) {
         const previous = this.operation(tx, input.retryOf), eligibility = this.retryEligibility(tx, previous, revalidation)
         if (!eligibility.eligible) fail(eligibility.reason!.code, eligibility.reason!.message)
@@ -495,6 +502,15 @@ export class SyncStore {
         const selectionMatches = revalidation ? !!input.baselineSelection && this.revalidationSelection(tx, previous, input.baselineSelection) : (previous.baselineSelection?.digest ?? null) === (input.baselineSelection?.digest ?? null)
         if (!selectionMatches || revalidation && (digest(previous.budget) !== digest(input.budget) || digest(previous.scope) !== digest(canonicalScope(input.scope))) || previous.origin !== input.origin || identityKey(previous.input.source) !== identityKey(input.input.source) || digest(inputPayload(previous.input)) !== digest(inputPayload(input.input)) || (previous.requestBlob?.sha256 ?? null) !== (input.requestBlob?.sha256 ?? null) || previous.policyDigest !== input.policyDigest || previous.impactDigest !== input.impactDigest || previous.readSetDigest !== input.readSetDigest || previous.deliveryPlan.baseCommit !== input.deliveryPlan.baseCommit || (previous.previousBaselinePair?.id ?? null) !== (input.previousBaselinePair?.id ?? null) || digest(previous.scope.paths) !== digest(canonicalScope(input.scope).paths) || !contains(previous.scope, input.scope)) fail('SYNC_RETRY_BINDING', '显式重试必须完整复用原冻结来源、用户请求、政策及授权范围')
         if (input.ingressKey === previous.ingressKey || input.rootCauseId === previous.rootCauseId) fail('SYNC_RETRY_BINDING', '显式重试需要新的用户请求身份')
+        if (input.inheritRetryBudget) {
+          if (revalidation || previous.delivery || !contains(emptyScope(), previous.deliveredScope) || !previous.currentAttemptId
+            || previous.recordUnverifiedCoverage !== input.recordUnverifiedCoverage || digest(previous.scope) !== digest(canonicalScope(input.scope))
+            || digest(previous.budget) !== digest(input.budget) || syncModel(previous) === syncModel(input)
+            || tx.query("SELECT id FROM sync_attempts WHERE operation_id=? AND status NOT IN ('failed','superseded','settled') LIMIT 1", previous.id).length
+            || tx.query("SELECT id FROM sync_resources WHERE operation_id=? AND kind='verification' LIMIT 1", previous.id).length
+            || tx.query('SELECT id FROM sync_apply_journals WHERE operation_id=? LIMIT 1', previous.id).length) fail('SYNC_RETRY_BUDGET_BINDING', '候选续审交接需要同一完整范围与预算、不同模型、原尝试已结算且未进入交付验证')
+          retryBudgetSource = previous
+        }
       }
       if (input.previousBaselinePair) {
         const pair = parseRecord<BaselinePair>(tx.query('SELECT record_json FROM sync_baseline_pairs WHERE id=?', input.previousBaselinePair.id)[0])
@@ -531,9 +547,10 @@ export class SyncStore {
       tx.initialize(address)
       const message = tx.enqueue(address, { kind: SYNC_DISPATCH_KIND, body: Buffer.from(JSON.stringify(envelope)), idempotencyKey: dispatchKey })
       const budget = finiteSyncBudget(input.budget)
-      const operation: SyncOperation = { ...clone(input), scope: canonicalScope(input.scope), id, payloadDigest, generation, revision: 1, phase: 'queued', control: 'run', previousBaselinePair: clone(input.previousBaselinePair ?? null), ...(predecessor ? { successorOf: predecessor.id, ...(inheritedAnchor ? { dispatchAnchor: clone(inheritedAnchor) } : {}), budget: clone(predecessor.budget) } : {}), readyScope: canonicalScope(input.scope), blockedScope: emptyScope(), deliveredScope: emptyScope(), blockedReason: null, callsUsed: 0, deadlineAtMs: predecessor ? predecessor.deadlineAtMs : budget ? this.now() + budget.timeoutMs : null, currentAttemptId: null, dispatchMessageId: message.messageId, createdAtMs: this.now(), updatedAtMs: this.now() }
+      const budgetSource = retryBudgetSource ?? predecessor
+      const operation: SyncOperation = { ...clone(input), scope: canonicalScope(input.scope), id, payloadDigest, generation, revision: 1, phase: 'queued', control: 'run', previousBaselinePair: clone(input.previousBaselinePair ?? null), ...(predecessor ? { successorOf: predecessor.id, ...(inheritedAnchor ? { dispatchAnchor: clone(inheritedAnchor) } : {}), budget: clone(predecessor.budget) } : {}), readyScope: canonicalScope(input.scope), blockedScope: emptyScope(), deliveredScope: emptyScope(), blockedReason: null, callsUsed: 0, deadlineAtMs: budgetSource ? budgetSource.deadlineAtMs : budget ? this.now() + budget.timeoutMs : null, currentAttemptId: null, dispatchMessageId: message.messageId, createdAtMs: this.now(), updatedAtMs: this.now() }
       tx.exec('INSERT INTO sync_operations(id,ingress_key,payload_digest,semantic_digest,normalized_semantic_digest,repository_id,source_key,source_root,generation,phase,control,current_attempt_id,updated_at_ms,record_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)', id, input.ingressKey, payloadDigest, syncSemanticDigest(input), semanticDigest, input.input.source.repositoryId, identityKey(input.input.source), input.input.source.canonicalRoot, generation, operation.phase, operation.control, null, operation.updatedAtMs, JSON.stringify(operation))
-      operation.dispatchAnchor ??= { scope: physicalScope(operation.input.source), firstMessageId: message.messageId, firstEnqueueSeq: Number(tx.query('SELECT enqueue_seq FROM protocol_messages WHERE message_id=?', message.messageId)[0].enqueue_seq), budgetRootOperationId: operation.id }
+      operation.dispatchAnchor ??= { scope: physicalScope(operation.input.source), firstMessageId: message.messageId, firstEnqueueSeq: Number(tx.query('SELECT enqueue_seq FROM protocol_messages WHERE message_id=?', message.messageId)[0].enqueue_seq), budgetRootOperationId: retryBudgetSource?.dispatchAnchor?.budgetRootOperationId ?? retryBudgetSource?.id ?? operation.id }
       tx.exec('UPDATE sync_operations SET record_json=? WHERE id=?', JSON.stringify(operation), operation.id)
       this.saveIngressReceipt(tx, input, operation.id, payloadDigest)
       return finish(operation, predecessor ? 'coalesced' : 'admitted')
