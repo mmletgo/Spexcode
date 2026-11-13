@@ -64,6 +64,8 @@ receipt树引用相同但manifest不同仍拒绝，journal保持未登记；相�
 
 细化范围回归使用真实 SQLite：初始 path scope 没有未来 ID，新增 REQ/AC/FLOW 后共享路径保持 ready、GAP 依赖 ID 单独 blocked，部分 receipt 与 baseline 只推进真实已验证 ID，根仍 needs_input。扩展参数夹带 paths、删除旧 ID、同证据不同集合、错误 hash、过期/旧 fence 或冻结候选后新扩展均拒绝。两个连接竞争新增 ID 时全部回滚，旧路径 lease/token/generation 不变；成功 ID 租约沿用 attempt token/期限，精确重放不增资源 generation/operation revision、不重复派发或计费。证据引用被 GC pin，数据库重启与 retry 保留 expanded scope 和证据。
 
+大范围租约领取及幂等扩域通过真实 SQLite 返回行的资源键读取次数验证成员查找按集合大小线性增长，不用固定耗时阈值。全部已持有时原租约逐值保持；缺失或被另一持有人替换时旧 fence 拒绝且不写回；已过期的外部租约必须实际接管并递增 generation，不能仅因键存在而当作自己已持有。
+
 两个独立进程同时操作同一 SQLite 文件争抢新业务 ID，只有一方扩展成功，另一方明确 lease conflict；数据库只登记一个 ID holder，双方原路径租约保持原 token。
 
 操作列表覆盖仓库隔离、精确来源根、终态可见、rowid顺序与默认/显式分页边界，非法limit拒绝；不同更新时间不会改变接入顺序。
