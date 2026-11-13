@@ -9,7 +9,7 @@ import { openProtocol } from '@spexcode/session-protocol'
 import { parseContract } from '@spexcode/spec-core/contracts'
 import { frozenBodyText, readFrozenBehaviorContext } from '../../test/frozen-behavior-context.js'
 import { analyzeCodeBehavior, authoredContractChanges, selectedAuthoredContractChanges } from './code-behavior.js'
-import { composeInputSnapshots, readCompositionEvidence } from './composition.js'
+import { baselineSelectionDigest, composeInputSnapshots, readCompositionEvidence, verifyBaselineSelection } from './composition.js'
 import { buildSyncApplicationPlan, deriveSyncBaselineResources } from './planning.js'
 import { migrateSyncStore } from './migrations.js'
 import { SyncStore } from './store.js'
@@ -120,6 +120,90 @@ async function fixture(t: test.TestContext, pendingInB = false, legacyDirectoryC
   const plan: SyncCoordinatorPlan = { version: 'sync-coordinator-v1', intentNodeId: 'export-contract', targets: [{ nodeId: 'export-contract', path }], readPaths: ['.spec', 'src', 'tests'], writePaths: ['.spec', 'src', 'tests'], facts: [], verifications: [], mandatoryTests: [] }
   return { root, deliveryRoot, store, settle, original, nextA, addB, sourceA0, pairA, pairB, deliveryB1, selection, plan, allIds, codePath, sourceCode, codeA1, codeA2, addCodeB }
 }
+
+const originalSelection = (source: InputSnapshot['source'], bindings: FrozenBaselineSelection['bindings']): FrozenBaselineSelection => {
+  const body = { version: 'sync-baseline-selection-v1' as const, source, bindings }
+  const bytes = JSON.stringify(body, (_key, value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value)
+  return { ...body, digest: contentHash(bytes) }
+}
+
+test('精确基线分段摘要逐字保持原 v1 排序、转义、数组顺序与字段缺席', async t => {
+  const f = await fixture(t), source = f.sourceA0.source
+  const pair = { ...f.pairA, metadata: { '10': 'ten', '2': 'two', Z: '\ufeff中文\r\n"\\\ud800', a: ['😀', '\udc00', null], omitted: undefined } }
+  const bindings: FrozenBaselineSelection['bindings'] = [
+    { resource: { kind: 'path', path }, bytePair: pair },
+    { resource: { kind: 'contract', id: a }, intentPair: pair },
+    { resource: { kind: 'flow', id: 'FLOW-未初始化' }, intentPair: null },
+  ]
+  const changed = structuredClone(pair); changed.metadata.a.reverse()
+  const variants: FrozenBaselineSelection['bindings'][] = [
+    [], bindings, [...bindings].reverse(), structuredClone(bindings),
+    [{ resource: { kind: 'path', path }, bytePair: null }],
+    [{ resource: { kind: 'path', path }, bytePair: { ...pair, metadata: { ...pair.metadata, omitted: null } } } as FrozenBaselineSelection['bindings'][number]],
+    [bindings[0], { resource: { kind: 'contract', id: a }, intentPair: changed }],
+  ]
+  for (const value of variants) {
+    const selection = originalSelection(source, value)
+    assert.equal(baselineSelectionDigest(selection), selection.digest)
+  }
+  assert.notEqual(baselineSelectionDigest(originalSelection(source, bindings)), baselineSelectionDigest(originalSelection(source, [...bindings].reverse())))
+  assert.notEqual(baselineSelectionDigest(originalSelection(source, [bindings[0]])), baselineSelectionDigest(originalSelection(source, variants[5])))
+  const reordered = { ...pair, metadata: Object.fromEntries(Object.entries(pair.metadata).reverse()) }
+  assert.equal(baselineSelectionDigest(originalSelection(source, [bindings[0]])), baselineSelectionDigest(originalSelection(source, [{ resource: { kind: 'path', path }, bytePair: reordered }])))
+})
+
+test('精确基线共享 pair 的正文与覆盖准备不随 binding 重复，真实快照每 pair 只验一次', async t => {
+  const f = await fixture(t), ids = Array.from({ length: 160 }, (_, index) => `RULE-LINEAR-${index}`)
+  const scope: SyncScope = { paths: ['src', 'srcX/dir'], contractIds: ids, flowIds: ['FLOW-LINEAR'] }
+  const pair = { ...f.pairA, coveredScope: scope }
+  const bindings: FrozenBaselineSelection['bindings'] = [
+    ...ids.map(id => ({ resource: { kind: 'contract' as const, id }, intentPair: pair })),
+    { resource: { kind: 'path', path: 'src/nested/file.ts' }, bytePair: pair },
+    { resource: { kind: 'path', path: 'srcX/dir' }, bytePair: pair },
+    { resource: { kind: 'flow', id: 'FLOW-LINEAR' }, intentPair: pair },
+  ]
+  const small = originalSelection(f.sourceA0.source, [bindings[0]]), large = originalSelection(f.sourceA0.source, bindings)
+  const copies = originalSelection(f.sourceA0.source, bindings.map(binding => structuredClone(binding)))
+  let scopeReads = 0, treeReads = 0
+  Object.defineProperty(pair, 'coveredScope', { enumerable: true, get() { scopeReads++; return scope } })
+  const cp = createRequire(import.meta.url)('node:child_process') as typeof import('node:child_process'), original = cp.execFileSync
+  cp.execFileSync = ((file: string, args: string[], options: unknown) => { if (file === 'git' && args.includes('ls-tree')) treeReads++; return original(file, args, options as never) }) as typeof execFileSync
+  syncBuiltinESMExports()
+  try {
+    verifyBaselineSelection(f.sourceA0, small)
+    const smallReads = scopeReads, smallTrees = treeReads
+    scopeReads = 0; treeReads = 0
+    verifyBaselineSelection(f.sourceA0, large)
+    assert.equal(scopeReads, smallReads, '同一正文及 coverage 准备只随真实 pair 数增长')
+    assert.equal(treeReads, smallTrees); assert.equal(treeReads, 2)
+    treeReads = 0
+    verifyBaselineSelection(f.sourceA0, copies)
+    assert.equal(treeReads, smallTrees, '历史 JSON 中正文相同的不同对象仍只认证一次快照')
+  } finally { cp.execFileSync = original; syncBuiltinESMExports() }
+  assert.throws(() => verifyBaselineSelection(f.sourceA0, originalSelection(f.sourceA0.source, [{ resource: { kind: 'path', path: 'srcX/file.ts' }, bytePair: pair }])), /uncovered path:srcX\/file.ts/)
+})
+
+test('精确基线短命认证拒绝同 ID 异正文与覆盖伪造，后续调用重核原证据', async t => {
+  const f = await fixture(t), binding = { resource: { kind: 'path' as const, path }, bytePair: f.pairA }
+  const selected = (pair = f.pairA): FrozenBaselineSelection => originalSelection(f.sourceA0.source, [binding, { resource: { kind: 'contract', id: a }, intentPair: pair }])
+  const selection = selected()
+  verifyBaselineSelection(f.sourceA0, selection)
+  assert.throws(() => verifyBaselineSelection(f.sourceA0, selected({ ...f.pairA, settledAtMs: f.pairA.settledAtMs + 1 })), /pair payload differs/)
+  assert.throws(() => verifyBaselineSelection(f.sourceA0, selected({ ...f.pairA, sourceInput: { ...f.pairA.sourceInput, source: { ...f.pairA.source, branch: 'foreign' } } })), /pair identity/)
+  assert.throws(() => verifyBaselineSelection(f.sourceA0, { ...selection, digest: '0'.repeat(64) }), /identity or digest/)
+  assert.throws(() => verifyBaselineSelection(f.sourceA0, originalSelection(f.sourceA0.source, [binding, binding])), /duplicate path:/)
+  for (const resource of [{ kind: 'contract' as const, id: 'RULE-UNCOVERED' }, { kind: 'flow' as const, id: a }]) {
+    assert.throws(() => verifyBaselineSelection(f.sourceA0, originalSelection(f.sourceA0.source, [{ resource, intentPair: f.pairA }])), /uncovered/)
+  }
+  const evidence = join(f.sourceA0.source.commonDir, 'spexcode/evidence', f.pairA.sourceInput.manifestBlob.sha256), bytes = readFileSync(evidence)
+  try {
+    writeFileSync(evidence, 'changed after the prior verification')
+    assert.throws(() => verifyBaselineSelection(f.sourceA0, selection), /证据摘要不匹配/)
+    rmSync(evidence)
+    assert.throws(() => verifyBaselineSelection(f.sourceA0, selection), /缺失证据/)
+  } finally { writeFileSync(evidence, bytes) }
+  verifyBaselineSelection(f.sourceA0, selection)
+})
 
 function fakeBehavior(resolution?: string, assertInput?: (frozen: Record<string, unknown>) => void, resolutionPath = path, resolutionMode: '100644' | '100755' = '100755'): ElaborationRunner {
   return async request => {

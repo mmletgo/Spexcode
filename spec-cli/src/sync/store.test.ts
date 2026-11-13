@@ -2015,13 +2015,21 @@ test('全树精确基线的读取次数与缺席路径数无关', async () => {
     f.store.settleApply(journal.id, receipt.id)
 
     const transaction = f.protocol.withTransaction.bind(f.protocol)
-    let queries = 0
+    let queries = 0, pairQueries = 0, receiptQueries = 0
     f.protocol.withTransaction = body => transaction(tx => body({
       ...tx,
-      query: (...args) => { queries++; return tx.query(...args) },
+      query: (...args) => {
+        queries++
+        if (args[0].includes('FROM sync_baseline_pairs')) pairQueries++
+        if (args[0].includes('FROM sync_apply_journals')) receiptQueries++
+        return tx.query(...args)
+      },
     }))
     const small = f.store.readBaselineSelection(source(), exact)
     assert.ok('selection' in small)
+    assert.equal(pairQueries, 1); assert.equal(receiptQueries, 1)
+    const pairs = small.selection.bindings.flatMap(binding => ('bytePair' in binding ? binding.bytePair : binding.intentPair) ?? [])
+    assert.equal(pairs.length, exact.length); assert.equal(pairs[0], pairs[1])
     const smallQueries = queries
     const absent = Array.from({ length: 1_748 }, (_, index) => ({ kind: 'path' as const, path: `src/module-${index}.ts` }))
     const large = f.store.readBaselineSelection(source(), [...absent, ...exact, ...exact].reverse())
@@ -2029,6 +2037,23 @@ test('全树精确基线的读取次数与缺席路径数无关', async () => {
     assert.equal(large.selection.bindings.length, absent.length + exact.length)
     assert.deepEqual(large.selection.bindings.filter(binding => 'bytePair' in binding ? binding.bytePair : binding.intentPair), small.selection.bindings)
     assert.equal(queries - smallQueries, smallQueries)
+    assert.equal(pairQueries, 2); assert.equal(receiptQueries, 2)
+    for (const { selection } of [small, large, f.store.readPublicationHeads(source())]) {
+      const { digest, ...body } = selection
+      const canonical = JSON.stringify(body, (_key, value: unknown) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : value)
+      assert.equal(digest, createHash('sha256').update(canonical).digest('hex'))
+    }
+    f.protocol.withTransaction = transaction
+    transaction(tx => tx.exec("UPDATE sync_apply_journals SET status='prepared' WHERE id=?", journal.id))
+    const unsettled = f.store.readBaselineSelection(source(), exact)
+    assert.ok('failure' in unsettled); assert.equal(unsettled.failure.code, 'SYNC_PUBLICATION_BASE_BINDING')
+    transaction(tx => tx.exec("UPDATE sync_apply_journals SET status='settled' WHERE id=?", journal.id))
+    assert.deepEqual(f.store.readBaselineSelection(source(), exact), small)
+    transaction(tx => tx.exec("UPDATE sync_baseline_pairs SET record_json='null' WHERE id=?", pairs[0].id))
+    const missing = f.store.readBaselineSelection(source(), exact)
+    assert.ok('failure' in missing); assert.equal(missing.failure.code, 'SYNC_PUBLICATION_BASE_BINDING')
+    transaction(tx => tx.exec('UPDATE sync_baseline_pairs SET record_json=? WHERE id=?', JSON.stringify(pairs[0]), pairs[0].id))
+    assert.deepEqual(f.store.readBaselineSelection(source(), exact), small)
   } finally { f.cleanup() }
 })
 
@@ -2981,7 +3006,7 @@ for (const prior of [34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44] as const) test(
   } finally { backup?.close(); f.cleanup() }
 })
 
-for (const prior of [46, 47, 48, 49] as const) test(`从writer${prior}升级保留自动采纳索引及原件，旧writer拒绝且备份可回滚`, async () => {
+for (const prior of [46, 47, 48, 49, 51] as const) test(`从writer${prior}升级保留自动采纳索引及原件，旧writer拒绝且备份可回滚`, async () => {
   assert.equal(SYNC_MIGRATIONS[prior]?.version, prior + 1, '新持久语义必须有独立 writer 围栏')
   const f = await fixture()
   let backup: ReturnType<typeof openProtocol> | undefined

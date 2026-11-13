@@ -11,7 +11,7 @@ code:
 
 ## expanded spec
 
-historicalCoverageDigest 只绑定完整 seal 的程序资格，局部输入移除该字段。封口沿原 checkpoint 接缝取得 [[sync-historical-coverage]] 的逐 ID 冷验回调并传入同一严格候选校验器；有摘要却无可信回调时拒绝，不由模型或局部结果声明历史授信。
+historicalCoverageDigest 只绑定完整 seal 的程序资格，局部输入移除该字段。封口及候选 GAP 复核沿原 checkpoint 接缝取得 [[sync-historical-coverage]] 的逐 ID 冷验回调并传入同一严格候选校验器；有摘要却无可信回调时拒绝，不由模型或局部结果声明历史授信。
 
 composed 全树补入的未选 owner 声明可使用原计划冻结的 contextVerifications 完成最终 seal 登记校验。该字段在局部输入复制时移除；局部模型原 verifications、文件视图、writer 和真实 V3 范围保持。只有完整 seal 合并定义并绑定摘要，不把未选定义迁入当前候选或局部 VERIFY 归属投影。
 
@@ -19,6 +19,8 @@ P0/P1分区材料回调透传可await结果，使归档失败来源能沿同一c
 
 
 多轮事实返修复用原acceptedRef/changes作确定值继承。仅既有checkpoint接缝认证同owner完整changes与真实原generation attempt的V5及批准身份后，才投影事实固定值到局部targets/files；当前finding不开放旧ID。全局seal接收同一进程内固定基线，先证明其仅改变作者事实字段，再作完整候选与演进比较；aggregate继续恢复原input.targets.sourceDigest为beforeDigest，原作者CAS和源码/tests对象不变。不增加持久字段或历史权限集合。
+
+GAP 独审与严格并集合成共用同一作者 CAS 投影：原已审局部返修可以绑定其接受正文作为局部基线，但完整并集仍按原作者 target 的 beforeDigest 校验，正文、身份及原 local 引用保持。不能因这项程序投影忽略 source、owner 或候选差异。
 
 只读candidate_review的V5完整叶事实资格沿原受影响owner输入参与局部冻结与新独审，已审局部原件中的同一诊断再以进程内参数交strict final seal；复用原generationGuidance冻结V5，不新增诊断字段或伪造当前P0变化。全局候选仍相对原作者基线逐值核raw、业务列、身份、源码/tests对象及absence，仅命中owner的desc/expanded和RULE.basis事实修正可通过；缺该原诊断的全局输入保持冻结。
 
@@ -137,3 +139,5 @@ Native局部P1的精确结构输出格式失败沿同一checkpoint接缝传递�
 已有认证draft不屏蔽更晚正式停止执行的最新Git观察。材料选择携当前draft作瞬态参数，仅当原正常Native/注入trace认证定位到该draft来源，暂停资源在既有retry来源顺序中严格更晚、原seed与当前业务树除本owner临时稿/schema外全部对象相同，且所有原材料门槛仍过时，才复制其最新正常Git正文到新seed。更老暂停、未知来源、不同起点及普通Native/material fallback不能覆盖已有draft；无更晚可救稿则保持原draft、错误与标签，不继承批准。该参数不进入业务摘要、旧请求或持久协议。
 
 显式只读覆盖选择进入完整分区与全局 seal。薄父接口保留原独审请求及摘要，供其后代继续引用。
+
+完整 P1 的只读 GAP 诊断接缝只读取已通过严格 seal 的 aggregate 与其原局部 refs，重核原计划、正文并集及完整输入后，使用既有 `elaboration_review` 检查本次新提议、来自 code/derived 的 missing_fact。真实只读 seed 包含冻结源码和同一并集中的已审兄弟正文，任务明确给出原件与 GAP 定位；已有作者 GAP、冲突和没有合格 GAP 的候选不增加调用。输出仅为当次内存中的原始 review、真实 trace 和校验发现，不改变原 aggregate、ready/blocked、稳定 ID、草稿或授权。正式协调器认证同 operation 的原派发、资源结算、原局部 Git/独审、原计划及完整 seal 后，才可让对应 owner 缓存让位于 [[sync-elaboration]] 的窄 GAP 续稿；无关 owner 保留原批准。新接受结果重新完整封口，仍保留的已复核 GAP 不再反复派发诊断。真实 P1 和 analysis-only P0 分区沿原完整覆盖分别核验，不能丢分区或放松 seal。

@@ -8,12 +8,14 @@
 - 分区复用 partitioning/partition-execution 的唯一计划，共用 operation、fence、预算与最终 candidate/journal/receipt。任务只交付变更 Spec、相关接口和明确目标；Agent 在独立 worktree 自由读取，不以分块读取或逐字消费证明作为同步门禁。
 - 新计划的 contextVerifications 只供全图 seal 校验未选 owner 的冻结定义；局部模型和 V3 保原登记及运行范围，旧 plan 缺席不从实时配置补入。writer47 只追加 marker；停稳并结算旧 writer 后 online backup，回滚恢复一致 v46 库及配套证据/Git refs，不删 marker。
 - 新计划的历史未执行资格只由 historical-coverage 按精确已采纳 pair/receipt/report 和三份 Git 对象冷验；P1 全图 seal 与 V1 共用逐 ID 判据，局部请求与当前义务保持严格。证明沿原 planBlob，旧缺席不补写。writer50 只追加 marker；停稳结算并 online backup，回滚恢复一致 v49 库及配套证据/Git refs。
-- P2 混合结果先保同候选已认证结论，仅续审格式拒稿，随后按精确 owner 处理普通与契约遗漏发现。writer51 围栏保护新增持久判别值；冷升级先停稳、结算与 online backup，回滚恢复一致 v50 库及原证据。
+- P2 混合结果先保同候选已认证结论，仅续审格式拒稿，不插入GAP复核/续稿；随后按精确 owner 处理普通与契约遗漏发现并逐值保GAP，新并集strict seal后才独审GAP。writer51 围栏保护新增持久判别值；冷升级先停稳、结算与 online backup，回滚恢复一致 v50 库及原证据。
+- writer52 保护候选 GAP 独审与 owner 续稿的原件引用。停稳并结算后由原组件迁移保存一致 online backup，回滚恢复 v51 库、证据和 Git 引用。
 - 共享分区调度每项结束均须真正让出事件循环，缓存、末项与失败亦然；让原心跳与控制运行，不延长租约或弱化fence。P1只按最近有真实P1派发的已结算观测故障收紧下一次返修，故障消失后恢复冻结并发；无派发或仅复用检查点的控制重启不消耗或重置该次返修。
 - 每阶段绑定真实 seed commit/tree：分析使用 composed，细化包含已审祖先，构建包含已审 Spec，独审使用实际候选。缓存同时核验实际可见 tree；不能只传原 HEAD 而漏掉受控 Spec 修改，也不能混入提交后的 index/WIP。
 - 实现 Agent 在工作树真实修改、测试并正常提交；候选从实际 Git 对象差量导入。程序检查写范围、CAS、原测试和契约演进，生成摘要或自报补丁不能替代实际修改。
 - 模型临时业务行由 `CONTRACT_COLUMNS` 渲染唯一 Markdown；raw/摘要由程序复制，JSON 仅是执行证据。
 - 生成和独立评审使用不同会话。输入、候选和检查结果均按内容摘要绑定；未决 GAP 只阻塞依赖闭包。
+- P1候选GAP只复核同operation新提议的code/derived missing_fact；原aggregate/local/Native refs冷验后只让命中owner续原Git稿、新独审及strict seal，其他业务字段与源码/tests保持。新checkpoint仅留refs和身份，诊断现读；真实未知及已处理负例不反复派发，旧批准不改签。
 - P1 V5完整叶只读事实返修只消费原candidate_review认证诊断的typed relatedIds与冻结owner交集：仅desc/expanded及命中RULE.basis可变，其余业务列/raw/绑定/AC/VERIFY严格保持；旧缺席不补写、不从message或草稿errors授信，局部与strict seal共用。
 - P1独审共用生成侧owner范围；仅要求冻结owner改写的repair或未知ID绑定须给具体拒因重审。原JSON/Git稿、候选与原Native生成身份冷验相同后只续独审；域内语义repair仍续生成。已结算的ZCode session/events独审超时同样可仅续审，须同operation冷验原只读请求、canonical失败与正式removed/stop，保原失败及未批准状态。旧请求字段不追补。
 - 状态派发 STEP 显式关联实际 TR；next→TR 是依赖，next→STEP/STATE 仍为导航，独立审查核对派发集合与步骤声明范围。

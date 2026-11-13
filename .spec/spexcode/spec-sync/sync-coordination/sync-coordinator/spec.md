@@ -21,7 +21,13 @@ related:
 
 同一 operation 的 code_to_spec 已有原冻结候选时，git-json-v4 / v7 的 P0 只可沿该候选专用冷验恢复。原完整计划、读集和基线、P0 每个 owner 的分析及独审、P1 实际生成与独审、仅分析覆盖、候选 Git/CAS 与全部 required P2 原件须一致，Native 成功也核 canonical 请求、输出和身份。正式 freezeCandidate 尚未执行时，原 partition:candidate 与实际独审绑定可证明该既有候选；不能重造候选或补旧 failure。组间交还控制并续原租约，先仅补格式失败，再沿合法发现回精确 P1 owner，随后继续原 V1–V4。资格仅在本轮同 operation/input/source/candidate 范围有效，退出后清除；普通自动复用仍只接受 v8，无正式来源的跨操作、新业务、缺证或漂移不借旧批准。原P0/P1生产者可来自严格更早且正式结算的 retryOf 链；逐跳保原计划、local ref及Git组合内容，null扩域只凭该wrapper原selection/readSet与同次已审whole证明回接。模型按各真实生产者原冻结请求认证，正式重试已换模型不重签旧请求。生成与独审可来自原同操作的不同轮。原 v7 标记、缺席字段、raw、Git/Native 和调用账本保持，不追加数据库协议。
 
-P1 全图 seal 与完整候选 V1 仅从原 planBlob 的 [[sync-historical-coverage]] 描述构造同一逐 ID 冷验。完整政策摘要、真实 input/composed/candidate 与原收据绑定后才保留历史 warning；不读当前资源头、扩大 ready/coveredScope 或将其记成本轮已执行验收。P1 局部只收到原业务输入。
+候选独审的已审来源校验沿 [[sync-input-composition]] 的原 v1 分段摘要核精确冻结选择；大范围共享 pair 时也保持原字节顺序及全部身份。
+
+同一冻结 operation 的 code→spec 原生 P1 完整候选可复核本轮新提议的 code/derived missing_fact GAP。复用原 runner、request/session、fence、调用/返修预算和阶段 refs；严格核 original aggregate/local Git/独审、plan、readSet/selection、composed、完整输入与只读 Native 请求及正式结果。合法 repair 只派原 GAP owner 续稿并新独审，旧 accept 不改成失败；仍须当前严格 seal 和全部 P2 门。已复核的真实未知、冲突或无新发现保持原 blocked，冷恢复重验原结果而不重复模型调用；错绑定或无合法独审不能授予续稿。JSON合法但ID、边界或独立性协议未过时，在原预算下一attempt只续只读审查；previousReviewRef严格指向同operation较早的同候选失败原件，拒因和原输出仅在当次prompt现读，原owner批准保持。合法负例不走该续审。新 checkpoint 只引用已有结果原件和稳定身份，不重复归档诊断正文，不把临时诊断或草稿纳入产品 Git。
+
+同候选 P2 协议续审只消费原 P2 格式诊断，不先复核 GAP 或加载 GAP 续稿；历史可选 GAP checkpoint 缺席不能触发新阶段。协议齐备后，普通与遗漏诊断只派实际 owner，保原未决 GAP 全部列；这些 owner 新独审并通过严格全图 seal 形成新 aggregate 后，才允许其候选 GAP 独立复核。各阶段诊断不相互增加写权。
+
+P1 全图 seal、GAP 首次复核与冷恢复、完整候选 V1 仅从原 planBlob 的 [[sync-historical-coverage]] 描述构造同一逐 ID 冷验。完整政策摘要、真实 input/composed/candidate 与原收据绑定后才保留历史 warning；不读当前资源头、扩大 ready/coveredScope 或将其记成本轮已执行验收。P1 局部只收到原业务输入。
 
 P1 输入只透传原 planBlob 已冻结的 contextVerifications，供 [[sync-partition-execution]] 的全图封口引用校验；局部模型和 V3 继续使用原 verifications 与 mandatoryTests。旧计划没有该字段时不读取当前 settings 补签。
 
@@ -108,7 +114,7 @@ resource-only入口按 [[sync-source-registration]] 使用专用raw Git登记元
 
 同步 budget.mode=unlimited 的新模型请求使用 timeoutMs:null，表示不设置模型调用总时限；有限数字期限及旧记录语义保持。null 调用仍受独立会话创建、租约/心跳、显式取消/停止/关闭和可信 VERIFY/Docker 各自期限约束，不以大数模拟无限。 协调器从冻结预算唯一派生该值，unlimited 不再使用旧 callTimeoutMs 覆盖模型调用；分析、细化、生成及各自独审共同沿同一策略。
 
-同一operation的分区多轮承接已通过的局部analysis及普通叶P1：只读较早已终结attempt的原stage，严格核原operation/input/policy、精确readSet/selection、完整plan/分区归属及当前真实局部输入的原唯一冻结摘要。analysis承接在code-behavior现有context摘要生成后、任何模型派发前进行，并核原独立dispatch身份；叶P1沿freezeElaborationInput及完整partitionBinding，仅结构与独审accept且无failure的局部原件可承接。当前fence保存原resultRef/fromAttempt provenance，review/traces及输入摘要不改写；未审、错误绑定及聚合全局结果不能成为局部成功。局部并集仍重新执行严格全图seal，实际candidate改变后P2独审及V1–V4全部照常，不提前交付。
+同一operation的分区多轮承接已通过的局部analysis及普通叶P1：只读较早已终结attempt的原stage，严格核原operation/input/policy、精确readSet/selection、完整plan/分区归属及当前真实局部输入的原唯一冻结摘要。analysis承接在code-behavior现有context摘要生成后、任何模型派发前进行，并核原独立dispatch身份；叶P1沿freezeElaborationInput及完整partitionBinding承接结构与独审通过且无failure的局部原件。规范implementation-review已经程序批准并完整转交P2时，复用[[sync-elaboration]]的统一批准判据，另核原生成及独立只读审查的完整Native请求、模型、摘要、会话身份与Git草稿；原repair结论、全部发现和deferred原件保持。普通repair、只读实现阻断、缺证或输入权限漂移不取得此资格；父接口与跨operation局部承接仍沿原accept门。当前fence保存原resultRef/fromAttempt provenance，review/traces及输入摘要不改写；未审、错误绑定及聚合全局结果不能成为局部成功。局部并集仍重新执行严格全图seal，实际candidate改变后P2独审及V1–V4全部照常，不提前交付。
 
 只读候选续修来源的资格重验以原generation wrapper保存的readSet/selection恢复原冻结语境，再沿既有仅追加null资源的选择桥核当前合法性；后续已审P1新增ID不能让先前真实诊断失去资格，也不能重写旧wrapper/hash。真实原绑定改值、删除、非null扩展、source/input/policy不符继续拒绝；通用partition loader仍要求当前精确绑定。新whole候选的P2原生失败或再次语义repair都保留最新合法已审owner链，继续最终独审与V1–V4，不回退旧候选。
 
@@ -303,6 +309,8 @@ P0/P1/P2 共用 typed Native RPC 已结算准入：仅当前 control/physical ru
 同候选的合法 accept 与 repair 共用完整输入、Native、schema、seed、输出及 trace 冷验；复用 repair 保留原未批准 verdict、resultRef 和所有 finding，不能伪装 accept 或授业务推进。仅格式失败组续原稿，先不改候选或派发 P1；各组协议完成后，业务路由消费全部正式 partitionEvidence，不以用于显示的首个主失败替代并集。普通只读事实与契约遗漏按精确 owner 分别沿原事实资格和受限 refinement 进入同一 owner 返修调度；未命中 owner 保留原 P1 原件。候选或完整读闭包改变后，不跨不相等身份复用旧批准。
 
 generation 已完整保存、但收尾失租约留下 superseded 且 failure=null 时，不补签旧失败或收据。只有同 operation/input/candidate、原完整 requiredKeys 的唯一正式审查结果、原 plan/scope/P1、全部 Native 完成或格式失败原件及资源 removed 逐一成立，才可继续同候选协议或业务返修；零调用、无 generation 的中间控制 attempt 不取代该来源。缺 outcome、未知停止、未结算资源或身份漂移继续拒绝。单次恢复在已结算 attempt 内复用 stage index，不跨新的检查点、候选或控制状态缓存授信。
+
+旧轮重复细化后，已有候选可能实际使用同一冻结输入下另一份完整已审P1。只在上述精确候选续审路径，回到生成该候选的原attempt，冷验其完整封口、原计划全分区覆盖、每个owner的Native生成与独立审查、Git草稿和原局部输入。当前完整局部输入仍须一致，重组后的全图P1必须逐值等于原候选所用原件；缺证或漂移明确拒绝，不回退另一份P1或重新派发生成。此候选继续沿原builder真实请求/Git差量、独审输入及V1–V4验证；普通实现修复的首个批准选择器及全局增补链保持，不把该来源变成任意最新P1批准。
 
 格式诊断不加入全局repairContext；已有accept的局部或跨边独审仍逐项沿原完整输入、Native传输请求/schema/seed/模型/policy及停止原件核验。原Native请求比较复用资源桥的nativeConfiguration、内部effort与精准ZCode read policy统一冻结接缝，按原saved字段重建；新cli-config-v1省略同步内部默认high，旧请求保原字段和缺席，不向历史补默认。仅失败组取得reviewRepair原result/NativePlan/checkpoint引用；从原canonical record和failed→removed停止证明认证完整final后，在只读临时seed提供原回答及精确schema，要求Agent基于旧回答继续输出合法最终JSON。原文仍未批准，不抽取其中JSON、不补checkedIds/accept/receipt，不读thinking、不改业务候选。旧GenerationResult及raw ref缺席保持；新独审、V1–V4/Docker/Git/adopt和预算照常。
 

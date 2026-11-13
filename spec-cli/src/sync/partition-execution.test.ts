@@ -13,12 +13,12 @@ import type { ElaborationRunner, ElaborationSessionRequest } from './elaboration
 import { elaborate, elaborationDigest, sealPartitionedElaboration } from './elaboration.js'
 import { elaborationSchema } from './elaboration-schema.js'
 import type { ElaborationInput, ElaborationResult } from './elaboration-types.js'
-import { CONTRACT_COLUMNS, parseParts } from '@spexcode/spec-core/contracts'
+import { CONTRACT_COLUMNS, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
 import { withoutVerificationTables } from './elaboration-markdown.js'
 import type { GeneratedTables, GeneratedTargetElaboration } from './elaboration-markdown.js'
 import type { GenerationInput, GenerationResult } from './generation-types.js'
 import { freezeGenerationInput, generationReviewRequest, restoreGenerationInput } from './generation.js'
-import { analyzeSyncPartitions, completeSyncPartitionPlan, elaborateSyncPartitions, generateSyncPartitions, implementationGenerationDispatch, implementationPartitionSelection, mapSyncPartitions, partitionSealRepairOwners, projectPartitionVerificationOwnership } from './partition-execution.js'
+import { analyzeSyncPartitions, completeSyncPartitionPlan, elaborateSyncPartitions, generateSyncPartitions, implementationGenerationDispatch, implementationPartitionSelection, inspectPartitionedElaborationGaps, mapSyncPartitions, partitionSealRepairOwners, projectPartitionVerificationOwnership } from './partition-execution.js'
 import type { PartitionCheckpoints } from './partition-execution.js'
 import { planSyncPartitions } from './partitioning.js'
 import type { SyncPartitionPlan } from './partitioning.js'
@@ -32,6 +32,7 @@ import { buildSyncApplicationPlan } from './planning.js'
 import { verifyCandidate } from './candidate.js'
 import { nativeWorktreeResult } from '../native-worktree-runtime.js'
 import { readFrozenBehaviorContext } from '../../test/frozen-behavior-context.js'
+import { stageWorktree } from './stage-worktree.js'
 
 async function fixture(t: test.TestContext): Promise<{ input: GenerationInput; plan: SyncPartitionPlan; checkpoints: PartitionCheckpoints; root: string }> {
   const root = mkdtempSync(join(tmpdir(), 'spex-partition-execution-'))
@@ -2218,4 +2219,101 @@ test('普通Spec→Code已生成且V1通过的候选只续审，不重派builder
   assert.deepEqual(result.candidate, first.candidate); assert.equal(validations, 2)
   assert.deepEqual(verifyCandidate(input.snapshot.source.commonDir, result.candidate!), actualEntries, '续审保全部path/mode/OID及absence')
   assert.equal(runtime.calls.length - before, 1); assert.deepEqual(result.traces.filter(trace => trace.purpose !== 'code_review'), builderTraces)
+})
+
+async function gapReviewFixture(t: test.TestContext, existingGap = false, emitGap = true) {
+  const f = await fixture(t), commonDir = f.input.snapshot.source.commonDir
+  const gapId = 'GAP-EXPORT-PORT-REPEAT', owner = f.input.contracts[0]
+  for (const partition of f.plan.partitions.slice(1)) partition.readPaths = [...new Set([...partition.readPaths, ...f.plan.partitions[0].readPaths])]
+  const input: ElaborationInput = {
+    root: f.root, requestKey: 'gap-evidence:p1', intent: f.input.intent,
+    historyInput: f.input.snapshot, worktree: stageWorktree(commonDir, f.input.snapshot.headCommit, f.input.snapshot.immutableTree),
+    draftProtocol: 'elaboration-draft-v1', implementationWritePaths: [], files: f.input.files,
+    targets: f.input.contracts.map(contract => ({ nodeId: contract.nodeId, path: contract.path, source: f.input.files.get(contract.path)!, sourceDigest: contentHash(f.input.files.get(contract.path)!) })),
+    facts: f.input.contracts.map(contract => ({ source: `decision:${contract.nodeId.split('-')[0].toUpperCase()}-POLICY`, text: '夹具冻结的原业务政策' })),
+    maxRepairs: 0, maxCalls: 2,
+  }
+  const gap = { id: gapId, kind: 'missing_fact', unknown: '单次执行端口是否应自行处理重复请求', affects: ['RULE-EXPORT-06'], evidence: '端口内没有请求账本；须核对真实调用方及其已审规则', decision: '确认重复政策的唯一属主', source: 'code:src/export.js#ExportService', 'depends-on': ['REQ-EXPORT-01'] }
+  if (existingGap) {
+    const source = `${input.targets[0].source}\n### GAP\n\n| id | kind | unknown | affects | evidence | decision | source | depends-on |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| ${gap.id} | ${gap.kind} | ${gap.unknown} | ${gap.affects.join(',')} | ${gap.evidence} | ${gap.decision} | ${gap.source} | ${gap['depends-on'].join(',')} |\n`
+    input.targets = input.targets.map((target, index) => index === 0 ? { ...target, source, sourceDigest: contentHash(source) } : target)
+    writeFileSync(join(f.root, owner.path), source)
+    execFileSync('git', ['-C', f.root, 'add', owner.path], { stdio: 'pipe' })
+    execFileSync('git', ['-C', f.root, 'commit', '-m', 'freeze authored GAP'], { stdio: 'pipe' })
+    input.historyInput = await captureInputSnapshot(f.root)
+    input.worktree = stageWorktree(commonDir, input.historyInput.headCommit, input.historyInput.immutableTree)
+    input.files = new Map(readTree(commonDir, input.historyInput.immutableTree).map(entry => [entry.path, readObject(commonDir, entry.oid).toString('utf8')]))
+  }
+  const calls: ElaborationSessionRequest[] = []
+  const runner: ElaborationRunner = async request => {
+    const number = calls.push(request), workspace = join(f.root, `gap-stage-${number}`), seed = request.worktree!
+    execFileSync('git', ['-C', f.root, 'worktree', 'add', '--detach', workspace, seed.baseCommit], { stdio: 'pipe' })
+    let output: unknown = { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+    if (request.purpose === 'elaboration_generate') {
+      const tables = emptyElaborationTables(), target = input.targets.find(target => request.requestKey.includes(`part-${target.nodeId.split('-')[0]}:`))!
+      const contract = parseContract({ ...target, source: target.source! }).contract!, fm = parseFrontmatter(target.source!).fm
+      if (target.nodeId === owner.nodeId && !existingGap && emitGap) tables.GAP = [gap]
+      const rows = { version: 'elaboration-target-rows-v3', changes: tables.GAP.length ? [{ targetIndex: 0, title: String(fm.title), description: String(fm.desc ?? ''), code: contract.code, related: contract.related, prose: null, removeIds: [], tables }] : [], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: true, basis: '冻结夹具原有边界', affectedIds: [`REQ-${target.nodeId.split('-')[0].toUpperCase()}-01`] })) }
+      const path = /草稿文件=([^\s]+)/.exec(request.prompt)![1]
+      mkdirSync(dirname(join(workspace, path)), { recursive: true }); writeFileSync(join(workspace, path), JSON.stringify(rows))
+      execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' })
+      execFileSync('git', ['-C', workspace, 'commit', '--allow-empty', '-m', 'P1 GAP evidence fixture draft'], { stdio: 'pipe' })
+      output = { summary: '原草稿已提交' }
+    }
+    return { sessionId: `gap-source-session-${number}`, threadId: `gap-source-thread-${number}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)), worktree: nativeWorktreeResult(workspace, seed) }
+  }
+  const full = await elaborateSyncPartitions(input, f.plan, 2, f.checkpoints, runner)
+  assert.equal(full.structurePassed, true, JSON.stringify(full.partitionSeal?.findings))
+  assert.equal(full.reviewPassed, true); assert.equal(full.status, emitGap || existingGap ? 'needs_input' : 'complete')
+  const { contracts: _contracts, graph: _graph, coverage: _coverage, ...aggregate } = full
+  const aggregateRef = writeEvidence(commonDir, aggregate)
+  return { ...f, input, commonDir, gapId, owner, aggregate, aggregateRef, calls }
+}
+
+for (const verdict of ['repair', 'needs_input'] as const) test(`P1 GAP只读证据 ${verdict} 读取原sealed并集与兄弟，不改变批准或阻塞`, async t => {
+  const f = await gapReviewFixture(t), before = readEvidence(f.commonDir, f.aggregateRef), index = readFileSync(join(f.commonDir, 'index'))
+  const refs = structuredClone(f.aggregate.partitionEvidence), calls: ElaborationSessionRequest[] = []
+  const result = await inspectPartitionedElaborationGaps(f.input, f.plan, f.aggregateRef, async request => {
+    calls.push(request)
+    assert.equal(request.purpose, 'elaboration_review'); assert.equal(request.worktree?.mode, 'read')
+    const workspace = join(f.root, 'gap-inspection')
+    execFileSync('git', ['-C', f.root, 'worktree', 'add', '--detach', workspace, request.worktree!.baseCommit], { stdio: 'pipe' })
+    assert.ok(readFileSync(join(workspace, f.owner.path), 'utf8').includes(f.gapId))
+    assert.ok(readFileSync(join(workspace, '.spec/export/import-contract/spec.md'), 'utf8').includes('RULE-IMPORT-06'))
+    assert.equal(readFileSync(join(workspace, 'src/import.js'), 'utf8'), f.input.files!.get('src/import.js'))
+    assert.match(request.prompt, /仅.*诊断|诊断.*不.*授权/)
+    const output = { verdict, checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ code: 'gap_owner_boundary', kind: verdict === 'repair' ? 'repair' : 'missing_fact', affectedIds: [verdict === 'repair' ? f.gapId : 'RULE-EXPORT-06'], message: verdict === 'repair' ? '重复请求已有调用方属主' : '既有规则仍没有回答该问题', evidence: 'RULE-IMPORT-06 与 src/import.js#ExportService；对同一已完成请求重放原结果，端口不拥有第二份账本。', decision: verdict === 'repair' ? '请原owner核对职责，不增加新政策' : '保持原GAP并等待真实业务选择' }] }
+    return { sessionId: 'gap-inspector', threadId: 'gap-inspector-thread', turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)), worktree: nativeWorktreeResult(workspace, request.worktree!) }
+  })
+  assert.equal(calls.length, 1); assert.equal(result!.diagnosticOnly, true); assert.equal(result!.review?.verdict, verdict)
+  assert.deepEqual(result!.findings.map(issue => issue.code), verdict === 'repair' ? ['gap_owner_boundary'] : [])
+  assert.deepEqual(result!.gapIds, [f.gapId]); assert.deepEqual(result!.ownerRefs, refs)
+  assert.deepEqual(readEvidence(f.commonDir, f.aggregateRef), before); assert.deepEqual(readFileSync(join(f.commonDir, 'index')), index)
+  assert.equal(f.aggregate.status, 'needs_input'); assert.ok(f.aggregate.blockedIds.includes('RULE-EXPORT-06'))
+  assert.equal(Object.hasOwn(result!, 'readyIds'), false); assert.equal(Object.hasOwn(result!, 'authorizedChanges'), false)
+  assert.equal(execFileSync('git', ['-C', f.root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), f.input.historyInput!.headCommit)
+})
+
+test('P1 GAP只读证据不重审作者既有GAP，不把完整候选摘要失配当新评审', async t => {
+  const f = await gapReviewFixture(t, true)
+  assert.equal(await inspectPartitionedElaborationGaps(f.input, f.plan, f.aggregateRef, async () => assert.fail('作者既有GAP不授新复核')), null)
+  const changed = { ...f.aggregate, candidateDigest: 'f'.repeat(64) }
+  await assert.rejects(inspectPartitionedElaborationGaps(f.input, f.plan, writeEvidence(f.commonDir, changed), async () => assert.fail('失配原件不能派发')), /封口|摘要|候选/)
+})
+
+test('P1 GAP只读证据无GAP时零调用，错误owner原件在派发前拒绝', async t => {
+  const f = await gapReviewFixture(t, false, false)
+  assert.equal(await inspectPartitionedElaborationGaps(f.input, f.plan, f.aggregateRef, async () => assert.fail('完整无GAP候选不加审查')), null)
+  const wrong = structuredClone(f.aggregate)
+  wrong.partitionEvidence![0].resultRef = wrong.partitionEvidence![1].resultRef
+  await assert.rejects(inspectPartitionedElaborationGaps(f.input, f.plan, writeEvidence(f.commonDir, wrong), async () => assert.fail('兄弟ref不能伪装本owner')), /局部原件|分区/)
+})
+
+for (const invalid of ['same-session', 'unknown-id', 'wrong-digest'] as const) test(`P1 GAP只读证据拒绝 ${invalid}，保留原始review且不产生批准`, async t => {
+  const f = await gapReviewFixture(t)
+  const output = { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ code: 'gap_owner_boundary', kind: 'repair', affectedIds: invalid === 'unknown-id' ? [f.gapId, 'RULE-UNKNOWN-01'] : [f.gapId], message: '核对原属主', evidence: 'src/import.js#ExportService 与 RULE-IMPORT-06 的冻结正文', decision: '只返回诊断' }] }
+  const result = await inspectPartitionedElaborationGaps(f.input, f.plan, f.aggregateRef, async () => ({ sessionId: invalid === 'same-session' ? f.aggregate.rounds[0].traces[0].sessionId : 'new-gap-inspector', threadId: 'new-gap-thread', turnId: 'turn', output, resultDigest: invalid === 'wrong-digest' ? 'a'.repeat(64) : contentHash(JSON.stringify(output)) }))
+  assert.equal(result!.review, null); assert.deepEqual(result!.reviewOutput, output)
+  assert.deepEqual(result!.findings.map(issue => issue.code), [invalid === 'same-session' ? 'review_not_independent' : invalid === 'unknown-id' ? 'review_binding' : 'review_digest'])
+  assert.equal(f.aggregate.status, 'needs_input'); assert.equal(result!.diagnosticOnly, true)
 })
