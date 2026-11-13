@@ -213,7 +213,7 @@ export async function prepareSyncAdmission(input: InputSnapshot, supplied: SyncC
 
 type Stage = { version: 'sync-stage-v1'; operationId: string; attemptId: string; inputId: string; policyDigest: string; readSetDigest?: string; baselineSelectionRef?: BlobRef; guidanceContractVersion?: string; composedTree?: string; composedContentDigest?: string; stage: string; resultRef: BlobRef }
 const behaviorAnalysisStage = (name: string): boolean => name === 'analysis' || name.startsWith('partition:') && name.endsWith(':analysis')
-type FrozenAnalysisScope = { active: boolean; operationId: string; inputId: string; source: string; policyDigest: string; refs: Set<string>; candidateDigest?: string; readNativeRecord?: typeof readRecord; readIndex?: (attempt: SyncAttempt, owner?: SyncOperation) => SyncCheckpointStageView; selectionMatches?: Map<string, boolean>; settlement?: { leased: Set<string>; recoverable: Set<string> } }
+type FrozenAnalysisScope = { active: boolean; operationId: string; inputId: string; source: string; policyDigest: string; refs: Set<string>; candidateDigest?: string; readNativeRecord?: typeof readRecord; readIndex?: (attempt: SyncAttempt, owner?: SyncOperation) => SyncCheckpointStageView; selectionMatches?: Map<string, boolean> }
 const frozenAnalysisScope = new AsyncLocalStorage<FrozenAnalysisScope>()
 function readStageCheckpoints(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, indexed = false): SyncCheckpointStageView {
   const scope = frozenAnalysisScope.getStore()
@@ -317,17 +317,7 @@ function retryDraftSources(store: SyncStore, operation: SyncOperation, attemptNu
 }
 function settledApprovalSource(store: SyncStore, source: SyncOperation): boolean {
   if (source.phase !== 'superseded') return ['failed', 'budget_exhausted', 'cancelled'].includes(source.phase) && store.readRetryEligibility(source.id).eligible
-  const scope = frozenAnalysisScope.getStore()
-  const settlement = scope?.active && scope.readIndex ? scope.settlement ??= {
-    leased: new Set(store.sourceContinuityState(source.input.source.commonDir).leasedOperationIds),
-    recoverable: new Set(store.listRecoverableResources().map(item => item.operation.id)),
-  } : undefined
-  // 正式重试的更早祖先可被新准入替代，原已结算的独审证据仍有来源。
-  return !!source.currentAttemptId
-    && store.listAttempts(source.id).every(attempt => ['failed', 'superseded', 'settled'].includes(attempt.status))
-    && !(settlement ? settlement.leased.has(source.id) : store.sourceContinuityState(source.input.source.commonDir).leasedOperationIds.includes(source.id))
-    && !(settlement ? settlement.recoverable.has(source.id) : store.listRecoverableResources().some(item => item.operation.id === source.id))
-    && store.listJournals(source.id).every(journal => journal.status === 'settled')
+  return store.isSupersededOperationSettled(source.id)
 }
 
 /** 返修接续只读原派发的输入，历史生成结果没有新的批准权。 */
@@ -1488,7 +1478,7 @@ export async function authenticateFrozenCandidateAnalysis(store: SyncStore, oper
         await renew()
       }
       return { operationId: operation.id, sourceAttemptId: attempt.id, candidateDigest: candidate.digest, analysisRef: evidence.ref, analysisRefs: [...scope.refs] }
-    } finally { scope.active = false; scope.refs.clear(); scope.selectionMatches?.clear(); delete scope.readIndex; delete scope.settlement }
+    } finally { scope.active = false; scope.refs.clear(); scope.selectionMatches?.clear(); delete scope.readIndex }
   }))
 }
 

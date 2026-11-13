@@ -9307,10 +9307,10 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
       assert.ok(originalStages.some(stage => stage.stage.endsWith(':analysis:provenance')), '真实旧producer沿正式换模型retry继承P0')
       assert.ok(originalStages.some(stage => stage.stage.endsWith(':elaboration:provenance')), '真实旧producer沿正式换模型retry继承P1')
       await assert.rejects(continuationCoordinator.authenticateFrozenCandidateAnalysis(store, { ...current, retryOf: undefined }, first), /binding/, '删除正式retryOf不能借旧P0批准')
-      const continuity = store.sourceContinuityState.bind(store)
-      store.sourceContinuityState = directory => { const state = continuity(directory); return { ...state, leasedOperationIds: [...state.leasedOperationIds, ancestors[0].id] } }
-      await assert.rejects(continuationCoordinator.authenticateFrozenCandidateAnalysis(store, current, first), /binding/, '祖先活租约不能借原批准取得恢复资格')
-      store.sourceContinuityState = continuity
+      const settled = store.isSupersededOperationSettled.bind(store)
+      store.isSupersededOperationSettled = id => id !== ancestors[0].id && settled(id)
+      await assert.rejects(continuationCoordinator.authenticateFrozenCandidateAnalysis(store, current, first), /binding/, '祖先结算资格不通过时不能借原批准恢复')
+      store.isSupersededOperationSettled = settled
       await assert.rejects(continuationCoordinator.authenticateFrozenCandidateAnalysis(store, { ...current, contractScopeExpansions: [] }, first), /binding/, '原null扩域证据缺席不能反签旧owner范围')
       const readOperation = store.readOperation.bind(store)
       store.readOperation = id => { const owner = readOperation(id); return id === ancestors[0].id ? { ...owner, model: 'claude:unexpected' } : owner }
