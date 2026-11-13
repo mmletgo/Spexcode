@@ -22,6 +22,7 @@ import { SyncStore } from './store.js'
 import { SyncApplication } from './application.js'
 import { freezeDeliveryRuntime } from './runtime-freeze.js'
 import { deliverVerifiedAttempt } from './private-delivery.js'
+import { planAcceptanceRuns } from './verification-plan.js'
 import type { BaselinePair, BaselineResource, FrozenBaselineSelection, InputSnapshot, SyncScope, VerificationResultBlob } from './operation-types.js'
 import type { SyncSettings } from './settings.js'
 
@@ -110,6 +111,8 @@ test('正式adoption的插件实例不进入业务规划，真实业务子树和
 test('两节点真实Git规划按意图筛政策，不把独立B oracle或VERIFY送给A候选', async t => {
   const f = await fixture(t), plan = await buildSyncApplicationPlan(f.source, 'export-contract')
   assert.deepEqual(plan.verifications.map(item => item.definition.id), ['VERIFY-EXPORT-01'])
+  assert.deepEqual(plan.contextVerifications, [f.config.verifications[1].definition])
+  assert.notEqual(syncPlanDigest(plan), syncPlanDigest({ ...plan, contextVerifications: undefined }), '全图登记属于原冻结政策')
   assert.deepEqual(plan.mandatoryTests, [f.config.mandatoryTests[0]])
   assert.ok(!plan.readPaths.includes(specB)); assert.ok(!plan.readPaths.includes('tests/other.test.mjs'))
   assert.ok(!plan.executionScope.paths.some(path => path.includes('other')))
@@ -117,6 +120,8 @@ test('两节点真实Git规划按意图筛政策，不把独立B oracle或VERIFY
   assert.ok(!resources.some(resource => resource.kind === 'path' && resource.path.includes('other')))
   const frozen = await context(f.source, plan.readPaths)
   for (const mandatory of plan.mandatoryTests) assert.equal(frozen.graph.items.get(mandatory.verificationId)?.kind, 'VERIFY')
+  const runs = planAcceptanceRuns(frozen.graph, plan.executionScope.contractIds.filter(id => frozen.graph.items.get(id)?.kind === 'AC'), plan.verifications)
+  assert.deepEqual(runs.map(run => run.verificationId), ['VERIFY-EXPORT-01'], '全图只读登记不能增加V3运行计划')
   for (const content of [null, 'test("fake", () => {})\n']) {
     const entry = verifySnapshot(f.source).find(entry => entry.path === 'tests/export.test.mjs')!
     assert.throws(() => freezeCandidate(f.source, { version: 'sync-files-v1', changes: [{ path: entry.path, beforeDigest: entry.digest, beforeMode: entry.mode, content }] }, plan.executionScope), /越界/)
@@ -222,6 +227,7 @@ test('冻结source角色参与政策摘要，旧持久JSON保持原摘要', asyn
   const legacy = JSON.parse(legacyJson) as SyncCoordinatorPlan
   assert.equal(syncPlanDigest(legacy), contentHash(legacyJson))
   assert.equal(syncPlanDigest({ ...legacy, sourcePaths: undefined }), contentHash(legacyJson))
+  assert.equal(syncPlanDigest({ ...legacy, contextVerifications: undefined }), contentHash(legacyJson))
 })
 
 test('真实store旧政策防删owner规避：整个A节点/VERIFY删除后退役仍保原命令和oracle', async t => {

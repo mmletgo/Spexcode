@@ -11,6 +11,8 @@ code:
 
 ## expanded spec
 
+真实三叶 Git 夹具的单叶局部 P1 原样通过而全图 seal 因兄弟 VERIFY 未登记失败；冻结 contextVerifications 后同例通过。实际两次局部请求仍只有本区文件和验证定义，changes 不含兄弟；旧字段缺席即使实时配置提供全量登记仍失败，错误的冻结 timeout 也继续拒绝。该回归不启动 Native 或 Docker。
+
 真实Git三方输入含A/B两个owner各自的源码冲突，原计划只触发各自Spec，第三owner可共享读取两份源码但没有冲突义务；实际分区请求须只包含本owner真实冲突，原计划/输入不变。foreign change与resolution继续拒绝；零owner、重复owner及仅从聚合移除任一已审finding且没有resolution时必须失败。不同完整输入/旧指导的saved结果不能跳过新分析和独审，其原JSON字节保持；同摘要缓存仍沿原完整输入接缝复用。
 
 立即返回Promise的缓存分区用真实timer证明心跳及取消可在批次耗尽前运行；末项成功和失败均须先让已排队控制回调运行，再返回原结果或抛原错误。旧调度的微任务链须在同例失败，修复后结果顺序、原取消和失败停止后续派发的断言保持；回归不以增加租约或放宽fence掩盖调度饥饿。
