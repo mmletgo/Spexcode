@@ -23,11 +23,12 @@ const settings: SyncSettings = {
   verifications: [{ definition: { id: 'VERIFY-DEMO-01', command: ['node', '--test', 'tests/demo.test.mjs'], cwd: '.', timeoutMs: 1000 }, environment: { version: 'v1', image: `node@sha256:${'a'.repeat(64)}`, platform: 'linux/arm64', memoryBytes: 100000000, cpus: 1, pidsLimit: 64, scratchBytes: 1000000, logBytes: 100000 } }],
   mandatoryTests: [], facts: [], budget: { maxAttempts: 2, maxCalls: 4, maxRepairs: 1, timeoutMs: 30000 },
 }
-async function fixture(t: test.TestContext, options: { branch?: string; gitFailureAfterMerge?: boolean; activeResource?: boolean; exactSelection?: boolean } = {}) {
+async function fixture(t: test.TestContext, options: { branch?: string; gitFailureAfterMerge?: boolean; activeResource?: boolean; exactSelection?: boolean; automatic?: boolean; ignoredNewPath?: string } = {}) {
   const temp = realpathSync(mkdtempSync(join(tmpdir(), 'spex-source-adoption-'))), root = join(temp, 'source'), runtime = join(temp, 'trusted'), appRuntime = join(temp, 'application')
+  const committed = options.automatic !== undefined
   mkdirSync(join(root, '.spec/demo'), { recursive: true }); mkdirSync(join(root, 'src')); mkdirSync(join(root, 'tests'))
   writeFileSync(join(root, '.spec/demo/spec.md'), '---\ntitle: Demo\nstatus: pending\n---\n# Demo\n\n## raw source\n\n返回指定文本。\n\n## expanded spec\n\n待细化。\n')
-  if (options.exactSelection) writeFileSync(join(root, '.spec/demo/spec.md'), readFileSync(join(root, '.spec/demo/spec.md'), 'utf8').replace('status: pending', 'status: pending\ncode:\n  - src/demo.mjs'))
+  if (options.exactSelection || committed) writeFileSync(join(root, '.spec/demo/spec.md'), readFileSync(join(root, '.spec/demo/spec.md'), 'utf8').replace('status: pending', 'status: pending\ncode:\n  - src/demo.mjs'))
   writeFileSync(join(root, '.spec/spexcode.json'), JSON.stringify({ sync: settings }))
   writeFileSync(join(root, 'src/demo.mjs'), 'export const demo = text => text\n')
   writeFileSync(join(root, 'tests/demo.test.mjs'), "import test from 'node:test'; test('DEMO-01', () => {})\n")
@@ -49,21 +50,34 @@ async function fixture(t: test.TestContext, options: { branch?: string; gitFailu
   if (options.gitFailureAfterMerge) { writeFileSync(gitPath, '#!/bin/sh\n/usr/bin/git "$@"\nresult=$?\nfor arg do if [ "$arg" = merge ] && [ "$result" = 0 ]; then exit 17; fi; done\nexit "$result"\n'); chmodSync(gitPath, 0o755) }
   const tools = { trustedRuntimeRoot: runtime, toolEntry: join(runtime, 'dist/cli.js'), canonicalHooksDir: join(runtime, 'templates/hooks'), gitPath }
   const protocol = openProtocol(join(temp, 'sessions.sqlite'))
-  t.after(() => { protocol.close(); rmSync(temp, { recursive: true, force: true }) })
   const application = await SyncApplication.create(root, { protocol, runtimeDirectory: appRuntime, tools })
+  t.after(async () => { await application.stopService(); protocol.close(); rmSync(temp, { recursive: true, force: true }) })
   await application.enable()
-  const input = await captureInputSnapshot(root), plan = await buildSyncApplicationPlan(input, 'demo')
-  const selected = options.exactSelection ? application.store.readBaselineSelection(input.source, await deriveSyncBaselineResources(input, plan)) : null
+  const input = await captureInputSnapshot(root, committed ? { committed: true } : undefined), plan = await buildSyncApplicationPlan(input, 'demo')
+  const selected = options.exactSelection || committed ? application.store.readBaselineSelection(input.source, await deriveSyncBaselineResources(input, plan)) : null
   assert.ok(!selected || 'selection' in selected)
   const selection = selected && 'selection' in selected ? selected.selection : undefined
-  const operation = application.store.admitAndEnqueue(await prepareSyncAdmission(input, plan, { ingressKey: `adopt:${input.id}`, rootCauseId: 'adopt', origin: 'initial', budget: settings.budget, managedRoot: join(appRuntime, 'managed'), ...(selection ? { baselineSelection: selection } : {}) }))
+  const ingressKey = committed ? `observation:${input.source.repositoryId}:${input.id}:demo` : `adopt:${input.id}`
+  const admission = await prepareSyncAdmission(input, plan, { ingressKey, rootCauseId: 'adopt', origin: 'initial', budget: settings.budget, managedRoot: join(appRuntime, 'managed'), ...(selection ? { baselineSelection: selection } : {}), ...(options.automatic ? { automaticSourceAdoption: 'canonical-source-v1' } : {}) })
+  if (options.ignoredNewPath) admission.scope = { ...admission.scope, paths: [...admission.scope.paths, options.ignoredNewPath] }
+  let operation: SyncOperation
+  if (committed) {
+    assert.ok(selection)
+    const configRef = writeEvidence(input.source.commonDir, { version: 'sync-observed-configuration-v1', configDigest: verifySnapshot(input).find(entry => entry.path === '.spec/spexcode.json')!.digest, settings })
+    const latestDifferenceDigest = writeEvidence(input.source.commonDir, { nodeId: 'demo' }).sha256
+    const control = application.store.readPhysicalControl(input.source)
+    const observed = application.store.observeAndAdmit({ input, configRef, selection, latestDifferenceDigest }, admission, { controlRevision: control.revision, selectionDigest: selection.digest })
+    assert.notEqual(observed.outcome, 'blocked')
+    if (observed.outcome === 'blocked') assert.fail(observed.reason.message)
+    operation = observed.operation
+  } else operation = application.store.admitAndEnqueue(admission)
   writeFileSync(join(appRuntime, 'artifacts', `application-runtime-${contentHash(operation.ingressKey)}.json`), JSON.stringify({ version: 'sync-tools-v1', tools, runtimeDigest: null }))
   const acknowledged = selection ? application.store.ackDispatch(input.source.repositoryId, operation.dispatchMessageId) : null
   const claimed = acknowledged ? application.store.claimQueuedAttempt({ operationId: operation.id, source: input.source, scope: operation.scope, leaseMs: 30000, expectedRevision: acknowledged.revision }) : application.store.claimAttempt({ operationId: operation.id, source: input.source, scope: operation.scope, leaseMs: 30000 })
   const composed = composeInputSnapshots(input, selection, { executionPaths: operation.scope.paths, contextPaths: plan.readPaths }).composed!
   application.store.bindComposedInput(claimed.fence, composed); application.store.startGeneration(claimed.fence)
   const entry = verifySnapshot(input).find(file => file.path === 'src/demo.mjs')!
-  const candidate = freezeCandidate(input, { version: 'sync-files-v1', changes: [{ path: entry.path, beforeDigest: entry.digest, beforeMode: entry.mode, content: 'export const demo = text => `${text}!`\n' }] }, operation.scope, composed)
+  const candidate = freezeCandidate(input, { version: 'sync-files-v1', changes: [{ path: entry.path, beforeDigest: entry.digest, beforeMode: entry.mode, content: 'export const demo = text => `${text}!`\n' }, ...(options.ignoredNewPath ? [{ path: options.ignoredNewPath, beforeDigest: null, beforeMode: null, content: 'verified new tracked content\n' }] : [])] }, operation.scope, composed)
   application.store.freezeCandidate(claimed.fence, candidate)
   const evidence = writeEvidence(input.source.commonDir, { fixture: '受控的四层前置证据；此测试只验证真实Git交付和采纳，不代替模型/Docker产品验收' })
   const bindings = { inputId: input.id, candidateDigest: candidate.digest, policyDigest: operation.policyDigest, readSetDigest: operation.readSetDigest, ...(selection ? { baselineSelectionDigest: selection.digest } : {}), environmentDigest: 'fixture', contextDigest: 'fixture' }
@@ -190,6 +204,68 @@ test('AC-ADOPT-01 服务采纳真实settled提交，正常hooks执行，主分�
   assert.equal(f.git('rev-list', '--count', 'HEAD'), '2')
 })
 
+test('服务冷启自动采纳完整主分支交付，重复扫描保持原收据且不回声', { timeout: 90000 }, async t => {
+  const f = await fixture(t, { automatic: true })
+  assert.equal(f.git('rev-parse', 'HEAD'), f.input.headCommit)
+  const dispatches: string[] = []
+  f.application.start = id => { dispatches.push(id) }
+  await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
+  const adopted = await f.application.readOperation(f.operation.id)
+  assert.equal(adopted.canonicalSynced, true)
+  assert.equal(adopted.sourceSynced, true)
+  assert.equal(f.git('rev-parse', 'HEAD'), f.receipt.actualCommit)
+  await f.application['scanObservedInput']()
+  await f.application.stopService()
+  await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
+  assert.deepEqual(f.application.store.listJournals(f.operation.id), [f.journal])
+  assert.deepEqual(dispatches, [])
+  assert.deepEqual(f.application.store.listOperations(f.input.source.repositoryId).map(operation => operation.id), [f.operation.id])
+  assert.equal(f.application.store.readOperation(f.operation.id).callsUsed, 0)
+  assert.equal(readFileSync(join(f.temp, 'hook-trace'), 'utf8'), 'normal:clear:clear\n')
+})
+
+for (const mode of ['historical', 'feature', 'dirty', 'paused', 'open-resource'] as const) test(`自动采纳保留原树及收据 mode=${mode}`, { timeout: 90000 }, async t => {
+  const f = await fixture(t, { automatic: mode !== 'historical', ...(mode === 'feature' ? { branch: 'feature' } : {}), activeResource: mode === 'open-resource' })
+  const file = join(f.root, 'local-notes.txt')
+  if (mode === 'dirty') writeFileSync(file, 'author content\n')
+  if (mode === 'paused') await f.application.automaticControl('pause')
+  const dispatches: string[] = []
+  f.application.start = id => { dispatches.push(id) }
+  const before = await captureInputSnapshot(f.root)
+  await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
+  assert.equal((await captureInputSnapshot(f.root)).id, before.id)
+  assert.equal((await f.application.readOperation(f.operation.id)).canonicalSynced, false)
+  assert.deepEqual(f.application.store.listJournals(f.operation.id), [f.journal])
+  if (mode === 'dirty' || mode === 'paused') {
+    if (mode === 'dirty') rmSync(file)
+    else await f.application.automaticControl('resume')
+    await f.application['scanObservedInput']()
+    assert.equal((await f.application.readOperation(f.operation.id)).canonicalSynced, true)
+  }
+  assert.deepEqual(dispatches, [])
+  assert.deepEqual(f.application.store.listOperations(f.input.source.repositoryId).map(operation => operation.id), [f.operation.id])
+})
+
+test('自动采纳重读异步授权期间出现的外部文件，保留原Git和私有交付', { timeout: 90000 }, async t => {
+  const f = await fixture(t, { automatic: true })
+  const authorization = f.application['requireNodeAuthorized'].bind(f.application)
+  const outside = join(f.root, 'local-notes.txt')
+  let added = false
+  f.application['requireNodeAuthorized'] = async (snapshot, id) => {
+    await authorization(snapshot, id)
+    if (!added) { added = true; writeFileSync(outside, 'author during authorization\n') }
+  }
+  const dispatches: string[] = []
+  f.application.start = id => { dispatches.push(id) }
+  await f.application.startService({ compensationMs: 10000, debounceMs: 5 })
+  assert.equal(added, true)
+  assert.equal(f.git('rev-parse', 'HEAD'), f.input.headCommit)
+  assert.equal(readFileSync(outside, 'utf8'), 'author during authorization\n')
+  assert.deepEqual(f.application.store.listJournals(f.operation.id), [f.journal])
+  assert.deepEqual(dispatches, [])
+  assert.deepEqual(f.application.store.listOperations(f.input.source.repositoryId).map(operation => operation.id), [f.operation.id])
+})
+
 async function rejectedUnchanged(f: Awaited<ReturnType<typeof fixture>>, code: string): Promise<void> {
   const before = await captureInputSnapshot(f.root), index = readFileSync(join(f.root, '.git/index')), refs = f.git('show-ref')
   const detail = await f.application.readOperation(f.operation.id)
@@ -210,6 +286,21 @@ test('AC-ADOPT-02 暂存、未暂存与未跟踪修改均拒绝并完整保留',
   await rejectedUnchanged(f, 'sync_adoption_source_dirty')
   writeFileSync(path, original); writeFileSync(join(f.root, 'human-untracked.txt'), 'preserve me\n')
   await rejectedUnchanged(f, 'sync_adoption_source_dirty')
+})
+
+test('AC-ADOPT-10 快进不会覆盖与交付新文件冲突的 ignored 作者文件', { timeout: 90000 }, async t => {
+  const path = 'src/ignored.mjs', f = await fixture(t, { ignoredNewPath: path })
+  assert.equal(f.git('show', `${f.receipt.actualCommit}:${path}`), 'verified new tracked content')
+  writeFileSync(join(f.root, '.git/info/exclude'), `/${path}\n`)
+  writeFileSync(join(f.root, path), 'local ignored content\n')
+  assert.equal(f.git('check-ignore', path), path)
+  assert.equal(f.git('status', '--porcelain'), '')
+  const index = readFileSync(join(f.root, '.git/index'))
+  await assert.rejects(f.application.adopt(f.operation.id), { code: 'sync_adoption_git_failed' })
+  assert.equal(f.git('rev-parse', 'HEAD'), f.input.headCommit)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), index)
+  assert.equal(readFileSync(join(f.root, path), 'utf8'), 'local ignored content\n')
+  assert.deepEqual(f.application.store.listJournals(f.operation.id), [f.journal])
 })
 
 test('AC-ADOPT-03 原分支分叉拒绝，feature快进只投影source采纳', { timeout: 90000 }, async t => {

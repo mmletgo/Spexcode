@@ -24,7 +24,7 @@ An ordinary repeated input does not grant a fresh operation budget.
 It also documents daemon-free `sync check` with explicit immutable base/candidate/trusted policy, protected-target CI execution, exit codes, and uncovered scope. Large context uses the verified frozen reader without truncation; the configured total budget remains binding when finite.
 It distinguishes recover (settle existing side effects without new work), resume and retry,
 and preserves control/input/budget while recovery remains uncertain.
-It teaches explicit `sync adopt` after verified private delivery: the shared application only fast-forwards a clean original worktree to the settled receipt commit, rejects dirty or divergent trees with a concrete reason, and reports original-source and canonical-branch adoption separately.
+It describes automatic adoption of new verified deliveries on an enabled canonical source, including recovery from the settled receipt after restart. It teaches explicit `sync adopt` for settled deliveries. The shared application fast-forwards a clean original worktree to the receipt commit, gives the reason for refusing a dirty or divergent tree, and reports original-source and canonical-branch adoption separately.
 
 `spex guide` is SpexCode's **reference surface as a command**, not buried docs. It serves the human and
 the agent from one verb, picked by an optional topic:
