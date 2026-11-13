@@ -14,7 +14,7 @@ code:
 
 ## expanded spec
 
-v53 追加 SELECT 1 writer marker，保护候选模型交接的显式授权、原预算族与独审来源引用。先停稳结算，执行一致 online backup 后由原组件事务升级。旧请求、候选和 Git/CAS 证据保持原样。回滚恢复 v52 备份和对应原件。
+v53 追加 SELECT 1 writer marker，保护候选模型交接的显式授权、按模型去重的身份、原预算族与独审来源引用。先停稳结算，执行一致 online backup 后由原组件事务升级。旧请求摘要、候选和 Git/CAS 证据保持原样。回滚恢复 v52 备份和对应原件。
 
 v52 只追加 SELECT 1 writer marker，保护 [[sync-coordinator]] 的候选 GAP 独审及 [[elaboration-result]] 的精确 owner 续稿引用。先停稳并结算旧 writer，再保存一致 online backup。旧请求、批准和 Git/CAS 原件保持。回滚恢复一致 v51 备份及配套证据和 Git 引用。
 

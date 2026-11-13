@@ -5,7 +5,26 @@ import { applyComponentMigrations, type ComponentMigration, type SessionProtocol
 export const SYNC_COMPONENT = 'spec-sync'
 export const SYNC_COORDINATOR_ADDRESS = 'spec-sync-coordinator'
 export const syncCoordinatorAddress = (repositoryId: string): string => `spec-sync-coordinator-${createHash('sha256').update(repositoryId).digest('hex')}`
-export const syncSemanticDigest = (input: Pick<SyncOperation, 'input' | 'origin' | 'requestBlob' | 'policyDigest' | 'scope' | 'retryOf' | 'baselineSelection' | 'recordUnverifiedCoverage' | 'automaticSourceAdoption'>): string => createHash('sha256').update(JSON.stringify({ inputId: input.input.id, source: input.input.source, origin: input.origin, requestBlob: input.requestBlob?.sha256 ?? null, policyDigest: input.policyDigest, paths: [...new Set(input.scope.paths)].sort(), ...(input.baselineSelection ? { baselineSelectionDigest: input.baselineSelection.digest, contractIds: [...new Set(input.scope.contractIds)].sort(), flowIds: [...new Set(input.scope.flowIds)].sort() } : {}), retryOf: input.retryOf ?? null, ...(input.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), ...(input.automaticSourceAdoption ? { automaticSourceAdoption: input.automaticSourceAdoption } : {}) }, (_key, entry: unknown) => entry && typeof entry === 'object' && !Array.isArray(entry) ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a.localeCompare(b))) : entry)).digest('hex')
+export function syncSemanticDigest(input: Pick<SyncOperation, 'input' | 'origin' | 'requestBlob' | 'policyDigest' | 'scope' | 'retryOf' | 'baselineSelection' | 'recordUnverifiedCoverage' | 'automaticSourceAdoption' | 'inheritRetryBudget' | 'model'>): string {
+  const identity = {
+    inputId: input.input.id,
+    source: input.input.source,
+    origin: input.origin,
+    requestBlob: input.requestBlob?.sha256 ?? null,
+    policyDigest: input.policyDigest,
+    paths: [...new Set(input.scope.paths)].sort(),
+    ...(input.baselineSelection ? {
+      baselineSelectionDigest: input.baselineSelection.digest,
+      contractIds: [...new Set(input.scope.contractIds)].sort(),
+      flowIds: [...new Set(input.scope.flowIds)].sort(),
+    } : {}),
+    retryOf: input.retryOf ?? null,
+    ...(input.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}),
+    ...(input.automaticSourceAdoption ? { automaticSourceAdoption: input.automaticSourceAdoption } : {}),
+    ...(input.inheritRetryBudget ? { handoffModel: input.model } : {}),
+  }
+  return createHash('sha256').update(JSON.stringify(identity, (_key, entry: unknown) => entry && typeof entry === 'object' && !Array.isArray(entry) ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a.localeCompare(b))) : entry)).digest('hex')
+}
 export const SYNC_MIGRATIONS: readonly ComponentMigration[] = [{ version: 1, sql: `
 CREATE TABLE sync_operations (
  id TEXT PRIMARY KEY, ingress_key TEXT NOT NULL UNIQUE, ingress_aliases_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(ingress_aliases_json)), payload_digest TEXT NOT NULL UNIQUE,
