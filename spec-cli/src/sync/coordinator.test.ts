@@ -1628,7 +1628,10 @@ test('真实V1/意图门禁拒绝弱化AC、命令及错误关系，有限预算
     assert.equal(f.calls.filter(call => call.purpose === 'code_review').length, 0)
     for (const plan of f.store.readAttempt(result.operation.currentAttemptId!).dispatchPlans) if (plan.session) assert.deepEqual(Object.keys(plan.session).sort(), ['sessionId', 'threadId', 'turnId'])
     const generations = f.store.listAttempts(f.operation.id).flatMap(attempt => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).filter(stage => stage.stage === 'generation').map(stage => JSON.parse(readEvidence(f.input.source.commonDir, stage.resultRef).toString()) as import('./generation-types.js').GenerationResult))
-    assert.ok(generations.some(value => value.validationFindings.some(item => mutation === 'related' ? item.code === 'integrity' : item.code === 'generation-protected-meaning-changed' || item.code === 'generation-verification-unregistered')))
+    const validationFindings = generations.flatMap(value => value.validationFindings)
+    assert.ok(validationFindings.some(item => mutation === 'related'
+      ? item.code === 'related-file-missing' && item.severity === 'error' && item.citation?.origin === 'related' && item.citation.ref === 'REQ-EXPORT-01'
+      : item.code === 'generation-protected-meaning-changed' || item.code === 'generation-verification-unregistered'), JSON.stringify(validationFindings))
     assert.equal(f.store.listJournals(f.operation.id).length, 0)
     assert.ok(f.store.pinnedBlobRefs().length > 3)
     assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
