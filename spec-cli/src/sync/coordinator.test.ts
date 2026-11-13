@@ -5211,7 +5211,8 @@ for (const mode of ['analysis-live', 'analysis-two-accepted', 'analysis-restart'
       if (attempt.number === 2 && partition === 'export' && request.purpose === 'code_behavior_analyze') {
         const path = /草稿文件=([^\s；]+)/.exec(request.prompt)![1]
         assert(!readTree(f.input.source.commonDir, request.worktree!.tree).some(entry => entry.path === path), '无稿的旧transport失败不能产生草稿')
-        assert.deepEqual(context.errors, [{ code: transportCode, message: transportMessage }])
+        assert.deepEqual(context.errors, [], '新请求不复制原传输故障的诊断正文')
+        assert.deepEqual(context.repairDiagnostics, [])
       }
       const fence = { operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }
       return createAttemptRunner(store, fence, { pollMs: 2, runtime: {
@@ -5295,12 +5296,17 @@ for (const mode of ['analysis-live', 'analysis-two-accepted', 'analysis-restart'
       assert.equal(first.failure?.kind, 'repairable')
       assert.ok(first.dispatchPlans.every(dispatch => store.findResource(first.id, dispatch.key)?.phase === 'removed'))
       const failures = JSON.parse(readEvidence(f.input.source.commonDir, firstStages.find(value => value.stage === 'partition:analysis-failures').resultRef).toString()).failures as { code: string; message: string }[]
-      assert.ok(failures.some(item => item.code === transportCode && item.message === transportMessage))
-      const business = failures.find(item => item.code === 'behavior_review_failed' || item.code === 'behavior_analysis_invalid')!
-      assert.ok(business)
+      assert.ok(failures.some(item => item.code === transportCode))
+      assert.ok(failures.some(item => item.code === 'behavior_review_failed' || item.code === 'behavior_analysis_invalid'))
+      assert.ok(failures.every(item => item.message === 'P0 行为校验未通过'), '新P0分区检查点只保存失败状态')
       const resumed = transportCalls.filter(call => call.attempt === 2)
       assert.deepEqual(resumed.map(call => `${call.partition}:${call.purpose}`).sort(), ['export:code_behavior_analyze', 'export:code_behavior_review', 'import:code_behavior_review'])
-      assert.ok(resumed.filter(call => call.partition === 'import').every(call => call.context.repairDiagnostics.some(issue => JSON.stringify(issue) === JSON.stringify(business))))
+      const originalReview = transportCalls.find(call => call.attempt === 1 && call.partition === 'import' && call.purpose === 'code_behavior_review')!
+      const resumedReview = resumed.find(call => call.partition === 'import')!
+      assert.ok(originalReview.context.pendingAnalysis)
+      assert.deepEqual(resumedReview.context.pendingAnalysis, originalReview.context.pendingAnalysis, '兄弟传输故障后仅续审原分析')
+      assert.deepEqual(resumedReview.context.errors, [])
+      assert.deepEqual(resumedReview.context.repairDiagnostics, [])
       const secondStages = stages(attempts[1])
       assert.deepEqual(secondStages.find(stage => stage.stage === accepted.stage).resultRef, accepted.resultRef)
       assert.ok(secondStages.some(stage => stage.stage === `${accepted.stage}:provenance`))
