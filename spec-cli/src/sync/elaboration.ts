@@ -12,6 +12,8 @@ import { isReadonlyCitationFailure } from './frozen-anchors.js'
 import { contractOmissionBound } from './candidate-review.js'
 import type { GenerationFinding } from './generation-types.js'
 import type { FrozenContracts } from './frozen-contracts.js'
+import { historicalCoverageFinding } from './frozen-contracts.js'
+import type { HistoricalCoverageCheck } from './historical-coverage.js'
 import { posix } from 'node:path'
 import { buildContractGraph, contractReferences, CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts, projectContractCoverage, validateContractGraph } from '@spexcode/spec-core/contracts'
 import type { Contract, ContractCoverage, ContractFinding, ContractGraph, ContractItem, Gap, Verification } from '@spexcode/spec-core/contracts'
@@ -283,7 +285,7 @@ function checkInput(input: ElaborationInput): void {
 }
 
 export function freezeElaborationInput(input: ElaborationInput): { input: ElaborationInput; inputDigest: string; frozen: Record<string, unknown> & { targets: readonly ElaborationTarget[] } } {
-  const frozen = structuredClone({ ...(['candidate_review', 'contract_omission'].includes(input.readonlySpecRepair?.kind ?? '') && input.generationGuidance === ELABORATION_GENERATION_GUIDANCE ? { generationGuidance: input.generationGuidance } : {}), execution: { root: input.root, base: input.base ?? null, ...(input.worktree ? { worktree: input.worktree } : {}) }, intent: input.intent, targets: input.targets, context: input.context ?? [], facts: input.facts ?? [], ...(input.verifications ? { verifications: input.verifications } : {}), ...(input.contextVerifications ? { contextVerifications: input.contextVerifications } : {}), ...(input.implementationWritePaths ? { implementationWritePaths: input.implementationWritePaths } : {}), ...(input.readonlyTestPaths ? { readonlyTestPaths: input.readonlyTestPaths } : {}), ...(input.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), authorizedChanges: input.authorizedChanges ?? [], mode: input.mode ?? 'reelaborate', nodeChanges: input.nodeChanges ?? [], analysis: input.analysis, decisionAuthorities: input.decisionAuthorities, refinement: input.refinement, ...(input.readonlySpecRepair ? { readonlySpecRepair: input.readonlySpecRepair } : {}), retiredIds: input.retiredIds ?? [], historyInput: input.historyInput, files: input.files ? [...input.files].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0) : null, ...(input.phase ? { phase: input.phase } : {}), ...(input.partitionBinding ? { partitionBinding: input.partitionBinding } : {}), ...(input.validationScope ? { validationScope: input.validationScope } : {}), ...(input.draftProtocol ? { draftProtocol: input.draftProtocol } : {}) })
+  const frozen = structuredClone({ ...(['candidate_review', 'contract_omission'].includes(input.readonlySpecRepair?.kind ?? '') && input.generationGuidance === ELABORATION_GENERATION_GUIDANCE ? { generationGuidance: input.generationGuidance } : {}), execution: { root: input.root, base: input.base ?? null, ...(input.worktree ? { worktree: input.worktree } : {}) }, intent: input.intent, targets: input.targets, context: input.context ?? [], facts: input.facts ?? [], ...(input.verifications ? { verifications: input.verifications } : {}), ...(input.contextVerifications ? { contextVerifications: input.contextVerifications } : {}), ...(input.historicalCoverageDigest ? { historicalCoverageDigest: input.historicalCoverageDigest } : {}), ...(input.implementationWritePaths ? { implementationWritePaths: input.implementationWritePaths } : {}), ...(input.readonlyTestPaths ? { readonlyTestPaths: input.readonlyTestPaths } : {}), ...(input.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), authorizedChanges: input.authorizedChanges ?? [], mode: input.mode ?? 'reelaborate', nodeChanges: input.nodeChanges ?? [], analysis: input.analysis, decisionAuthorities: input.decisionAuthorities, refinement: input.refinement, ...(input.readonlySpecRepair ? { readonlySpecRepair: input.readonlySpecRepair } : {}), retiredIds: input.retiredIds ?? [], historyInput: input.historyInput, files: input.files ? [...input.files].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0) : null, ...(input.phase ? { phase: input.phase } : {}), ...(input.partitionBinding ? { partitionBinding: input.partitionBinding } : {}), ...(input.validationScope ? { validationScope: input.validationScope } : {}), ...(input.draftProtocol ? { draftProtocol: input.draftProtocol } : {}) })
   return { input: { ...input, ...frozen, files: frozen.files === null ? undefined : new Map(frozen.files) } as ElaborationInput, inputDigest: digest(frozen), frozen: frozen as Record<string, unknown> & { targets: readonly ElaborationTarget[] } }
 }
 
@@ -324,7 +326,7 @@ export function elaborationScopeErrors(input: ElaborationInput, generated: Gener
   })
 }
 
-function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate, inputDigest: string, options: { strictContextCoverage?: boolean; partitionSealFiles?: ReadonlyMap<string, string>; readonlyFactRepairs?: readonly ReadonlySpecRepair[]; readonlyFactBaselines?: ReadonlyMap<string, string> } = {}): { contracts: Contract[]; graph: ContractGraph; findings: ContractFinding[]; resolvedGapIds: string[] } {
+function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate, inputDigest: string, options: { strictContextCoverage?: boolean; partitionSealFiles?: ReadonlyMap<string, string>; readonlyFactRepairs?: readonly ReadonlySpecRepair[]; readonlyFactBaselines?: ReadonlyMap<string, string>; historicalCoverage?: HistoricalCoverageCheck } = {}): { contracts: Contract[]; graph: ContractGraph; findings: ContractFinding[]; resolvedGapIds: string[] } {
   if (input.worktree && input.historyInput) {
     const files = new Map(input.files), treeSources = new Map<string, string>()
     const entries = readTree(input.historyInput.source.commonDir, input.worktree.tree, (entry, bytes) => {
@@ -449,12 +451,14 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
   const targetNodeIds = new Set(input.targets.map(target => target.nodeId))
   const strictContextCoverage = options.strictContextCoverage ?? input.validationScope !== 'partition_local'
   const previouslyBound = input.recordUnverifiedCoverage ? acceptanceBoundContractIds(before.coverage) : undefined
-  const recordUnverifiedAcceptance = previouslyBound ? (id: string): boolean => !previouslyBound.has(id) : undefined
+  const historical = options.historicalCoverage?.(graph, afterFiles)
+  const recordUnverifiedAcceptance = previouslyBound || historical?.size ? (id: string): boolean => Boolean(previouslyBound && !previouslyBound.has(id) || historical?.has(id)) : undefined
   const localValidation = validateContractGraph(graph, { mode: input.phase === 'interface_seed' ? 'draft' : 'final', files: input.files, nodeIds: new Set(after.nodes.map(source => source.id)), recordUnverifiedAcceptance })
     .filter(issue => input.phase === 'interface_seed'
       ? !interfaceSeedCoverageFinding.has(issue.code)
       : strictContextCoverage || targetNodeIds.has(issue.nodeId) || !contextCoverageFinding.has(issue.code))
-    .map(issue => {
+    .map(original => {
+      const issue = historicalCoverageFinding(original, historical)
       const readonlyTest = ['missing-test-file', 'missing-test-case'].includes(issue.code) && input.readonlyTestPaths?.some(path => issue.message.includes(path))
       return (input.implementationWritePaths?.length === 0 || readonlyTest) && implementationFinding(issue) ? { ...issue, code: 'readonly_implementation_gap', message: `本轮实现或测试只读，不能延后补写代码或测试；${issue.message}` } : issue
     })
@@ -508,7 +512,7 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
 }
 
 /** Use the same complete final-candidate validator for the merged, real-file-backed partition result. */
-export function sealPartitionedElaboration(input: ElaborationInput, changes: readonly ElaborationChange[], applicability: readonly Applicability[], readonlyFactRepairs: readonly ReadonlySpecRepair[] = [], readonlyFactBaselines: ReadonlyMap<string, string> = new Map()): {
+export function sealPartitionedElaboration(input: ElaborationInput, changes: readonly ElaborationChange[], applicability: readonly Applicability[], readonlyFactRepairs: readonly ReadonlySpecRepair[] = [], readonlyFactBaselines: ReadonlyMap<string, string> = new Map(), historicalCoverage?: HistoricalCoverageCheck): {
   seal: ElaborationPartitionSeal
   contracts: Contract[]
   graph: ContractGraph
@@ -516,11 +520,12 @@ export function sealPartitionedElaboration(input: ElaborationInput, changes: rea
   resolvedGapIds: string[]
 } {
   if (!input.files) throw new TypeError('完整分区封口必须绑定冻结的全局源码/测试文件')
+  if (input.historicalCoverageDigest && !historicalCoverage) throw new TypeError('历史覆盖封口缺少可信原件核验')
   const { contextVerifications, ...scoped } = input
   const frozen = freezeElaborationInput({ ...scoped, ...(contextVerifications ? { verifications: [...input.verifications ?? [], ...contextVerifications] } : {}), phase: undefined, validationScope: undefined })
   checkInput(frozen.input)
   const candidate: ElaborationCandidate = { inputDigest: frozen.inputDigest, changes: changes.map(change => structuredClone(change)), applicability: applicability.map(entry => structuredClone(entry)), nodeChanges: [...input.nodeChanges ?? []] }
-  const checked = checkCandidate(frozen.input, candidate, frozen.inputDigest, { strictContextCoverage: true, readonlyFactRepairs, readonlyFactBaselines })
+  const checked = checkCandidate(frozen.input, candidate, frozen.inputDigest, { strictContextCoverage: true, readonlyFactRepairs, readonlyFactBaselines, historicalCoverage })
   const coverage = projectContractCoverage(checked.graph)
   const seal: ElaborationPartitionSeal = {
     inputDigest: frozen.inputDigest,
@@ -705,8 +710,9 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
   const factRepairInstructions = factRepairTargets.length ? `\n本轮已有合法code_review指向P0未变owner的事实叙述：${JSON.stringify(factRepairTargets)}。只允许按冻结源码核实并更新这些owner的description、prose和所列RULE.basis；保raw、标题、code/related及全部业务列、稳定ID、AC/VERIFY、来源和依赖，不增删行，不改源码/tests。诊断不是业务改义授权；生成后仍须独立审查与strict全图seal。` : ''
   const omissionInstructions = input.readonlySpecRepair?.kind === 'contract_omission' ? '\nrefinement只来自本owner已认证的contract-omission，按原raw和当前P0范围核对遗漏；不适用时诚实阻断。既有REQ/RULE/AC/VERIFY全部列及来源/测试绑定保持，原稳定ID不能删除。普通事实仍只按另外列明的factRepairIds修正，omission的ID不进入该白名单；两类诊断不能合成全量改义授权。' : ''
   const repairInstructions = (sealRepair ? '\n本轮是跨owner全局封口返修：' + (input.compactSealDiagnostics ? '在repair.diagnosticRoot下按原相对路径打开相关规格，可按ID或状态对象检索冲突双方；' : '读取repair诊断目录中的真实失败并集，按原路径核对冲突双方；') + '它仅为非权威诊断，不是raw、事实、批准或新增写权。只在本owner原意/源码/tests支持下修复所列error；纯父仍只负责接口。仅renameableIds中的本轮未采纳duplicate可同类同义唯一更名并更新本owner全部typed引用，原作者/已采纳及非冲突ID继续保留；旧draft错误不是更名资格裁定。程序与独审诊断副本沿同一原VERIFY技术归属投影替回本区候选，本区原件不重写；核原错误及新增错误后再独审，最后仍须strict全图封口。' : anchorRepair ? '\n本轮是已接受规格的只读V1锚点返修：先读repair.baselines的baselineSpecPath作为原已接受正文，仅修findings定位的code来源选择器；按冻结源码可索引声明Unit.name精确选择，main内局部变量和成员调用不是声明，不猜替代值。原raw、prose和RULE等已接受业务字段保持，禁止顺手重写basis、政策、流程或验收及增删稳定ID；已有草稿若改坏这些字段，须依据baseline自行恢复原prose和finding.itemId对应受保护项。mode=reelaborate与失败诊断不是新增授权。baseline、Spec、源码、全部测试及schema仍只读，只改指定draft并重新独审。' : '') + factRepairInstructions + omissionInstructions
+  const { historicalCoverageDigest: _historicalCoverageDigest, ...modelInput } = frozenInput.frozen
   const snapshot = JSON.stringify(citationRepair ? { repair: anchorRepairBrief, targets: input.targets.map(({ nodeId, path }, targetIndex) => ({ targetIndex, nodeId, path })), relatedSpecs: input.context?.map(({ nodeId, path }) => ({ nodeId, path })), implementationWritePaths: [] }
-    : input.worktree ? { ...(sealRepairBrief || anchorRepairBrief ? { repair: sealRepairBrief ?? anchorRepairBrief } : {}), intent: input.intent, targets: input.targets.map((target, targetIndex) => ({ targetIndex, nodeId: target.nodeId, path: target.path, rawSource: target.rawSource })), relatedSpecs: input.context?.map(context => ({ nodeId: context.nodeId, path: context.path })), facts: input.facts, authorizedChanges: input.authorizedChanges, verifications: input.verifications, implementationWritePaths: input.implementationWritePaths, readonlyTestPaths: input.readonlyTestPaths, ...(input.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), retiredIds: input.retiredIds, nodeChanges: input.nodeChanges, mode: input.mode, analysis: input.analysis, partitionBinding: input.partitionBinding, decisionAuthorities: input.decisionAuthorities, refinement: input.refinement } : { ...frozenInput.frozen, targets: frozenInput.frozen.targets.map((target, targetIndex) => ({ targetIndex, ...target })) })
+    : input.worktree ? { ...(sealRepairBrief || anchorRepairBrief ? { repair: sealRepairBrief ?? anchorRepairBrief } : {}), intent: input.intent, targets: input.targets.map((target, targetIndex) => ({ targetIndex, nodeId: target.nodeId, path: target.path, rawSource: target.rawSource })), relatedSpecs: input.context?.map(context => ({ nodeId: context.nodeId, path: context.path })), facts: input.facts, authorizedChanges: input.authorizedChanges, verifications: input.verifications, implementationWritePaths: input.implementationWritePaths, readonlyTestPaths: input.readonlyTestPaths, ...(input.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), retiredIds: input.retiredIds, nodeChanges: input.nodeChanges, mode: input.mode, analysis: input.analysis, partitionBinding: input.partitionBinding, decisionAuthorities: input.decisionAuthorities, refinement: input.refinement } : { ...modelInput, targets: frozenInput.frozen.targets.map((target, targetIndex) => ({ targetIndex, ...target })) })
   const generationSchema = elaborationSchema(input, { purpose: input.phase === 'interface_seed' ? 'interface_seed' : 'generation' })
   const draftBinding = elaborationDraftBinding(input, generationSchema)
   const sourceDraft = options.loadDraft?.(draftBinding.schemaDigest) ?? options.draft

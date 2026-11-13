@@ -20,6 +20,8 @@ related:
 
 ## expanded spec
 
+真正新接入可从同一冻结 input 的完整发现选择派生 [[sync-historical-coverage]]，内联原 planBlob 并参与政策摘要；复用原计划的重复请求及正式 retry 不重读 live heads 或补写历史资格。实际 executionScope、选择、验证登记与强制测试保持。
+
 正式 configuredSyncApplication 与 configuredSyncResourceRecoveryApplication 共用 [[verification-transport]] 的可信 server 装配。可由 server 的 SPEX_VERIFICATION_SSH_ALIAS 与 SPEX_VERIFICATION_SSH_ROOT 选择既有 SSH 配置和远端独占 root，必须成对提供；缺席保持本地。alias/host 权限和认证不进入候选 Spec、项目 sync settings 或模型请求，凭据沿 SSH 原生机制，不能因当前配置改变而重绑定旧 v1/v2 resource。此装配不增加 P0/readiness 阶段或第二业务状态机。
 
 server可选SPEX_VERIFICATION_SSH_DOCKER_ENDPOINT只接受本机Unix socket，缺省unix:///var/run/docker.sock，按原plan冻结并显式传每次Docker CLI，不使用远端默认context猜执行主机。
@@ -131,7 +133,7 @@ revert 将精确历史恢复 Spec 作为可信目标，保原节点/业务 ID �
 
 Dashboard 的受控正文保存继续直接 submit，requestBlob 即时触发 spec→code，不等待 Git 提交。外部编辑器的 Spec/代码保存、原子替换与 git add 均不启动自动模型；自动观察只接受已提交 HEAD tree，首次显式 enable 可从既有 committed HEAD 发起 initial，同期未提交或未暂存的新编辑不混入。enable 仅授权已提交配置及意图，不从未提交内容建立初始输入。
 
-首次无已证明自动接入快照时以 initial 纳管当前已提交树；旧无 captureKind 的操作不能被猜作 committed 前态。后续自动输入依据该节点最近已消费的真实 commit 快照到当前输入的 tree 差量区分 spec/code/combined；停机多次提交仍按累计已提交差量分类，paused 中尚未处理的新作者变化只观察而不消费边界。相关路径取当前计划与该节点最近消费记录的精确path绑定并集，已删除路径不能仅因当前树不再列出它而失去方向；不扩大到全局源码根或无关owner。v2 plan 的 commitTrigger 冻结该 before 快照（首次 initial 为 null）及真实累计 paths，after 仍为 operation.input。它是作者提交前态而非已验证交付，不替代 receipt/baseline，也不按 HEAD^ 猜测或只保存可能被 GC 的 OID。仅提交无关路径或空提交不启动模型。code 冻结 code_to_spec、combined 冻结 combined；initial 有已提交授权实现时冻结 code_to_spec，否则与 Spec 保存相同冻结 spec_to_code。沿同一 plan/selection 规划，不复制执行器或分区政策。
+首次无已证明自动接入快照时以 initial 纳管当前已提交树；旧无 captureKind 的操作不能被猜作 committed 前态。后续自动输入依据该节点最近已消费的真实 commit 快照到当前输入的 tree 差量区分 spec/code/combined；停机多次提交仍按累计已提交差量分类，paused 中尚未处理的新作者变化只观察而不消费边界。相关路径取当前计划与该节点最近消费记录保存的精确路径资源并集，已删除路径不能仅因当前树不再列出它而失去方向；不扩大到全局源码根或无关owner。v2 plan 的 commitTrigger 冻结该 before 快照（首次 initial 为 null）及真实累计 paths，after 仍为 operation.input。它是作者提交前态而非已验证交付，不替代 receipt/baseline，也不按 HEAD^ 猜测或只保存可能被 GC 的 OID。仅提交无关路径或空提交不启动模型。code 冻结 code_to_spec、combined 冻结 combined；initial 有已提交授权实现时冻结 code_to_spec，否则与 Spec 保存相同冻结 spec_to_code。沿同一 plan/selection 规划，不复制执行器或分区政策。
 
 自动 ingress 固定到提交快照与节点，同一 commit 重放不因 baseline 或差异证据推进而重新派发；已结算 receipt/baseline 继续按真实意图消费和采纳证明消除同步自身交付/采纳提交的回声，不按 Git author 或 session trailer 猜测作者。停机提交在 service 启动及周期补偿中继续发现。新 commit 沿既有作用域、物理控制和预算族门禁，不新增触发配置开关。
 

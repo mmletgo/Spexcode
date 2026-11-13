@@ -7,6 +7,8 @@
 - 手动 code→spec 显式记录未执行覆盖时，已审声明与实际测试分开。全部旧绑定、冻结 mandatory、V1–V4、严格交付和采纳保持，`unexecutedContractIds` 只来自通过的正式验证原件。
 - 分区复用 partitioning/partition-execution 的唯一计划，共用 operation、fence、预算与最终 candidate/journal/receipt。任务只交付变更 Spec、相关接口和明确目标；Agent 在独立 worktree 自由读取，不以分块读取或逐字消费证明作为同步门禁。
 - 新计划的 contextVerifications 只供全图 seal 校验未选 owner 的冻结定义；局部模型和 V3 保原登记及运行范围，旧 plan 缺席不从实时配置补入。writer47 只追加 marker；停稳并结算旧 writer 后 online backup，回滚恢复一致 v46 库及配套证据/Git refs，不删 marker。
+- 新计划的历史未执行资格只由 historical-coverage 按精确已采纳 pair/receipt/report 和三份 Git 对象冷验；P1 全图 seal 与 V1 共用逐 ID 判据，局部请求与当前义务保持严格。证明沿原 planBlob，旧缺席不补写。writer50 只追加 marker；停稳结算并 online backup，回滚恢复一致 v49 库及配套证据/Git refs。
+- P2 混合结果先保同候选已认证结论，仅续审格式拒稿，随后按精确 owner 处理普通与契约遗漏发现。writer51 围栏保护新增持久判别值；冷升级先停稳、结算与 online backup，回滚恢复一致 v50 库及原证据。
 - 共享分区调度每项结束均须真正让出事件循环，缓存、末项与失败亦然；让原心跳与控制运行，不延长租约或弱化fence。P1只按最近有真实P1派发的已结算观测故障收紧下一次返修，故障消失后恢复冻结并发；无派发或仅复用检查点的控制重启不消耗或重置该次返修。
 - 每阶段绑定真实 seed commit/tree：分析使用 composed，细化包含已审祖先，构建包含已审 Spec，独审使用实际候选。缓存同时核验实际可见 tree；不能只传原 HEAD 而漏掉受控 Spec 修改，也不能混入提交后的 index/WIP。
 - 实现 Agent 在工作树真实修改、测试并正常提交；候选从实际 Git 对象差量导入。程序检查写范围、CAS、原测试和契约演进，生成摘要或自报补丁不能替代实际修改。
@@ -25,6 +27,7 @@
 - 执行器单测：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/verification-executor.test.ts`；真实 Linux/arm64 Docker 验收：先准备测试中冻结的镜像，再 `SPEX_DOCKER_VERIFICATION_TEST=1 npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/verification-executor.docker.test.ts`。`SPEX_VERIFICATION_EVIDENCE_DIR` 可指定已存在的外部证据目录；未设置时用系统临时目录，不把运行证据写入源码。
 
 - 持久协调使用 `operation-types.ts` 共享身份，原source/composed/candidate分离；所有写入走store动作门禁及既有protocol事务，native/Git/FS副作用放事务外。
+- writer49 保护观察覆盖投影；旧观察在 SQL 内按原选择投影，保留原 JSON、选择摘要和证据引用。升级停稳并结算旧 writer，回滚恢复一致 v48 在线备份及配套证据和 Git refs。
 - `sync resources recover` 仅结算显式 operation/input 的既有 owned 资源；普通 `sync recover` 还可回放 journal。资源清理不授予来源连续性，来源不匹配仍不得 resume/adopt。
 - 普通协调器逐任务回收已完成或精确停止且clean的Native工作树，正式close保branch/archive/record与原结果/错误；removed不代表物理删除。已归档失败稿经原认证临时restore→严格观察→复用物理回收段，保原archive/Native，零launch/wake；仅回收registry内本次created场地。dirty/未知停止保留，pending不改业务结果或烧新调用。
 - 存储验证：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/store.test.ts packages/session-protocol/src/adopter-seams.test.ts`。

@@ -286,10 +286,7 @@ test('observer projection distinguishes live health, physical control, project c
     latestDifference: { nodeId: 'alpha' },
     latest: {
       outcome: 'blocked', reason: { code: 'BASELINE_REVIEW', message: 'A decision is required' },
-      selection: { bindings: [
-        { resource: { kind: 'path', path: 'src/a.js' }, bytePair: { id: 'pair-a' } },
-        { resource: { kind: 'contract', id: 'REQ-1' }, intentPair: null },
-      ] },
+      baseline: { resourceCount: 2, pathResources: ['src/a.js'], missingResources: ['contract:REQ-1'] },
     },
   }
   const projection = syncObserverProjection(observation, sources)
@@ -316,7 +313,7 @@ test('persisted watching and identity mismatch never project an online observer 
     persistedHealth: { status: 'watching', updatedAtMs: 456 },
     control: { control: 'run' },
     coverage: { includedNodeIds: [], contextNodeIds: [], missingNodeIds: [], excludedNodeIds: [], totalNodeCount: 0 },
-    latest: { selection: null, reason: { code: 'SYNC_BASELINE_UNKNOWN', message: 'Baseline could not be read' } },
+    latest: { baseline: null, reason: { code: 'SYNC_BASELINE_UNKNOWN', message: 'Baseline could not be read' } },
   })
   assert.equal(projection.healthStatus, 'identity_unconfirmed')
   assert.equal(projection.watchOnline, false)

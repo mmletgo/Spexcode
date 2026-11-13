@@ -2220,6 +2220,55 @@ test('commit观察历史折叠普通重复但保留接入消费事实，不受50
   } finally { f.cleanup() }
 })
 
+test('大树观察只持久化基线覆盖，保留原选择摘要及旧记录的等价可读投影', async () => {
+  const f = await fixture()
+  try {
+    const initial = f.ready(f.admit())
+    const journal = f.store.beginApply(initial.fence, initial.plan, initial.target)
+    for (const step of journal.steps) f.store.recordApplyStep(initial.fence, journal.id, { ...step, status: 'completed' })
+    const receipt = f.receipt(journal.id, initial.plan)
+    f.store.recordReceipt(journal.id, receipt); f.store.settleApply(journal.id, receipt.id)
+    let pairReads = 0, receiptReads = 0
+    const transaction = f.protocol.withTransaction.bind(f.protocol)
+    f.protocol.withTransaction = cb => transaction(tx => cb({
+      ...tx, query: (sql, ...args) => {
+        if (sql.startsWith('SELECT record_json FROM sync_baseline_pairs WHERE id=?')) pairReads++
+        if (sql.startsWith('SELECT id FROM sync_apply_journals WHERE receipt_id=?')) receiptReads++
+        return tx.query(sql, ...args)
+      },
+    }))
+    let selected: ReturnType<SyncStore['readBaselineSelection']>
+    try {
+      selected = f.store.readBaselineSelection(source(), [{ kind: 'path', path: 'src/a.ts' }, { kind: 'contract', id: 'RULE-A' }, { kind: 'flow', id: 'FLOW-MISSING' }])
+    } finally { f.protocol.withTransaction = transaction }
+    assert.ok('selection' in selected)
+    const pairs = selected.selection.bindings.flatMap(binding => 'bytePair' in binding && binding.bytePair ? [binding.bytePair] : 'intentPair' in binding && binding.intentPair ? [binding.intentPair] : [])
+    assert.deepEqual(pairs.map(pair => pair.receiptId), [receipt.id, receipt.id])
+    assert.equal(pairs[0], pairs[1], '同一事务复用已核身份与收据的 pair')
+    assert.equal(pairReads, 1)
+    assert.equal(receiptReads, 1)
+    const input = { ...f.input(), captureKind: 'commit' as const }, configRef = f.put({ fixture: 'observation storage projection' })
+    const expected = { controlRevision: 0, selectionDigest: selected.selection.digest }
+    const value = { input, configRef, selection: selected.selection, latestDifferenceDigest: 'observation-projection' }
+    const fresh = f.store.recordObservation(value, expected)
+    const rows = () => f.protocol.withTransaction(tx => tx.query('SELECT id,source_key,record_json FROM sync_observations ORDER BY rowid'))
+    const first = rows()[0], actual = JSON.parse(String(first.record_json))
+    assert.equal(Object.hasOwn(actual, 'selection'), false, '观察记录不嵌入每个资源重复的完整 receipt pair')
+    const baseline = { resourceCount: 3, pathResources: ['src/a.ts'], missingResources: ['flow:FLOW-MISSING'] }
+    assert.deepEqual(fresh.baseline, baseline)
+    assert.equal(fresh.selectionDigest, selected.selection.digest)
+    const { baseline: _baseline, ...legacy } = fresh
+    const old = { ...legacy, id: 'legacy-observation-projection', latestDifferenceDigest: 'legacy-observation-projection', selection: selected.selection }
+    f.protocol.withTransaction(tx => tx.exec('INSERT INTO sync_observations(id,source_key,operation_id,record_json) VALUES(?,?,NULL,?)', old.id, String(first.source_key), JSON.stringify(old)))
+    const rawLegacy = rows()[1].record_json
+    assert.deepEqual(f.store.readLatestObservation(source()), { ...legacy, id: old.id, latestDifferenceDigest: old.latestDifferenceDigest, baseline })
+    assert.deepEqual(f.store.listCommittedObservationFrontiers(source()).map(row => row.baseline), [baseline, baseline])
+    assert.deepEqual(f.store.listObservations(source()).map(row => row.baseline), [baseline, baseline])
+    assert.equal(rows()[1].record_json, rawLegacy)
+    assert.ok(f.store.pinnedBlobRefs().some(ref => ref.sha256 === selected.selection.bindings.flatMap(binding => 'bytePair' in binding && binding.bytePair ? [binding.bytePair.verifiedDelivery.manifestBlob.sha256] : [])[0]))
+  } finally { f.cleanup() }
+})
+
 test('commit观察的差异摘要在重开和真实evidence GC后保留，消费证明不因裸字符串引用丢失', async () => {
   const f = await fixture()
   try {
@@ -2932,13 +2981,22 @@ for (const prior of [34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44] as const) test(
   } finally { backup?.close(); f.cleanup() }
 })
 
-for (const prior of [46, 47] as const) test(`从writer${prior}升级保留自动采纳索引及原件，旧writer拒绝且备份可回滚`, async () => {
-  assert.equal(SYNC_MIGRATIONS[prior]?.version, prior + 1, '新程序计划语义必须有独立 writer 围栏')
+for (const prior of [46, 47, 48, 49] as const) test(`从writer${prior}升级保留自动采纳索引及原件，旧writer拒绝且备份可回滚`, async () => {
+  assert.equal(SYNC_MIGRATIONS[prior]?.version, prior + 1, '新持久语义必须有独立 writer 围栏')
   const f = await fixture()
   let backup: ReturnType<typeof openProtocol> | undefined
   try {
     const claimed = f.claim(), versions = SYNC_MIGRATIONS.slice(0, prior)
-    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>?', SYNC_COMPONENT, prior))
+    const observation = f.store.recordObservation({
+      input: { ...f.input(), captureKind: 'commit' },
+      configRef: f.put({ fixture: 'legacy observation before writer fence' }),
+      selection: null, latestDifferenceDigest: 'legacy-observation-before-writer-fence',
+    }, { controlRevision: 0, selectionDigest: null })
+    const { baseline: _baseline, ...legacy } = observation
+    f.protocol.withTransaction(tx => {
+      tx.exec('UPDATE sync_observations SET record_json=? WHERE id=?', JSON.stringify({ ...legacy, selection: null }), observation.id)
+      tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>?', SYNC_COMPONENT, prior)
+    })
     const read = (protocol: typeof f.protocol) => protocol.withTransaction(tx => ({
       schema: tx.query('SELECT * FROM sqlite_master ORDER BY type,name'),
       rows: Object.fromEntries(tx.query("SELECT name FROM sqlite_master WHERE type='table' AND name!='schema_migrations' ORDER BY name").map(row => [String(row.name), tx.query(`SELECT * FROM "${String(row.name)}"`)])),
@@ -2956,6 +3014,7 @@ for (const prior of [46, 47] as const) test(`从writer${prior}升级保留自动
     assert.deepEqual(read(f.protocol), before)
     assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, versions), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
     assert.deepEqual(f.store.readAttempt(claimed.attempt.id), claimed.attempt)
+    assert.deepEqual(f.store.readLatestObservation(source()), observation)
     backup = openProtocol(backupPath)
     assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, versions), prior)
     assert.deepEqual(read(backup), before)

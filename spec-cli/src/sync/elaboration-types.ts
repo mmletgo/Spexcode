@@ -68,6 +68,7 @@ export type ElaborationInput = {
   verifications?: readonly Pick<Verification, 'id' | 'command' | 'cwd' | 'timeoutMs'>[]
   /** 未选 owner 的冻结定义只用于完整封口，不进入局部模型请求或执行计划。 */
   contextVerifications?: readonly Pick<Verification, 'id' | 'command' | 'cwd' | 'timeoutMs'>[]
+  historicalCoverageDigest?: string
   /** 冻结计划的技术写范围与不可修改的外部验收文件，不授予新的业务权限。 */
   implementationWritePaths?: readonly string[]
   readonlyTestPaths?: readonly string[]
