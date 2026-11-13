@@ -81,7 +81,7 @@ AC-APPLICATION-P4-09 真实失败后scope外编辑不改变stale/重试资格，
 
 AC-APPLICATION-P4-10 在可控native执行期间物理pause，单operation detail独立展示physicalControl=pause，原operation.control保持run且资源在安全边界结算；暂停提交仍更新latest且无新调用，resume先准入最新input，原active input不被改写。
 
-AC-APPLICATION-P4-11 同一真实Git/SQLite来源两个独立节点分别提交，四轮实际Docker/正常hooks交付（在线两次、停机编辑重启补偿两次）均要求workspace_synced和真实receipt，source/index/HEAD保持；实际作者源码完整保留，每轮全部非Spec Git对象与该轮真实composed树一致，不派code_generate。同一HEAD内已提交源码作为原样基底保留，独立节点隔离核对另一Spec的Git对象保持原值、且未列入本轮deliveredScope；行为runner明确为确定性替身，不算真实模型验收。
+AC-APPLICATION-P4-11 同一真实Git/SQLite来源两个独立节点分别提交，四轮实际Docker/正常hooks交付（在线两次、停机编辑重启补偿两次）均要求workspace_synced和真实receipt，source/index/HEAD保持；实际作者源码完整保留，每轮全部非Spec Git对象与该轮真实composed树一致，不派code_generate。第二节点的原Spec和确定性P1输出共用独立other-job实体域，STATE、EVENT、TR不与export-job合并。同一HEAD内已提交源码作为原样基底保留，独立节点隔离核对另一Spec的Git对象保持原值、且未列入本轮deliveredScope；行为runner明确为确定性替身，不算真实模型验收。
 
 Docker应用夹具可复用SPEX_VERIFICATION_EVIDENCE_DIR保存实际观察/operation/attempt/journal投影、关闭后的真实SQLite与Git对象证据，失败断言含journal与blockedReason；归档不制造基线或修改权威状态。独立节点以首个真实receipt的完成顺序核对另一未消费输入，不能假设独立范围的完成顺序。
 
