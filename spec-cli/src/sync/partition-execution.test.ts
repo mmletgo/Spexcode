@@ -918,7 +918,7 @@ test('历史accepted审查不覆盖当前repair，跨边保原件且取消后不
   const resumed: PartitionCheckpoints = {
     load: <T>(key: string) => current.get(key) as T ?? null,
     save: (key, value) => { current.set(key, value); return writeEvidence(input.snapshot.source.commonDir, value) },
-    loadAcceptedCandidateReview: key => { assert.notEqual(key, failedKey); accepted.push(key); return checkpoints.load(key) },
+    loadCompletedCandidateReview: key => { assert.notEqual(key, failedKey); accepted.push(key); return checkpoints.load(key) },
   }
   const calls = runtime.calls.length
   const result = await generateSyncPartitions({ ...input, requestKey: 'next-attempt' }, plan, 1, true, { runner: async () => assert.fail('current repair与其它accepted原件均已结算'), validateCandidate: async () => { gates++; return [] } }, resumed)
@@ -2209,7 +2209,7 @@ test('普通Spec→Code已生成且V1通过的候选只续审，不重派builder
   const actualEntries = verifyCandidate(input.snapshot.source.commonDir, first.candidate!)
   assert.notDeepEqual(actualEntries.filter(entry => entry.path.startsWith('src/')), input.manifest.entries.filter(entry => entry.path.startsWith('src/')), '首轮scratch正常提交实际改变源码Git对象')
   const before = runtime.calls.length, current = new Map<string, unknown>([['file-writer-plan', JSON.parse(readEvidence(input.snapshot.source.commonDir, first.fileWriterPlanRef!).toString())]])
-  const resumed: PartitionCheckpoints = { load: <T>(key: string) => current.get(key) as T ?? null, save: (key, value) => { current.set(key, value); return writeEvidence(input.snapshot.source.commonDir, value) }, loadAcceptedCandidateReview: key => key === failedKey ? null : checkpoints.load(key) }
+  const resumed: PartitionCheckpoints = { load: <T>(key: string) => current.get(key) as T ?? null, save: (key, value) => { current.set(key, value); return writeEvidence(input.snapshot.source.commonDir, value) }, loadCompletedCandidateReview: key => key === failedKey ? null : checkpoints.load(key) }
   const result = await generateSyncPartitions({ ...input, requestKey: 'next-review' }, plan, 1, false, { runner: async request => { assert.equal(request.purpose, 'code_review'); assert.ok(request.requestKey.includes(':final:part-export:')); return runtime.runner(request) }, reviewCandidate: first.candidate!, builderTraces, validateCandidate: async () => { validations++; return [] } }, resumed)
   assert.equal(result.status, 'reviewed', JSON.stringify(result.failure))
   assert.deepEqual(result.candidate, first.candidate); assert.equal(validations, 2)

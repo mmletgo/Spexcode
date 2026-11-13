@@ -290,7 +290,11 @@ P0/P1/P2 共用 typed Native RPC 已结算准入：仅当前 control/physical ru
 
 只读 V1 返修可使用在正式重试祖先中真实生成及独审的同一已审 owner 作为原基线。先核当前已审 aggregate 的原局部 resultRef 及原阶段 readSet/selection；发生正式 null 扩域时还须核对应 scope 扩展和原计划范围。若原局部阶段所在 attempt 已完成扩域，须同时核同次已审 whole 作为扩域原件，并复用 [[sync-checkpoint-evidence]] 的同冻结树校验。沿原复用 provenance 逐跳核同一计划、完整组合输入、已结算祖先和原独审与 Git 草稿的 Native 派发。返修结论仍须本操作在原诊断之后实际生成并独审。
 
-候选已通过V1而仅精确code_review结构格式失败时，续审从同operation的已结算原Native失败请求、合法P1批准链及validated candidate恢复原partition-plan身份，不因诊断或P1合法扩域重规划。原plan wrapper、digest及旧字段不改签；若计划冻结早于P1新增null资源，须核旧selection绑定逐字保留、新增binding全null、contractScopeExpansions的前后selection及evidenceRef精确来自同一已审P1、各owner原planDigest及composed tree/content不变。新增业务ID/Spec路径来自该已审正文，实现与测试路径只来自同P1的code/AC.test映射或原文件规划，均在原冻结权限内；非null/既有绑定、source/input/readSet/policy/scope/原意变化不获得承接。原P1局部完整输入/Git/schema缓存核验及strict全图seal仍执行，唯一候选重新经V1及全部最终门。
+候选已通过V1而精确code_review结构格式失败时，包括同轮仍有合法普通 repair 或 contract-omission 的组合，先在同一冻结候选上补齐协议。续审从同operation的已结算原Native请求、合法P1批准链及validated candidate恢复原partition-plan身份，不因诊断或P1合法扩域重规划。原plan wrapper、digest及旧字段不改签；若计划冻结早于P1新增null资源，须核旧selection绑定逐字保留、新增binding全null、contractScopeExpansions的前后selection及evidenceRef精确来自同一已审P1、各owner原planDigest及composed tree/content不变。新增业务ID/Spec路径来自该已审正文，实现与测试路径只来自同P1的code/AC.test映射或原文件规划，均在原冻结权限内；非null/既有绑定、source/input/readSet/policy/scope/原意变化不获得承接。原P1局部完整输入/Git/schema缓存核验及strict全图seal仍执行，唯一候选重新经V1及全部最终门。
+
+同候选的合法 accept 与 repair 共用完整输入、Native、schema、seed、输出及 trace 冷验；复用 repair 保留原未批准 verdict、resultRef 和所有 finding，不能伪装 accept 或授业务推进。仅格式失败组续原稿，先不改候选或派发 P1；各组协议完成后，业务路由消费全部正式 partitionEvidence，不以用于显示的首个主失败替代并集。普通只读事实与契约遗漏按精确 owner 分别沿原事实资格和受限 refinement 进入同一 owner 返修调度；未命中 owner 保留原 P1 原件。候选或完整读闭包改变后，不跨不相等身份复用旧批准。
+
+generation 已完整保存、但收尾失租约留下 superseded 且 failure=null 时，不补签旧失败或收据。只有同 operation/input/candidate、原完整 requiredKeys 的唯一正式审查结果、原 plan/scope/P1、全部 Native 完成或格式失败原件及资源 removed 逐一成立，才可继续同候选协议或业务返修；零调用、无 generation 的中间控制 attempt 不取代该来源。缺 outcome、未知停止、未结算资源或身份漂移继续拒绝。单次恢复在已结算 attempt 内复用 stage index，不跨新的检查点、候选或控制状态缓存授信。
 
 格式诊断不加入全局repairContext；已有accept的局部或跨边独审仍逐项沿原完整输入、Native传输请求/schema/seed/模型/policy及停止原件核验。原Native请求比较复用资源桥的nativeConfiguration、内部effort与精准ZCode read policy统一冻结接缝，按原saved字段重建；新cli-config-v1省略同步内部默认high，旧请求保原字段和缺席，不向历史补默认。仅失败组取得reviewRepair原result/NativePlan/checkpoint引用；从原canonical record和failed→removed停止证明认证完整final后，在只读临时seed提供原回答及精确schema，要求Agent基于旧回答继续输出合法最终JSON。原文仍未批准，不抽取其中JSON、不补checkedIds/accept/receipt，不读thinking、不改业务候选。旧GenerationResult及raw ref缺席保持；新独审、V1–V4/Docker/Git/adopt和预算照常。
 

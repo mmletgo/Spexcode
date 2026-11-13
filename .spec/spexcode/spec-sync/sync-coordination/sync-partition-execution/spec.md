@@ -22,6 +22,8 @@ P0/P1分区材料回调透传可await结果，使归档失败来源能沿同一c
 
 同一候选的 contract_omission 也沿原 owner 返修容器投影，但仅其精确 typed finding 进入局部 refinement，并以原已审 changes 为保持基准。普通事实资格不由遗漏 ID 派生；源码/tests、现有 P0 范围、独审和全图 seal 保持。新回执只有在原独立批准与局部完整输入验证后才能装配，不重派未受影响 owner。
 
+协议续审可承接同候选上已认证的合法 repair 及 accept 原件，保存各自 verdict 并继续阻断未决发现。缓存当前结果也核同一来源；只重派有原 Native 格式证明的失败组，不能把一次完整分区审查的混合失败变成全部重审或丢失某组业务 finding。
+
 原冻结计划中无目标、写路径、契约/流程角色或依赖边的分区，若非空精确源码集合等于变更集合，且已审P0覆盖全部路径、只含无ID和规则授权的refactor或allowed_change、没有作者/生命周期/新节点/裁决/整合/GAP等写义务，程序核原全局和局部P0、冻结计划及真实独审来源后，以仅分析证据进入全局P1。保留P0事实和原件，不派发该组的P1，也不合成局部结果或独审。既有或新派生的真实目标继续走原父/叶细化。空目标无法证明仅分析资格时仍拒绝。真实P1与仅分析分区在原计划上唯一完整覆盖，严格全图封口和后续四层验证照常执行。
 
 P1物理草稿观察所需的当前binding、含只读祖先/诊断overlay的StageWorktree及inputDigest，沿既有loadElaborationDraftMaterial仅作进程内参数传递；不进入持久请求/计划或改变缓存摘要。loadDraft认证Git来源与existingDraft传入同材料回调，只有已认证严格更新attempt/round的物理稿可替换；合法candidate/续审、分区owner/plan/schema和原source/test保护不变，未批准physical材料仍须真实新提交及独审。

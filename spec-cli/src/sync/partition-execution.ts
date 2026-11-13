@@ -29,7 +29,7 @@ type PartitionSealRepair = { prior: Omit<ElaborationResult, 'contracts' | 'graph
 export type PartitionCheckpoints = {
   load<T>(key: string): T | null
   loadCandidateReviewRepair?(key: string, plan: SyncPartitionPlan, input: GenerationInput, candidate: NonNullable<GenerationResult['candidate']>): GenerationInput['reviewRepair'] | null
-  loadAcceptedCandidateReview?(key: string, plan: SyncPartitionPlan, input: GenerationInput, candidate: NonNullable<GenerationResult['candidate']>, builders: readonly ElaborationTrace[], current?: Omit<GenerationResult, 'candidateFiles'>): Omit<GenerationResult, 'candidateFiles'> | null
+  loadCompletedCandidateReview?(key: string, plan: SyncPartitionPlan, input: GenerationInput, candidate: NonNullable<GenerationResult['candidate']>, builders: readonly ElaborationTrace[], current?: Omit<GenerationResult, 'candidateFiles'>): Omit<GenerationResult, 'candidateFiles'> | null
   elaborationDraftTagged?(key: string, result: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>): boolean
   loadBehaviorDraftMaterial?(key: string, planDigest: string, purpose: string, schemaDigest: string, inputDigest: string, request: CodeBehaviorMaterialRequest, existingDraft?: ElaborationDraft): ElaborationDraftMaterial | null | Promise<ElaborationDraftMaterial | null>
   loadBehaviorContinuation?(key: string, planDigest: string, inputDigest: string): CodeBehaviorContinuation | null
@@ -777,11 +777,11 @@ export async function generateSyncPartitions(input: GenerationInput, plan: SyncP
     const reviewInput = repair ? { ...baseInput, reviewRepair: repair } : baseInput
     if (saved) {
       if (JSON.stringify(saved.candidate) !== JSON.stringify(candidate)) reject('分区独审绑定了另一候选')
-      const current = saved.reviewPassed ? checkpoints.loadAcceptedCandidateReview?.(key, plan, reviewInput, candidate, settledReviewTraces, saved) ?? saved : saved
+      const current = saved.review ? checkpoints.loadCompletedCandidateReview?.(key, plan, reviewInput, candidate, settledReviewTraces, saved) ?? saved : saved
       settledReviewTraces.push(...current.traces); return current
     }
-    const accepted = checkpoints.loadAcceptedCandidateReview?.(key, plan, reviewInput, candidate, settledReviewTraces)
-    if (accepted) { settledReviewTraces.push(...accepted.traces); return accepted }
+    const completed = checkpoints.loadCompletedCandidateReview?.(key, plan, reviewInput, candidate, settledReviewTraces)
+    if (completed) { settledReviewTraces.push(...completed.traces); return completed }
     checkpoints.save(`${key}:input`, freezeGenerationInput(reviewInput).inputEvidence)
     const result = await runGeneration(reviewInput, { ...options, beforeFreezeCandidate: undefined, reviewCandidate: candidate, reviewSpecWritePaths: dispatch.specWritePaths, builderTraces: builders, validateCandidate: async () => validationFindings }, reviewTreeCache)
     const { candidateFiles: _files, ...compact } = result
