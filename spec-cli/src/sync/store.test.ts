@@ -1621,6 +1621,139 @@ test('explicit user retry receives a fresh operation and budget while automatic 
   } finally { f.cleanup() }
 })
 
+test('superseded结算资格要求本操作current与全部历史attempt终结，冷读不改记录', async () => {
+  const f = await fixture()
+  try {
+    const first = f.claim()
+    f.store.recordFailure(first.fence, { code: 'controlled', kind: 'repairable', message: '保留已结算历史', evidenceRefs: [] })
+    const second = f.store.claimAttempt({ operationId: first.operation.id, source: first.operation.input.source, scope: first.operation.scope, leaseMs: 1000 })
+    const foreign = f.claim(f.admit({ ...source(), physicalFingerprint: 'new-inode' }, 'new-input'))
+    const operation = f.store.readOperation(first.operation.id), attempts = f.store.listAttempts(operation.id)
+    assert.equal(operation.phase, 'superseded'); assert.equal(operation.currentAttemptId, second.attempt.id)
+    const before = f.protocol.withTransaction(tx => tx.query('SELECT total_changes() AS changes')[0].changes)
+    assert.equal(f.store.isSupersededOperationSettled(operation.id), true, '别的operation仍运行及持租不影响此原件')
+    assert.equal(f.protocol.withTransaction(tx => tx.query('SELECT total_changes() AS changes')[0].changes), before)
+    for (const phase of ['queued', 'failed', 'cancelled', 'workspace_synced']) {
+      f.protocol.withTransaction(tx => tx.exec("UPDATE sync_operations SET phase=?,record_json=json_set(record_json,'$.phase',?) WHERE id=?", phase, phase, operation.id))
+      assert.equal(f.store.isSupersededOperationSettled(operation.id), false, phase)
+    }
+    f.protocol.withTransaction(tx => tx.exec('UPDATE sync_operations SET phase=?,record_json=? WHERE id=?', operation.phase, JSON.stringify(operation), operation.id))
+    for (const current of [null, 'missing-attempt', foreign.attempt.id]) {
+      f.protocol.withTransaction(tx => tx.exec("UPDATE sync_operations SET current_attempt_id=?,record_json=json_set(record_json,'$.currentAttemptId',?) WHERE id=?", current, current, operation.id))
+      assert.equal(f.store.isSupersededOperationSettled(operation.id), false, `current=${current}`)
+    }
+    f.protocol.withTransaction(tx => tx.exec('UPDATE sync_operations SET current_attempt_id=?,record_json=? WHERE id=?', operation.currentAttemptId, JSON.stringify(operation), operation.id))
+    for (const attempt of attempts) {
+      for (const status of ['running', 'verifying', 'applying', 'failed', 'superseded', 'settled']) {
+        f.protocol.withTransaction(tx => tx.exec("UPDATE sync_attempts SET status=?,expires_at_ms=0,record_json=json_set(record_json,'$.status',?,'$.expiresAtMs',0) WHERE id=?", status, status, attempt.id))
+        assert.equal(f.store.isSupersededOperationSettled(operation.id), ['failed', 'superseded', 'settled'].includes(status), `attempt=${attempt.number} status=${status}`)
+      }
+      f.protocol.withTransaction(tx => tx.exec('UPDATE sync_attempts SET status=?,expires_at_ms=?,record_json=? WHERE id=?', attempt.status, attempt.expiresAtMs, JSON.stringify(attempt), attempt.id))
+    }
+    assert.throws(() => f.store.isSupersededOperationSettled('unknown-operation'), /SYNC_OPERATION_UNKNOWN/)
+    const reopened = openProtocol(f.path)
+    try { assert.equal(new SyncStore(reopened, f.options).isSupersededOperationSettled(operation.id), true) }
+    finally { reopened.close() }
+    assert.deepEqual(f.store.readOperation(operation.id), operation)
+    assert.deepEqual(f.store.listAttempts(operation.id), attempts)
+  } finally { f.cleanup() }
+})
+
+test('superseded结算资格逐项拒绝活租约、历史未removed资源和未settled journal', async () => {
+  const f = await fixture()
+  try {
+    const ready = f.ready(), planned = f.put({ phase: 'planned' })
+    const resource = f.store.planResource(ready.fence, { key: 'settlement-proof', kind: 'verification', payloadDigest: 'fixed-proof', inputId: ready.operation.input.id, candidateDigest: ready.candidate.digest, planBlob: planned, checkpointRef: planned })
+    const binding = { operationId: resource.operationId, attemptId: resource.attemptId, inputId: resource.plan.inputId, candidateDigest: resource.plan.candidateDigest }
+    const terminal = f.put({ phase: 'terminal' }), removed = f.put({ phase: 'removed' })
+    f.store.recordResourceCheckpoint(resource.id, { ...binding, phase: 'terminal', expectedCheckpointRef: planned, checkpointRef: terminal })
+    f.store.recordResourceCheckpoint(resource.id, { ...binding, phase: 'removed', expectedCheckpointRef: terminal, checkpointRef: removed })
+    const journal = f.store.beginApply(ready.fence, ready.plan, ready.target), receipt = f.receipt(journal.id, ready.plan)
+    for (const step of journal.steps) f.store.recordApplyStep(ready.fence, journal.id, { ...step, status: 'completed' })
+    f.store.recordReceipt(journal.id, receipt); f.store.settleApply(journal.id, receipt.id)
+    const operationId = ready.operation.id
+    const previous = f.store.readAttempt(ready.attempt.id), current = { ...previous, id: 'settled-carrier', number: previous.number + 1, dispatchKey: 'settled-carrier-dispatch', sessionCreateKey: 'settled-carrier-create', status: 'superseded' as const }
+    f.protocol.withTransaction(tx => {
+      tx.exec('INSERT INTO sync_attempts(id,operation_id,number,generation,dispatch_key,session_create_key,status,expires_at_ms,record_json) VALUES(?,?,?,?,?,?,?,?,?)', current.id, operationId, current.number, current.generation, current.dispatchKey, current.sessionCreateKey, current.status, current.expiresAtMs, JSON.stringify(current))
+      tx.exec("UPDATE sync_operations SET phase='superseded',current_attempt_id=?,record_json=json_set(record_json,'$.phase','superseded','$.currentAttemptId',?) WHERE id=?", current.id, current.id, operationId)
+    })
+    assert.equal(f.store.isSupersededOperationSettled(operationId), true)
+    for (const phase of ['planned', 'created', 'terminal', 'removed']) {
+      f.protocol.withTransaction(tx => tx.exec("UPDATE sync_resources SET phase=?,record_json=json_set(record_json,'$.phase',?) WHERE id=?", phase, phase, resource.id))
+      assert.equal(f.store.isSupersededOperationSettled(operationId), phase === 'removed', `resource=${phase}`)
+    }
+    for (const status of ['prepared', 'applying', 'completed', 'recovery_required', 'settled']) {
+      f.protocol.withTransaction(tx => tx.exec("UPDATE sync_apply_journals SET status=?,record_json=json_set(record_json,'$.status',?) WHERE id=?", status, status, journal.id))
+      assert.equal(f.store.isSupersededOperationSettled(operationId), status === 'settled', `journal=${status}`)
+    }
+    const now = f.options.now()
+    f.protocol.withTransaction(tx => tx.exec('INSERT INTO sync_leases(repository_id,resource_key,generation,token,operation_id,attempt_id,expires_at_ms) VALUES(?,?,?,?,?,?,?)', 'foreign-repository', 'path:lease-proof', 1, null, operationId, ready.attempt.id, null))
+    for (const [token, expiry, expected] of [[null, now + 1, true], ['expired', now - 1, true], ['boundary', now, true], ['live', now + 1, false], ['', now + 1, false], ['unknown-expiry', null, true]] as const) {
+      f.protocol.withTransaction(tx => tx.exec('UPDATE sync_leases SET token=?,expires_at_ms=? WHERE repository_id=? AND resource_key=?', token, expiry, 'foreign-repository', 'path:lease-proof'))
+      assert.equal(f.store.isSupersededOperationSettled(operationId), expected, `token=${token} expires=${expiry}`)
+    }
+  } finally { f.cleanup() }
+})
+
+test('superseded结算资格在23跳与大JSON历史中只走索引标量，不读取全库正文', async t => {
+  const f = await fixture()
+  try {
+    const original = f.claim()
+    f.store.admitAndEnqueue(f.admit({ ...source(), physicalFingerprint: 'next-inode' }, 'new-input'))
+    const operation = f.store.readOperation(original.operation.id), attempt = f.store.readAttempt(original.attempt.id)
+    const paths = Array.from({ length: 2048 }, (_, index) => `src/history/${index}-${'x'.repeat(48)}.ts`)
+    const refs = Array.from({ length: 2048 }, (_, index) => ({ sha256: index.toString(16).padStart(64, '0') }))
+    const targetIds: string[] = []
+    f.protocol.withTransaction(tx => {
+      for (let index = 0; index < 128; index++) {
+        const id = `history-${index}`, attemptId = `${id}-attempt`, saved = { ...operation, id, ingressKey: id, payloadDigest: id, currentAttemptId: attemptId, scope: { ...operation.scope, paths } }
+        const historical = { ...attempt, id: attemptId, operationId: id, dispatchKey: `${id}-dispatch`, sessionCreateKey: `${id}-create`, checkpointRefs: refs }
+        tx.exec('INSERT INTO sync_operations(id,ingress_key,payload_digest,repository_id,source_key,source_root,generation,phase,control,current_attempt_id,updated_at_ms,record_json) SELECT ?,?,?,repository_id,source_key,source_root,generation,phase,control,?,updated_at_ms,? FROM sync_operations WHERE id=?', id, id, id, attemptId, JSON.stringify(saved), operation.id)
+        tx.exec('INSERT INTO sync_attempts(id,operation_id,number,generation,dispatch_key,session_create_key,status,expires_at_ms,record_json) VALUES(?,?,?,?,?,?,?,?,?)', attemptId, id, historical.number, historical.generation, historical.dispatchKey, historical.sessionCreateKey, historical.status, historical.expiresAtMs, JSON.stringify(historical))
+        if (index < 23) targetIds.push(id)
+      }
+      for (let index = 0; index < 19_168; index++) tx.exec('INSERT INTO sync_leases(repository_id,resource_key,generation,token,operation_id,attempt_id,expires_at_ms) VALUES(?,?,1,NULL,NULL,NULL,NULL)', 'historical-repository', `path:released-${index}`)
+      tx.exec('INSERT INTO sync_leases(repository_id,resource_key,generation,token,operation_id,attempt_id,expires_at_ms) VALUES(?,?,1,?,?,?,?)', 'historical-repository', 'path:active-peer', 'peer-token', 'history-127', 'history-127-attempt', f.options.now() + 1000)
+    })
+    const transaction = f.protocol.withTransaction.bind(f.protocol)
+    let jsonBytes = 0, rowsRead = 0
+    const statements: { sql: string; params: SqlParam[] }[] = []
+    f.protocol.withTransaction = body => transaction(tx => body({ ...tx, query: (sql, ...params) => {
+      const rows = tx.query(sql, ...params); rowsRead += rows.length; statements.push({ sql, params })
+      for (const row of rows) for (const [key, value] of Object.entries(row)) if (key.endsWith('_json')) jsonBytes += Buffer.byteLength(String(value))
+      return rows
+    } }))
+    const old = f.store.readOperation(targetIds[0]), startedBefore = performance.now()
+    const previous = !!old.currentAttemptId
+      && f.store.listAttempts(old.id).every(item => ['failed', 'superseded', 'settled'].includes(item.status))
+      && !f.store.sourceContinuityState(old.input.source.commonDir).leasedOperationIds.includes(old.id)
+      && !f.store.listRecoverableResources().some(item => item.operation.id === old.id)
+      && f.store.listJournals(old.id).every(item => item.status === 'settled')
+    const previousMs = performance.now() - startedBefore, previousJsonBytes = jsonBytes, previousRows = rowsRead
+    assert.equal(previous, true); assert.ok(previousJsonBytes > 16 * 1024 * 1024)
+    t.diagnostic(JSON.stringify({ previousOneOperation: { jsonBytes: previousJsonBytes, rows: previousRows, elapsedMs: previousMs } }))
+    jsonBytes = 0; rowsRead = 0; statements.length = 0
+    const changes = transaction(tx => tx.query('SELECT total_changes() AS changes')[0].changes), startedAfter = performance.now()
+    for (const id of targetIds) assert.equal(f.store.isSupersededOperationSettled(id), true)
+    const elapsedMs = performance.now() - startedAfter
+    assert.equal(jsonBytes, 0)
+    assert.ok(rowsRead <= targetIds.length * 3, `23跳只允许读取标量资格，实际rows=${rowsRead}`)
+    assert.ok(statements.every(({ sql }) => !/record_json|json_extract|json_each/.test(sql)))
+    const query = statements.find(({ sql }) => sql.includes('FROM sync_operations'))!
+    const plans = transaction(tx => tx.query(`EXPLAIN QUERY PLAN ${query.sql}`, ...query.params)).map(row => String(row.detail))
+    assert.equal(plans.some(detail => /\bSCAN\b/.test(detail)), false, plans.join('\n'))
+    for (const index of ['sync_leases_owner', 'sync_resources_recovery', 'sync_apply_journals_operation']) assert.ok(plans.some(detail => detail.includes(index)), plans.join('\n'))
+    assert.ok(plans.some(detail => /\(operation_id=\?\)/.test(detail)), plans.join('\n'))
+    assert.ok(plans.some(detail => /sync_leases_owner \(token>\?\)/.test(detail)), '释放后的NULL token必须由索引范围跳过')
+    assert.equal(transaction(tx => tx.query('SELECT total_changes() AS changes')[0].changes), changes)
+    t.diagnostic(JSON.stringify({ selectedOperations: targetIds.length, historicalOperations: 128, releasedLeases: 19_168, jsonBytes, rowsRead, elapsedMs, plans }))
+    f.protocol.withTransaction = transaction
+    const reopened = openProtocol(f.path)
+    try { const store = new SyncStore(reopened, f.options); for (const id of targetIds) assert.equal(store.isSupersededOperationSettled(id), true) }
+    finally { reopened.close() }
+  } finally { f.cleanup() }
+})
+
 test('retry gating uses historical resource settlement and immutable controlled request bytes', async () => {
   const f = await fixture()
   try {

@@ -20,6 +20,8 @@ listResources(attemptId)在既有只读事务枚举该attempt全部真实资源�
 
 sourceContinuityState仅在既有assertSchema事务只读汇总同commonDir的完整来源、有效current attempt/lease、未removed资源及未settled journal，不限列表条数、不读会话正文、不改CAS。登记层结合observer/owner事实拒绝活跃的另一raw namespace；过期running元数据本身不证明活跃。连续性不修改原operation/input/预算或既有blob。
 
+isSupersededOperationSettled(operationId) 在同一 assertSchema 只读事务内核指定操作为 superseded、current attempt 确实属于该操作、全部历史 attempt 均 failed/superseded/settled，且没有非空 token 的有效租约、未 removed 资源或未 settled journal。只查询已有标量列和索引：operation/current attempt 按主键，历史 attempt、pending resource 和 journal 按 operation 前缀；租约沿 owner 索引的非空 token 范围核原 operation 与期限，不因 repository 字段异常漏掉仍挂在该操作上的租约。不读取或解析 record_json，不枚举全库操作或会话正文，不改变记录、期限、迁移或批准。未知 operation 明确报错；返回 true 仅是结算事实，原输入、模型、Git 和独审批准仍由调用者认证。
+
 共享身份属于 [[sync-operation-types]]。admitAndEnqueue 将冻结 operation、稳定派发计划与现有 protocol 的 sync.dispatch.v1 control envelope 原子写入，注册唯一 coordinator 地址；消息不是普通 Agent 文本。稳定接入 payload 包含输入内容与物理身份、policy/impact/readSet 摘要，capture 时间不参与；同键不同 payload 拒绝。claimAttempt 独立保存 attempt 与 sessionCreateKey（不超过128字符），在同一事务领取所有实际 path/规则写集合及可选 exact FIFO dequeue。dequeue 后仍由未完 attempt 恢复。
 
 提交快照的显式初始化若被替换且从未领取，新请求可在同一冻结输入、范围、基线选择和模型下，以新交付计划入队。它继承前驱的队列锚、预算族和原截止时间，旧操作及旧 ingress 仍可查询。已领取、已有调用或交付、已过期及精确旧 payload 继续去重。若同语义已有其他可复用操作，先复用它。自动观察和正式 retry 的准入不变。

@@ -19,6 +19,8 @@ related:
 
 长候选的冷恢复逐组核验原分区请求、结果和正式结算，同一次完整认证只读取每棵 Git 树一次。已领取恢复轮在组间检查原控制和租约，取消时停止后续认证。
 
+同一 operation 的 code_to_spec 已有原冻结候选时，git-json-v4 / v7 的 P0 只可沿该候选专用冷验恢复。原完整计划、读集和基线、P0 每个 owner 的分析及独审、P1 实际生成与独审、仅分析覆盖、候选 Git/CAS 与全部 required P2 原件须一致，Native 成功也核 canonical 请求、输出和身份。正式 freezeCandidate 尚未执行时，原 partition:candidate 与实际独审绑定可证明该既有候选；不能重造候选或补旧 failure。组间交还控制并续原租约，先仅补格式失败，再沿合法发现回精确 P1 owner，随后继续原 V1–V4。资格仅在本轮同 operation/input/source/candidate 范围有效，退出后清除；普通自动复用仍只接受 v8，无正式来源的跨操作、新业务、缺证或漂移不借旧批准。原P0/P1生产者可来自严格更早且正式结算的 retryOf 链；逐跳保原计划、local ref及Git组合内容，null扩域只凭该wrapper原selection/readSet与同次已审whole证明回接。模型按各真实生产者原冻结请求认证，正式重试已换模型不重签旧请求。生成与独审可来自原同操作的不同轮。原 v7 标记、缺席字段、raw、Git/Native 和调用账本保持，不追加数据库协议。
+
 候选独审的已审来源校验沿 [[sync-input-composition]] 的原 v1 分段摘要核精确冻结选择；大范围共享 pair 时也保持原字节顺序及全部身份。
 
 同一冻结 operation 的 code→spec 原生 P1 完整候选可复核本轮新提议的 code/derived missing_fact GAP。复用原 runner、request/session、fence、调用/返修预算和阶段 refs；严格核 original aggregate/local Git/独审、plan、readSet/selection、composed、完整输入与只读 Native 请求及正式结果。合法 repair 只派原 GAP owner 续稿并新独审，旧 accept 不改成失败；仍须当前严格 seal 和全部 P2 门。已复核的真实未知、冲突或无新发现保持原 blocked，冷恢复重验原结果而不重复模型调用；错绑定或无合法独审不能授予续稿。JSON合法但ID、边界或独立性协议未过时，在原预算下一attempt只续只读审查；previousReviewRef严格指向同operation较早的同候选失败原件，拒因和原输出仅在当次prompt现读，原owner批准保持。合法负例不走该续审。新 checkpoint 只引用已有结果原件和稳定身份，不重复归档诊断正文，不把临时诊断或草稿纳入产品 Git。

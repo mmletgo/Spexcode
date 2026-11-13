@@ -18,6 +18,8 @@ related:
 
 混合候选的冷验计数检查同一真实冻结 Git 树只完整读取一次。原候选、已拒稿及全部独审结论保持完整认证。
 
+旧候选回归用真实历史程序自然产生 git-json-v4 / v7：四组 P0、三个真实 P1 与一个仅分析 owner、合法 repair / accept / 格式失败三组 P2。原轮尚无正式 attempt.candidate，经 SQLite 冷开及 canonical Native/Git 冷验，只新增原格式独审，再仅重派命中 P1；原 v7、全部旧 CAS 和 source/index 不变。另经两次真实正式retry与显式换模型继承原P0及已审P1，保部分P1后的原范围；SQLite冷续同样只补格式审查再返命中owner。逐 owner及祖先控制机会、缺 P0 原件、Native 输出身份/原生产者模型漂移、无retryOf的跨 operation、祖先结算拒绝、缺null扩域证据、缺 P2 outcome、未结算资源及 scope 退出后的普通 v8 门均有反例。旧producer另自然保留needs_input的P1与缺席GAP复核阶段，冷续须保持格式审查、owner返修、新并集GAP复核的先后。该隔离场景在 V3 前硬停，不把受控 Native 输出冒充真实模型或最终交付证据。
+
 P2 混合失败使用真实 Git/Native 资源记录与 SQLite 冷开：普通 repair 排首、后组 contract-omission、另一组格式失败和一个 accept 同轮结算。冷续只重派原格式稿，保相同 candidate、合法 repair/accept 的原 resultRef；之后只回相应 P1 owner，保未命中原件与旧 CAS。覆盖完整 aggregate 后失租约的 superseded/null、零调用中间 attempt、缺 required outcome 及资源未 removed；不得补旧失败或收据。权限回归另在同 owner 核 ordinary 白名单与 omission 的已接受字段保护，不以并集扩权。
 
 同一矩阵另含尚未结清的新候选 GAP，仅在隔离控制前置模拟历史可选 GAP 复核 stage 缺席，其余真实 Git、SQLite、Native 和 CAS 字节保持。冷恢复仍只续 P2 格式组；普通与遗漏 owner 新独审及严格 seal 后才派新 aggregate 的 GAP 复核，协议阶段无 P1 或 GAP 派发，原 GAP 各字段与旧 verdict/ref 保持。
@@ -25,6 +27,8 @@ P2 混合失败使用真实 Git/Native 资源记录与 SQLite 冷开：普通 re
 同 owner 的后续 GAP 续稿分别覆盖已批准 RULE.basis 事实修正与合法新增 AC。新并集 GAP 独审后再次重开 SQLite，仅命中 owner 沿最新 acceptedRef 和 Git 草稿继续；新输入不携旧普通或遗漏权限，所有非 GAP 项、元数据、raw 与原 checkpoint 字节保持，最后重做 strict seal。回滚事实或丢弃新增 AC 的负例须以 candidate_gap_scope_changed 在独审前拒绝，不靠扩大原 P0 或合并诊断修绿。
 
 当前协议的只读候选续审回归通过真实 Git 草稿取得 P0 v8 和 P1 原件。有限预算、多个格式拒稿、独审缓存和锚点返修均从各阶段的冻结输入与精确 Git seed 检查。冻结上下文旧运输另由历史请求验证。
+
+文件规划的续审场景从 raw-only 目标和当前 native-worktree 计划开始，P0/P1 正常提交真实 JSON，P2 再规划并正常提交原先缺席的新源码与新测试，以及获准的 Spec 映射。正式 null 扩域及 V1 通过后，格式失败只续原候选独审，不重派 P0/P1、implementation_plan 或 builder；前后 candidate 和 file-writer 证据相同，作者 HEAD、index、WIP 与新增路径的原缺席保持。该受控 Native 回应夹具在 Docker 前停止，不声称真实模型、验收运行或交付。
 
 多 owner 候选独审失败回归从全局 generation 保存到失败结算统计阶段读取。每轮局部结论只共用一份索引，完整历史对象克隆为零，继续核原预算、格式续审范围和旧审批。
 
