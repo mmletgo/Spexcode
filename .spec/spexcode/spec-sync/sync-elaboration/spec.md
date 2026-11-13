@@ -33,6 +33,8 @@ related:
 
 同一冻结候选的 GAP 复核经 [[sync-coordinator]] 认证后，只可触发原 owner 的候选误报续稿。资格由独立 review 的 affectedIds 精确命中本轮新提议、code/derived 来源的 missing_fact GAP，不能从说明文字推测。新 gapRepair 仅引用原复核及 accepted owner；临时读取原结果诊断、原已审并集和 Git 草稿，不改旧批准。只可移除命中的临时 GAP 及指向已移除 GAP 的 typed 引用，原 metadata、raw、说明、其他业务列、稳定 ID、AC/VERIFY 和适用性逐值保持；真实未知可原样保留。新独审须与原生成、原独审、GAP 复核和当前生成独立，完整结构、演进和严格全图封口照常执行。诊断不能自行清除 GAP、取得人工裁决或改变实现权限。
 
+GAP 续稿的固定比较基准是该新并集中最近已批准的 owner 原件。此前普通返修已接受的事实值或遗漏返修新增的合法行必须保留，不能退回作者旧正文；当前 GAP 输入只含自己的诊断与原件引用，不承接旧 readonlySpecRepair/refinement 的可编辑范围。退回旧事实、丢掉新增义务或再次修改既有字段都在新独审前拒绝。
+
 同一已审候选的 owner 契约遗漏复用只读返修容器，以 contract_omission 区分普通 candidate_review 事实诊断。只从已认证的专用 marker、同 owner 既有 ID 和原候选派生局部 refinement；保留其原已审正文、raw、稳定身份及 REQ/RULE/AC/VERIFY 全部列与测试/来源绑定。现有 reelaborate、P0 影响范围和原意支持仍决定能否新增细节；refinement 不把未变化 P0 或普通事实诊断变成业务变更授权。不适用的差量继续明确拒绝。
 
 同 owner 同时含普通事实与遗漏时，两类资格分别检查。普通事实只消费 candidate-review-repair 的 typed relatedIds；遗漏发现的 relatedIds 不进入事实白名单。原 V5 资格、description/prose/命中 RULE.basis 范围保持；遗漏不能改既有政策或验收，普通事实不能增删业务行。局部独审、冷缓存及最终全图 seal 继续复验，不能用两个范围的并集放开整个 owner。

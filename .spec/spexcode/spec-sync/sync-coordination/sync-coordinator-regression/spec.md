@@ -20,6 +20,8 @@ P2 混合失败使用真实 Git/Native 资源记录与 SQLite 冷开：普通 re
 
 同一矩阵另含尚未结清的新候选 GAP，仅在隔离控制前置模拟历史可选 GAP 复核 stage 缺席，其余真实 Git、SQLite、Native 和 CAS 字节保持。冷恢复仍只续 P2 格式组；普通与遗漏 owner 新独审及严格 seal 后才派新 aggregate 的 GAP 复核，协议阶段无 P1 或 GAP 派发，原 GAP 各字段与旧 verdict/ref 保持。
 
+同 owner 的后续 GAP 续稿分别覆盖已批准 RULE.basis 事实修正与合法新增 AC。新并集 GAP 独审后再次重开 SQLite，仅命中 owner 沿最新 acceptedRef 和 Git 草稿继续；新输入不携旧普通或遗漏权限，所有非 GAP 项、元数据、raw 与原 checkpoint 字节保持，最后重做 strict seal。回滚事实或丢弃新增 AC 的负例须以 candidate_gap_scope_changed 在独审前拒绝，不靠扩大原 P0 或合并诊断修绿。
+
 多 owner 候选独审失败回归从全局 generation 保存到失败结算统计阶段读取。每轮局部结论只共用一份索引，完整历史对象克隆为零，继续核原预算、格式续审范围和旧审批。
 
 正式重试回归核对普通 P1 结构诊断不会阻断已审 P0 原件复用。P1 实际使用旧稿时继续校验原 owner、schema 和 Git 引用。 两次正式重试复用的局部批准须可作为只读 V1 返修基线冷验，删除重试关系或当作当前诊断后的新独审均拒绝。

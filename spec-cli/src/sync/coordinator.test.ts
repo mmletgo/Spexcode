@@ -8843,9 +8843,11 @@ for (const mode of ['repair', 'repair-restart', 'repair-complete-restart', 'nati
   assert.equal(f.store.listJournals(admitted.id).length, 0)
 })
 
-for (const withGap of [false, true]) for (const boundary of ['failed', 'superseded-zero-call'] as const) test(`${withGap ? 'P1 GAP保持期间，' : ''}P2混合普通修复、契约遗漏与格式失败经SQLite冷续只补原评审再回精确owner ${boundary}`, { timeout: 180000 }, async t => {
+for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', 'omission-drop'] as const) for (const boundary of gapMode === 'none' || gapMode === 'pending' ? ['failed', 'superseded-zero-call'] as const : ['failed'] as const) test(`${gapMode === 'none' ? '' : gapMode === 'pending' ? 'P1 GAP保持期间，' : `P1 GAP已审基线 ${gapMode}，`}P2混合普通修复、契约遗漏与格式失败经SQLite冷续只补原评审再回精确owner ${boundary}`, { timeout: 180000 }, async t => {
+  const withGap = gapMode !== 'none', repairGap = withGap && gapMode !== 'pending', factBaseline = gapMode.startsWith('fact'), rejectedGap = gapMode.endsWith('rollback') || gapMode.endsWith('drop')
   const protocolAttempt = boundary === 'failed' ? 2 : 3, ownerAttempt = protocolAttempt + 1
-  const definitions = ['export', 'import', 'archive', 'quiet'].map(word => {
+  const gapAttempt = ownerAttempt + 1
+  const definitions = (['export', 'import', 'archive', 'quiet'] as const).map(word => {
     const upper = word.toUpperCase(), nodeId = `${word}-contract`, path = word === 'export' ? contractPath : `.spec/project/${word}/${nodeId}/spec.md`
     const sourcePath = word === 'export' ? 'src/export.js' : `src/${word}/${word}.js`, testPath = `tests/${word}.test.mjs`
     const source = original.replaceAll('export-job', `${word}-job`).replaceAll('EXPORT', upper).replaceAll('export-contract', nodeId).replaceAll('src/export.js', sourcePath).replaceAll('tests/export.test.mjs', testPath)
@@ -8855,7 +8857,8 @@ for (const withGap of [false, true]) for (const boundary of ['failed', 'supersed
   })
   const environment = { version: 'trusted-test-v1' as const, image: 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392', platform: 'linux/arm64' as const, memoryBytes: 128 * 1024 * 1024, cpus: 1, pidsLimit: 64, scratchBytes: 16 * 1024 * 1024, logBytes: 128 * 1024 }
   const extras = Object.fromEntries(definitions.slice(1).flatMap(item => [[item.path, item.source], [item.sourcePath, readFileSync(new URL('src/export.js', fixturePath), 'utf8')], [item.testPath, readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', item.upper).replaceAll('src/export.js', item.sourcePath)]]))
-  const f = await fixture(t, { maxAttempts: ownerAttempt, maxCalls: 40, maxRepairs: ownerAttempt - 1, timeoutMs: 180000 }, false, original, 'project', original, {
+  const maxAttempts = repairGap ? gapAttempt : ownerAttempt
+  const f = await fixture(t, { maxAttempts, maxCalls: 40, maxRepairs: maxAttempts - 1, timeoutMs: 180000 }, false, original, 'project', original, {
     version: 'sync-coordinator-v2', direction: 'code_to_spec', agentWorkflow: 'native-worktree-v1', sourcePaths: ['src'], writePaths: ['.spec'],
     targets: definitions.map(({ nodeId, path }) => ({ nodeId, path })), facts: definitions.map(item => ({ source: `decision:${item.upper}-POLICY`, text: item.source })),
     verifications: definitions.map(({ verification: item }) => ({ definition: { id: item.id, command: item.command, cwd: item.cwd, timeoutMs: item.timeoutMs }, environment })),
@@ -8867,6 +8870,7 @@ for (const withGap of [false, true]) for (const boundary of ['failed', 'supersed
   const roles = new Map<string, { kind: 'ordinary' | 'omission' | 'format' | 'quiet'; definition: typeof definitions[number] }>()
   const gapId = 'GAP-EXPORT-CALLER-POLICY', gap = { id: gapId, kind: 'missing_fact', unknown: '端口是否另设重复请求账本', affects: ['RULE-EXPORT-06'], evidence: '须核对调用方现有重试职责', decision: '确认唯一重试属主', source: 'code:src/export.js#ExportService', 'depends-on': ['REQ-EXPORT-01'] }
   const gapReviews: { attempt: number; aggregateRef: BlobRef }[] = []
+  const newAcceptanceId = 'AC-EXPORT-OMISSION-RETRY', acceptedBasis = '已审冻结实现由调用方沿同一任务重试，端口不维护第二份账本'
   const rejected = '{original-mixed-review-final: only this group may resume}'
   const stages = (attempt: SyncAttempt): { stage: string; resultRef: BlobRef }[] => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
   const read = <T,>(ref: BlobRef): T => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as T
@@ -8898,7 +8902,7 @@ for (const withGap of [false, true]) for (const boundary of ['failed', 'supersed
         assert.notDeepEqual(task.aggregateRef, gapReviews[0].aggregateRef, '实际owner新独审和strict seal之后才能复核新并集')
         assert.deepEqual(calls.filter(item => item.attempt === ownerAttempt && item.purpose === 'elaboration_generate').map(item => item.nodeId).sort(), [...roles.values()].filter(role => role.kind === 'ordinary' || role.kind === 'omission').map(role => role.definition.nodeId).sort())
       }
-      output = { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+      output = { verdict: repairGap && attempt.number === ownerAttempt ? 'repair' : 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: repairGap && attempt.number === ownerAttempt ? [{ code: 'caller_owns_retry', kind: 'repair', affectedIds: [gapId], message: '最新已审事实已能回答候选GAP', evidence: 'RULE-EXPORT-05 与 src/export.js#ExportService 的既有重试职责', decision: '仅移除该候选GAP，保持最新已批准事实和全部业务行' }] : [] }
       const dispatch = attempt.dispatchPlans.find(dispatch => dispatch.key === request.requestKey)!
       return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `mixed-gap-${request.requestKey}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)), worktree: { baseCommit: seed.baseCommit, baseTree: seed.tree, headCommit: seed.baseCommit, tree: seed.tree, worktreePath: join(f.parent, 'closed-mixed-gap') } }
     }
@@ -8907,7 +8911,7 @@ for (const withGap of [false, true]) for (const boundary of ['failed', 'supersed
       const group = request.requestKey.split(':final:')[1]; call.group = group
       const definition = definitions.find(item => identity.requiredIds.includes(`AC-${item.upper}-03`))!
       assert.ok(definition)
-      if (attempt.number === 1 && !roles.has(group)) roles.set(group, { kind: (['ordinary', 'omission', 'format', 'quiet'] as const)[roles.size], definition })
+      if (attempt.number === 1 && !roles.has(group)) roles.set(group, { kind: factBaseline ? ({ quiet: 'quiet', export: 'ordinary', import: 'omission', archive: 'format' } as const)[definition.word] : (['ordinary', 'omission', 'format', 'quiet'] as const)[roles.size], definition })
       const role = roles.get(group)!
       output = { inputId: identity.inputId, candidateDigest: identity.candidateDigest, verdict: 'accept', checkedIds: identity.requiredIds, findings: [] }
       if (attempt.number === 1 && ['ordinary', 'omission'].includes(role.kind)) output = { ...(output as object), verdict: 'repair', findings: [{ kind: 'repair', affectedIds: [`RULE-${definition.upper}-05`], ruleLocation: `${role.kind === 'omission' ? 'contract-omission:' : 'contract:'}${definition.path}#RULE-${definition.upper}-05`, codeLocation: `${definition.sourcePath}#ExportService`, evidence: '冻结原意支持的精确边界需要本owner重新核对', counterexample: '同一输入与原稳定规则未完整对应', message: '只沿原意核对，不授新业务或源码写权' }] }
@@ -8922,14 +8926,24 @@ for (const withGap of [false, true]) for (const boundary of ['failed', 'supersed
       }
       return completeReview(request, output, { baseCommit: seed.baseCommit, baseTree: seed.tree, headCommit: seed.baseCommit, tree: seed.tree, worktreePath: join(f.parent, 'closed-review') })
     }
-    const task = request.prompt.includes('任务:\n') ? nativeTask(request, f.input.source.commonDir) as { requiredChangedPaths?: string[]; targets?: { nodeId: string }[]; readonlySpecRepair?: ReadonlySpecRepair; repair?: { kind: string } } : null
+    const task = request.prompt.includes('任务:\n') ? nativeTask(request, f.input.source.commonDir) as { requiredChangedPaths?: string[]; targets?: { nodeId: string }[]; readonlySpecRepair?: ReadonlySpecRepair; refinement?: unknown; repair?: { kind: string; acceptedRef: BlobRef } } : null
     const definition = definitions.find(item => task?.requiredChangedPaths?.includes(item.sourcePath) || task?.targets?.some(target => target.nodeId === item.nodeId)) ?? definitions[0]
     call.nodeId = definition.nodeId
     if (request.purpose === 'elaboration_generate' && attempt.number > 1) {
       call.repairKind = task?.readonlySpecRepair?.kind ?? task?.repair?.kind
       const role = [...roles.values()].find(role => role.definition.nodeId === definition.nodeId)!
-      assert.ok(role.kind === 'ordinary' || role.kind === 'omission', '未受影响的P1 owner不得重派')
-      assert.equal(attempt.number, ownerAttempt, '协议尚未完成时不得先改业务候选')
+      if (attempt.number === gapAttempt) {
+        assert.equal(repairGap, true); assert.equal(definition.word, 'export')
+        assert.equal(task?.repair?.kind, 'candidate_gap'); assert.equal(task?.refinement, undefined)
+        assert.equal(task?.readonlySpecRepair, undefined)
+        assert.doesNotMatch(request.prompt, /refinement只来自本owner|本轮已有合法code_review指向/)
+        const prior = read<ElaborationResult>(task!.repair!.acceptedRef)
+        assert.equal(prior.readonlySpecRepair?.kind, factBaseline ? 'candidate_review' : 'contract_omission')
+        assert.ok(prior.changes[0].source.includes(factBaseline ? acceptedBasis : newAcceptanceId), 'GAP阶段只能以最新已审owner为固定基准')
+      } else {
+        assert.ok(role.kind === 'ordinary' || role.kind === 'omission', '未受影响的P1 owner不得重派')
+        assert.equal(attempt.number, ownerAttempt, '协议尚未完成时不得先改业务候选')
+      }
     }
     if (request.purpose === 'elaboration_review') output = { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
     else if (request.purpose === 'code_behavior_analyze') output = { changes: task!.requiredChangedPaths!.map(path => ({ kind: withGap && definition.word === 'export' ? 'allowed_change' : 'refactor', paths: [path], affectedIds: [`RULE-${definition.upper}-05`], ruleIds: [`RULE-${definition.upper}-05`], originalIntent: '保留原业务', previousBehavior: '原导出行为', sourceBehavior: '原导出行为', deliveryBehavior: '原导出行为', evidence: path, counterexample: '不得改变权限及验收' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
@@ -8939,7 +8953,13 @@ for (const withGap of [false, true]) for (const boundary of ['failed', 'supersed
     } else {
       assert.equal(request.purpose, 'elaboration_generate')
       const generated = rows(definition.source, definition.path); generated.changes[0].nodeId = definition.nodeId
-      if (withGap && definition.word === 'export') generated.changes[0].tables.GAP.push(gap)
+      if (withGap && definition.word === 'export') {
+        if (attempt.number !== gapAttempt) generated.changes[0].tables.GAP.push(gap)
+        if (repairGap && attempt.number >= ownerAttempt && !(rejectedGap && attempt.number === gapAttempt)) {
+          if (factBaseline) generated.changes[0].tables.RULE.find(rule => rule.id === 'RULE-EXPORT-05')!.basis = acceptedBasis
+          else generated.changes[0].tables.AC.push({ ...generated.changes[0].tables.AC.find(row => row.id === 'AC-EXPORT-03')!, id: newAcceptanceId })
+        }
+      }
       for (const applicability of generated.applicability) applicability.affectedIds = [`REQ-${definition.upper}-01`]
       output = adaptElaborationNativeOutput(request, generated)
     }
@@ -8980,9 +9000,29 @@ for (const withGap of [false, true]) for (const boundary of ['failed', 'supersed
   records.clear(); f.closeForRestart()
   const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
   store = new SyncStore(protocol, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) }); f.useStore(store)
-  store.freezeCandidate = () => { throw Object.assign(new Error('P2与原owner分流已完整通过，fixture在V3前停止'), { code: 'unsupported' }) }
-  const result = await runSyncOperation(store, f.operation.id, f.options)
-  assert.equal(result.failure?.message, 'P2与原owner分流已完整通过，fixture在V3前停止', JSON.stringify({ failure: result.failure, calls }))
+  const stopBeforeVerification = () => { throw Object.assign(new Error('P2与原owner分流已完整通过，fixture在V3前停止'), { code: 'unsupported' }) }
+  store.freezeCandidate = stopBeforeVerification
+  if (repairGap) {
+    const checkpoint = store.checkpoint.bind(store)
+    store.checkpoint = (fence, ref) => {
+      const saved = checkpoint(fence, ref)
+      if (store.readAttempt(fence.attemptId).number === ownerAttempt && read<{ stage?: string }>(ref).stage === 'elaboration-gap-review') store.requestControl(f.operation.id, 'pause')
+      return saved
+    }
+  }
+  let result = await runSyncOperation(store, f.operation.id, f.options)
+  if (repairGap) {
+    assert.equal(result.status, 'paused', JSON.stringify({ failure: result.failure, calls }))
+    const reviewed = store.readAttempt(result.operation.currentAttemptId!), proofs = reviewed.checkpointRefs.flatMap(ref => [ref, ...ref.artifacts?.map(item => item.ref) ?? []]).map(ref => ({ ref, bytes: readEvidence(f.input.source.commonDir, ref) }))
+    const reopened = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => reopened.close())
+    store = new SyncStore(reopened, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) }); f.useStore(store)
+    store.freezeCandidate = stopBeforeVerification; store.requestControl(f.operation.id, 'run')
+    result = await runSyncOperation(store, f.operation.id, f.options)
+    assert.deepEqual(store.readAttempt(reviewed.id), reviewed, 'GAP新fence不改旧owner批准和独审结论')
+    for (const { ref, bytes } of proofs) assert.deepEqual(readEvidence(f.input.source.commonDir, ref), bytes)
+  }
+  if (rejectedGap) assert.equal(result.status, 'budget_exhausted', JSON.stringify({ failure: result.failure, calls }))
+  else assert.equal(result.failure?.message, 'P2与原owner分流已完整通过，fixture在V3前停止', JSON.stringify({ failure: result.failure, calls }))
   assert.deepEqual(calls.filter(call => call.attempt === protocolAttempt).map(call => call.purpose), ['code_review'])
   assert.deepEqual(calls.filter(call => call.attempt === ownerAttempt && call.purpose === 'elaboration_generate').map(call => call.nodeId).sort(), [...roles.values()].filter(role => role.kind === 'ordinary' || role.kind === 'omission').map(role => role.definition.nodeId).sort())
   const attempts = store.listAttempts(f.operation.id), second = stages(attempts.find(attempt => attempt.number === protocolAttempt)!), third = stages(attempts.find(attempt => attempt.number === ownerAttempt)!)
@@ -8991,7 +9031,31 @@ for (const withGap of [false, true]) for (const boundary of ['failed', 'supersed
     const original = read<ElaborationResult>(originalStages.find(stage => stage.stage === 'elaboration')!.resultRef)
     for (const stage of [...second, ...third].filter(stage => stage.stage === 'elaboration')) {
       const current = read<ElaborationResult>(stage.resultRef)
-      assert.deepEqual(current.gaps, original.gaps, '普通与omission阶段逐值保原GAP，不能提前消费GAP修复权')
+      assert.deepEqual(current.gaps.map(item => ({ ...item, line: undefined })), original.gaps.map(item => ({ ...item, line: undefined })), '普通与omission阶段逐值保原GAP，不能提前消费GAP修复权')
+      for (const gap of original.gaps) {
+        const next = current.gaps.find(item => item.id === gap.id)!
+        assert.equal(current.changes.find(change => change.path === gap.path)!.source.split('\n')[next.line! - 1], original.changes.find(change => change.path === gap.path)!.source.split('\n')[gap.line! - 1], '新增合法遗漏行只移动位置，GAP原行字节保持')
+      }
+    }
+  }
+  if (repairGap) {
+    const current = attempts.find(attempt => attempt.number === gapAttempt)!, finalStages = stages(current)
+    const local = finalStages.filter(stage => stage.stage.endsWith(':elaboration')).map(stage => read<ElaborationResult>(stage.resultRef)).find(result => result.gapRepair)!
+    assert.ok(local, JSON.stringify({ failure: result.failure, calls }))
+    const prior = read<ElaborationResult>(local.gapRepair!.acceptedRef)
+    assert.deepEqual(calls.filter(call => call.attempt === gapAttempt && call.purpose === 'elaboration_generate').map(call => call.nodeId), ['export-contract'])
+    assert.equal(local.readonlySpecRepair, undefined, 'GAP新阶段只携自己的诊断；旧普通或omission只作固定已批准来源')
+    if (rejectedGap) {
+      assert.ok(local.rounds.flatMap(round => round.findings).some(finding => finding.code === 'candidate_gap_scope_changed'))
+      assert.equal(calls.some(call => call.attempt === gapAttempt && call.purpose === 'elaboration_review'), false)
+    } else {
+      assert.equal(local.reviewPassed, true); assert.equal(local.gaps.length, 0)
+      const before = parseContract(prior.changes[0]).contract!, after = parseContract(local.changes[0]).contract!
+      for (const item of before.items.filter(item => item.id !== gapId)) assert.deepEqual({ ...after.items.find(next => next.id === item.id), line: undefined }, { ...item, line: undefined }, item.id)
+      assert.equal(after.rawSource, before.rawSource)
+      assert.deepEqual(parseFrontmatter(local.changes[0].source).fm, parseFrontmatter(prior.changes[0].source).fm)
+      assert.ok(local.changes[0].source.includes(factBaseline ? acceptedBasis : newAcceptanceId))
+      assert.equal(read<ElaborationResult>(finalStages.find(stage => stage.stage === 'elaboration')!.resultRef).partitionSeal!.passed, true)
     }
   }
   for (const before of originalStages.filter(stage => stage.stage.endsWith(':candidate-review'))) {
@@ -9004,18 +9068,20 @@ for (const withGap of [false, true]) for (const boundary of ['failed', 'supersed
   }
   for (const { ref, bytes } of originalBlobs) assert.deepEqual(readEvidence(f.input.source.commonDir, ref), bytes)
   if (boundary === 'superseded-zero-call') for (const attempt of attempts.slice(0, 2)) { assert.equal(attempt.status, 'superseded'); assert.equal(attempt.failure, null) }
-  const repair = read<{ readonlyOwnerRepair: Parameters<typeof continuationCoordinator.validateReadonlyRepair>[2] }>(third.find(stage => stage.stage === 'repair-input')!.resultRef).readonlyOwnerRepair
-  const readAttempt = store.readAttempt.bind(store), listResources = store.listResources.bind(store)
-  const settled = { ...readAttempt(repair.fromAttemptId), status: 'superseded' as const, failure: null }
-  store.readAttempt = id => id === settled.id ? settled : readAttempt(id)
-  assert.doesNotThrow(() => continuationCoordinator.validateReadonlyRepair(store, store.readOperation(f.operation.id), repair), '完整已结算aggregate可直接认证superseded/null来源，不补失败状态')
-  const missing = { ...settled, checkpointRefs: settled.checkpointRefs.filter(ref => !read<{ stage?: string }>(ref).stage?.endsWith(':candidate-review')).concat(settled.checkpointRefs.filter(ref => read<{ stage?: string }>(ref).stage?.endsWith(':candidate-review')).slice(1)) }
-  store.readAttempt = id => id === settled.id ? missing : readAttempt(id)
-  assert.throws(() => continuationCoordinator.validateReadonlyRepair(store, store.readOperation(f.operation.id), repair), /readonly_spec_repair_binding/, '缺一个required outcome不能接回失租约业务诊断')
-  store.readAttempt = id => id === settled.id ? settled : readAttempt(id)
-  store.listResources = id => listResources(id).map((resource, index) => id === settled.id && index === 0 ? { ...resource, phase: 'created' } : resource)
-  assert.throws(() => continuationCoordinator.validateReadonlyRepair(store, store.readOperation(f.operation.id), repair), /readonly_spec_repair_binding/, '资源尚未精确结算不能借完整aggregate接回')
-  store.readAttempt = readAttempt; store.listResources = listResources
+  if (!repairGap) {
+    const repair = read<{ readonlyOwnerRepair: Parameters<typeof continuationCoordinator.validateReadonlyRepair>[2] }>(third.find(stage => stage.stage === 'repair-input')!.resultRef).readonlyOwnerRepair
+    const readAttempt = store.readAttempt.bind(store), listResources = store.listResources.bind(store)
+    const settled = { ...readAttempt(repair.fromAttemptId), status: 'superseded' as const, failure: null }
+    store.readAttempt = id => id === settled.id ? settled : readAttempt(id)
+    assert.doesNotThrow(() => continuationCoordinator.validateReadonlyRepair(store, store.readOperation(f.operation.id), repair), '完整已结算aggregate可直接认证superseded/null来源，不补失败状态')
+    const missing = { ...settled, checkpointRefs: settled.checkpointRefs.filter(ref => !read<{ stage?: string }>(ref).stage?.endsWith(':candidate-review')).concat(settled.checkpointRefs.filter(ref => read<{ stage?: string }>(ref).stage?.endsWith(':candidate-review')).slice(1)) }
+    store.readAttempt = id => id === settled.id ? missing : readAttempt(id)
+    assert.throws(() => continuationCoordinator.validateReadonlyRepair(store, store.readOperation(f.operation.id), repair), /readonly_spec_repair_binding/, '缺一个required outcome不能接回失租约业务诊断')
+    store.readAttempt = id => id === settled.id ? settled : readAttempt(id)
+    store.listResources = id => listResources(id).map((resource, index) => id === settled.id && index === 0 ? { ...resource, phase: 'created' } : resource)
+    assert.throws(() => continuationCoordinator.validateReadonlyRepair(store, store.readOperation(f.operation.id), repair), /readonly_spec_repair_binding/, '资源尚未精确结算不能借完整aggregate接回')
+    store.readAttempt = readAttempt; store.listResources = listResources
+  }
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
   assert.deepEqual(store.listJournals(f.operation.id), [])
 })
