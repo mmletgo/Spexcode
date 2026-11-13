@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path'
 import type { ApplyFilePlan, CandidateRef, ComposedInputRef, InputSnapshot, SyncScope } from './operation-types.js'
 import { isUtf8Text } from './composition.js'
 import { contentHash, objectGit, readEvidence, readObject, readTree, safeSymlinkTarget, validateRepositoryPath, verifySnapshot, writeEvidence, writeObject, writeTree } from './snapshot.js'
-import type { TreeEntry } from './snapshot.js'
+import type { TreeEntry, TreeReadCache } from './snapshot.js'
 
 type FileChange = { path: string; beforeDigest: string | null; beforeMode: TreeEntry['mode'] | null; content: string | null; mode?: '100644' | '100755' | null }
 export type CandidateChanges = { version: 'sync-files-v1'; changes: FileChange[] }
@@ -68,11 +68,11 @@ export function freezeCandidate(input: InputSnapshot, changes: unknown, allowedS
   pinCandidate(commonDir, candidate)
   return candidate
 }
-export function verifyCandidate(commonDir: string, candidate: CandidateRef): TreeEntry[] {
+export function verifyCandidate(commonDir: string, candidate: CandidateRef, treeCache?: TreeReadCache): TreeEntry[] {
   const { digest, ...ref } = candidate
-  const entries = readTree(commonDir, candidate.tree)
+  const entries = readTree(commonDir, candidate.tree, undefined, treeCache)
   if (candidateDigest(ref) !== digest || readEvidence(commonDir, candidate.manifestBlob).toString() !== JSON.stringify({ version: 1, entries })) throw new Error('候选摘要/manifest 不匹配')
-  const diff = actualTreeDiff(readTree(commonDir, candidate.baseTree), entries)
+  const diff = actualTreeDiff(readTree(commonDir, candidate.baseTree, undefined, treeCache), entries)
   if (readEvidence(commonDir, candidate.actualDiffBlob).toString() !== JSON.stringify(diff) || diff.some(file => !withinScope(file.path, candidate.coveredScope.paths))) throw new Error('候选实际 diff/范围不匹配真实 Git tree')
   return entries
 }

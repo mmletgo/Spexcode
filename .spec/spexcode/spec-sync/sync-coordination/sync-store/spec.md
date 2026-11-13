@@ -38,6 +38,8 @@ P3冻结恢复只允许未来业务ID扩展；P4已审P1可同时登记真实精
 
 另一细化证据扩展完整 ID 集合时，只把 operation.scope 尚未登记的新 ID 加入 readyScope；已有 blocked ID 不因重新登记/取得租约自动变为 ready，blockedScope 原样保留，完整业务分区由后续 startGeneration 决定。
 
+租约领取及扩域幂等重放在当前事务按精确键检查已持有成员，成员查找工作量随请求键和持有租约数线性增长，不为每个键重扫全部租约。领取只索引同时匹配当前 token 与 attempt 的键，缺失或别的持有人不算已取得；重叠冲突、期限、applying、未移除资源、generation 和旧 fence 的判断保持，索引不跨事务保存。
+
 freezeCandidate 核对实际 diff blob 的文件范围，recordVerification 绑定输入与候选及真实 coveredScope。beginApply 核对控制、fence、完整目标物理身份与复核快照、共同 baseline、候选/验证/真实 target→candidate manifest diff，先提交 journal 才允许文件副作用。effectKey 同 payload 幂等，不同 payload 拒绝。recordApplyStep 保存写入单元进度，recordReceipt 保存真实 tree/commit/交付快照证据；没有实际副作用的回调不能成为 Git 完成证明。
 
 settleApply 原子保存 receipt、journal 结算、sourceInput+verifiedDelivery 成对 baseline 和真实 deliveredScope。部分交付只推进 coveredScope；根仍 needs_input/conflicted。源及交付物理身份不同的外部输入基线不得套到发布交付树后续编辑，交付树另建自己的 source=delivery 成对基线。pause/cancel 在 applying 只记请求并进入等待边界状态，写入单元完成登记结算后停；取消保留实际 receipt，不等于回滚。未结算副作用、过期 attempt 与未派发操作通过 listRecoverable 查询；pinnedBlobRefs 保护冻结输入、候选、证据、checkpoint 与基线引用。
@@ -109,7 +111,7 @@ P4原自动语义摘要包括冻结selection；仅逐binding完全相同、或�
 
 bindComposedInput可带readSetDigest绑定：只有已审scope扩展真实改变selection、仍analyzing/elaborating/repairing且无candidate/verification，才允许从旧composed重组到新digest并原子更新readSet。扩展ledger保存前后摘要。相同selection二次换composed/readSet、生成后换或没有真实扩展均拒绝，输入/policy/原payload不改。新增非null author意图的重新独审由协调器证明，存储不解析业务。
 
-readLatestObservation/listObservations按事务插入顺序提供当前完整来源观测及失败信息，不按可回拨壁钟排序。listBaselineResources只列真实heads及明确legacy未知条目，不造新头。recordObserverHealth以expectedInstanceId CAS保存当前物理scope进程实例健康；旧实例不能覆盖新实例。缺失来源用health记录，不伪造snapshot。readBudgetUsage从全族真实attempt及dispatchPlans派生calls/attempts/repair统计，显示不得以新op局部callsUsed假充剩余预算。
+readLatestObservation/listObservations按事务插入顺序提供当前来源观测和失败信息。新观察只保存基线资源总数、具体路径、未初始化资源键及原选择摘要。旧记录只读投影为同形，保留原记录和引用；原业务选择、成对收据和写权核验沿原接口。listBaselineResources只列真实heads及明确legacy未知条目，不造新头。recordObserverHealth以expectedInstanceId CAS保存当前物理scope进程实例健康；旧实例不能覆盖新实例。缺失来源用health记录，不伪造snapshot。readBudgetUsage从全族真实attempt及dispatchPlans派生calls/attempts/repair统计，显示不得以新op局部callsUsed假充剩余预算。
 
 物理run仅对同scope、原control仍run、实际settled attempt+journal+receipt的paused操作恢复已交付结论，保blockedReason和真实完整度；不新claim、不重应用或重置预算。所有历史原生resources必须removed、journals必须settled才允许新P4 claim/continuation；callback仍可登记真实清理并在removed后释放终结attempt租约。
 
