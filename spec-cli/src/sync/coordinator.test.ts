@@ -7535,11 +7535,12 @@ for (const parentSeed of [false, true]) for (const defect of parentSeed ? ['none
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
 
-for (const mode of ['observation', 'ordinary', 'mixed'] as const) test(`P1已结算进程观测失败后，同操作保持原上限并逐个派发返修 failure=${mode}`, async t => {
+for (const mode of ['observation', 'ordinary', 'mixed', 'recovered', 'empty-control', 'cached-control'] as const) test(`P1已结算进程观测失败仅收紧下一次真实返修，恢复后回到计划并发 failure=${mode}`, async t => {
   const importPath = '.spec/project/beta/import-contract/spec.md'
   const other = original.replaceAll('export-job', 'import-job').replaceAll('EXPORT', 'IMPORT').replaceAll('export-contract', 'import-contract').replaceAll('src/export.js', 'src/beta/import.js').replaceAll('tests/export.test.mjs', 'tests/import.test.mjs')
   const rawOnly = (source: string) => source.slice(0, source.indexOf('## expanded spec')).replace('contract-schema: sync-v1\n', '')
-  const budget = { maxAttempts: 2, maxCalls: 24, maxRepairs: 1, timeoutMs: 120_000 }
+  const controlAfter = mode === 'empty-control' ? 1 : mode === 'cached-control' ? 2 : 0
+  const budget = { maxAttempts: controlAfter ? 4 : 3, maxCalls: 24, maxRepairs: 2, timeoutMs: 120_000 }
   const f = await fixture(t, budget, false, rawOnly(original), 'project', original, {
     version: 'sync-coordinator-v2', direction: 'spec_to_code', agentWorkflow: 'native-worktree-v1', intentNodeId: 'export-contract', sourcePaths: ['src'],
     targets: [{ nodeId: 'export-contract', path: contractPath }, { nodeId: 'import-contract', path: importPath }],
@@ -7548,13 +7549,22 @@ for (const mode of ['observation', 'ordinary', 'mixed'] as const) test(`P1已结
     [importPath]: rawOnly(other), 'src/beta/import.js': 'export class ImportService {}\n',
     'tests/import.test.mjs': readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', 'IMPORT').replaceAll('src/export.js', 'src/beta/import.js'),
   })
+  let store = f.store
+  if (controlAfter) {
+    const recordFailure = store.recordFailure.bind(store)
+    store.recordFailure = (fence, issue) => {
+      const result = recordFailure(fence, issue)
+      if (store.readAttempt(fence.attemptId).number === controlAfter) store.requestControl(f.operation.id, 'pause')
+      return result
+    }
+  }
   const originalRunner = f.options.runner!, waves = new Map<number, { started: number; running: number; peak: number; release?: () => void }>()
   f.options.runner = async request => {
     if (request.purpose !== 'elaboration_generate') return originalRunner(request)
-    const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!)
+    const attempt = store.readAttempt(store.readOperation(f.operation.id).currentAttemptId!)
     const wave = waves.get(attempt.number) ?? { started: 0, running: 0, peak: 0 }
     waves.set(attempt.number, wave)
-    const observationFailure = mode === 'observation' || (mode === 'mixed' && wave.started === 1)
+    const observationFailure = mode === 'observation' || (mode === 'mixed' && wave.started === 1) || ((mode === 'recovered' || controlAfter > 0) && attempt.number === 1)
     wave.started++
     wave.running++
     wave.peak = Math.max(wave.peak, wave.running)
@@ -7566,17 +7576,45 @@ for (const mode of ['observation', 'ordinary', 'mixed'] as const) test(`P1已结
     wave.running--
     throw new StructuredSessionError('failed', observationFailure ? 'Cursor periodic native process observation did not recover' : 'ordinary execution failure')
   }
-  const result = await runSyncOperation(f.store, f.operation.id, f.options)
-  const prior = f.store.listAttempts(f.operation.id)[0]
+  let result = await runSyncOperation(store, f.operation.id, f.options)
+  if (controlAfter) {
+    assert.equal(result.operation.control, 'pause')
+    const previous = store.readAttempt(result.operation.currentAttemptId!), calls = result.operation.callsUsed
+    store.requestControl(f.operation.id, 'run')
+    const control = store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30_000 })
+    if (mode === 'cached-control') {
+      store.bindComposedInput(control.fence, previous.composedInput!)
+      const ref = previous.checkpointRefs.find(ref => (JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as { stage?: string }).stage === 'elaboration-draft-protocol')!
+      const wrapper = JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as { attemptId: string }
+      store.checkpoint(control.fence, { ...writeEvidence(f.input.source.commonDir, { ...wrapper, attemptId: control.attempt.id }), artifacts: ref.artifacts })
+    }
+    store.requestControl(f.operation.id, 'pause')
+    const stoppedControl = store.readAttempt(control.attempt.id)
+    assert.deepEqual(stoppedControl.dispatchPlans, []); assert.equal(stoppedControl.failure, null)
+    assert.equal(stoppedControl.checkpointRefs.length, mode === 'cached-control' ? 1 : 0)
+    assert.equal(store.readOperation(f.operation.id).callsUsed, calls)
+    f.closeForRestart()
+    const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
+    store = new SyncStore(protocol, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) }); f.useStore(store)
+    store.requestControl(f.operation.id, 'run')
+    result = await runSyncOperation(store, f.operation.id, f.options)
+  }
+  const prior = store.listAttempts(f.operation.id)[0], peaks = [...waves.values()].map(wave => wave.peak)
   if (mode === 'mixed') assert.equal(prior.failure?.message, 'ordinary execution failure')
   assert.equal(prior.failure?.serialElaborationRetry, mode === 'ordinary' ? undefined : true)
-  assert.equal(waves.get(1)?.peak, 2, JSON.stringify(result.failure))
-  assert.equal(waves.get(2)?.peak, mode === 'ordinary' ? 2 : 1, JSON.stringify(result.failure))
+  assert.equal(peaks[0], 2, JSON.stringify(result.failure))
+  assert.equal(peaks[1], mode === 'ordinary' ? 2 : 1, JSON.stringify(result.failure))
+  assert.equal(peaks[2], mode === 'observation' || mode === 'mixed' ? 1 : 2, '原观测故障不能在后续真实返修已无该故障时永久收紧并发')
+  assert.equal(waves.size, 3)
   assert.equal(result.operation.input.id, f.input.id)
   assert.equal(result.operation.policyDigest, f.operation.policyDigest)
   assert.equal(result.operation.model, f.operation.model)
   assert.deepEqual(result.operation.budget, f.operation.budget)
-  assert.equal(f.store.listRecoverableResources().length, 0)
+  assert.equal(store.listRecoverableResources().length, 0)
+  assert.equal(result.operation.callsUsed, 6)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+  assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+  t.diagnostic(JSON.stringify({ mode, peaks: [...waves].map(([attempt, wave]) => ({ attempt, peak: wave.peak, started: wave.started })), callsUsed: result.operation.callsUsed }))
 })
 
 test('P0正式retry只重新派发未独审通过的分区，保留原模型和Git独审证明', async t => {
@@ -8307,6 +8345,7 @@ for (const mode of ['original', 'resume', 'legacy-cleared', 'missing-cause', 'co
   }
   const commonDir = f.input.source.commonDir, protectedObjects = readTree(commonDir, f.input.immutableTree).filter(entry => !entry.path.startsWith('.spec/'))
   const calls: { attempt: number; purpose: string }[] = []
+  let sourceIndexWindow = false, readonlyProofSaved = false, resumedGeneration = false, sourceIndexesBeforeProof = 0, sourceIndexesAfterProof = 0
   let legacy: { ref: { sha256: string }; bytes: Buffer; attemptId: string } | undefined, finalV1 = false
   const first = f.store.claimQueuedAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30000, expectedRevision: f.store.readOperation(f.operation.id).revision })
   const originalProtocol = { version: 'elaboration-draft-v1', generationGuidance: ELABORATION_GENERATION_GUIDANCE_V4 }, originalProtocolRef = writeEvidence(commonDir, originalProtocol)
@@ -8331,6 +8370,7 @@ for (const mode of ['original', 'resume', 'legacy-cleared', 'missing-cause', 'co
   f.options.runner = async request => {
     const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!), seed = request.worktree!
     calls.push({ attempt: attempt.number, purpose: request.purpose })
+    if (mode === 'original' && attempt.number === 3 && request.purpose === 'elaboration_generate') { resumedGeneration = true; sourceIndexWindow = false }
     assert.notEqual(request.purpose, 'code_generate')
     let output: unknown
     if (request.purpose === 'code_behavior_analyze') output = { changes: [], facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
@@ -8381,17 +8421,32 @@ for (const mode of ['original', 'resume', 'legacy-cleared', 'missing-cause', 'co
   const paused = f.store.readAttempt(legacy.attemptId)
   assert.equal(paused.status, 'superseded'); assert.equal(paused.failure, null)
   assert.equal(calls.some(call => call.attempt === 2), false)
+  const originalOwnerAttempt = f.store.readAttempt(first.attempt.id)
   f.closeForRestart()
   let protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
   let store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) }); f.useStore(store); f.store = store
   const claim = store.claimQueuedAttempt.bind(store)
   store.claimQueuedAttempt = input => { if (store.listAttempts(f.operation.id).length >= 5) throw new Error('禁止无派发热循环'); return claim(input) }
   store.requestControl(f.operation.id, 'run')
+  if (mode === 'original') {
+    const clone = globalThis.structuredClone
+    globalThis.structuredClone = ((value: unknown, options?: Parameters<typeof clone>[1]): unknown => {
+      const wrappers = value as { value?: { version?: string; attemptId?: string } }[]
+      if (sourceIndexWindow && Array.isArray(wrappers) && wrappers.some(entry => entry?.value?.version === 'sync-stage-v1' && entry.value.attemptId === first.attempt.id)) {
+        if (readonlyProofSaved) sourceIndexesAfterProof++
+        else sourceIndexesBeforeProof++
+      }
+      return clone(value, options)
+    }) as typeof structuredClone
+    t.after(() => { globalThis.structuredClone = clone })
+    sourceIndexWindow = true
+  }
   let suspended = false
   const save = store.checkpoint.bind(store)
   store.checkpoint = (fence, ref) => {
     const saved = save(fence, ref)
     const wrapper = JSON.parse(readEvidence(commonDir, ref).toString()) as { stage?: string }
+    if (mode === 'original' && store.readAttempt(fence.attemptId).number === 3 && wrapper.stage?.endsWith(':readonly-repair-provenance')) readonlyProofSaved = true
     if (!suspended && store.readAttempt(fence.attemptId).number === 5 && wrapper.stage === 'elaboration') {
       suspended = true
       throw Object.assign(new Error('完整P1已保存，模拟同attempt进程边界'), { code: 'SYNC_FENCE_EXPIRED' })
@@ -8400,6 +8455,11 @@ for (const mode of ['original', 'resume', 'legacy-cleared', 'missing-cause', 'co
   }
   result = await runSyncOperation(store, f.operation.id, f.options)
   assert.equal(result.status, 'recovery_required', JSON.stringify(result.failure)); assert.equal(suspended, true)
+  if (mode === 'original') {
+    t.diagnostic(JSON.stringify({ sourceIndexesBeforeProof, sourceIndexesAfterProof, readonlyProofSaved, resumedGeneration }))
+    assert.equal(readonlyProofSaved, true); assert.equal(resumedGeneration, true); assert.ok(sourceIndexesBeforeProof > 0)
+    assert.equal(sourceIndexesAfterProof, 0, '同一P1恢复已认证只读来源后，草稿查询不得重建同attempt的typed检查点视图')
+  }
   const completedP1 = calls.filter(call => call.purpose.startsWith('elaboration_'))
   protocol.close()
   protocol = openProtocol(join(f.parent, 'sync.sqlite'))
@@ -8416,6 +8476,11 @@ for (const mode of ['original', 'resume', 'legacy-cleared', 'missing-cause', 'co
   assert.equal(read<{ generationGuidance: string }>(0, 'elaboration-draft-protocol').generationGuidance, ELABORATION_GENERATION_GUIDANCE_V4)
   assert.equal(read<{ generationGuidance: string }>(2, 'elaboration-draft-protocol').generationGuidance, ELABORATION_GENERATION_GUIDANCE)
   const repaired = read<{ readonlyOwnerRepair: Parameters<typeof continuationCoordinator.validateReadonlyRepair>[2] }>(2, 'repair-input').readonlyOwnerRepair
+  for (const owner of repaired.owners) {
+    assert.equal(owner.fromAttemptId, originalOwnerAttempt.id)
+    assert.equal(owner.resultRef.sha256, contentHash(JSON.stringify(read(0, owner.key))), '共享视图仍选原已审owner的精确resultRef')
+  }
+  assert.deepEqual(store.readAttempt(first.attempt.id), originalOwnerAttempt)
   assert.deepEqual(repaired.findings[0].relatedIds, ['RULE-EXPORT-05'])
   assert.deepEqual(read<{ readonlyOwnerRepair: typeof repaired }>(3, 'repair-input').readonlyOwnerRepair.findings[0].relatedIds, ['RULE-EXPORT-02'])
   assert.deepEqual(calls.filter(call => call.attempt === 4).map(call => call.purpose), ['elaboration_generate'], '未命中05再次改值在独审前机械拒绝')
