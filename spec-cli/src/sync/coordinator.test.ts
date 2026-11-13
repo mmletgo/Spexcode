@@ -3808,10 +3808,13 @@ for (const body of ['syntax', 'schema', 'stage-shape'] as const) for (const layo
   }
   if (['bad-record', 'unknown-json', 'false-role'].includes(layout)) {
     assert.throws(() => readCurrentSyncAnalysis(f.store, operation), layout === 'unknown-json' ? SyntaxError : { code: 'checkpoint_artifact_binding' })
+    assert.throws(() => readSyncCheckpointStageIndex(f.store, operation, f.store.readAttempt(attempt.id)), layout === 'unknown-json' ? SyntaxError : { code: 'checkpoint_artifact_binding' })
     return
   }
   const beforeRefs = f.store.readAttempt(attempt.id).checkpointRefs
   assert.doesNotThrow(() => readCurrentSyncAnalysis(f.store, operation), 'typed rejected raw must never be parsed or trusted as a stage')
+  const stageIndex = readSyncCheckpointStageIndex(f.store, operation, f.store.readAttempt(attempt.id))
+  assert.ok(stageIndex.raw.has(rawRef!.sha256)); assert.ok(stageIndex.json.every(entry => entry.ref.sha256 !== rawRef!.sha256), '紧凑历史视图也排除伪stage拒稿')
   const app = await SyncApplication.create(f.root, { protocol: f.protocol, runtimeDirectory: join(f.parent, 'read-application') })
   const detail = await app.readOperation(operation.id)
   assert.equal(detail.decisionContext, null)
@@ -4643,7 +4646,37 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
     return failed
   }
   f.store.claimQueuedAttempt = input => { if (f.store.listAttempts(f.operation.id).length >= (lineage ? 6 : formatInterleaved ? 4 : reuseRepair ? 4 : unchanged || invalidBase || sibling ? 5 : pending || aggregateOnly || mode === 'review-resume' || mode === 'review-rebind-native' ? 4 : 3)) throw new Error('fixture仅阻止旧实现无限零调用热循环'); return claim(input) }
+  const countCandidateHistory = mode === 'existing' || mode === 'review-accepted-reuse'
+  const candidateHistory = { windows: 0, fullClones: 0, indexClones: new Map<string, number>() }
+  if (countCandidateHistory) {
+    const checkpoint = f.store.checkpoint.bind(f.store), clone = globalThis.structuredClone
+    let reviewAttemptId: string | null = null
+    f.store.checkpoint = (fence, ref) => {
+      const wrapper = JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as { stage?: string }
+      const saved = checkpoint(fence, ref)
+      if (wrapper.stage === 'partition-generation-budget') { reviewAttemptId = fence.attemptId; candidateHistory.windows++ }
+      if (wrapper.stage === 'generation') reviewAttemptId = null
+      return saved
+    }
+    t.mock.method(globalThis, 'structuredClone', (value: unknown, options?: Parameters<typeof clone>[1]): unknown => {
+      const checkpoint = value as { json?: { value?: { version?: string; attemptId?: string } }[]; raw?: unknown } | null
+      const entries = Array.isArray(value) ? value as NonNullable<typeof checkpoint>['json'] : checkpoint?.json
+      const prior = entries?.find(entry => entry.value?.version === 'sync-stage-v1')?.value?.attemptId
+      if (reviewAttemptId && prior && prior !== reviewAttemptId) {
+        if (checkpoint?.raw instanceof Map) candidateHistory.fullClones++
+        else if (Array.isArray(value)) { const key = `${reviewAttemptId}:${prior}`; candidateHistory.indexClones.set(key, (candidateHistory.indexClones.get(key) ?? 0) + 1) }
+      }
+      return clone(value, options)
+    })
+  }
   const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  if (countCandidateHistory) {
+    const maximumIndexClones = Math.max(0, ...candidateHistory.indexClones.values())
+    t.diagnostic(JSON.stringify({ candidateHistory: { windows: candidateHistory.windows, fullClones: candidateHistory.fullClones, maximumIndexClones } }))
+    assert.ok(candidateHistory.windows > 1, '真实多attempt候选路径必须被执行')
+    assert.equal(candidateHistory.fullClones, 0, '候选来源不能逐owner克隆终结attempt的完整历史')
+    assert.ok(maximumIndexClones <= 1, '同一当前attempt跨owner共用原历史索引')
+  }
   const terminalDiagnostics = formatInterleaved ? (() => {
     const attempts = f.store.listAttempts(f.operation.id), wrappers = attempts.map(attempt => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())))
     const a = wrappers[1]?.find(stage => stage.stage?.endsWith(':candidate-review') && !wrappers[0].some(before => before.stage === stage.stage && before.resultRef.sha256 === stage.resultRef.sha256) && JSON.parse(readEvidence(f.input.source.commonDir, stage.resultRef).toString()).reviewPassed)
@@ -4695,8 +4728,11 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
     const plan = JSON.parse(readEvidence(f.input.source.commonDir, wrappers[0].find(stage => stage.stage === 'candidate-partition-plan').resultRef).toString())
     const value = JSON.parse(readEvidence(f.input.source.commonDir, wrappers[0].find(stage => stage.stage === `${failed.stage}:input`).resultRef).toString())
     const input = restoreGenerationInput(value), operation = f.store.readOperation(f.operation.id)
-    const proof = (current = operation, origin = attempts[0], selected = plan, supplied = input) => continuationCoordinator.failedCandidateReviewSource(f.store, current, origin, failed.stage, candidate, selected, supplied)
+    const history = new WeakMap<SyncAttempt, ReturnType<typeof readSyncCheckpointStageIndex>>()
+    const readIndex = (origin: SyncAttempt) => { const view = history.get(origin) ?? readSyncCheckpointStageIndex(f.store, operation, origin); history.set(origin, view); return view }
+    const proof = (current = operation, origin = attempts[0], selected = plan, supplied = input) => continuationCoordinator.failedCandidateReviewSource(f.store, current, origin, failed.stage, candidate, selected, supplied, readIndex)
     const refs = proof(); assert.ok(refs, '首次P1合法null扩域保原wrapper/digest及真实Native原件')
+    assert.deepEqual(refs, continuationCoordinator.failedCandidateReviewSource(f.store, operation, attempts[0], failed.stage, candidate, plan, input), '紧凑视图与原完整读取返回同一失败原件')
     assert.equal(proof({ ...operation, readSetDigest: contentHash('foreign-readset') }), null)
     assert.equal(proof({ ...operation, scope: { ...operation.scope, paths: [...operation.scope.paths, 'foreign-path'] } }), null)
     assert.equal(proof({ ...operation, scope: { ...operation.scope, contractIds: [...operation.scope.contractIds, 'REQ-FOREIGN'] } }), null)
@@ -4760,8 +4796,11 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
       const { manifestProjection: _projection, completeManifestDigest: _digest, ...context } = serialized
       const input: Input = { ...context, files: new Map(context.files), manifest: { version: 1, entries: readTree(f.input.source.commonDir, context.composed?.tree ?? context.snapshot.immutableTree) }, priorContext: context.priorContext?.map(prior => ({ ...prior, files: new Map(prior.files) })) }
       const operation = f.store.readOperation(f.operation.id)
-      const proof = (value = input, source = sourceAttempt, current = operation, selected = plan, actual = candidate) => acceptedCandidateReviewSource(f.store, current, source, saved.stage, actual, selected, value)
+      const history = new WeakMap<SyncAttempt, ReturnType<typeof readSyncCheckpointStageIndex>>()
+      const readIndex = (source: SyncAttempt) => { const view = history.get(source) ?? readSyncCheckpointStageIndex(f.store, operation, source); history.set(source, view); return view }
+      const proof = (value = input, source = sourceAttempt, current = operation, selected = plan, actual = candidate) => acceptedCandidateReviewSource(f.store, current, source, saved.stage, actual, selected, value, readIndex)
       assert.ok(proof(), '原真实checkpoint/request/dispatch/ref资格可重现')
+      assert.deepEqual(proof(), acceptedCandidateReviewSource(f.store, operation, sourceAttempt, saved.stage, candidate, plan, input), '紧凑视图与原完整读取返回同一接受来源')
       for (const patch of [{ intent: { ...input.intent, rawSource: input.intent.rawSource + '变更' } }, { facts: [...input.facts, { source: 'code:src/export.js', text: '不同上下文' }] }, { repairContext: undefined }, { model: 'gpt-6.1-terra' }, { timeoutMs: (input.timeoutMs === null ? 1000 : input.timeoutMs + 1) }]) assert.equal(proof({ ...input, ...patch }), null)
       assert.equal(proof(input, sourceAttempt, operation, { ...plan, digest: 'other-plan' }), null)
       assert.equal(proof(input, sourceAttempt, operation, plan, { ...candidate, coveredScope: { ...candidate.coveredScope, paths: [] } }), null)

@@ -22,4 +22,6 @@ code:
 
 私有 candidate ref 保活对象。验证导出独立空目录，普通文件和目录只读，链接不跟随且必须在导出范围内；不带 .git、node_modules 或宿主凭据（.env、.npmrc、.netrc、.ssh）和 .spex/runtime，业务 src/auth 等模块完整保留。排除文件明确返回清单并保存排除证据，不改变冻结候选摘要或假称排除范围已获运行覆盖。本原语不运行候选命令、不创建普通 session owned worktree、不 commit/merge。
 
+候选核验可沿 [[sync-input-snapshot]] 接收调用者在当前阶段绑定的显式树缓存，仅复用同commonDir与完整OID下已验证的TreeEntry。每次仍核候选摘要、manifest CAS、真实差量与coveredScope；缓存不保存候选批准或CAS验证结论，冷恢复重新读树。
+
 同一宿主元数据边界由 isHostPrivatePath 导出给模型读集合门禁复用；只按明确路径分类，不以 auth 等业务词屏蔽源码。

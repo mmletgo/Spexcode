@@ -11,6 +11,8 @@ code:
 
 ## expanded spec
 
+composed 全树补入的未选 owner 声明可使用原计划冻结的 contextVerifications 完成最终 seal 登记校验。该字段在局部输入复制时移除；局部模型原 verifications、文件视图、writer 和真实 V3 范围保持。只有完整 seal 合并定义并绑定摘要，不把未选定义迁入当前候选或局部 VERIFY 归属投影。
+
 P0/P1分区材料回调透传可await结果，使归档失败来源能沿同一checkout临时恢复/严格观察/回收接缝续原稿。分区身份、读取/预算、输入摘要、原candidate/批准与并发语义保持，无新持久字段。
 
 
@@ -123,6 +125,8 @@ Native局部P1的精确结构输出格式失败沿同一checkpoint接缝传递�
 已认证reviewCandidate续审复用原file-writer-plan与builderTraces、从实际候选Git差量重建结果变化，跳过实现规划/生成；两方向共用原候选、V1、发布基树和逐组/跨边独审门，不迁移局部builder接受缓存。
 
 最终独审把唯一implementationGenerationDispatch已派生的specWritePaths直接作为瞬态GenerationOptions.reviewSpecWritePaths交给既有runGeneration；不进入GenerationInput、冻结摘要、检查点或持久协议。仅实际P2不可写的Spec诊断提前经过只读P1定位门，一般可写P2与合法跨owner path#ID诊断保持原语义，后继协调器仍重核原严格唯一绑定。
+
+唯一候选固定且全局V1通过后，本次最终局部及跨边独审共用一份显式TreeReadCache，只保存当前commonDir/OID的已验证树条目。新调用及冷恢复重新建立，owner正文、候选/CAS身份和原Native批准门仍逐项执行；现有调度让步、取消及真实派发边界保持，缓存不持久化或跨attempt沿用。
 
 已有认证draft不屏蔽更晚正式停止执行的最新Git观察。材料选择携当前draft作瞬态参数，仅当原正常Native/注入trace认证定位到该draft来源，暂停资源在既有retry来源顺序中严格更晚、原seed与当前业务树除本owner临时稿/schema外全部对象相同，且所有原材料门槛仍过时，才复制其最新正常Git正文到新seed。更老暂停、未知来源、不同起点及普通Native/material fallback不能覆盖已有draft；无更晚可救稿则保持原draft、错误与标签，不继承批准。该参数不进入业务摘要、旧请求或持久协议。
 

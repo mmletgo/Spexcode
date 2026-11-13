@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+writer46→47 使用隔离 SQLite 验证正常 online backup、仅追加程序语义 marker、旧 writer 写前拒绝与备份可由原迁移集合恢复。所有表行、完整 schema（含原自动采纳索引）和已有迁移字节保持；重复升级不重做备份。
+
 自动采纳政策回归覆盖新字段的 payload/规范语义/alias 冻结、无效来源拒绝、正式 retry 保原值，以及有/无标记的旧操作在同提交重复观察中不升权、不丢权、不新增消息。候选查询使用真实 SQLite 的结算记录，核完整来源、当前 settled attempt、全部 settled journal、完整 scope、精确父 HEAD、noop 排除和确定顺序；超过 500 条无关历史不漏候选，执行计划须命中父 HEAD 及 journal 索引。此测试只证明存储查询，真实 Git 采纳由 [[sync-source-adoption]] 验收。
 
 自动采纳索引迁移沿隔离库 online backup 核旧数据/registry 不变、索引与 marker 原子提交或整体回滚、旧 writer 拒绝及原备份可恢复。历史 marker 回归模拟旧 schema 时移除后续新增索引，并把这些索引的独立证明与旧 schema 不变断言分开。
@@ -63,6 +65,8 @@ receipt树引用相同但manifest不同仍拒绝，journal保持未登记；相�
 资源生命周期回归先复现取消后checkpoint被旧fence拒绝且恢复查询遗漏；新增typed资源路径证明取消后created/terminal/removed可持久且业务写权仍撤销。覆盖真实SQLite多handle同阶段CAS冲突、精确重放、错input/candidate/attempt拒绝、历史attempt资源查询、未创建终止仍需terminal→removed、removed精确查询防重复创建、资源证据GC pin。v1→v2保留已有active attempt和protocol消息，online backup独立恢复v1、v2 DDL中断回滚、重复启动及升级后资源重开查询。
 
 细化范围回归使用真实 SQLite：初始 path scope 没有未来 ID，新增 REQ/AC/FLOW 后共享路径保持 ready、GAP 依赖 ID 单独 blocked，部分 receipt 与 baseline 只推进真实已验证 ID，根仍 needs_input。扩展参数夹带 paths、删除旧 ID、同证据不同集合、错误 hash、过期/旧 fence 或冻结候选后新扩展均拒绝。两个连接竞争新增 ID 时全部回滚，旧路径 lease/token/generation 不变；成功 ID 租约沿用 attempt token/期限，精确重放不增资源 generation/operation revision、不重复派发或计费。证据引用被 GC pin，数据库重启与 retry 保留 expanded scope 和证据。
+
+大范围租约领取及幂等扩域通过真实 SQLite 返回行的资源键读取次数验证成员查找按集合大小线性增长，不用固定耗时阈值。全部已持有时原租约逐值保持；缺失或被另一持有人替换时旧 fence 拒绝且不写回；已过期的外部租约必须实际接管并递增 generation，不能仅因键存在而当作自己已持有。
 
 两个独立进程同时操作同一 SQLite 文件争抢新业务 ID，只有一方扩展成功，另一方明确 lease conflict；数据库只登记一个 ID holder，双方原路径租约保持原 token。
 

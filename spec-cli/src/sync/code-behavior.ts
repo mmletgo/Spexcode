@@ -496,7 +496,8 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     facts: input.decision.previous.analysis.facts.filter(fact => !fact.source.startsWith('code:') || localPath(fact.source.slice(5).split('#')[0])),
     partitionEvidence: undefined, partitionCoverage: undefined,
   } } } : input.decision ?? null
-  const promptPlan = input.partition ? { ...input.plan, decisionAuthorities: input.plan.decisionAuthorities?.filter(authority => authority.paths.some(localPath) || authority.affectedIds.some(id => promptIds.has(id))), authorizedChanges: input.plan.authorizedChanges?.filter(change => promptIds.has(change.id)), ...(input.plan.version === 'sync-coordinator-v2' && input.plan.commitTrigger ? { commitTrigger: { ...input.plan.commitTrigger, paths: input.plan.commitTrigger.paths.filter(localPath) } } : {}) } : input.plan
+  const { contextVerifications: _contextVerifications, ...modelPlan } = input.plan
+  const promptPlan = input.partition ? { ...modelPlan, decisionAuthorities: input.plan.decisionAuthorities?.filter(authority => authority.paths.some(localPath) || authority.affectedIds.some(id => promptIds.has(id))), authorizedChanges: input.plan.authorizedChanges?.filter(change => promptIds.has(change.id)), ...(input.plan.version === 'sync-coordinator-v2' && input.plan.commitTrigger ? { commitTrigger: { ...input.plan.commitTrigger, paths: input.plan.commitTrigger.paths.filter(localPath) } } : {}) } : modelPlan
   const postGateReview = input.postGateReview?.length ? { postGateReview: input.postGateReview, postGateReviewPolicy: '仅为原分类的非权威质疑；沿原refs、真实旧新行和代码差量重新分析及独审，可维持refactor要求P1恢复错误改写，也可据原意和代码重判allowed_change，不扩大AC/VERIFY授权' } : {}
   const frozen = {
     guidanceContractVersion: input.contextTransport === 'git-json-v6' ? CODE_BEHAVIOR_GUIDANCE_VERSION : LEGACY_CODE_BEHAVIOR_GUIDANCE_VERSION,

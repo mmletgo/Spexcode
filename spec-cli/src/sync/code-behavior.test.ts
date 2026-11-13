@@ -9,7 +9,7 @@ import { isHostPrivatePath } from './candidate.js'
 import { isUtf8Text } from './composition.js'
 import { analyzeCodeBehavior, CODE_BEHAVIOR_REVIEW_SCHEMA, CODE_BEHAVIOR_SCHEMA, deriveBehaviorAuthorization, packBehaviorBodies, readCodeBehaviorContext, referenceCodeBehaviorMetadata, type FrozenBehaviorBody } from './code-behavior.js'
 import type { CodeBehaviorInput, CodeBehaviorContinuation } from './code-behavior.js'
-import { behaviorMaterialTaskMatches } from './coordinator.js'
+import { behaviorMaterialTaskMatches, syncPlanDigest } from './coordinator.js'
 import { nativeWorktreeResult } from '../native-worktree-runtime.js'
 import { readStageDraft } from './stage-worktree.js'
 import { adoptedDeliveryPaths, composeInputSnapshots, readCompositionEvidence, type IntentObject, type IntentResidual, type SelectedCompositionEvidence } from './composition.js'
@@ -90,6 +90,28 @@ function runner(kind: CodeBehaviorKind, patch?: (proposal: Record<string, unknow
     return { sessionId: `session-${request.purpose}`, threadId: `thread-${request.purpose}`, turnId: 'turn-1', output, resultDigest: contentHash(JSON.stringify(output)) }
   }
 }
+
+for (const partition of [false, true]) test(`P0模型任务不携全图contextVerifications且保全局政策绑定 partition=${partition}`, async t => {
+  const f = await fixture(t)
+  writeFileSync(join(f.root, 'src/export.js'), `${f.source}\n// formatting only\n`)
+  const input = await f.input()
+  input.plan.contextVerifications = [{ id: 'VERIFY-UNSELECTED-01', command: ['node', '--test', 'tests/unselected.test.mjs'], cwd: '.', timeoutMs: 7000 }]
+  input.policyDigest = syncPlanDigest(input.plan)
+  if (partition) input.partition = { id: 'export-partition', changedPaths: ['src/export.js'], factSourcePaths: ['src/export.js'] }
+  const before = structuredClone(input.plan), requests: ElaborationSessionRequest[] = [], fake = runner('refactor')
+  const result = await analyzeCodeBehavior(input, async request => {
+    requests.push(request)
+    const task = readFrozenBehaviorContext<{ plan: typeof input.plan; policyDigest: string }>(request)
+    assert.equal(task.plan.contextVerifications, undefined)
+    assert.equal(request.prompt.includes('VERIFY-UNSELECTED-01'), false)
+    assert.deepEqual(task.plan.verifications, before.verifications); assert.deepEqual(task.plan.mandatoryTests, before.mandatoryTests)
+    assert.equal(task.policyDigest, input.policyDigest)
+    return fake(request)
+  })
+  assert.equal(result.reviewPassed, true); assert.equal(requests.length, 2)
+  assert.equal(result.policyDigest, syncPlanDigest(before))
+  assert.deepEqual(input.plan, before)
+})
 
 test('Native P0历史seed复用已校验old tree entries且输入与接受门不变', async t => {
   const f = await fixture(t, undefined, {}, process.env.SPEX_P0_LOCAL_TREE_REUSE_FIXTURE), sourcePath = join(f.root, 'src/export.js'), marker = '// immutable tree reuse fixture change'

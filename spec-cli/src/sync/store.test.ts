@@ -1368,6 +1368,66 @@ test('scope expansion is canonical/idempotent, retains admission identity and bu
   } finally { f.cleanup() }
 })
 
+test('large scope lease membership remains linear for acquisition and idempotent expansion', async t => {
+  const f = await fixture()
+  try {
+    const covered = { paths: ['src/a.ts'], contractIds: Array.from({ length: 256 }, (_, index) => `RULE-${index}`), flowIds: ['FLOW-A'] }
+    const baseline = f.store.readBaselineSelection(source(), [...covered.paths.map(path => ({ kind: 'path' as const, path })), ...covered.contractIds.map(id => ({ kind: 'contract' as const, id })), ...covered.flowIds.map(id => ({ kind: 'flow' as const, id }))])
+    assert.ok('selection' in baseline)
+    const claimed = f.claim({ ...f.admit(source(), 'large-membership', covered), baselineSelection: baseline.selection })
+    const leases = f.protocol.withTransaction(tx => tx.query('SELECT * FROM sync_leases ORDER BY resource_key'))
+    const transaction = f.protocol.withTransaction.bind(f.protocol)
+    let keyReads = 0
+    f.protocol.withTransaction = body => transaction(tx => body({
+      ...tx,
+      query: (sql, ...params) => {
+        const rows = tx.query(sql, ...params)
+        return sql.includes('FROM sync_leases') ? rows.map(row => ({ ...row, get resource_key() { keyReads++; return row.resource_key } })) : rows
+      },
+    }))
+    const evidence = f.put({ reviewed: 'large-scope' })
+    const expanded = f.store.expandContractScope(claimed.fence, covered, evidence)
+    const acquisitionReads = keyReads
+    keyReads = 0
+    assert.deepEqual(f.store.expandContractScope(claimed.fence, covered, evidence), expanded)
+    const replayReads = keyReads
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT * FROM sync_leases ORDER BY resource_key')).map(row => ({ ...row })), leases.map(row => ({ ...row })))
+    t.diagnostic(JSON.stringify({ leases: leases.length, acquisitionReads, replayReads }))
+    assert.ok(acquisitionReads <= leases.length * 4, `acquisition read ${acquisitionReads} keys for ${leases.length} leases`)
+    assert.ok(replayReads <= leases.length * 4, `replay read ${replayReads} keys for ${leases.length} leases`)
+  } finally { f.cleanup() }
+})
+
+test('lease membership reacquires an expired foreign owner instead of treating its key as owned', async () => {
+  const f = await fixture()
+  try {
+    const first = f.claim()
+    f.tick(1001)
+    const next = f.claim(f.admit(source('other'), 'expired-foreign-owner', scope('src/other.ts', 'RULE-A')))
+    assert.equal(f.store.assertWriteFence(next.fence).attempt.id, next.attempt.id)
+    const shared = f.protocol.withTransaction(tx => tx.query('SELECT token,attempt_id,generation FROM sync_leases WHERE resource_key=?', 'contract:RULE-A'))[0]
+    assert.equal(shared.token, next.fence.leaseToken); assert.equal(shared.attempt_id, next.attempt.id); assert.equal(shared.generation, 2)
+    assert.throws(() => f.store.assertWriteFence(first.fence), /SYNC_FENCE_EXPIRED/)
+  } finally { f.cleanup() }
+})
+
+for (const defect of ['missing', 'foreign-owner'] as const) test(`idempotent scope expansion refuses changed lease membership (${defect})`, async () => {
+  const f = await fixture()
+  try {
+    const claimed = f.claim(), ids = { contractIds: ['RULE-A', 'REQ-A'], flowIds: [] }, evidence = f.put({ reviewed: true })
+    const expanded = f.store.expandContractScope(claimed.fence, ids, evidence)
+    if (defect === 'missing') f.protocol.withTransaction(tx => tx.exec('DELETE FROM sync_leases WHERE token=? AND resource_key=?', claimed.fence.leaseToken, 'contract:REQ-A'))
+    else {
+      const other = f.claim(f.admit(source('other'), 'foreign-owner', scope('src/other.ts', 'RULE-OTHER')))
+      f.protocol.withTransaction(tx => tx.exec('UPDATE sync_leases SET token=?,operation_id=?,attempt_id=? WHERE token=? AND resource_key=?', other.fence.leaseToken, other.operation.id, other.attempt.id, claimed.fence.leaseToken, 'contract:REQ-A'))
+    }
+    const leases = f.protocol.withTransaction(tx => tx.query('SELECT * FROM sync_leases ORDER BY resource_key'))
+    assert.throws(() => f.store.expandContractScope(claimed.fence, ids, evidence), /SYNC_FENCE_EXPIRED/)
+    assert.deepEqual(f.store.readOperation(claimed.operation.id), expanded)
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT * FROM sync_leases ORDER BY resource_key')), leases)
+  } finally { f.cleanup() }
+})
+
 test('two SQLite handles atomically acquire new ID resources; conflicting set rolls back every new lease and preserves held path', async () => {
   const f = await fixture(), secondProtocol = openProtocol(f.path), second = new SyncStore(secondProtocol, f.options)
   try {
@@ -2869,5 +2929,33 @@ for (const prior of [34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44] as const) test(
     backup = openProtocol(backupPath)
     assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, versions), prior)
     assert.deepEqual(read(backup), before)
+  } finally { backup?.close(); f.cleanup() }
+})
+
+for (const prior of [46] as const) test(`从writer${prior}升级保留自动采纳索引及原件，旧writer拒绝且备份可回滚`, async () => {
+  assert.equal(SYNC_MIGRATIONS[prior]?.version, prior + 1, '新程序计划语义必须有独立 writer 围栏')
+  const f = await fixture()
+  let backup: ReturnType<typeof openProtocol> | undefined
+  try {
+    const claimed = f.claim(), versions = SYNC_MIGRATIONS.slice(0, prior)
+    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>?', SYNC_COMPONENT, prior))
+    const read = (protocol: typeof f.protocol) => protocol.withTransaction(tx => ({
+      schema: tx.query('SELECT * FROM sqlite_master ORDER BY type,name'),
+      rows: Object.fromEntries(tx.query("SELECT name FROM sqlite_master WHERE type='table' AND name!='schema_migrations' ORDER BY name").map(row => [String(row.name), tx.query(`SELECT * FROM "${String(row.name)}"`)])),
+      registry: tx.query('SELECT * FROM schema_migrations WHERE component!=? OR version<=? ORDER BY component,version', SYNC_COMPONENT, prior),
+    }))
+    const before = read(f.protocol), backupPath = join(f.root, `v${prior}-before-program-context.backup`)
+    const originalBackup = f.protocol.backupTo.bind(f.protocol); let backups = 0
+    f.protocol.backupTo = async destination => { backups++; await originalBackup(destination) }
+    for (const { sql } of SYNC_MIGRATIONS.slice(prior)) assert.match(sql, /^SELECT 1;/)
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), SYNC_MIGRATIONS.length)
+    assert.deepEqual(read(f.protocol), before)
+    assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, versions), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
+    assert.deepEqual(f.store.readAttempt(claimed.attempt.id), claimed.attempt)
+    backup = openProtocol(backupPath)
+    assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, versions), prior)
+    assert.deepEqual(read(backup), before)
+    assert.equal(await migrateSyncStore(f.protocol), SYNC_MIGRATIONS.length)
+    assert.equal(backups, 1)
   } finally { backup?.close(); f.cleanup() }
 })

@@ -34,6 +34,8 @@ contract-omission marker回归拒绝错路径、未知existingID与affectedIds�
 
 Native 候选独审计数回归使用含大量未投影文本、重复 OID、二进制和链接的同一真实冻结树。派发前不得逐 blob 启动 Git，也不序列化未发送的内联 manifest 投影；完整候选文本、路径顺序、输入摘要及 JSON 冷重建后的 prompt/schema/工作树请求保持原绑定。计数断言衡量 I/O 形状，不以机器负载相关的固定耗时冒充正确性。
 
+Legacy与Native各以真实snapshot/composed/candidate三棵不同Git树执行四次独审，显式阶段缓存将完整读树从24次收敛到三棵各一次，所有完整请求逐值保持。warm缓存下错误owner正文、manifest、candidate摘要与被篡改CAS仍拒绝；候选Git对象损坏时warm正文读取和新缓存冷验均拒绝，恢复原件后JSON冷重建的请求不变。
+
 旧生命周期Spec的`related` glob回归使用真实Git提交删除owner及`src/helpers/format.js`；即使prior manifest含该entry，只提供Spec/代码/测试、不提供命中的helper正文时，generation硬门禁必须在Native派发前拒绝。
 
 格式续审的native/非native双路径回归使用真实Git候选和认证格式packet引用：完整原final与精确schema进入Native唯一临时Git评审稿及只读sidecar，或非Native完整提示，重复格式失败的第二份原final继续进入下一seed，原candidate全部业务字节不变；ref缺席不补，foreign thread原文拒绝，程序不解析旧final为accept。

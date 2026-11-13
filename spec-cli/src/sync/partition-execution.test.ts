@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { createRequire, syncBuiltinESMExports } from 'node:module'
 import { mintIds } from '@spexcode/spec-core'
 import { parseContract } from '@spexcode/spec-core/contracts'
 import type { Acceptance, Contract } from '@spexcode/spec-core/contracts'
@@ -26,7 +27,7 @@ import type { CodeBehaviorInput } from './code-behavior.js'
 import type { CodeBehaviorAnalysis } from './writeback-types.js'
 import type { BaselinePair } from './operation-types.js'
 import { composeInputSnapshots } from './composition.js'
-import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence } from './snapshot.js'
+import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence, writeObject, writeTree } from './snapshot.js'
 import { buildSyncApplicationPlan } from './planning.js'
 import { verifyCandidate } from './candidate.js'
 import { nativeWorktreeResult } from '../native-worktree-runtime.js'
@@ -146,6 +147,53 @@ test('全局seal只路由真实error owner及引用依赖，无关accept不失�
   assert.ok([...routed.values()].every(findings => findings.length === 1 && findings[0] === error))
   assert.equal(routed.has('part-archive'), false)
   assert.throws(() => partitionSealRepairOwners(plan, { ...aggregate, partitionSeal: { ...aggregate.partitionSeal, findings: [{ ...error, path: '.spec/foreign/spec.md' }] } }, locals), { code: 'partition_final_seal_unroutable' })
+})
+
+test('全图seal保留冻结的独立VERIFY登记，局部请求不扩域且旧缺席不读取实时配置', async t => {
+  const prepared = await fixture(t), selected = prepared.input.contracts[0], snapshot = prepared.input.snapshot
+  const partition = prepared.plan.partitions[0]
+  const plan: SyncPartitionPlan = { ...prepared.plan, partitions: [partition], dependencies: [], expectedPaths: partition.changedPaths }
+  const registrations = prepared.input.contracts.flatMap(contract => contract.items.filter(item => item.kind === 'VERIFY').map(item => ({ id: item.id, command: item.command, cwd: item.cwd, timeoutMs: item.timeoutMs })))
+  const source = prepared.input.files.get(selected.path)!
+  const input: ElaborationInput = {
+    root: prepared.root, requestKey: 'scoped-verification-seal', historyInput: snapshot,
+    intent: { nodeId: selected.nodeId, rawSource: selected.rawSource },
+    targets: [{ nodeId: selected.nodeId, path: selected.path, source, sourceDigest: contentHash(source) }],
+    files: new Map([...prepared.input.files].filter(([path]) => partition.readPaths.includes(path))),
+    verifications: [registrations[0]], contextVerifications: registrations.slice(1), maxRepairs: 0, maxCalls: 2,
+  }
+  const composed = composeInputSnapshots(snapshot).composed!, requests: ElaborationSessionRequest[] = []
+  const runner: ElaborationRunner = async request => {
+    const ordinal = requests.push(request)
+    const frozen = JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as { verifications: { id: string }[]; contextVerifications?: unknown; files: [string, string][] }
+    assert.deepEqual(frozen.verifications.map(item => item.id), ['VERIFY-EXPORT-01'])
+    assert.equal(frozen.contextVerifications, undefined, '全图登记不进入局部模型请求')
+    assert.ok(frozen.files.every(([path]) => partition.readPaths.includes(path)))
+    const output = request.purpose === 'elaboration_generate'
+      ? { version: 'elaboration-target-rows-v3', changes: [], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: true, basis: '沿用本区完整已审契约', affectedIds: ['REQ-EXPORT-01'] })) }
+      : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+    return { sessionId: `registration-session-${ordinal}`, threadId: `registration-thread-${ordinal}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+  }
+  const checkpoints: PartitionCheckpoints = { load: () => null, save: (_key, value) => writeEvidence(snapshot.source.commonDir, value) }
+  const original = JSON.stringify(input)
+  const result = await elaborateSyncPartitions(input, plan, 1, checkpoints, runner, composed)
+  assert.equal(result.structurePassed, true, JSON.stringify(result.partitionSeal?.findings))
+  assert.equal(result.partitionSeal?.passed, true)
+  assert.equal(requests.length, 2)
+  assert.equal(JSON.stringify(input), original)
+  assert.deepEqual(result.changes.map(change => change.path), [selected.path])
+
+  const { contextVerifications: _context, ...legacy } = input
+  writeFileSync(join(prepared.root, '.spec/spexcode.json'), JSON.stringify({ sync: { verifications: registrations.map(definition => ({ definition })) } }))
+  const legacyResult = await elaborateSyncPartitions(legacy, plan, 1, checkpoints, runner, composed)
+  assert.equal(legacyResult.partitionSeal?.passed, false, '旧冻结缺席不能从实时配置补登记')
+  assert.ok(legacyResult.partitionSeal!.findings.some(issue => issue.code === 'verification_registration_mismatch' && issue.itemId === 'VERIFY-IMPORT-01'))
+  assert.equal(Object.hasOwn(legacy, 'contextVerifications'), false)
+
+  const changed = { ...input, contextVerifications: registrations.slice(1).map(item => item.id === 'VERIFY-IMPORT-01' ? { ...item, timeoutMs: item.timeoutMs + 1 } : item) }
+  const rejected = await elaborateSyncPartitions(changed, plan, 1, checkpoints, runner, composed)
+  assert.equal(rejected.partitionSeal?.passed, false, '只读登记的错误命令预算仍严格拒绝')
+  assert.ok(rejected.partitionSeal!.findings.some(issue => issue.code === 'verification_registration_mismatch' && issue.itemId === 'VERIFY-IMPORT-01'))
 })
 
 test('局部分区最终封口读取composed全树承接，真实缺失仍由strict门拒绝', async t => {
@@ -763,7 +811,20 @@ test('mixed只读owner权限投影沿真实P2 dispatch，纯父只读而三个le
 
 test('分区生成同时在途，每区只收到本区完整正文；分区和跨边独审绑定唯一最终candidate', async t => {
   const { input, plan, checkpoints } = await fixture(t), runtime = native()
-  const result = await generateSyncPartitions(input, plan, 2, false, { runner: runtime.runner, validateCandidate: async () => [] }, checkpoints)
+  const commonDir = input.snapshot.source.commonDir, context = Buffer.from('冻结组合上下文\n')
+  const tree = writeTree(commonDir, [...input.manifest.entries, { path: 'src/composed-context.txt', mode: '100644', oid: writeObject(commonDir, context), digest: contentHash(context) }]), entries = readTree(commonDir, tree)
+  input.composed = { sourceInputId: input.snapshot.id, previousBaselinePairId: null, tree, manifestBlob: writeEvidence(commonDir, { version: 1, entries }), contentDigest: contentHash(JSON.stringify(entries)) }
+  input.manifest = { version: 1, entries }
+  const childProcess = createRequire(import.meta.url)('node:child_process') as typeof import('node:child_process'), exec = childProcess.execFileSync, treeReads: string[] = []
+  let reviewing = false, result: GenerationResult
+  childProcess.execFileSync = ((...args: Parameters<typeof execFileSync>) => {
+    const command = args[1] as string[]
+    if (reviewing && args[0] === 'git' && command.includes('ls-tree') && command.includes('-rlz')) treeReads.push(command.at(-1)!)
+    return Reflect.apply(exec, childProcess, args)
+  }) as typeof execFileSync
+  syncBuiltinESMExports()
+  try { result = await generateSyncPartitions(input, plan, 2, false, { runner: runtime.runner, validateCandidate: async () => { reviewing = true; return [] } }, checkpoints) }
+  finally { childProcess.execFileSync = exec; syncBuiltinESMExports() }
   assert.equal(result.status, 'reviewed', JSON.stringify(result.failure))
   assert.equal(runtime.peak(), 2)
   assert.equal(runtime.calls.filter(call => call.purpose === 'code_generate').length, 3)
@@ -771,6 +832,10 @@ test('分区生成同时在途，每区只收到本区完整正文；分区和�
   assert.equal(result.review, null, '不得伪造全仓模型review')
   assert.equal(result.partitionEvidence!.length, 4)
   assert.ok(result.partitionEvidence!.every(item => item.candidateDigest === result.candidate!.digest))
+  const trees = new Set([input.snapshot.immutableTree, input.composed.tree, result.candidate!.tree])
+  t.diagnostic(JSON.stringify({ reviews: result.partitionEvidence!.length, distinctTrees: trees.size, fullTreeReads: treeReads.length }))
+  assert.deepEqual(new Set(treeReads), trees)
+  assert.equal(treeReads.length, trees.size, 'P2的局部与跨边独审共享同一次候选阶段的完整树读取')
   for (const request of runtime.calls.filter(call => call.purpose === 'code_generate')) {
     const context = JSON.parse(request.prompt.split('冻结完整输入:\n')[1]) as { files: [string, string][] }
     assert.equal(context.files.filter(([path]) => path.startsWith('src/')).length, 1)

@@ -11,6 +11,8 @@ code:
 
 ## expanded spec
 
+真实三叶 Git 夹具的单叶局部 P1 原样通过而全图 seal 因兄弟 VERIFY 未登记失败；冻结 contextVerifications 后同例通过。实际两次局部请求仍只有本区文件和验证定义，changes 不含兄弟；旧字段缺席即使实时配置提供全量登记仍失败，错误的冻结 timeout 也继续拒绝。该回归不启动 Native 或 Docker。
+
 真实Git三方输入含A/B两个owner各自的源码冲突，原计划只触发各自Spec，第三owner可共享读取两份源码但没有冲突义务；实际分区请求须只包含本owner真实冲突，原计划/输入不变。foreign change与resolution继续拒绝；零owner、重复owner及仅从聚合移除任一已审finding且没有resolution时必须失败。不同完整输入/旧指导的saved结果不能跳过新分析和独审，其原JSON字节保持；同摘要缓存仍沿原完整输入接缝复用。
 
 立即返回Promise的缓存分区用真实timer证明心跳及取消可在批次耗尽前运行；末项成功和失败均须先让已排队控制回调运行，再返回原结果或抛原错误。旧调度的微任务链须在同例失败，修复后结果顺序、原取消和失败停止后续派发的断言保持；回归不以增加租约或放宽fence掩盖调度饥饿。
@@ -18,6 +20,8 @@ code:
 并行分析用三个实际分区的冻结输入证明全部在途失败保留partitionId与原完整proposal/review诊断，原主错误及其它unknown错误身份均不丢失；checkpoint读取绑定错误在模型派发前拒绝，也必须进入真实失败集合，不能用空集合绕过协调器有限修复名单。测试只验证执行/持久机制，不冒充Native或Docker产品通过。
 
 定向测试覆盖局部完整源码/测试正文、同时在途上限、分区和跨边同candidateDigest、独审原件集合而非虚构全局review、已完成检查点重入不重调、异步完成序相同树、code_to_spec无code_generate且source/tests对象不变、取消停止后续派发、只读原意P1及唯一根writer、新依赖冻结和重复业务writer拒绝。协调器的最少调用不足零模型派发/零超扣及v1恢复回归保留在 [[sync-coordinator-regression]]。注入runner不代替真实native读取、Docker及正常hooks验收。
+
+三个真实owner与一个跨边的最终独审在V1后的准备窗口共用当前候选树缓存。snapshot、composed与candidate三棵不同树各完整读取一次；原并行上限、本区全文、唯一candidate及检查点重入零派发断言保持。该缓存只属于本次最终独审，不继承到下一调用。
 
 
 新增功能文件布局回归让三个独立分区分别规划一个此前不存在的源码文件，检查生成allowedScope只有对应精确文件而无共享src目录，跨边审查包含两端真实新增正文。多个区提出同一文件时返回原repair且零code_generate；不得按完成顺序抢writer。原代码方向测试证明从不派implementation_plan或code_generate。

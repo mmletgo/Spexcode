@@ -6,6 +6,7 @@
 - code→spec 只装配已审 Spec，source/test 的 Git path、mode、OID 与 absence 必须不变；不能调用代码生成器修绿验收。
 - 手动 code→spec 显式记录未执行覆盖时，已审声明与实际测试分开。全部旧绑定、冻结 mandatory、V1–V4、严格交付和采纳保持，`unexecutedContractIds` 只来自通过的正式验证原件。
 - 分区复用 partitioning/partition-execution 的唯一计划，共用 operation、fence、预算与最终 candidate/journal/receipt。任务只交付变更 Spec、相关接口和明确目标；Agent 在独立 worktree 自由读取，不以分块读取或逐字消费证明作为同步门禁。
+- 新计划的 contextVerifications 只供全图 seal 校验未选 owner 的冻结定义；局部模型和 V3 保原登记及运行范围，旧 plan 缺席不从实时配置补入。writer47 只追加 marker；停稳并结算旧 writer 后 online backup，回滚恢复一致 v46 库及配套证据/Git refs，不删 marker。
 - 共享分区调度每项结束均须真正让出事件循环，缓存、末项与失败亦然；让原心跳与控制运行，不延长租约或弱化fence。P1只按最近有真实P1派发的已结算观测故障收紧下一次返修，故障消失后恢复冻结并发；无派发或仅复用检查点的控制重启不消耗或重置该次返修。
 - 每阶段绑定真实 seed commit/tree：分析使用 composed，细化包含已审祖先，构建包含已审 Spec，独审使用实际候选。缓存同时核验实际可见 tree；不能只传原 HEAD 而漏掉受控 Spec 修改，也不能混入提交后的 index/WIP。
 - 实现 Agent 在工作树真实修改、测试并正常提交；候选从实际 Git 对象差量导入。程序检查写范围、CAS、原测试和契约演进，生成摘要或自报补丁不能替代实际修改。

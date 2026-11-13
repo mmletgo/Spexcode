@@ -17,6 +17,7 @@ import { freezeGenerationCandidate, freezeGenerationInput, generationBrief, gene
 import type { GenerationInput, GenerationOptions, GenerationResult } from './generation-types.js'
 import type { BlobRef, ComposedInputRef } from './operation-types.js'
 import { contentHash, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot, writeEvidence } from './snapshot.js'
+import type { TreeReadCache } from './snapshot.js'
 import { isUtf8Text } from './composition.js'
 import { readFrozenContracts } from './frozen-contracts.js'
 import { projectSyncPartition, rawOnlyInterfaceSeedEvidence } from './partitioning.js'
@@ -403,6 +404,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
     const seedTarget = interfaceSeed ? targets[0] : undefined
     const intent = seedTarget && seedTarget.nodeId !== input.intent.nodeId ? { nodeId: seedTarget.nodeId, rawSource: parseParts(seedTarget.source ?? '')?.rawSource ?? seedTarget.rawSource! } : input.intent
     const localInput: ElaborationInput = { ...input, requestKey: `${input.requestKey}:partition:${partition.id}`, intent, targets, context,
+      contextVerifications: undefined,
       partitionBinding,
       files: new Map([...input.files ?? []].filter(([path]) => within(path, readPaths)).map(([path, source]) => [path, settledSources.get(path) ?? source])), analysis,
       validationScope: 'partition_local',
@@ -762,6 +764,7 @@ export async function generateSyncPartitions(input: GenerationInput, plan: SyncP
   base.candidateValidated = true
   const reviews = dispatch.reviews
   const settledReviewTraces = [...builders]
+  const reviewTreeCache: TreeReadCache = new Map()
   const checked = await mapSyncPartitions(reviews, maxParallel, input.signal, async local => {
     const key = `partition:${local.id}:candidate-review`, saved = checkpoints.load<GenerationResult>(key)
     const baseInput = { ...local.input, requestKey: `${input.requestKey}:final:${local.id}` }
@@ -775,7 +778,7 @@ export async function generateSyncPartitions(input: GenerationInput, plan: SyncP
     const accepted = checkpoints.loadAcceptedCandidateReview?.(key, plan, reviewInput, candidate, settledReviewTraces)
     if (accepted) { settledReviewTraces.push(...accepted.traces); return accepted }
     checkpoints.save(`${key}:input`, freezeGenerationInput(reviewInput).inputEvidence)
-    const result = await runGeneration(reviewInput, { ...options, beforeFreezeCandidate: undefined, reviewCandidate: candidate, reviewSpecWritePaths: dispatch.specWritePaths, builderTraces: builders, validateCandidate: async () => validationFindings })
+    const result = await runGeneration(reviewInput, { ...options, beforeFreezeCandidate: undefined, reviewCandidate: candidate, reviewSpecWritePaths: dispatch.specWritePaths, builderTraces: builders, validateCandidate: async () => validationFindings }, reviewTreeCache)
     const { candidateFiles: _files, ...compact } = result
     settledReviewTraces.push(...compact.traces)
     checkpoints.save(key, compact)
