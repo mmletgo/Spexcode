@@ -10,7 +10,7 @@ import type { Contract, ContractFinding } from '@spexcode/spec-core/contracts'
 import { candidateReviewError, candidateReviewLocationError } from './candidate-review.js'
 import { actualTreeDiff, exportCandidate, isHostPrivatePath, verifyCandidate } from './candidate.js'
 import type { CodeBehaviorContinuation, CodeBehaviorMaterialRequest, CodeBehaviorPostGateReview } from './code-behavior.js'
-import { analyzeCodeBehavior, authoredContractChanges, CODE_BEHAVIOR_FAILURE_STATUS, CODE_BEHAVIOR_GUIDANCE_VERSION, codeBehaviorReviewSchema, codeBehaviorContinuationStatus, codeBehaviorDraftStatus, deriveBehaviorAuthorization, isCodeBehaviorContextTransport, readCodeBehaviorContext, type CodeBehaviorContextTransport, type CodeBehaviorReviewReference } from './code-behavior.js'
+import { analyzeCodeBehavior, authoredContractChanges, CODE_BEHAVIOR_FAILURE_STATUS, CODE_BEHAVIOR_GUIDANCE_VERSION, LEGACY_CODE_BEHAVIOR_GUIDANCE_VERSION, codeBehaviorReviewSchema, codeBehaviorContinuationStatus, codeBehaviorDraftStatus, deriveBehaviorAuthorization, isCodeBehaviorContextTransport, readCodeBehaviorContext, type CodeBehaviorContextTransport, type CodeBehaviorReviewReference } from './code-behavior.js'
 import type { CodeBehaviorAnalysis, CodeBehaviorEvidence, SyncDecisionInput } from './writeback-types.js'
 import { adoptedDeliveryPaths, baselineResourceKey, extendsWithUninitializedResources, isUtf8Text, readCompositionEvidence, selectedRetiredIds, verifyBaselineSelection } from './composition.js'
 import { readHistoryRequest, readReceiptHistoryRestorations } from './history-input.js'
@@ -1126,7 +1126,7 @@ function saveStage(store: SyncStore, fence: WriteFence, name: string, value: unk
   const resultRef = writeEvidence(commonDir, value)
   const artifacts = syncCheckpointArtifacts(value, resultRef)
   const bindings = basis ? { readSetDigest: basis.readSetDigest, baselineSelectionRef: basis.baselineSelectionRef } : operation.baselineSelection ? { readSetDigest: operation.readSetDigest, baselineSelectionRef: writeEvidence(commonDir, store.readBusinessBaselineSelection(operation.id)) } : {}
-  const guidance = behaviorAnalysisStage(name) && (value as CodeBehaviorAnalysis).reviewPassed === true ? { guidanceContractVersion: CODE_BEHAVIOR_GUIDANCE_VERSION } : {}
+  const guidance = behaviorAnalysisStage(name) && (value as CodeBehaviorAnalysis).reviewPassed === true ? { guidanceContractVersion: (value as CodeBehaviorAnalysis).guidanceContractVersion ?? LEGACY_CODE_BEHAVIOR_GUIDANCE_VERSION } : {}
   if (bindings.baselineSelectionRef) artifacts.push({ kind: 'json', ref: bindings.baselineSelectionRef })
   store.checkpoint(fence, { ...writeEvidence(commonDir, { version: 'sync-stage-v1', operationId: operation.id, attemptId: fence.attemptId, inputId: operation.input.id, policyDigest: operation.policyDigest, ...bindings, ...guidance, ...composition, stage: name, resultRef } satisfies Stage), artifacts })
   return resultRef

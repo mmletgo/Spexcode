@@ -34,6 +34,7 @@ export function codeBehaviorReviewSchema(inputDigest: string, analysisDigest: st
 }
 export type CodeBehaviorApprovalBinding = { analysisSchemaDigest: string; changedPaths: readonly string[] }
 export const CODE_BEHAVIOR_GUIDANCE_VERSION = 'code-behavior-guidance-v8'
+export const LEGACY_CODE_BEHAVIOR_GUIDANCE_VERSION = 'code-behavior-guidance-v7'
 export const CODE_BEHAVIOR_FAILURE_STATUS = 'P0 行为校验未通过'
 const CONTEXT_TRANSPORTS = ['git-json-v1', 'git-json-v2', 'git-json-v3', 'git-json-v4', 'git-json-v5', 'git-json-v6'] as const
 export type CodeBehaviorContextTransport = typeof CONTEXT_TRANSPORTS[number]
@@ -498,7 +499,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   const promptPlan = input.partition ? { ...input.plan, decisionAuthorities: input.plan.decisionAuthorities?.filter(authority => authority.paths.some(localPath) || authority.affectedIds.some(id => promptIds.has(id))), authorizedChanges: input.plan.authorizedChanges?.filter(change => promptIds.has(change.id)), ...(input.plan.version === 'sync-coordinator-v2' && input.plan.commitTrigger ? { commitTrigger: { ...input.plan.commitTrigger, paths: input.plan.commitTrigger.paths.filter(localPath) } } : {}) } : input.plan
   const postGateReview = input.postGateReview?.length ? { postGateReview: input.postGateReview, postGateReviewPolicy: '仅为原分类的非权威质疑；沿原refs、真实旧新行和代码差量重新分析及独审，可维持refactor要求P1恢复错误改写，也可据原意和代码重判allowed_change，不扩大AC/VERIFY授权' } : {}
   const frozen = {
-    guidanceContractVersion: input.contextTransport === 'git-json-v6' ? CODE_BEHAVIOR_GUIDANCE_VERSION : 'code-behavior-guidance-v7',
+    guidanceContractVersion: input.contextTransport === 'git-json-v6' ? CODE_BEHAVIOR_GUIDANCE_VERSION : LEGACY_CODE_BEHAVIOR_GUIDANCE_VERSION,
     ...postGateReview,
     requiredChangedPaths: changedPaths, unownedSourcePaths, unownedSourcePathCount: unownedSourcePaths.length, rawlessSpecPaths,
     ...(readonlyCodeToSpec ? { newNodeParents } : {}),
@@ -941,7 +942,7 @@ SPEX_P0_REVIEW_PATHS`
     if (errors.length) reject(`raw整合越过实际作者/交付编辑范围: ${resolution.path}: ${errors.join('; ')}`)
     return { path: resolution.path, sourceRaw, deliveryRaw, resolvedRaw, expectedRaw: input.decision ? renderControlledDecisionRaw(resolvedRaw, input.decision.request, input.decision.previous.analysis) : resolvedRaw }
   })
-  const analysis: CodeBehaviorAnalysis = { version: 'code-behavior-v1', inputId: input.snapshot.id, baselinePairId: input.baseline?.id ?? null, ...(input.baselineSelection ? { baselineSelectionDigest: input.baselineSelection.digest } : {}), composedDigest: input.composed.contentDigest, readSetDigest: input.readSetDigest, policyDigest: input.policyDigest, inputDigest, decisionAuthorities, ...(input.decision && input.composed.requestBlob ? { decision: { requestRef: input.composed.requestBlob, analysisRef: input.decision.previous.ref, findingIds: input.decision.request.findingIds } } : {}), authorChanges, rawIntegrations, changes, findings, facts: proposal.facts, authorizedChanges, nodeChanges, newNodes, resolutions: proposal.resolutions, traces: [], reviewPassed: false }
+  const analysis: CodeBehaviorAnalysis = { version: 'code-behavior-v1', ...(input.contextTransport === 'git-json-v6' ? { guidanceContractVersion: CODE_BEHAVIOR_GUIDANCE_VERSION } : {}), inputId: input.snapshot.id, baselinePairId: input.baseline?.id ?? null, ...(input.baselineSelection ? { baselineSelectionDigest: input.baselineSelection.digest } : {}), composedDigest: input.composed.contentDigest, readSetDigest: input.readSetDigest, policyDigest: input.policyDigest, inputDigest, decisionAuthorities, ...(input.decision && input.composed.requestBlob ? { decision: { requestRef: input.composed.requestBlob, analysisRef: input.decision.previous.ref, findingIds: input.decision.request.findingIds } } : {}), authorChanges, rawIntegrations, changes, findings, facts: proposal.facts, authorizedChanges, nodeChanges, newNodes, resolutions: proposal.resolutions, traces: [], reviewPassed: false }
   diagnostic.analysis = analysis
   if (continuation) { continuation.readyAnalysis = { ...analysisRequest!, trace: traces[0], draftOid: continuation.drafts.code_behavior_analyze!.oid, resultCommit: continuation.drafts.code_behavior_analyze!.resultCommit }; persist() }
   const analysisDigest = contentHash(JSON.stringify(analysis))

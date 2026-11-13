@@ -8253,6 +8253,33 @@ test('未采纳settled重验重新派发P0/P1并续原Git稿，坏candidate不�
   assert.notEqual(result.receipt!.actualTree, first.receipt!.actualTree)
 })
 
+for (const transport of ['git-json-v5', 'git-json-v6'] as const) test(`P0已审wrapper只标真实生成指导，不能把历史运输贴成新批准 ${transport}`, async t => {
+  const f = await fixture(t, { maxAttempts: 1, maxCalls: 8, maxRepairs: 0, timeoutMs: 120_000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, 'code', 'claude:default')
+  const claimed = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30_000, expectedMessageId: f.operation.dispatchMessageId })
+  const protocol = { version: 'code-behavior-draft-v1', contextTransport: transport }, resultRef = writeEvidence(f.input.source.commonDir, protocol)
+  f.store.checkpoint(claimed.fence, { ...writeEvidence(f.input.source.commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: claimed.attempt.id, inputId: f.input.id, policyDigest: f.operation.policyDigest, stage: 'behavior-draft-protocol', resultRef }), artifacts: syncCheckpointArtifacts(protocol, resultRef) })
+  const purposes: string[] = []
+  f.options.runner = async request => {
+    purposes.push(request.purpose)
+    if (!request.purpose.startsWith('code_behavior_')) throw Object.assign(new Error('fixture止于已审P0之后'), { code: 'unsupported' })
+    const context = readCodeBehaviorContext(request, f.input.source.commonDir), paths = context.task.requiredChangedPaths as string[], pending = context.pendingAnalysis
+    const output = pending
+      ? { inputDigest: request.inputDigest, analysisDigest: pending.analysisDigest, verdict: 'accept', checkedPaths: paths, checkedChangeIds: pending.analysis.changes.map(change => change.id), findings: [] }
+      : { changes: paths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保原导出结果', previousBehavior: '原结果', sourceBehavior: '仅源码注释变化', deliveryBehavior: '无新增业务', evidence: path, counterexample: '重复完成仍保首次结果' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    const worktree = committedDraftFixture(f, request, output, join(f.parent, `guidance-${purposes.length}`))
+    const dispatch = f.store.readAttempt(claimed.attempt.id).dispatchPlans.find(item => item.key === request.requestKey)!
+    const receipt = { summary: '生成指导身份回归' }
+    return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `guidance-${request.purpose}`, turnId: 'turn', output: receipt, resultDigest: contentHash(JSON.stringify(receipt)), worktree }
+  }
+  await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.deepEqual(purposes, ['code_behavior_analyze', 'code_behavior_review', 'elaboration_generate'])
+  const wrapper = readSyncCheckpoints(f.store, f.store.readOperation(f.operation.id), f.store.readAttempt(claimed.attempt.id)).json.map(({ value }) => value as { stage?: string; resultRef: { sha256: string }; guidanceContractVersion?: string }).find(value => value.stage === 'analysis')!
+  const analysis = JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString()) as { reviewPassed: boolean; guidanceContractVersion?: string }
+  assert.equal(analysis.reviewPassed, true)
+  assert.equal(wrapper.guidanceContractVersion, transport === 'git-json-v6' ? 'code-behavior-guidance-v8' : 'code-behavior-guidance-v7', 'wrapper必须从原analysis取指导，不能按当前writer版本补签')
+  assert.equal(analysis.guidanceContractVersion, transport === 'git-json-v6' ? 'code-behavior-guidance-v8' : undefined, '旧analysis字段缺席保持')
+})
+
 for (const frozen of ['new', 'v1', 'v2-reserved', 'v3-reserved', 'v4-reserved', 'v5-reserved', 'legacy-checkpoint', 'reserved', 'null', 'empty', 'future'] as const) test(`P0 context传输只在首次冻结选择，${frozen}保留旧字段缺席与请求绑定`, async t => {
   const f = await fixture(t, { maxAttempts: 1, maxCalls: 8, maxRepairs: 0, timeoutMs: 120_000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, 'code', 'claude:default')
   const claim = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30_000, expectedMessageId: f.operation.dispatchMessageId })
