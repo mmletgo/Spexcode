@@ -5,7 +5,7 @@ import { getBlob } from '@spexcode/spec-core'
 import { applyComponentMigrations, type ProtocolTransaction, type SessionProtocol } from '@spexcode/session-protocol'
 import { controlledDecisionIdentity, readControlledDecision, readControlledRequest } from './request-input.js'
 import { readHistoryRequest } from './history-input.js'
-import { verifyPublicationBase } from './publication-base.js'
+import { assertPublicationParentCurrent, verifyPublicationBase } from './publication-base.js'
 import { selectedRetiredIds } from './composition.js'
 import { proveUnadoptedDelivery } from './source-adoption.js'
 import type { SyncCoordinatorPlan } from './coordinator-types.js'
@@ -632,7 +632,8 @@ export class SyncStore {
   }
   bindPublicationBase(fence: WriteFence, base: PublicationBase): SyncAttempt {
     const originalOperation = this.readOperation(fence.operationId), originalAttempt = this.readAttempt(fence.attemptId)
-    const provenance = verifyPublicationBase(originalOperation, originalAttempt, base)
+    const provenance = verifyPublicationBase(this, originalOperation, originalAttempt, base)
+    if (!originalAttempt.publicationBase) assertPublicationParentCurrent(originalOperation, provenance)
     return this.write(tx => {
       const { operation, attempt } = this.checkFence(tx, fence)
       if (operation.phase !== 'generating' || attempt.candidate || attempt.verification || !operation.baselineSelection || !attempt.composedInput || digest(attempt.composedInput) !== digest(originalAttempt.composedInput)) fail('SYNC_PUBLICATION_BASE_FROZEN', 'publication base only binds before candidate freeze')
