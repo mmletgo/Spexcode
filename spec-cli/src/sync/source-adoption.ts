@@ -20,7 +20,7 @@ export { covers as sourceAdoptionScopeCovers }
 const hasScope = (scope: SyncScope): boolean => !!(scope.paths.length || scope.contractIds.length || scope.flowIds.length)
 const identity = (source: WorktreeIdentity): string => JSON.stringify(source, Object.keys(source).sort())
 const gitText = (commonDir: string, args: string[]): string => objectGit(commonDir, args).toString().trim()
-const ancestor = (commonDir: string, before: string, after: string): boolean => {
+export function isSourceCommitAncestor(commonDir: string, before: string, after: string): boolean {
   try { objectGit(commonDir, ['merge-base', '--is-ancestor', before, after]); return true }
   catch (error) { if ((error as { status?: number }).status === 1) return false; throw error }
 }
@@ -79,7 +79,7 @@ export function proveUnadoptedDelivery(store: SyncStore, operation: SyncOperatio
   if (!same(canonicalScope(scope), canonicalScope(operation.scope))) fail('sync_adoption_incomplete', '真实已结算交付与完整原操作范围不一致')
   const canonicalBranch = `refs/heads/${readConfig(source.canonicalRoot).mainBranch?.trim() || 'main'}`
   const canonical = objectGit(commonDir, ['for-each-ref', '--format=%(refname) %(objectname)', canonicalBranch]).toString().split('\n').find(line => line.startsWith(`${canonicalBranch} `))?.slice(canonicalBranch.length + 1)
-  if (deliveries.some(({ receipt }) => ancestor(commonDir, receipt.actualCommit!, head) || canonical && ancestor(commonDir, receipt.actualCommit!, canonical))) fail('sync_revalidation_already_adopted', '交付已被来源或主分支采纳，不能作为未采纳候选重验')
+  if (deliveries.some(({ receipt }) => isSourceCommitAncestor(commonDir, receipt.actualCommit!, head) || canonical && isSourceCommitAncestor(commonDir, receipt.actualCommit!, canonical))) fail('sync_revalidation_already_adopted', '交付已被来源或主分支采纳，不能作为未采纳候选重验')
   return { operation, journals }
 }
 
@@ -101,7 +101,7 @@ export function prepareSourceAdoption(store: SyncStore, operation: SyncOperation
   const commit = latest.receipt.actualCommit!, alreadyAdopted = readSyncLandingStatus(operation, snapshot, journals, options).sourceSynced
   const adoption = { source: snapshot.source, headCommit: snapshot.headCommit, actualCommit: commit, actualTree: latest.receipt.actualTree, alreadyAdopted }
   if (alreadyAdopted) return { ...adoption, binding: latest.intent.binding }
-  if (!ancestor(snapshot.source.commonDir, snapshot.headCommit, commit)) fail('sync_adoption_not_fast_forward', '原输入工作树与交付已分叉或有后续相关提交，无法快进采纳')
+  if (!isSourceCommitAncestor(snapshot.source.commonDir, snapshot.headCommit, commit)) fail('sync_adoption_not_fast_forward', '原输入工作树与交付已分叉或有后续相关提交，无法快进采纳')
   const footprint = latest.intent.binding.footprintPolicy.privateDirectory
   if (footprint.path !== join(dirname(operation.deliveryPlan.canonicalRoot), 'footprint')) fail('sync_adoption_hooks_unavailable', '交付缺少原可信 footprint 目录')
   const inspected = prepareTrustedHooksBinding(snapshot.source.canonicalRoot, { ...options.tools, privateFootprintDir: footprint.path, operation: 'publish', expectedTree: latest.receipt.actualTree, expectedParent: snapshot.headCommit, expectedRef: snapshot.source.branch })

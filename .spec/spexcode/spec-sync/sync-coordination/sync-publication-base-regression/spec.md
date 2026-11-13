@@ -16,6 +16,8 @@ code:
 
 针对 [[sync-publication-base]]、[[sync-store]] 与 [[sync-private-delivery]] 建立真实 Git 仓库、SQLite store、canonical hooks、journal、receipt 及 source/index 字节断言。覆盖已结算 A1 未合回来源后 B2、同 HEAD A/B 两种发布顺序，完整结果均保留 A1+B2 且不含 A2；B journal 不冒领 A/readonly，A path head 不推进。已结算删除 tombstone 和可执行 mode/OID 逐对象跨独立交付保留。
 
+干净主树的 A/B 从同一 HEAD 开始，两种发布顺序各验证先交付者已采纳和未采纳。后交付者保留前一份实际 receipt 的 Git 祖先，两个正式采纳可连续快进，后一次 journal 只含该操作实际写路径。
+
 config/oracle 只读当前冻结字节和不存在路径进入父树与实际候选；原 source/index 保留。伪 parent、readonly/absence、异来源 frontier、全 path-head CAS、绑定后更换 base 和 candidate 冻结后再绑定均拒绝；无关资源更新不使原 selected 资源过期。真实 commit 后中断仍沿原 commit/tree/parent 恢复，后续独立发布必须等待其结算，再形成继承它的新 base；来源已提交新 HEAD 对象保留且记录 current_head，无关 legacy 只记录明确诊断。
 
 纯发布夹具的冻结计划显式声明空 targets，表示本组不含 owned Spec 义务；不以缺字段模拟可信计划。owned related 与字面 absence 的派生读闭包、原 base 恢复探针由 [[sync-application-regression]] 的旧计划 retry 拒绝与新正式操作场景共同验证，CLI 始终只读，伪换实际 readonly/absence 对象仍被 publication verifier 拒绝。
