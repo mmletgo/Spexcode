@@ -15,7 +15,7 @@ const schema = { type: 'object', properties: { marker: { type: 'string' } }, req
 const finalText = '{"marker":"终态"}'
 const sha256 = (text: string): string => createHash('sha256').update(text).digest('hex')
 
-type Scenario = 'success' | 'wrong-session' | 'wrong-cwd' | 'missing-request' | 'duplicate-terminal' | 'missing-terminal' | 'wrong-format' | 'bad-schema' | 'hang' | 'read' | 'periodic' | 'split-settlement-window' | 'cancel-during-settlement' | 'inherited-stdout' | 'inherited-stdout-trailing' | 'parent-awaits-owned-child' | 'parent-restarts-owned-child' | 'unowned-stdout'
+type Scenario = 'success' | 'wrong-session' | 'wrong-cwd' | 'missing-request' | 'duplicate-terminal' | 'missing-terminal' | 'wrong-format' | 'bad-schema' | 'hang' | 'read' | 'periodic' | 'split-settlement-window' | 'cancel-during-settlement' | 'inherited-stdout' | 'inherited-stdout-trailing' | 'parent-awaits-owned-child' | 'parent-restarts-owned-child' | 'natural-child-shutdown' | 'unowned-stdout'
 
 function fixture(t: TestContext, scenario: Scenario, model = 'grok:default') {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'spex-grok-fixture-')))
@@ -92,6 +92,16 @@ if (scenario === 'split-settlement-window' || scenario === 'cancel-during-settle
   const descendant = spawn(process.execPath, ['-e', childCode, join(dirname(promptFile), 'descendant-ready')], { cwd: outside, detached: true, stdio: ['ignore', 'inherit', 'ignore'] })
   descendant.unref()
   finish()
+} else if (scenario === 'natural-child-shutdown') {
+  const ready = join(dirname(promptFile), 'descendant-ready')
+  const childCode = "const fs=require('node:fs');process.on('SIGTERM',()=>process.exit(143));fs.writeFileSync(process.argv[1],'ready');setTimeout(()=>{},2500)"
+  const descendant = spawn(process.execPath, ['-e', childCode, ready], { stdio: ['ignore', 'inherit', 'ignore'] })
+  descendant.once('exit', code => { process.exitCode = code === 0 ? 0 : 1 })
+  const poll = setInterval(() => {
+    if (!existsSync(ready)) return
+    clearInterval(poll)
+    finish()
+  }, 20)
 } else if (scenario === 'parent-awaits-owned-child' || scenario === 'parent-restarts-owned-child') {
   const ready = join(dirname(promptFile), 'descendant-ready')
   const childCode = "const {writeFileSync}=require('node:fs');const keep=setTimeout(()=>{},21000);process.on('SIGTERM',()=>clearTimeout(keep));writeFileSync(process.argv[1],String(process.pid))"
@@ -276,6 +286,15 @@ test('Grok settles a successful terminal when its parent waits for a recorded ch
     }
     assert.equal((await stopGrokStructuredTurn(f.state(), 5_000)).nativeStopped, true)
   }
+})
+
+test('Grok leaves time for the original CLI to finish its own terminal shutdown', { timeout: 12_000 }, async t => {
+  const f = fixture(t, 'natural-child-shutdown')
+  const result = await f.run()
+  assert.equal(result.turnId, f.requestId)
+  assert.equal(result.text, finalText)
+  const settlement = JSON.parse(readFileSync(join(f.sessionRoot, 'settlement.json'), 'utf8'))
+  assert.deepEqual(settlement.exit, { code: 0, signal: null })
 })
 
 test('Grok settles when the original CLI starts another owned child during terminal shutdown', { timeout: 26_000 }, async t => {

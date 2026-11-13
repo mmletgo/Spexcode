@@ -24,6 +24,7 @@ type NativeSettlement = { launchDigest: string; outputDigest: string; stopDigest
 type StopResult = { nativeStopped: boolean; acknowledged: false; nativeStatus?: string; error?: string }
 
 const STOP_MS = 15_000
+const NATIVE_SHUTDOWN_GRACE_MS = 5_000
 const sha256 = (bytes: string | Buffer): string => createHash('sha256').update(bytes).digest('hex')
 const digest = (value: unknown): string => sha256(JSON.stringify(value))
 const pending = (message: string): StructuredSessionError => new StructuredSessionError('cancellation_pending', message)
@@ -318,9 +319,11 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
           const stillWaiting = (): boolean => Date.now() < exitDeadline && !exitObserved && !timedOut && !observerFailure && !processFailed
             && !callbacks.signal?.aborted && !existsSync(join(root, 'cancel.json')) && sha256(readFileSync(receiptFile)) === binding.receiptDigest
           const signaled = new Map<number, string>()
+          let delayMs = NATIVE_SHUTDOWN_GRACE_MS
           while (stillWaiting()) {
-            await Promise.race([exited, new Promise<void>(resolve => { reapTimer = setTimeout(resolve, 500) })])
+            await Promise.race([exited, new Promise<void>(resolve => { reapTimer = setTimeout(resolve, delayMs) })])
             clearTimeout(reapTimer)
+            delayMs = 500
             if (!stillWaiting()) break
             await Promise.race([exited, stopNativeWorktreeDescendants(ownedLaunch, exitDeadline, stillWaiting, signaled).catch(error => {
               if (!(error instanceof StructuredSessionError && error.code === 'cancellation_pending')) throw error
