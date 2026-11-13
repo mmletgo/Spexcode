@@ -25,7 +25,7 @@ P1 全图 seal 与候选 V1 在已有唯一契约图上调用同一逐 ID 判据
 
 同一 warning 明确显示“历史上未执行”，只进入当前 P1/V1 的正式证据，不扩展新验证报告的 coveredScope 或 unexecutedContractIds。新 receipt 与采纳不能替换范围外旧义务的 pair/head，旧报告与旧详情继续保留其原未执行清单。
 
-冻结计划的证明不再查 live heads。原报告、manifest 与 receipt 继续由既有持久记录保活，计划本身沿原 planBlob 内容寻址；不新增表或证据仓库。新判据须由独立 writer48 围栏保护，旧 saved/reserved 计划不能追加证明，升级与回滚保一致数据库、证据和 Git 引用。
+冻结计划的证明沿原件读取。原报告、manifest 与 receipt 继续由既有持久记录保活，计划本身沿原 planBlob 内容寻址。writer50 保护新判据，旧 saved/reserved 计划保持原字段，升级与回滚保一致数据库、证据和 Git 引用。
 
 每次冻结或候选检查重新认证原件；只在该次校验内按精确 pair、owner 和路径复用条目清单、解析与闭包结果，并沿已有 Git 对象批读读取原件。同 owner 增加旧 ID 不重复原件 I/O 或整份 inventory 构造；当前图的义务展开复用已有 Contract，不能持久缓存授权或跨候选跳过冷验。
 
