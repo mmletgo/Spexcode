@@ -1808,7 +1808,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       }
       const budget = finiteSyncBudget(operation.budget)
       const callTimeoutMs = budget === null ? null : options.callTimeoutMs ?? Math.min(120_000, budget.timeoutMs)
-      let reviewContinuation: { attempt: SyncAttempt; plan: SyncPartitionPlan; generation: SavedGeneration; failedReviewKeys: string[] } | undefined
+      let reviewContinuation: { attempt: SyncAttempt; plan: SyncPartitionPlan; generation: SavedGeneration; failedReviewKeys: string[]; elaboration?: ApprovedElaborationSource } | undefined
       if (readonlyBase && !readonlyOwnerRepair && !refinement && options.plan.version === 'sync-coordinator-v2') {
         for (const prior of store.listAttempts(operation.id).filter(prior => prior.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(prior.status)).reverse()) {
           const generation = partitionStage<SavedGeneration>(store, operation, prior, 'generation')?.result
@@ -1817,11 +1817,26 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           const originalPlan = reviewPlanStage(store, operation, prior, 'partition-plan')?.result
           const candidatePlan = reviewPlanStage(store, operation, prior, 'candidate-partition-plan')?.result
           const candidate = generation.candidate
-          if (!candidate || !generation.candidateValidated || generation.reviewPassed || !(reviewFormatRepairCodes.has(generation.failure?.code ?? '') || completedReviewRepairCodes.has(generation.failure?.code ?? '') || approved && generation.partitionEvidence?.some(evidence => candidateReviewLocationError(evidence.review, approved.changes.flatMap(change => parseContract(change).contract ?? []), generation.p2SpecWritePaths)?.code === 'review_location_format')) || generation.validationFindings.some(finding => finding.severity === 'error') || !approved || writeEvidence(operation.input.source.commonDir, approved).sha256 !== readonlyBase.resultRef.sha256 || !elaborationComposedBinding(store, operation, prior, approved, view.composed) || !originalPlan || !candidatePlan || canonical(candidate.coveredScope.paths) !== canonical(operation.scope.paths)) break
+          if (!candidate || !generation.candidateValidated || generation.reviewPassed || !(reviewFormatRepairCodes.has(generation.failure?.code ?? '') || completedReviewRepairCodes.has(generation.failure?.code ?? '') || approved && generation.partitionEvidence?.some(evidence => candidateReviewLocationError(evidence.review, approved.changes.flatMap(change => parseContract(change).contract ?? []), generation.p2SpecWritePaths)?.code === 'review_location_format')) || generation.validationFindings.some(finding => finding.severity === 'error') || !approved || !elaborationComposedBinding(store, operation, prior, approved, view.composed) || !originalPlan || !candidatePlan || canonical(candidate.coveredScope.paths) !== canonical(operation.scope.paths)) break
           const reviewKeys = readSyncCheckpoints(store, operation, prior).json.map(({ value }) => value as Stage).filter(value => value.stage?.endsWith(':candidate-review')).map(value => value.stage)
           if (!reviewKeys.length || !reviewKeys.some(key => failedCandidateReviewSource(store, operation, prior, key, candidate, candidatePlan)) || !reviewKeys.every(key => { const result = partitionStage<SavedGeneration>(store, operation, prior, key)?.result; return result?.reviewPassed && result.review?.verdict === 'accept' && !result.failure || failedCandidateReviewSource(store, operation, prior, key, candidate, candidatePlan) })) break
           verifyCandidate(operation.input.source.commonDir, candidate)
-          reviewContinuation = { attempt: prior, plan: originalPlan, generation, failedReviewKeys: reviewKeys.filter(key => !partitionStage<SavedGeneration>(store, operation, prior, key)?.result.reviewPassed) }
+          const approvedRef = writeEvidence(operation.input.source.commonDir, approved)
+          let sourceElaboration: ApprovedElaborationSource | undefined
+          if (approvedRef.sha256 !== readonlyBase.resultRef.sha256) {
+            if (!approved.structurePassed || !approved.reviewPassed || approved.failure || approved.status !== 'complete' || !approved.partitionSeal?.passed || !approved.partitionEvidence?.length
+              || !partitionedElaborationCoverageMatches(originalPlan.partitions.map(partition => partition.id), approved.partitionEvidence.map(member => member.partitionId), approved.analysisOnlyPartitions?.map(member => member.partitionId) ?? [])
+              || approved.analysisOnlyPartitions?.length && !authenticatedMixedElaborationCoverage(store, operation, prior, originalPlan, approved)) fail('review_source_binding', '原候选缺少生成当时的完整P1封口及分区批准')
+            const sourceHistory = readonlyElaborationHistory(store, operation)
+            for (const member of approved.partitionEvidence) {
+              store.renewLease(fence!, leaseMs); await yieldToControl(); store.renewLease(fence!, leaseMs)
+              const local = reviewedReadonlyLocal(store, operation, prior, `partition:${member.partitionId}:elaboration`, member.resultRef, approvedRef, 0, sourceHistory)
+              if (local.partitionBinding?.planDigest !== originalPlan.digest || !authenticatedApprovedElaboration(store, operation, prior, local, { allowDeferredImplementation: local.phase === undefined })) fail('review_source_binding', '原候选P1的Native生成、独审或完整冻结输入失配')
+              readStageDraft(operation.input.source.commonDir, local.rounds.at(-1)!.draft!, local.rounds.at(-1)!.draft!)
+            }
+            sourceElaboration = { result: approved, resultRef: approvedRef, operationId: operation.id, attemptId: prior.id }
+          }
+          reviewContinuation = { attempt: prior, plan: originalPlan, generation, failedReviewKeys: reviewKeys.filter(key => !partitionStage<SavedGeneration>(store, operation, prior, key)?.result.reviewPassed), ...(sourceElaboration ? { elaboration: sourceElaboration } : {}) }
           repairContext = stage<{ repairContext?: typeof repairContext }>(store, operation, prior, 'repair-input')?.repairContext
           saveStage(store, fence, 'repair-input', { ...repairInput, repairContext })
           break
@@ -1845,13 +1860,14 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         return readonlySourceHistory
       }
       const readonlyAccepted = (key: string, binding: NonNullable<ElaborationResult['partitionBinding']>, inputDigest: string): SavedElaboration | null => {
-        if (!readonlyBase || readonlyActiveOwners.some(owner => owner.key === key)) return null
-        const approved = readonlyBase!.result
+        const base = reviewContinuation?.elaboration ?? readonlyBase
+        if (!base || readonlyActiveOwners.some(owner => owner.key === key)) return null
+        const approved = base.result
         const expected = approved.partitionEvidence?.find(item => item.partitionId === binding.partitionId)
         if (!expected) return null
         const history = readonlySources()
         for (const origin of history.attempts.filter(item => item.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(item.status)).reverse()) {
-          const source = readonlyLocalSource(store, operation, origin, key, expected.resultRef, readonlyBase!.resultRef, history)
+          const source = readonlyLocalSource(store, operation, origin, key, expected.resultRef, base.resultRef, history)
           if (!source || !source.result.structurePassed || !source.result.reviewPassed || source.result.failure || canonical(source.result.partitionBinding) !== canonical(binding) || (source.result.readonlySpecRepair?.baseInputDigest ?? source.result.inputDigest) !== inputDigest) continue
           if (source.result.rounds.at(-1)?.review?.verdict !== 'accept'
             && (source.result.phase !== undefined || !authenticatedApprovedElaboration(store, operation, origin, source.result, { allowDeferredImplementation: true }))) continue
@@ -1859,6 +1875,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           partitionCheckpoints.save(key, source.result)
           return source.result
         }
+        if (reviewContinuation?.elaboration) fail('review_source_binding', '候选续审的原P1不匹配当前完整局部输入，不能回退或重新细化')
         return null
       }
       const priorElaborationInputMatches = (prior: SyncAttempt, binding?: NonNullable<ElaborationResult['partitionBinding']>, owner = operation, checkpoints?: SyncCheckpointStageView): boolean => {
@@ -2969,6 +2986,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         seed = elaborationRepairSeed(elaboration, `sync:${attempt.id}:elaborate`)
         continue
       }
+      if (reviewContinuation?.elaboration && canonical(elaboration) !== canonical(reviewContinuation.elaboration.result)) fail('review_source_binding', '当前P1重新封口与原候选的实际批准原件不同')
       const acceptedFiles = new Map(view.files)
       seed = undefined; refinement = undefined
       for (const change of elaboration.nodeChanges ?? []) if (change.action === 'retire' || change.from.path !== change.to.path) acceptedFiles.delete(change.from.path)
