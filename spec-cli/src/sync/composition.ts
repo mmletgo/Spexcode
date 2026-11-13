@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -106,7 +107,55 @@ export type IntentArtifactResidual = {
   before: TreeEntry | null; delivery: TreeEntry | null; source: TreeEntry | null; authorBase: TreeEntry | null
   adoptionPairId: string | null; adoptionCommit: string | null; changed: boolean
 }
-const canonical = (value: unknown): string => JSON.stringify(value, (_key, item: unknown) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item)
+const canonicalObject = (value: object): Record<string, unknown> => Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)))
+const canonical = (value: unknown): string => JSON.stringify(value, (_key, item: unknown) => item && typeof item === 'object' && !Array.isArray(item) ? canonicalObject(item) : item)
+
+type BaselineSelectionBody = Pick<FrozenBaselineSelection, 'version' | 'source' | 'bindings'>
+function baselinePairTexts(): (pair: BaselinePair) => string {
+  const objects = new WeakMap<BaselinePair, string>(), identities = new Map<string, string>()
+  return pair => {
+    const cached = objects.get(pair)
+    if (cached !== undefined) return cached
+    const text = canonical(pair), known = identities.get(pair.id)
+    const shared = known === text ? known : text
+    if (known === undefined) identities.set(pair.id, shared)
+    objects.set(pair, shared)
+    return shared
+  }
+}
+
+function hashBaselineSelection(selection: BaselineSelectionBody, pairText: (pair: BaselinePair) => string): string {
+  const hash = createHash('sha256')
+  const record = (value: object, binding: boolean): void => {
+    hash.update('{')
+    let separator = ''
+    for (const [key, item] of Object.entries(canonicalObject(value))) {
+      const bindings = !binding && key === 'bindings' && Array.isArray(item)
+      const text = bindings ? '' : binding && (key === 'bytePair' || key === 'intentPair') && item !== null && typeof item === 'object' && !Array.isArray(item) ? pairText(item as BaselinePair) : canonical(item)
+      if (text === undefined) continue
+      hash.update(separator).update(JSON.stringify(key)).update(':')
+      if (bindings) {
+        hash.update('[')
+        for (let index = 0; index < item.length; index++) {
+          if (index) hash.update(',')
+          const member: unknown = item[index]
+          if (member !== null && typeof member === 'object' && !Array.isArray(member)) record(member, true)
+          else hash.update(canonical(member) ?? 'null')
+        }
+        hash.update(']')
+      } else hash.update(text)
+      separator = ','
+    }
+    hash.update('}')
+  }
+  record({ version: selection.version, source: selection.source, bindings: selection.bindings }, false)
+  return hash.digest('hex')
+}
+
+/** 分段重放原 v1 canonical JSON 字节；同次 pair 正文可复用，不能用其摘要替代原文。 */
+export function baselineSelectionDigest(selection: BaselineSelectionBody): string {
+  return hashBaselineSelection(selection, baselinePairTexts())
+}
 
 export const baselineResourceKey = ({ resource }: FrozenBaselineSelection['bindings'][number]): string =>
   resource.kind === 'path' ? `path:${resource.path}` : `${resource.kind}:${resource.id}`
@@ -124,20 +173,41 @@ export function extendsWithUninitializedResources(before: FrozenBaselineSelectio
 
 /** 精确选择是边界输入；不接受遗漏、错误归属或由全局 latest 补出的基线。 */
 export function verifyBaselineSelection(input: InputSnapshot, selection: FrozenBaselineSelection, treeCache?: TreeReadCache): void {
-  if (selection.version !== 'sync-baseline-selection-v1' || canonical(selection.source) !== canonical(input.source) || selection.digest !== contentHash(canonical({ version: selection.version, source: selection.source, bindings: selection.bindings }))) throw new Error('SYNC_BASELINE_SELECTION_INVALID: identity or digest')
-  const keys = new Set<string>(), checkedPairs = new Map<string, string>()
+  const pairText = baselinePairTexts(), source = canonical(input.source)
+  if (selection.version !== 'sync-baseline-selection-v1' || canonical(selection.source) !== source || selection.digest !== hashBaselineSelection(selection, pairText)) throw new Error('SYNC_BASELINE_SELECTION_INVALID: identity or digest')
+  type PairProof = { text: string; paths: Set<string>; contractIds: Set<string>; flowIds: Set<string> }
+  const keys = new Set<string>(), checkedPairs = new Map<string, PairProof>(), objects = new WeakMap<BaselinePair, PairProof>()
   for (const binding of selection.bindings) {
     const resource = binding.resource, key = resource.kind === 'path' ? `path:${resource.path}` : `${resource.kind}:${resource.id}`
     if (keys.has(key)) throw new Error(`SYNC_BASELINE_SELECTION_INVALID: duplicate ${key}`)
     keys.add(key)
     const pair = 'bytePair' in binding ? binding.bytePair : binding.intentPair
     if (!pair) continue
-    if (canonical(pair.source) !== canonical(input.source) || canonical(pair.sourceInput.source) !== canonical(input.source) || pair.repositoryId !== input.source.repositoryId || pair.verifiedDelivery.source.repositoryId !== input.source.repositoryId || pair.verifiedDelivery.source.commonDir !== input.source.commonDir) throw new Error(`SYNC_BASELINE_SELECTION_INVALID: pair identity ${pair.id}`)
-    const covered = resource.kind === 'path' ? pair.coveredScope.paths.some(path => resource.path === path || resource.path.startsWith(`${path}/`)) : resource.kind === 'flow' ? pair.coveredScope.flowIds.includes(resource.id) : pair.coveredScope.contractIds.includes(resource.id)
+    const checked = checkedPairs.get(pair.id)
+    let prepared = objects.get(pair)
+    if (!prepared) {
+      const text = pairText(pair)
+      if (checked?.text === text) prepared = checked
+      else {
+        if (canonical(pair.source) !== source || canonical(pair.sourceInput.source) !== source || pair.repositoryId !== input.source.repositoryId || pair.verifiedDelivery.source.repositoryId !== input.source.repositoryId || pair.verifiedDelivery.source.commonDir !== input.source.commonDir) throw new Error(`SYNC_BASELINE_SELECTION_INVALID: pair identity ${pair.id}`)
+        const { paths, contractIds, flowIds } = pair.coveredScope
+        prepared = { text, paths: new Set(paths), contractIds: new Set(contractIds), flowIds: new Set(flowIds) }
+      }
+      objects.set(pair, prepared)
+    }
+    let covered = resource.kind === 'flow' ? prepared.flowIds.has(resource.id) : resource.kind === 'contract' ? prepared.contractIds.has(resource.id) : false
+    if (resource.kind === 'path') {
+      let path = resource.path
+      for (;;) {
+        if (prepared.paths.has(path)) { covered = true; break }
+        const separator = path.lastIndexOf('/')
+        if (separator < 0) break
+        path = path.slice(0, separator)
+      }
+    }
     if (!covered) throw new Error(`SYNC_BASELINE_SELECTION_INVALID: uncovered ${key}`)
-    const pairDigest = canonical(pair), checked = checkedPairs.get(pair.id)
-    if (checked && checked !== pairDigest) throw new Error(`SYNC_BASELINE_SELECTION_INVALID: pair payload differs ${pair.id}`)
-    if (!checked) { verifySnapshot(pair.sourceInput, treeCache); verifySnapshot(pair.verifiedDelivery, treeCache); checkedPairs.set(pair.id, pairDigest) }
+    if (checked && checked.text !== prepared.text) throw new Error(`SYNC_BASELINE_SELECTION_INVALID: pair payload differs ${pair.id}`)
+    if (!checked) { verifySnapshot(pair.sourceInput, treeCache); verifySnapshot(pair.verifiedDelivery, treeCache); checkedPairs.set(pair.id, prepared) }
   }
 }
 
