@@ -30,7 +30,7 @@ writer46→47 使用隔离 SQLite 验证正常 online backup、仅追加程序�
 
 writer34 至 writer44 升级到 writer45 的回归验证只追加无 DDL 的缺失 marker。备份可由各自原迁移集合读取，原 schema、操作、attempt 和已注册迁移字节保持。旧 writer 对升级后的库明确拒绝。
 
-批量基线回归使用含引号、换行和 Unicode 的已结算路径及同一合约的真实 pair。加入 1,748 个缺席路径与重复键后，结果仍保留相同 pair、精确缺席及原排序，查询次数与小集合相同。
+批量基线回归使用含引号、换行和 Unicode 的已结算路径及同一合约的真实 pair。加入 1,748 个缺席路径与重复键后，结果仍保留相同 pair、精确缺席及原排序，查询次数与小集合相同；同一事务每个真实 pair 及 settled receipt 只读一次并共享正文。精确选择与发布头摘要须等于原完整 canonical JSON。随后移除 settled 状态或破坏 pair 正文，下一事务必须明确拒绝，原件恢复后才再次通过。
 
 writer34索引回归核v33→v34先一次online backup、只新增目标索引，全部业务/protocol表和v1–v33 registry原行保持；DDL失败时索引及marker整体回滚，旧v33 writer拒绝升级库，备份可按v33读取，重复启动不再备份。历史marker用例模拟旧schema时同时移除该新增索引，旧schema不变断言仅排除这个由v34独立验证的新增对象。完整commit观察以禁用索引的原SQL重算作对照，覆盖超过500条重复、来源/input/difference/outcome分组、failure/blocked及缺失captureKind/outcome、显式null failure、新写和重开；执行计划使用表达式索引、无历史JSON函数及临时GROUP BY，不用固定耗时阈值替代结构证明。
 

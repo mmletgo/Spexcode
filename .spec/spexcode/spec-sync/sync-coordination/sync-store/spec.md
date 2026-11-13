@@ -103,7 +103,7 @@ P4 精确资源 frontier 独立保存路径字节头与 contract/flow 作者意�
 
 selection保存完整精确语义read/protection与write资源；assertSelection重读全部binding并至少含实际operation.scope，允许readonly extras。scope、ready/blocked/delivered只计实际意图/write资源，readonly不取得write lease。expand保原全部readonly binding，union已审新ID/path，任何缺证明的旧资源不能推定null。
 
-精确基线在同一事务批量读取来源内请求的资源头及历史未知路径。每次门禁仍逐项核对路径重叠、成对基线与已结算receipt，保持原排序、缺席和摘要。
+精确基线在同一事务批量读取来源内请求的资源头及历史未知路径；同一 pair 的正文与 settled receipt 只读取一次并供本次 binding 共享，下一事务必须重新读取。每次门禁仍逐项核对路径重叠，保持原排序与缺席。精确选择、发布头、CAS 复核及重验业务选择统一沿 [[sync-input-composition]] 的原 v1 字节分段摘要，不构造重复展开的完整选择字符串；持久正文、摘要值与旧选择的效力不变。
 
 P4原自动语义摘要包括冻结selection；仅逐binding完全相同、或变成该operation自身已settled receipt头才可兼容归并自身已审扩展scope回声。新外来相关byte/intent/read头不能仅凭sameInput/policy吞掉；不同头的新语义重新准入，仍受自动预算族约束。观察的自动去重在同事务以完整source identity、configRef、latestDifferenceDigest和实际selectionDigest命中已有已准入观测；即使全输入/HEAD因无关字节改变，也保存当前真实snapshot与alias payload收据，复用原op/预算而不改其input。仅observed、blocked/failure及显式request/retry不取得此快捷授权。
 
