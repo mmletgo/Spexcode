@@ -299,20 +299,21 @@ function persistNativeOrphanObservation(plan: NativeOwnedPlan, observation: Nati
   writeFileSync(join(plan.root, 'unattributed-processes.json'), JSON.stringify(observation.unattributed), { mode: 0o600 })
 }
 
-export function stopNativeWorktreeDescendants(plan: NativeOwnedPlan, deadline: number, canStop: () => boolean, signaled: Map<number, string>): Promise<void> {
+export function stopNativeWorktreeDescendants(plan: NativeOwnedPlan, deadline: number, canObserve: () => boolean, signaled: Map<number, string>, signalAfter: number): Promise<void> {
   return observeSerially(plan, async limit => {
-    if (!canStop()) return
+    if (!canObserve()) return
     const rows = await nativeProcessCensus(plan, limit)
-    if (!canStop()) return
+    if (!canObserve()) return
     captureOwnedProcesses(plan, limit, rows)
+    if (Date.now() < signalAfter) return
     const currentStarts = new Map(rows.map(({ pid, startToken }) => [pid, startToken]))
     const owned = JSON.parse(readFileSync(join(plan.root, 'owned-processes.json'), 'utf8')) as ProcessIdentity[]
     for (const { pid, startToken } of owned) {
       if (pid === plan.pid || currentStarts.get(pid) !== startToken || signaled.get(pid) === startToken) continue
-      if (!canStop()) return
+      if (!canObserve()) return
       if (processStartToken(pid)?.replace(/\s+/g, ' ') !== startToken) continue
       assertObservationDeadline(limit)
-      if (!canStop()) return
+      if (!canObserve()) return
       try {
         process.kill(pid, 'SIGTERM')
         signaled.set(pid, startToken)
