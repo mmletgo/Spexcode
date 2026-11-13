@@ -407,7 +407,7 @@ export class SyncStore {
     const { model, ...withoutModel } = input
     input = { ...withoutModel, ...syncModelBinding(model) }
     if (input.retryOf !== undefined && (typeof input.retryOf !== 'string' || !input.retryOf.trim())) fail('SYNC_RETRY_BINDING', '显式重试需要有效的原operation身份')
-    if (input.inheritRetryBudget !== undefined && (input.inheritRetryBudget !== true || !input.retryOf || !input.model || !input.planBlob || observation || input.delivery)) fail('SYNC_RETRY_BUDGET_BINDING', '候选续审交接需要已固定计划、原操作及明确的新模型')
+    if (input.inheritRetryBudget !== undefined && (input.inheritRetryBudget !== true || !input.retryOf || !input.model || !input.planBlob || !input.baselineSelection || observation || input.delivery)) fail('SYNC_RETRY_BUDGET_BINDING', '候选续审交接需要已固定计划、精确基线选择、原操作及明确的新模型')
     this.blob(input.input.manifestBlob)
     if (input.retryOf && (this.readOperation(input.retryOf).requestBlob?.sha256 ?? null) !== (input.requestBlob?.sha256 ?? null)) fail('SYNC_RETRY_BINDING', '显式重试必须继承原始用户请求引用')
     const parent = input.retryOf ? this.readOperation(input.retryOf) : null
