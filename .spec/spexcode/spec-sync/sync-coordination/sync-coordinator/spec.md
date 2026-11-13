@@ -17,6 +17,8 @@ related:
 
 ## expanded spec
 
+候选独审的已审来源校验沿 [[sync-input-composition]] 的原 v1 分段摘要核精确冻结选择；大范围共享 pair 时也保持原字节顺序及全部身份。
+
 P1 全图 seal 与完整候选 V1 仅从原 planBlob 的 [[sync-historical-coverage]] 描述构造同一逐 ID 冷验。完整政策摘要、真实 input/composed/candidate 与原收据绑定后才保留历史 warning；不读当前资源头、扩大 ready/coveredScope 或将其记成本轮已执行验收。P1 局部只收到原业务输入。
 
 P1 输入只透传原 planBlob 已冻结的 contextVerifications，供 [[sync-partition-execution]] 的全图封口引用校验；局部模型和 V3 继续使用原 verifications 与 mandatoryTests。旧计划没有该字段时不读取当前 settings 补签。

@@ -12,7 +12,7 @@ import { actualTreeDiff, exportCandidate, isHostPrivatePath, verifyCandidate } f
 import type { CodeBehaviorContinuation, CodeBehaviorMaterialRequest, CodeBehaviorPostGateReview } from './code-behavior.js'
 import { analyzeCodeBehavior, authoredContractChanges, CODE_BEHAVIOR_FAILURE_STATUS, CODE_BEHAVIOR_GUIDANCE_VERSION, LEGACY_CODE_BEHAVIOR_GUIDANCE_VERSION, codeBehaviorReviewSchema, codeBehaviorContinuationStatus, codeBehaviorDraftStatus, deriveBehaviorAuthorization, isCodeBehaviorContextTransport, readCodeBehaviorContext, type CodeBehaviorContextTransport, type CodeBehaviorReviewReference } from './code-behavior.js'
 import type { CodeBehaviorAnalysis, CodeBehaviorEvidence, SyncDecisionInput } from './writeback-types.js'
-import { adoptedDeliveryPaths, baselineResourceKey, extendsWithUninitializedResources, isUtf8Text, readCompositionEvidence, selectedRetiredIds, verifyBaselineSelection } from './composition.js'
+import { adoptedDeliveryPaths, baselineResourceKey, baselineSelectionDigest, extendsWithUninitializedResources, isUtf8Text, readCompositionEvidence, selectedRetiredIds, verifyBaselineSelection } from './composition.js'
 import { readHistoryRequest, readReceiptHistoryRestorations } from './history-input.js'
 import { composeAuthoredInput } from './author-input.js'
 import { elaborate, hasApprovedElaborationReview, elaborationMaterialContext, freezeElaborationInput, gapBlockedFinding, verifyElaborationDraftCache } from './elaboration.js'
@@ -817,7 +817,7 @@ function completedCandidateReviewSource(store: SyncStore, operation: SyncOperati
   const indexes = new Map<string, SyncCheckpointStageView>()
   readIndex ??= source => { let index = indexes.get(source.id); if (!index) { index = readSyncCheckpointStageIndex(store, operation, source); indexes.set(source.id, index) } return index }
   const selected = operation.baselineSelection
-  if (selected && selected.digest !== contentHash(canonical({ version: selected.version, source: selected.source, bindings: selected.bindings }))) return null
+  if (selected && selected.digest !== baselineSelectionDigest(selected)) return null
   let origin = attempt, checkpoints = readIndex?.(origin), source = partitionStage<SavedGeneration>(store, operation, origin, key, undefined, checkpoints)
   while (source) {
     const result = source.result, trace = result.traces[0]
