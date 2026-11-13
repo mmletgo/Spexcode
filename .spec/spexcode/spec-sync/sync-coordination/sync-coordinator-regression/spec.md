@@ -16,6 +16,8 @@ related:
 
 ## expanded spec
 
+候选换模型的混合独审回归在真实 SQLite 冷恢复期间计数格式判据的单对象 Git 调用，保留合法 repair 与格式失败的分流。候选、已审结果及原 Native 绑定继续精确核验。
+
 正式模型交接回归使用真实 Git、隔离 SQLite 与受控 Native 原件，先保存混合 accept、合法 repair 及格式失败的候选，再以直接父 `retryOf`、原预算族和新模型接入。现代与旧 git-json-v4/v7 两种原 P0 均保原 resultRef、原请求与调用账本，只补失败独审后进入精确 P1 owner。新独审完成但 aggregate 尚未保存时正式暂停，SQLite 冷重启沿同一 resultRef 零调用补齐聚合，并核原 publication parentCommit/tree。原 P1 为 needs_input 时逐值保留 GAP；候选、Native 或 required outcome 缺证时零新 P0/P1 派发并明确拒绝。该证据只证明编排与来源认证，不冒称真实模型、V3 或正式交付完成。
 
 混合候选的冷验计数检查同一真实冻结 Git 树只完整读取一次。原候选、已拒稿及全部独审结论保持完整认证。
