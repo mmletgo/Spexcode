@@ -258,7 +258,7 @@ whole P1 aggregate 的 stage wrapper 只在真实计算 strict seal 时保存当
 
 同一次只读返修的来源核验按历史 attempt 共用已认证的 stage 索引与批准依据，核对每个 owner 原件的 readSet、selection 和聚合归属。即时推导的诊断可直接进入当前阶段，冷恢复仍从旧原件重验其冻结诊断。索引不跨执行尝试，不继承写入权限。
 
-Native 细化在原 attempt 的草稿协议阶段冻结封口诊断提示及只读 V1 引用返修的历史诊断展示。新阶段使用封口目录入口及 `actionable-v1` 引用提示，已有阶段按原形态逐字重放。Native 请求绑定真实提示，已审结果继续按原业务输入及正式返修来源校验。
+Native 细化在原 attempt 的草稿协议阶段冻结封口诊断提示及只读 V1 引用返修的提示形态。新阶段使用封口目录入口、`actionable-v1` 历史诊断展示及本地默认导出提示，已有阶段按原形态逐字重放。Native 请求绑定真实提示，已审结果继续按原业务输入及正式返修来源校验。
 
 已认证 native_worktree_result_invalid 与既有精确结构输出失败共用分析修复准入和单体/分区诊断筛选；原 mode/seed/HEAD/tree/status 诊断只反馈对应分区的新分析及独审。原资源未结算不得重派，正式结算后在新 attempt/新工作树重做，不采纳或清理旧脏工作树。生成续修沿既有 attempt.failure 反馈真实 code/message；不增加权限或绕过原预算和独审。
 

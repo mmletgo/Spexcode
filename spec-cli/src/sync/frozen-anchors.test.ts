@@ -21,6 +21,24 @@ test('V1解析冻结的TS/Python、related和代码来源，不要求宿主存�
   assert.equal(result.anchors.find(x => x.origin === 'source')!.itemId, 'RULE-EXPORT-01')
 })
 
+test('V1精确引用JS族本地默认导出声明及其源码范围', async () => {
+  const path = 'src/config.ts', ref = `${path}#default`
+  const source = 'const target = "local"\nexport default defineConfig({\n  test: { environment: "jsdom" },\n  build: { manualChunks(id: string) { return id } },\n  target,\n})\n'
+  const files = new Map([[path, source]])
+  const graph = buildContractGraph([contract([ref], [], ref)])
+  const valid = await validateFrozenAnchors(graph, files)
+  assert.deepEqual(valid.findings, [])
+  assert.deepEqual(valid.anchors.map(anchor => anchor.unit), [
+    { name: 'default', kind: 'export-default', start: 2, end: 6 },
+    { name: 'default', kind: 'export-default', start: 2, end: 6 },
+  ])
+  const dead = await validateFrozenAnchors(buildContractGraph([contract([], [], `${path}#manualChunks`)]), files)
+  assert.equal(dead.findings[0].code, 'anchor-dead')
+  assert.match(dead.findings[0].message, /#default/)
+  const onlyDefault = new Map([[path, source.slice(source.indexOf('\n') + 1)]])
+  assert.deepEqual(await findWholeFileSourcePaths(onlyDefault, [path]), [])
+})
+
 test('V1文件级来源保留精确路径和空选择器，不改变裸治理及相关路径的语义', async () => {
   const files = new Map([['src/export.ts', 'export const value = 1'], ['src/related.py', 'def run(): pass\n'], ['src/docs.py', '"""说明。"""\n']])
   const graph = buildContractGraph([contract(['src/export.ts'], ['src/related.py'], 'src/docs.py')])
