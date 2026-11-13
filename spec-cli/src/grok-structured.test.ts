@@ -382,7 +382,11 @@ test('Grok read uses native plan mode, removes plan exit and leaves the original
   const f = fixture(t, 'read')
   const result = await f.run()
   assert.equal(result.text, finalText)
+  const invocation = JSON.parse(readFileSync(f.started, 'utf8')) as { prompt: string }
+  assert.match(invocation.prompt, /built-in file readers or read-only shell commands/)
+  assert.match(invocation.prompt, /avoid the search_tool and use_tool discovery wrappers/)
   assert.equal(nativeWorktreeResult(f.workspace, f.worktree).headCommit, f.worktree.baseCommit)
+  assert.deepEqual(await f.run(f.state(), replayCallbacks), result)
 })
 
 for (const scenario of ['wrong-session', 'wrong-cwd', 'missing-request', 'duplicate-terminal', 'missing-terminal'] as const) {
