@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+superseded 结算查询用真实 SQLite 的两轮 attempt、另一操作的活动租约以及真实已结算资源/journal 验证。缺失或外来 current、任一历史非终态、非空 token 且未到期的租约、未 removed 资源和未 settled journal 均不合格；过期边界与 NULL token 保原语义，冷重开结果相同且查询不写记录。128 份大正文历史及 19,168 份已释放租约中，连续核 23 个指定操作不得读取 JSON 列或返回全历史行；对照原查询的实际正文读取量，EXPLAIN 必须显示现有主键/operation 索引和非空 token 索引范围，不以固定耗时断言替代访问范围证明。此证据只验证结算事实，不授予业务批准或真实产品交付。
+
 writer51→52 复用真实 SQLite marker 迁移回归，核对原表行和旧迁移记录、事务失败回滚、旧 writer 拒绝和可恢复的在线备份。
 
 writer49→50 复用隔离 SQLite 迁移回归，验证旧 writer 拒绝、事务失败回滚、原观察及旧表行保持和在线备份可恢复。具体历史资格与新收据行为由 [[sync-historical-coverage]] 验收。

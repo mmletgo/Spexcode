@@ -1029,6 +1029,21 @@ export class SyncStore {
     }
     return this.write(tx => this.retryEligibility(tx, this.operation(tx, operationId), proof))
   }
+  /** 仅核指定已替换操作的结算事实；原批准与输入绑定仍由调用者认证。 */
+  isSupersededOperationSettled(operationId: string): boolean {
+    return this.write(tx => {
+      const row = tx.query(`SELECT o.phase='superseded'
+        AND EXISTS (SELECT 1 FROM sync_attempts c WHERE c.id=o.current_attempt_id AND c.operation_id=o.id)
+        AND NOT EXISTS (SELECT 1 FROM sync_attempts a WHERE a.operation_id=o.id AND a.status NOT IN ('failed','superseded','settled'))
+        AND NOT EXISTS (SELECT 1 FROM sync_leases l INDEXED BY sync_leases_owner
+          WHERE l.token IS NOT NULL AND l.operation_id=o.id AND l.expires_at_ms>?)
+        AND NOT EXISTS (SELECT 1 FROM sync_resources r WHERE r.operation_id=o.id AND r.phase!='removed')
+        AND NOT EXISTS (SELECT 1 FROM sync_apply_journals j WHERE j.operation_id=o.id AND j.status!='settled') AS settled
+        FROM sync_operations o WHERE o.id=?`, this.now(), operationId)[0]
+      if (!row) fail('SYNC_OPERATION_UNKNOWN', operationId)
+      return row.settled === 1
+    })
+  }
   readBudgetUsage(operationId: string): { budgetRootOperationId: string; callsUsed: number; attemptsUsed: number; repairFailures: number } {
     return this.write(tx => {
       const operation = this.operation(tx, operationId), family = this.family(tx, operation)
