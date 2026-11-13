@@ -88,3 +88,5 @@ ReadonlySpecRepair的candidate_review来源保留真实generationRef、各分区
 ReadonlySpecRepair可用kind:partition_seal标记全局封口反馈；generationRef在此分支指原失败partitioned_final aggregate，acceptedRef仍指其真实已审局部，candidateDigest绑定原partitionSeal候选，findings仅含error。该诊断进入新局部输入/请求摘要，不修改历史accept、原意、作者授权或预算。
 
 显式只读未执行覆盖的 `acceptance-not-executed` 发现保留在局部检查和全局 seal 中，独审绑定同一候选；它提供声明 ID 和测试缺口，真实执行仍由 V3 记录。
+
+ElaborationGapReviewEvidence是显式调用只读复核得到的diagnosticOnly证据：绑定原aggregateRef、partitionPlanDigest、局部owner refs、完整输入/候选摘要、指定GAP、真实只读树与requestKey/trace，并保留原reviewOutput、合法review和校验发现。不保存候选正文副本，不返回ready、授权或完成字段，不加入旧ElaborationResult、ReadonlySpecRepair或持久操作协议；该证据不能清除GAP或替代正式Native来源认证及新的owner生成/独审。

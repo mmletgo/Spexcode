@@ -129,3 +129,5 @@ Native局部P1的精确结构输出格式失败沿同一checkpoint接缝传递�
 已有认证draft不屏蔽更晚正式停止执行的最新Git观察。材料选择携当前draft作瞬态参数，仅当原正常Native/注入trace认证定位到该draft来源，暂停资源在既有retry来源顺序中严格更晚、原seed与当前业务树除本owner临时稿/schema外全部对象相同，且所有原材料门槛仍过时，才复制其最新正常Git正文到新seed。更老暂停、未知来源、不同起点及普通Native/material fallback不能覆盖已有draft；无更晚可救稿则保持原draft、错误与标签，不继承批准。该参数不进入业务摘要、旧请求或持久协议。
 
 显式只读覆盖选择进入完整分区与全局 seal。薄父接口保留原独审请求及摘要，供其后代继续引用。
+
+完整 P1 的只读 GAP 诊断接缝只读取已通过严格 seal 的 aggregate 与其原局部 refs，重核原计划、正文并集及完整输入后，使用既有 `elaboration_review` 检查本次新提议、来自 code/derived 的 missing_fact。真实只读 seed 包含冻结源码和同一并集中的已审兄弟正文，任务明确给出原件与 GAP 定位；已有作者 GAP、冲突和没有合格 GAP 的候选不增加调用。输出仅为带原始 review、真实 trace 和校验发现的诊断证据，不改变原 aggregate、ready/blocked、稳定 ID、草稿或授权，不进入自动协调、裁决、恢复和交付。该接缝不替代协调器对 Native 派发、资源结算及同 operation 来源的认证；在正式接入和精确返修权限另有证明前，诊断不能重开 owner 或清除 GAP。

@@ -6,10 +6,10 @@ import { contractReferences, parseContract, parseParts } from '@spexcode/spec-co
 import { analyzeCodeBehavior, compositionConflictPaths, deriveBehaviorAuthorization, partitionBehaviorChangedPaths, uncoveredCompositionConflicts, verifyBehaviorReadBasis } from './code-behavior.js'
 import type { CodeBehaviorApprovalBinding, CodeBehaviorInput, CodeBehaviorContinuation, CodeBehaviorMaterialRequest, CodeBehaviorReviewReference } from './code-behavior.js'
 import { elaborationSchema, outputErrors } from './elaboration-schema.js'
-import { elaborate, freezeElaborationInput, verifyElaborationDraftCache, projectElaborationFlowReadiness, sealPartitionedElaboration, partitionSealRepairContext } from './elaboration.js'
+import { elaborate, freezeElaborationInput, inspectElaborationGaps, verifyElaborationDraftCache, projectElaborationFlowReadiness, sealPartitionedElaboration, partitionSealRepairContext } from './elaboration.js'
 import type { Contract, ContractFinding, Verification } from '@spexcode/spec-core/contracts'
 import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE, partitionedElaborationInputDigest } from './elaboration-types.js'
-import type { AnalysisOnlyPartitionEvidence, Applicability, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationTrace, ElaborationSessionRequest, ElaborationChange, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ReadonlySpecRepair, VerificationOwnershipProjection } from './elaboration-types.js'
+import type { AnalysisOnlyPartitionEvidence, Applicability, ElaborationGapReviewEvidence, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationTrace, ElaborationSessionRequest, ElaborationChange, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ReadonlySpecRepair, VerificationOwnershipProjection } from './elaboration-types.js'
 import { elaborationTargetBindings, projectVerificationTable, withoutVerificationTables, readonlyFactRepairPreservesTarget, targetHasCurrentChanges } from './elaboration-markdown.js'
 import { actualTreeDiff, isHostPrivatePath, verifyCandidate } from './candidate.js'
 import type { CandidateChanges } from './candidate.js'
@@ -538,6 +538,35 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
     partitionEvidence, ...(analysisOnlyPartitions.length ? { analysisOnlyPartitions } : {}), ...(verificationProjectionRef ? { verificationProjectionRef } : {}),
   }
   return compact
+}
+
+/** 独立取证不接入自动协调；旧批准和未知业务保持原件，后续返修须另经正式来源门。 */
+export async function inspectPartitionedElaborationGaps(input: ElaborationInput, plan: SyncPartitionPlan, aggregateRef: BlobRef, runner: ElaborationRunner): Promise<ElaborationGapReviewEvidence | null> {
+  if (!input.historyInput) reject('GAP复核缺少冻结输入')
+  const commonDir = input.historyInput!.source.commonDir
+  const aggregate = JSON.parse(readEvidence(commonDir, aggregateRef).toString('utf8')) as Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>
+  const seal = aggregate.partitionSeal
+  if (aggregate.phase !== 'partitioned_final' || !aggregate.structurePassed || !aggregate.reviewPassed || aggregate.failure || !seal?.passed
+    || aggregate.candidateDigest !== seal.candidateDigest || aggregate.candidateDigest !== contentHash(JSON.stringify({ inputDigest: seal.inputDigest, changes: seal.changes, applicability: seal.applicability, nodeChanges: seal.nodeChanges }))) reject('GAP复核必须绑定原已审完整候选和通过的封口摘要')
+  const ownerRefs = aggregate.partitionEvidence ?? []
+  const locals = ownerRefs.map(owner => {
+    const local = JSON.parse(readEvidence(commonDir, owner.resultRef).toString('utf8')) as Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>
+    if (!plan.partitions.some(partition => partition.id === owner.partitionId) || local.partitionBinding?.planDigest !== plan.digest || local.partitionBinding.partitionId !== owner.partitionId || !local.structurePassed || !local.reviewPassed || local.failure) reject('GAP复核局部原件不属于同一已审分区计划')
+    return local
+  })
+  if (new Set(ownerRefs.map(owner => owner.partitionId)).size !== ownerRefs.length || ownerRefs.length !== plan.partitions.length || aggregate.analysisOnlyPartitions?.length
+    || aggregate.inputDigest !== partitionedElaborationInputDigest(plan.digest, locals.map(local => local.inputDigest))) reject('GAP复核缺少完整且唯一的P1 owner原件')
+  const changes = locals.flatMap(local => local.changes)
+  if (changes.length !== seal!.changes.length || new Set(changes.map(change => change.path)).size !== changes.length
+    || seal!.changes.some(change => !changes.some(local => local.path === change.path && local.nodeId === change.nodeId && local.beforeDigest === change.beforeDigest && withoutVerificationTables(local.source) === withoutVerificationTables(change.source)))
+    || aggregate.changes.some(change => change.contentDigest !== contentHash(change.source) || !seal!.changes.some(sealed => sealed.path === change.path && sealed.nodeId === change.nodeId && sealed.beforeDigest === change.beforeDigest && sealed.source === change.source))
+    || aggregate.changes.length !== seal!.changes.length) reject('GAP复核并集与原已审owner正文不一致')
+  if (freezeElaborationInput({ ...input, phase: undefined, validationScope: undefined }).inputDigest !== seal!.inputDigest) reject('GAP复核当前完整输入不匹配原封口候选')
+  const existing = new Set([...input.targets, ...input.context ?? []].flatMap(target => target.source ? parseContract({ ...target, source: target.source }).contract?.items.map(item => item.id) ?? [] : []))
+  const gapIds = seal!.changes.flatMap(change => parseContract(change).contract!.items).filter(item => item.kind === 'GAP' && item.gapKind === 'missing_fact' && ['code', 'derived'].includes(item.source.kind) && !existing.has(item.id)).map(item => item.id)
+  if (!gapIds.length) return null
+  const candidate = { inputDigest: seal!.inputDigest, changes: seal!.changes, applicability: seal!.applicability, nodeChanges: seal!.nodeChanges }
+  return inspectElaborationGaps(input, candidate, gapIds, { aggregateRef, partitionPlanDigest: plan.digest, ownerRefs }, locals.flatMap(local => local.rounds.flatMap(round => round.traces)), runner)
 }
 
 /** P1新身份与实际依赖完成后冻结候选审查覆盖；沿用原分区身份及原独审原件。 */

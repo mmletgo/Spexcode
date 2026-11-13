@@ -17,7 +17,7 @@ import { CONTRACT_FLOW_INSTRUCTIONS, CONTRACT_INSTRUCTIONS, CONTRACT_SOURCE_INST
 import { bindElaborationTargets, elaborationPatchErrors, elaborationTargetBindings, hasTypedCitationRepair, renderElaboration, unchangedTargetOutput, withoutVerificationTables, projectVerificationTable, readonlyFactRepairIds, readonlyFactRepairPreservesTarget, targetHasCurrentChanges } from './elaboration-markdown.js'
 import type { GeneratedElaboration, GeneratedTargetElaboration, GeneratedTables } from './elaboration-markdown.js'
 import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE, ELABORATION_GENERATION_GUIDANCE_V1, ELABORATION_GENERATION_GUIDANCE_V2, ELABORATION_GENERATION_GUIDANCE_V3, ELABORATION_GENERATION_GUIDANCE_V4 } from './elaboration-types.js'
-import type { Applicability, ElaborationCandidate, ElaborationChange, ElaborationInput, ElaborationPartitionSeal, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ElaborationResult, ElaborationReview, ElaborationRound, ElaborationRunner, ElaborationTrace, ElaborationTarget, ElaborationSessionRequest, ReadonlySpecRepair } from './elaboration-types.js'
+import type { Applicability, ElaborationCandidate, ElaborationChange, ElaborationGapReviewBasis, ElaborationGapReviewEvidence, ElaborationInput, ElaborationPartitionSeal, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ElaborationResult, ElaborationReview, ElaborationRound, ElaborationRunner, ElaborationTrace, ElaborationTarget, ElaborationSessionRequest, ReadonlySpecRepair } from './elaboration-types.js'
 export type { Applicability, AuthorizedContractChange, BlockedElaborationFlow, ElaborationCandidate, ElaborationChange, ElaborationFact, ElaborationInput, ElaborationPartitionSeal, ElaborationPhase, ElaborationPriorReference, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ElaborationResult, ElaborationReview, ElaborationReviewFinding, ElaborationRound, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ElaborationTarget, ElaborationTrace } from './elaboration-types.js'
 
 const DEFAULT_CALL_TIMEOUT_MS = 900_000
@@ -565,6 +565,44 @@ function reviewErrors(input: ElaborationInput, review: ElaborationReview, inputD
     }
   }
   return findings
+}
+
+/** 对完整候选的指定 GAP 只读取证；调用方仍拥有派发、预算、原件认证及后续处置。 */
+export async function inspectElaborationGaps(input: ElaborationInput, candidate: ElaborationCandidate, gapIds: readonly string[], basis: ElaborationGapReviewBasis, priorTraces: readonly ElaborationTrace[], runner: ElaborationRunner): Promise<ElaborationGapReviewEvidence> {
+  const frozen = freezeElaborationInput({ ...input, phase: undefined, validationScope: undefined })
+  input = frozen.input; candidate = structuredClone(candidate); basis = structuredClone(basis)
+  const selected = [...new Set(gapIds)].sort(), inputDigest = frozen.inputDigest, candidateDigest = digest(candidate)
+  if (!input.worktree || !input.historyInput || input.implementationWritePaths?.length !== 0 || candidate.inputDigest !== inputDigest) throw new TypeError('GAP只读复核必须绑定原完整输入及只读实现范围')
+  const checked = checkCandidate(input, candidate, inputDigest, { strictContextCoverage: true })
+  const coverage = projectContractCoverage(checked.graph)
+  if (checked.findings.some(issue => repairRequired(issue, coverage))) throw new TypeError('GAP只读复核不能绕过完整候选的严格封口')
+  const gaps = selected.map(id => checked.graph.items.get(id)).filter((item): item is Gap => item?.kind === 'GAP')
+  if (!selected.length || selected.length !== gapIds.length || gaps.length !== selected.length) throw new TypeError('GAP只读复核必须精确选择当前候选中的唯一GAP')
+  const worktree = stageWorktree(input.historyInput.source.commonDir, input.historyInput.headCommit, overlayStageTree(input.historyInput.source.commonDir, input.worktree.tree, [
+    ...input.context ?? [], ...candidate.changes,
+    ...(candidate.nodeChanges ?? []).filter(change => change.action === 'retire' || change.from.path !== change.to.path).map(change => ({ path: change.from.path, source: null })),
+  ]))
+  const prompt = `${STAGE_READING_INSTRUCTIONS} 仅对指定GAP作只读诊断，核对冻结原意、真实源码和同一已审并集中的责任属主；不要把单个端口未定义的调用方政策误当业务未知。其他已审Spec已在当前只读树中，沿真实调用或契约依赖查阅。已有事实确能回答时，以repair给出具体反例、原规则和真实代码定位；事实仍不足时保留missing_fact/conflict及准确影响项，不能选择新业务政策。诊断不授予写权限、GAP删除、业务裁决或候选批准，禁止修改文件或执行候选。复用P1审查schema，各适用边界仍须核对；每条finding必须定位指定GAP或其原affects中的项，其他已存在ID只能作证据。accept仅表示本次没有新的诊断，不清除原GAP。\n任务:\n${JSON.stringify({ ...basis, sourceInputId: input.historyInput.id, candidateDigest, gaps, relatedSpecs: candidate.changes.filter(change => gaps.some(gap => gap.nodeId === change.nodeId && gap.path === change.path)).map(change => ({ nodeId: change.nodeId, path: change.path })) })}`
+  const schema = structuredClone(ELABORATION_REVIEW_SCHEMA), purpose = 'elaboration_review'
+  const requestKey = `${input.requestKey}:gap-inspection:${candidateDigest}`, requestDigest = digest({ inputDigest, purpose, prompt, schema, worktree })
+  const originalTraces = structuredClone([...priorTraces, ...input.analysis?.analysis.traces ?? []])
+  input.signal?.throwIfAborted()
+  const session = await runner({ root: input.root, base: worktree.baseCommit, worktree, requestKey, inputDigest: requestDigest, purpose, prompt, schema, timeoutMs: input.timeoutMs === undefined ? DEFAULT_CALL_TIMEOUT_MS : input.timeoutMs, signal: input.signal, model: input.model, effort: input.effort })
+  const reviewOutput = structuredClone(session.output), trace: ElaborationTrace = { purpose, sessionId: session.sessionId, threadId: session.threadId, turnId: session.turnId, resultDigest: session.resultDigest, inputDigest: requestDigest }
+  const findings = outputErrors(reviewOutput, schema).map(message => finding(input, 'output_schema', message))
+  if (session.resultDigest !== digest(reviewOutput)) findings.push(finding(input, 'review_digest', 'GAP独审原始输出与Native结果摘要不符'))
+  if (originalTraces.some(prior => prior.sessionId === trace.sessionId || prior.threadId === trace.threadId)) findings.push(finding(input, 'review_not_independent', 'GAP独审须独立于原生成、独审及行为分析会话'))
+  let review: ElaborationReview | null = null
+  if (!findings.length) {
+    const output = reviewOutput as Omit<ElaborationReview, 'inputDigest' | 'candidateDigest'>
+    const focus = new Set(gaps.flatMap(item => [item.id, ...item.affects]))
+    if (output.findings.some(issue => !issue.affectedIds.some(id => focus.has(id)) || issue.affectedIds.some(id => !checked.graph.items.has(id)))) findings.push(finding(input, 'review_binding', 'GAP诊断必须绑定指定GAP闭包及全部真实存在的ID'))
+    else {
+      review = { ...output, inputDigest, candidateDigest }
+      findings.push(...reviewErrors(input, review, inputDigest, candidateDigest, checked.graph))
+    }
+  }
+  return { ...basis, diagnosticOnly: true, inputDigest, candidateDigest, gapIds: selected, worktree, requestKey, trace, reviewOutput, review, findings }
 }
 
 /** FLOW 可整体推进须自身和声明步骤均无 GAP；聚合阻塞不反向污染独立子项。 */
