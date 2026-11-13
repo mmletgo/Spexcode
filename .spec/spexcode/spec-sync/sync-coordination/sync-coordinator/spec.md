@@ -72,7 +72,7 @@ P1的whole缓存沿[[sync-elaboration]]同时核身份与当前owner范围。分
 
 后置P1 refactor_business_meaning_changed只向其原P0真实变更owner回审：每轮从当前operation或精确绑定的正式retryOf祖先已结算原round重算资格，核原analysisRef、readSet/selection/composed及分区plan/owner，旧行须与原候选beforeDigest逐字一致。无关P1漂移、非原affectedId、非本owner、缺失或错误引用以及AC/VERIFY不取得分类回授。精确质疑进入新P0输入身份，原已审whole及受影响局部不得直接复用，原Git/Native稿只作认证材料并重新分析和独审；同预算族、fence、operation、attempt/calls/repairs及deadline不变，已有reserved请求摘要不得重签。新analysisRef使P1依赖沿完整原binding重新生成及独审，兄弟P0仍按原唯一输入摘要承接；不承诺兄弟P1缓存不变。与该来源认证共用的P1修复诊断也接收已有rendered candidate的完整round.findings，且必须保持同owner、inputDigest及新requestKey，只作actualprompt诊断，不转成seed、不补写旧draft短errors或旧原件。
 
-定位原P1阶段时，各分区在本次回审扫描内共享同一历史attempt的完整认证检查点，并保留各自的来源优先顺序与绑定校验。首次读取历史检查点和处理匹配阶段前，沿当前fence续租、让出事件循环并复核租约。
+定位原P1阶段时，各分区在本次回审扫描内共享同一历史attempt的完整认证检查点，并保留各自的来源优先顺序与绑定校验。只读P1原件和草稿选源在同次恢复查询中共用历史wrapper视图，保持原operation绑定；当前活动attempt不进入该共享索引，重入重新读取，具体来源的Native与资源资格继续按原门认证。首次读取历史检查点和处理匹配阶段前，沿当前fence续租、让出事件循环并复核租约。
 
 新P0按attempt显式冻结code-behavior-draft-v1，已有code_behavior reserved派发不补签。whole与partition的临时草稿continuation沿原stage/input/readSet/selection保存，分区另核原plan digest；来源由当前operation及正式retryOf祖先的已终结attempt统一枚举；续修材料跨operation不携readyAnalysis或批准，前述局部批准复用单独按原件认证；加载时记录原resultRef provenance，沿精确continuation-provenance核已校验分析及当前独审的原请求、summary回执、Native身份与真实Git draft path/OID/schema/seed/resultCommit/resultTree。业务摘要不包含非权威修复诊断，但真实prompt/request仍包含；格式失败沿原预算新attempt续原JSON，review格式失败保留此前已校验分析，业务拒绝仍重新分析与独审。已有只读Native格式拒绝沿authenticateNativeRejectedFinal核原请求/精确schema/input、canonical Native错误及已停止removed资源；旧累计诊断仅从原/当前任务的可复算结构化表示移除顶层repairDiagnostics，其余指令、业务字段、待审分析与只读seed、selection/composed及精确schema完全一致才迁接，认证仍使用原inputDigest；不因最新schema不符默退旧材料。只将原CAS文本和真实错误投影为下一真实临时输入，保plan/checkpoint provenance，不补历史draft或accept。
 
@@ -254,7 +254,7 @@ whole P1 aggregate 的 stage wrapper 只在真实计算 strict seal 时保存当
 
 正式重试可跨过多轮已正式结算的封口返修。只有原Native请求和checkpoint逐项匹配同一封口的owner、局部批准、诊断及请求摘要时，才接续原封口。较新的真实全树结果先核。已独审且输入相同的局部沿原批准复用，未批准稿按原真实生成来源继续。
 
-同一 operation 完成原生周期进程观测故障的资源结算后，P1 按 [[sync-partition-execution]] 收紧后续并发。该调度决定只读取已结束并被后续 attempt 替代的原失败记录，写入栅栏规则、预算和证据保持。
+同一 operation 完成原生周期进程观测故障的资源结算后，P1 按 [[sync-partition-execution]] 仅收紧下一次实际 P1 派发的并发。调度只看最近有 P1 派发的历史 attempt：其已被后续 attempt 替代且保有已结算的观测故障时串行返修，后续真实返修不再有该故障便恢复冻结计划的并发上限；新的观测故障仍可触发下一次串行。无派发或仅复用检查点的控制重启不消耗该次返修，也不重新激活更早故障。写入栅栏规则、预算、原失败及其证据保持，不新增持久调度状态。
 
 只读 V1 引用返修可同批处理已认证的符号错误和缺失 related 路径。诊断须属于同一实际失败候选，只给有错误的 P1 owner；其它完整性、业务、配置或解析器不可用错误沿原门禁处理。未取得全树批准的返修 attempt 可能已复制兄弟结果，后续查找沿精确同操作来源回到原批准，不以复制阶段的 readSet 或 selection 重签。
 
