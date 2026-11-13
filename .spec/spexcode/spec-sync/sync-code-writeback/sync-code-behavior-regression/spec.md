@@ -12,6 +12,8 @@ related:
 
 ## expanded spec
 
+真实 Git 的整体及分区 P0 回归先复现未选 contextVerifications 泄漏到模型任务，再核分析与独审都不携该字段或区外 VERIFY 定义；原 verifications、mandatoryTests、完整政策摘要及输入计划逐值保持。
+
 legacy冻结程序尾段先复现errors被[]替代，再核完整原对象及repairDiagnostics只读返回；字符串含相同分隔标记、转义引号/反斜线/换行、嵌套JSON和旧summary文字均正确，重复/缺尾/错schema路径/非数组/损坏或额外正文拒绝。原空数组不混旧错误，非draft请求无段保原空诊断。真实Git legacy/file续改夹具核新seed原稿/schema/OID与读回原错误对象相同，request原bytes不改；git-json业务摘要及23次accepted早退零调用保持。不代表真实模型或正式交付。
 
 P0 git-json-v2 回归以同一真实 Git fixture 对照旧运输。新 context 与 Native 请求不携历史诊断正文，完整当前任务和待审分析仍保持，旧业务输入与已批准复用身份一致。失败原稿仍可修改，程序只存状态摘要，业务修订读取真实独审原件。
