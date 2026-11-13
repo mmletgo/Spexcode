@@ -2,6 +2,7 @@
 
 - 本目录复用 session 原生工作树执行与 spec-core/contracts；不自行维护第二份契约图或会话执行器。旧受限结构化策略只按原绑定恢复历史任务。
 - Dashboard 保存 Spec 立即进入 spec→code；外部文件保存/index变化只观察，Git 提交冻结 HEAD 后才派发。已采纳的真实同步发布先消费为基线，避免回声或污染下次提交方向。
+- 已启用的主分支自动采纳新授权的完整已验证交付；与显式采纳共用发布锁、原收据和普通 Git 快进。每个直接后继采纳后先观察该 HEAD 再继续；历史无标记或来源有改动时保留私有结果。writer46 只追加自动采纳索引与版本围栏，回滚恢复一致 v45 备份及原证据。
 - code→spec 只装配已审 Spec，source/test 的 Git path、mode、OID 与 absence 必须不变；不能调用代码生成器修绿验收。
 - 手动 code→spec 显式记录未执行覆盖时，已审声明与实际测试分开。全部旧绑定、冻结 mandatory、V1–V4、严格交付和采纳保持，`unexecutedContractIds` 只来自通过的正式验证原件。
 - 分区复用 partitioning/partition-execution 的唯一计划，共用 operation、fence、预算与最终 candidate/journal/receipt。任务只交付变更 Spec、相关接口和明确目标；Agent 在独立 worktree 自由读取，不以分块读取或逐字消费证明作为同步门禁。
