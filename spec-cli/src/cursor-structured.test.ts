@@ -57,6 +57,10 @@ if (scenario === 'edit-sticky') {
   setInterval(() => {}, 1000)
   process.once('SIGTERM', () => process.exit(143))
 }
+if (scenario === 'cancel-blocked') {
+  // Hold the cancellation response until the test releases it, even if a stop probe sends SIGTERM.
+  process.on('SIGTERM', () => {})
+}
 const send = packet => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...packet }) + '\n')
 const update = (sessionUpdate, update, session = sessionId) => send({ method: 'session/update', params: { sessionId: session, update: { sessionUpdate, ...update } } })
 const text = (value, session) => update('agent_message_chunk', { content: { type: 'text', text: value } }, session)
@@ -517,7 +521,8 @@ test('Cursor refuses to settle a live prompt before matching cancellation and pr
     writeFileSync(release, '')
     await rejected
   }
-  assert.equal((await stopCursorStructuredTurn(f.state())).acknowledged, true)
+  assert.deepEqual(await stopCursorStructuredTurn(f.state()), { nativeStopped: true, acknowledged: true, nativeStatus: 'stopped' })
+  assert.equal(existsSync(join(f.sessionRoot, 'settlement.json')), false)
 })
 
 test('Cursor stops before dispatch when cancelled while the prompt identity is being pinned', async t => {
