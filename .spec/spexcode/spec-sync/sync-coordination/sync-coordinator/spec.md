@@ -21,7 +21,11 @@ related:
 
 候选独审的已审来源校验沿 [[sync-input-composition]] 的原 v1 分段摘要核精确冻结选择；大范围共享 pair 时也保持原字节顺序及全部身份。
 
-P1 全图 seal 与完整候选 V1 仅从原 planBlob 的 [[sync-historical-coverage]] 描述构造同一逐 ID 冷验。完整政策摘要、真实 input/composed/candidate 与原收据绑定后才保留历史 warning；不读当前资源头、扩大 ready/coveredScope 或将其记成本轮已执行验收。P1 局部只收到原业务输入。
+同一冻结 operation 的 code→spec 原生 P1 完整候选可复核本轮新提议的 code/derived missing_fact GAP。复用原 runner、request/session、fence、调用/返修预算和阶段 refs；严格核 original aggregate/local Git/独审、plan、readSet/selection、composed、完整输入与只读 Native 请求及正式结果。合法 repair 只派原 GAP owner 续稿并新独审，旧 accept 不改成失败；仍须当前严格 seal 和全部 P2 门。已复核的真实未知、冲突或无新发现保持原 blocked，冷恢复重验原结果而不重复模型调用；错绑定或无合法独审不能授予续稿。JSON合法但ID、边界或独立性协议未过时，在原预算下一attempt只续只读审查；previousReviewRef严格指向同operation较早的同候选失败原件，拒因和原输出仅在当次prompt现读，原owner批准保持。合法负例不走该续审。新 checkpoint 只引用已有结果原件和稳定身份，不重复归档诊断正文，不把临时诊断或草稿纳入产品 Git。
+
+同候选 P2 协议续审只消费原 P2 格式诊断，不先复核 GAP 或加载 GAP 续稿；历史可选 GAP checkpoint 缺席不能触发新阶段。协议齐备后，普通与遗漏诊断只派实际 owner，保原未决 GAP 全部列；这些 owner 新独审并通过严格全图 seal 形成新 aggregate 后，才允许其候选 GAP 独立复核。各阶段诊断不相互增加写权。
+
+P1 全图 seal、GAP 首次复核与冷恢复、完整候选 V1 仅从原 planBlob 的 [[sync-historical-coverage]] 描述构造同一逐 ID 冷验。完整政策摘要、真实 input/composed/candidate 与原收据绑定后才保留历史 warning；不读当前资源头、扩大 ready/coveredScope 或将其记成本轮已执行验收。P1 局部只收到原业务输入。
 
 P1 输入只透传原 planBlob 已冻结的 contextVerifications，供 [[sync-partition-execution]] 的全图封口引用校验；局部模型和 V3 继续使用原 verifications 与 mandatoryTests。旧计划没有该字段时不读取当前 settings 补签。
 

@@ -13,6 +13,8 @@ code:
 
 ## expanded spec
 
+ElaborationGapReviewEvidence 是当次调用的内存诊断。持久 GAP 复核只保存原 aggregate/local/result refs、完整输入与候选摘要、GAP IDs、请求及独立 trace/seed 绑定，不重复保存 review、findings 或说明正文。原结果 ref 指向已有正式 Native/注入结果；新 owner 的 gapRepair 只保存 reviewRef、acceptedRef 和 baseInputDigest，并进入当前输入摘要。协议续审只追加previousReviewRef，冷恢复按严格较早来源重建原请求和全部旧审查身份，诊断正文现读。原作者或已采纳 GAP 不取得该资格，旧字段缺席不追补。
+
 ReadonlySpecRepair 的 contract_omission 使用已有 generationRef、acceptedRef、reviewEvidence、candidateDigest 和 owner findings，不另存一份诊断正文。它与 candidate_review 共用原件承接，但其局部 refinement 仅由精确遗漏 finding 派生；普通事实资格继续按自身 typed IDs 检查。该新增持久判别值须由独立 writer 围栏保护，发布前停稳、结算并备份，旧字段缺席与历史原件不追补。
 
 可选 historicalCoverageDigest 只绑定 [[sync-historical-coverage]] 的程序证明，进入完整封口 inputDigest；局部投影和模型任务移除它。实际证明原件仍由原 planBlob 与协调器持有，不复制进 ElaborationInput 或旧结果，也不表示历史测试已在本轮执行。
@@ -94,3 +96,5 @@ ReadonlySpecRepair的candidate_review来源保留真实generationRef、各分区
 ReadonlySpecRepair可用kind:partition_seal标记全局封口反馈；generationRef在此分支指原失败partitioned_final aggregate，acceptedRef仍指其真实已审局部，candidateDigest绑定原partitionSeal候选，findings仅含error。该诊断进入新局部输入/请求摘要，不修改历史accept、原意、作者授权或预算。
 
 显式只读未执行覆盖的 `acceptance-not-executed` 发现保留在局部检查和全局 seal 中，独审绑定同一候选；它提供声明 ID 和测试缺口，真实执行仍由 V3 记录。
+
+ElaborationGapReviewEvidence是显式调用只读复核得到的diagnosticOnly证据：绑定原aggregateRef、partitionPlanDigest、局部owner refs、完整输入/候选摘要、指定GAP、真实只读树与requestKey/trace，并保留原reviewOutput、合法review和校验发现。不保存候选正文副本，不返回ready、授权或完成字段，不加入旧ElaborationResult、ReadonlySpecRepair或持久操作协议；该证据不能清除GAP或替代正式Native来源认证及新的owner生成/独审。

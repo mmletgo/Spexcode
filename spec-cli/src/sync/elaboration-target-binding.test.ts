@@ -719,3 +719,27 @@ test('owner遗漏的marker、既有ID与专用refinement必须同源，普通fin
     await assert.rejects(() => elaborate(changed, { runner: async () => assert.fail('错误遗漏身份不得派发') }), /owner遗漏/, mutation)
   }
 })
+
+for (const kind of ['candidate_review', 'contract_omission'] as const) test(`${kind}阶段逐值保留原候选GAP，不能提前消费独立GAP诊断`, async () => {
+  const frozen = kind === 'candidate_review' ? factRepairInput() : mixedOwnerRepairInput()
+  frozen.analysis = undefined; frozen.mode = 'reelaborate'; frozen.maxRepairs = 0
+  const gap = { id: 'GAP-EXPORT-CALLER-POLICY', kind: 'missing_fact', unknown: '端口是否另设重复请求账本', affects: ['RULE-EXPORT-06'], evidence: '调用方职责仍待独立核实', decision: '确认唯一重试属主', source: 'code:src/export.js#ExportService', 'depends-on': ['REQ-EXPORT-01'] }
+  const node = unchangedOwner(frozen, 0); node.tables.GAP = [gap]
+  const accepted = renderElaboration(frozen, bindElaborationTargets(frozen, { version: 'elaboration-target-rows-v3', changes: [node], applicability: [] }), 'accepted-gap').changes[0]
+  frozen.readonlySpecRepair!.changes = [{ ...accepted, contentDigest: elaborationDigest(accepted.source) }]
+  const kept = await elaborate(frozen, { runner: runner(request => build(request, [node])).run })
+  assert.equal(kept.reviewPassed, true, JSON.stringify(kept.rounds.flatMap(round => round.findings)))
+  for (const [column, value] of [
+    ['kind', 'conflict'], ['unknown', '改成另一项未知'], ['affects', ['RULE-EXPORT-05']], ['evidence', '提前覆盖原证据'],
+    ['decision', '提前选择业务政策'], ['source', 'derived:REQ-EXPORT-01'], ['depends-on', ['REQ-EXPORT-01', 'RULE-EXPORT-01']],
+  ] as const) {
+    const changed = structuredClone(node); changed.tables.GAP[0][column] = typeof value === 'string' ? value : [...value]
+    const fake = runner(request => build(request, [changed])), rejected = await elaborate(frozen, { runner: fake.run })
+    assert.equal(rejected.reviewPassed, false, `${kind}.${column}`)
+    assert.ok(rejected.rounds.flatMap(round => round.findings).some(finding => finding.code === 'readonly_repair_gap_changed'), `${kind}.${column}`)
+    assert.deepEqual(fake.calls.map(call => call.purpose), ['elaboration_generate'], '越界GAP改变应在独审前拒绝')
+    const candidate = renderElaboration(frozen, bindElaborationTargets(frozen, { version: 'elaboration-target-rows-v3', changes: [changed], applicability: [] }), 'tampered-gap')
+    const seal = sealPartitionedElaboration({ ...frozen, readonlySpecRepair: undefined, refinement: undefined }, candidate.changes, candidate.applicability, [frozen.readonlySpecRepair!])
+    assert.ok(seal.seal.findings.some(finding => finding.code === 'readonly_repair_gap_changed'), 'strict seal必须复验同一GAP保护面')
+  }
+})

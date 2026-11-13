@@ -20,6 +20,10 @@ related:
 
 P2 混合失败使用真实 Git/Native 资源记录与 SQLite 冷开：普通 repair 排首、后组 contract-omission、另一组格式失败和一个 accept 同轮结算。冷续只重派原格式稿，保相同 candidate、合法 repair/accept 的原 resultRef；之后只回相应 P1 owner，保未命中原件与旧 CAS。覆盖完整 aggregate 后失租约的 superseded/null、零调用中间 attempt、缺 required outcome 及资源未 removed；不得补旧失败或收据。权限回归另在同 owner 核 ordinary 白名单与 omission 的已接受字段保护，不以并集扩权。
 
+同一矩阵另含尚未结清的新候选 GAP，仅在隔离控制前置模拟历史可选 GAP 复核 stage 缺席，其余真实 Git、SQLite、Native 和 CAS 字节保持。冷恢复仍只续 P2 格式组；普通与遗漏 owner 新独审及严格 seal 后才派新 aggregate 的 GAP 复核，协议阶段无 P1 或 GAP 派发，原 GAP 各字段与旧 verdict/ref 保持。
+
+同 owner 的后续 GAP 续稿分别覆盖已批准 RULE.basis 事实修正与合法新增 AC。新并集 GAP 独审后再次重开 SQLite，仅命中 owner 沿最新 acceptedRef 和 Git 草稿继续；新输入不携旧普通或遗漏权限，所有非 GAP 项、元数据、raw 与原 checkpoint 字节保持，最后重做 strict seal。回滚事实或丢弃新增 AC 的负例须以 candidate_gap_scope_changed 在独审前拒绝，不靠扩大原 P0 或合并诊断修绿。
+
 当前协议的只读候选续审回归通过真实 Git 草稿取得 P0 v8 和 P1 原件。有限预算、多个格式拒稿、独审缓存和锚点返修均从各阶段的冻结输入与精确 Git seed 检查。冻结上下文旧运输另由历史请求验证。
 
 多 owner 候选独审失败回归从全局 generation 保存到失败结算统计阶段读取。每轮局部结论只共用一份索引，完整历史对象克隆为零，继续核原预算、格式续审范围和旧审批。
@@ -305,3 +309,5 @@ ZCode P0 completed/events-RPC定向回归以真实分区协调器、Git/隔离SQ
 原request/plan/init/echo/正式stop、source/schema与当前fence均认证后，实际干净HEAD仍等于原seed的无进度候选先沿既有分支跳过，再判断输出终态形状；不将无JSON的exit143旧失败误判为missing-final阻断新任务。该skip不代表成功或格式资格，foreign身份、未知停止/进程与真实新提交仍不得借此越过认证；exit143已有新稿不取得本轮明确exit1错误材料资格。
 
 真实 Docker 回归覆盖只读未执行声明的交付与保护测试失败。核对 V1–V4、未执行清单、实际测试运行原件、源码和测试 Git 对象，以及失败没有交付。
+
+P1候选GAP回归用真实Git提交、两owner和隔离SQLite先证旧accept封口后仍持续blocked，再经一次只读完整并集复核、原owner原JSON字节续稿、新独审与严格seal结清误报，兄弟原件保持。复核后和完整新P1后的暂停/SQLite重启均保旧attempt及CAS字节；needs_input、conflict、无新发现和作者既有GAP不重复派发，mixed诊断只处理typed repair而保真实未知。未知ID和复用原线程先拒绝，下一原预算attempt仅沿previousReviewRef重审同一候选，合法前不派owner；候选/result refs失配及借诊断修改业务列继续拒绝。新独审实际seed须含原并集诊断文件；持久新增checkpoint不得复制review/findings正文。正常Native资源桥另核原只读请求、canonical结果及removed原件，后续P2回授仍绑定已结清GAP的新P1批准。全部场景保原预算、截止时间、source/index、非Spec Git对象与零交付journal；受控模型和Docker前停止不声称真实模型、V3或产品交付已通过。

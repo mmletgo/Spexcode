@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+v52 只追加 SELECT 1 writer marker，保护 [[sync-coordinator]] 的候选 GAP 独审及 [[elaboration-result]] 的精确 owner 续稿引用。先停稳并结算旧 writer，再保存一致 online backup。旧请求、批准和 Git/CAS 原件保持。回滚恢复一致 v51 备份及配套证据和 Git 引用。
+
 v51 只追加 SELECT 1 writer marker，保护 [[sync-coordinator]] 的混合候选续审与 [[elaboration-result]] 的精确 owner 契约遗漏返修。停稳并结算旧 writer 后保留一致 online backup。旧阶段、候选和结算记录的原字节保持。回滚恢复一致 v50 备份及配套证据和 Git 引用。
 
 v50 只追加 SELECT 1 writer marker，保护 [[sync-historical-coverage]] 的精确历史未执行资格。升级先停稳 v49 writer、正式结算资源并 online backup。旧计划按原资格验证，历史报告、收据、基线、表行、索引与迁移 checksum 保持。回滚先停稳新 writer，再恢复一致 v49 备份及配套证据和 Git 引用。

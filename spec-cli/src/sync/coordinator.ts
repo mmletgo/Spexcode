@@ -15,9 +15,9 @@ import type { CodeBehaviorAnalysis, CodeBehaviorEvidence, SyncDecisionInput } fr
 import { adoptedDeliveryPaths, baselineResourceKey, baselineSelectionDigest, extendsWithUninitializedResources, isUtf8Text, readCompositionEvidence, selectedRetiredIds, verifyBaselineSelection } from './composition.js'
 import { readHistoryRequest, readReceiptHistoryRestorations } from './history-input.js'
 import { composeAuthoredInput } from './author-input.js'
-import { elaborate, hasApprovedElaborationReview, elaborationMaterialContext, freezeElaborationInput, gapBlockedFinding, verifyElaborationDraftCache } from './elaboration.js'
+import { elaborate, hasApprovedElaborationReview, elaborationGapRepairFindings, elaborationMaterialContext, freezeElaborationInput, gapBlockedFinding, verifyElaborationDraftCache } from './elaboration.js'
 import { outputErrors } from './elaboration-schema.js'
-import type { ElaborationResult, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ElaborationTrace, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ReadonlySpecRepair } from './elaboration-types.js'
+import type { ElaborationGapReviewCheckpoint, ElaborationGapReviewEvidence, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ElaborationTrace, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ReadonlySpecRepair } from './elaboration-types.js'
 import { claimFileMutex } from './file-mutex.js'
 import { authenticateNativeFailure, authenticateNativeRejectedFinal, composedBeforeNullExpansionMatches, readSyncCheckpoints, readSyncCheckpointStageIndex, retryOperationLineage, syncCheckpointArtifacts, withCheckpointStageBasis } from './checkpoint-evidence.js'
 import type { SyncCheckpointStageView } from './checkpoint-evidence.js'
@@ -27,7 +27,7 @@ import { historicalCoverageCheck } from './historical-coverage.js'
 import { findWholeFileSourcePaths, isReadonlyCitationFailure } from './frozen-anchors.js'
 import { decisionAuthorizationErrors, sameContractBusinessMeaning } from './contract-evolution.js'
 import type { FrozenContracts, GenerationContractPolicy } from './frozen-contracts.js'
-import { implementationGenerationDispatch, completeSyncPartitionPlan, analyzeSyncPartitions, elaborateSyncPartitions, generateSyncPartitions, partitionSealRepairOwners, analysisOnlyPartitionEvidence, IMPLEMENTATION_PLAN_SCHEMA } from './partition-execution.js'
+import { implementationGenerationDispatch, completeSyncPartitionPlan, analyzeSyncPartitions, elaborateSyncPartitions, generateSyncPartitions, inspectPartitionedElaborationGaps, partitionSealRepairOwners, analysisOnlyPartitionEvidence, IMPLEMENTATION_PLAN_SCHEMA } from './partition-execution.js'
 import type { FileWriterPlan, PartitionCheckpoints, PartitionAnalysisFailure, PartitionAnalysisFailures } from './partition-execution.js'
 import { planSyncPartitions } from './partitioning.js'
 import type { SyncPartitionPlan } from './partitioning.js'
@@ -1128,6 +1128,23 @@ function latestApprovedElaboration(store: SyncStore, operation: SyncOperation, a
         })) fail('readonly_spec_repair_binding', '只读续修必须响应原source且保留未修owner的最新原件')
         selected = { result: approved, attemptId: prior.id }; lineage.push({ ...selected, operationId: ancestor.id, resultRef: writeEvidence(operation.input.source.commonDir, approved) }); continue
       }
+      const previousRef = writeEvidence(operation.input.source.commonDir, selected.result)
+      const changedOwners = approved.partitionEvidence?.filter(owner => selected!.result.partitionEvidence?.some(before => before.partitionId === owner.partitionId && before.resultRef.sha256 !== owner.resultRef.sha256)) ?? []
+      if (changedOwners.length && changedOwners.every(owner => (JSON.parse(readEvidence(operation.input.source.commonDir, owner.resultRef).toString()) as SavedElaboration).gapRepair)) {
+        if (canonical(approved.partitionEvidence!.map(owner => owner.partitionId)) !== canonical(selected.result.partitionEvidence?.map(owner => owner.partitionId))) fail('candidate_gap_review_binding', 'GAP续稿不能改变原全图owner覆盖')
+        for (const member of changedOwners) {
+          const before = selected.result.partitionEvidence!.find(owner => owner.partitionId === member.partitionId)!
+          const local = reviewedReadonlyLocal(store, ancestor, prior, `partition:${member.partitionId}:elaboration`, member.resultRef, writeEvidence(operation.input.source.commonDir, approved), 0, history)
+          const marker = local.gapRepair!
+          const provenance = history.read<{ fromAttemptId: string; reviewRef: BlobRef; resultRef: BlobRef }>(prior, `partition:${member.partitionId}:elaboration:gap-repair-provenance`)
+          const origin = history.attempts.find(origin => origin.id === provenance?.fromAttemptId && origin.number < prior.number && ['failed', 'superseded', 'settled'].includes(origin.status))
+          const proof = origin && history.read<ElaborationGapReviewCheckpoint>(origin, 'elaboration-gap-review')
+          if (!proof || contentHash(JSON.stringify(proof)) !== marker.reviewRef.sha256 || proof.aggregateRef.sha256 !== previousRef.sha256 || marker.acceptedRef.sha256 !== before.resultRef.sha256
+            || !proof.ownerRefs.some(owner => owner.partitionId === member.partitionId && owner.resultRef.sha256 === before.resultRef.sha256)
+            || canonical(provenance) !== canonical({ fromAttemptId: origin!.id, resultRef: before.resultRef, reviewRef: marker.reviewRef })) fail('candidate_gap_review_binding', '新已审whole缺少同一GAP复核及原owner的续稿因果绑定')
+        }
+        selected = { result: approved, attemptId: prior.id }; lineage.push({ ...selected, operationId: ancestor.id, resultRef: writeEvidence(operation.input.source.commonDir, approved) }); continue
+      }
       const supplementation = history.read<{ refinement?: Refinement }>(prior, 'repair-input')?.refinement
       if (!supplementation || canonical(supplementation.prior) !== canonical(selected.result) || !supplementation.diagnostics.length) continue
       const findings = supplementation.diagnostics.map(item => JSON.parse(item.message) as GenerationFinding)
@@ -1172,7 +1189,7 @@ function pendingReadonlyRepair(store: SyncStore, operation: SyncOperation, attem
         if (!origin) fail('readonly_spec_repair_binding', '诊断结算缺少该owner的新P1来源')
         const reviewed = reviewedReadonlyLocal(store, operation, origin, owner.key, response.saved.resultRef, response.base.resultRef, prior.number, history)
         const original = JSON.parse(readEvidence(operation.input.source.commonDir, owner.resultRef).toString('utf8')) as SavedElaboration
-        if (canonical(reviewed.partitionBinding) !== canonical(original.partitionBinding) || reviewed.readonlySpecRepair?.baseInputDigest !== (original.readonlySpecRepair?.baseInputDigest ?? original.inputDigest)) fail('readonly_spec_repair_binding', '诊断结算改变了原owner完整输入绑定')
+        if (canonical(reviewed.partitionBinding) !== canonical(original.partitionBinding) || reviewed.readonlySpecRepair?.baseInputDigest !== (original.gapRepair?.baseInputDigest ?? original.readonlySpecRepair?.baseInputDigest ?? original.inputDigest)) fail('readonly_spec_repair_binding', '诊断结算改变了原owner完整输入绑定')
         continue
       }
       const current = approved.result.partitionEvidence?.find(item => item.partitionId === owner.partitionId)
@@ -1943,7 +1960,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         const history = readonlySources()
         for (const origin of history.attempts.filter(item => item.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(item.status)).reverse()) {
           const source = readonlyLocalSource(store, operation, origin, key, expected.resultRef, base.resultRef, history)
-          if (!source || !source.result.structurePassed || !source.result.reviewPassed || source.result.failure || canonical(source.result.partitionBinding) !== canonical(binding) || (source.result.readonlySpecRepair?.baseInputDigest ?? source.result.inputDigest) !== inputDigest) continue
+          if (!source || !source.result.structurePassed || !source.result.reviewPassed || source.result.failure || canonical(source.result.partitionBinding) !== canonical(binding) || (source.result.gapRepair?.baseInputDigest ?? source.result.readonlySpecRepair?.baseInputDigest ?? source.result.inputDigest) !== inputDigest) continue
           if (source.result.rounds.at(-1)?.review?.verdict !== 'accept'
             && (source.result.phase !== undefined || !authenticatedApprovedElaboration(store, operation, origin, source.result, { allowDeferredImplementation: true }))) continue
           saveStage(store, fence!, `${key}:provenance`, { fromOperationId: operation.id, fromAttemptId: origin.id, resultRef: source.resultRef })
@@ -2675,7 +2692,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           const sourceAttempt = store.readAttempt(owner.fromAttemptId)
           const prior = reviewedReadonlyLocal(store, operation, sourceAttempt, key, owner.resultRef, readonlyOwnerRepair!.priorRef, 0, readonlySources()), round = prior.rounds.at(-1)!
           const protocol = stage<{ generationGuidance?: ElaborationGenerationGuidance }>(store, operation, sourceAttempt, 'elaboration-draft-protocol')
-          const priorInput = { ...localInput, generationGuidance: protocol?.generationGuidance }
+          const priorInput = { ...localInput, generationGuidance: protocol?.generationGuidance, ...(prior.gapRepair ? { gapRepair: prior.gapRepair } : {}) }
           if (canonical(prior.partitionBinding) !== canonical(binding) || (prior.readonlySpecRepair?.baseInputDigest ?? prior.inputDigest) !== freezeElaborationInput(priorInput).inputDigest) fail('readonly_spec_repair_binding', '只读owner原件不匹配当前完整局部输入')
           const ids = new Set(prior.changes.flatMap(change => parseContract(change).contract!.items.map(item => item.id)))
           const findings = readonlyOwnerRepair!.findings.filter(finding => prior.changes.some(change => change.nodeId === finding.nodeId && change.path === finding.path))
@@ -2703,7 +2720,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           if (!source || !local || !findings) return null
           store.assertWriteFence(fence!)
           const prior = local.result, round = prior.rounds.at(-1)!
-          if (canonical(prior.partitionBinding) !== canonical(binding) || (prior.readonlySpecRepair?.baseInputDigest ?? prior.inputDigest) !== inputDigest) return null
+          if (canonical(prior.partitionBinding) !== canonical(binding) || (prior.gapRepair?.baseInputDigest ?? prior.readonlySpecRepair?.baseInputDigest ?? prior.inputDigest) !== inputDigest) return null
           if (prior.changes.some(change => !within(change.path, options.plan.writePaths) || options.plan.mandatoryTests.some(test => overlap(change.path, test.testPath)))) fail('partition_final_seal_binding', '全局seal返修owner越过原冻结写范围')
           const crossOperation = source.attempt.operationId !== operation.id
           const name = `${key}:readonly-repair-provenance`
@@ -2718,6 +2735,18 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           }
           saveStage(store, fence!, name, provenance)
           return { prior, repair: { kind: 'partition_seal', baseInputDigest: inputDigest, candidateDigest: source.result.candidateDigest!, generationRef: source.resultRef, acceptedRef: local.resultRef, changes: prior.changes, output: round.output, review: round.review, findings } }
+        },
+        loadGapRepair: async (key, binding, inputDigest) => {
+          const source = await loadGapRepairSource()
+          assertMaterialFence()
+          const local = source?.locals.get(binding.partitionId)
+          if (!source || !local || !elaborationGapRepairFindings(source.evidence, source.result).some(issue => local.result.changes.some(change => change.nodeId === issue.nodeId && change.path === issue.path))) return null
+          const prior = local.result
+          if (canonical(prior.partitionBinding) !== canonical(binding) || (prior.gapRepair?.baseInputDigest ?? prior.readonlySpecRepair?.baseInputDigest ?? prior.inputDigest) !== inputDigest) fail('candidate_gap_review_binding', '候选GAP续稿不能改变原owner完整输入')
+          if (prior.changes.some(change => !within(change.path, options.plan.writePaths) || options.plan.mandatoryTests.some(test => overlap(change.path, test.testPath)))) fail('candidate_gap_review_binding', '候选GAP续稿越过原冻结写范围')
+          const provenance = { fromAttemptId: source.attempt.id, resultRef: local.resultRef, reviewRef: source.reviewRef }
+          saveStage(store, fence!, `${key}:gap-repair-provenance`, provenance)
+          return { prior, repair: { reviewRef: source.reviewRef, acceptedRef: local.resultRef, baseInputDigest: inputDigest } }
         },
         loadAcceptedInterfaceSeed: (key, binding, inputDigest) => {
           const readonly = readonlyAccepted(key, binding, inputDigest)
@@ -2992,6 +3021,76 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         }
         return { ...(draftProtocol ? { draftProtocol } : {}), ...(operation.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), ...(options.plan.agentWorkflow ? { worktree: stageWorktree(operation.input.source.commonDir, operation.input.headCommit, refinement?.candidate.tree ?? view.composed.tree) } : {}), root: operation.input.source.canonicalRoot, base: operation.input.headCommit, requestKey: `sync:${attempt!.id}:elaborate`, intent: { nodeId: effectiveIntentNodeId, rawSource }, targets, context: view.frozen.nodes.filter(node => !targets.some(target => target.path === node.path) && !moved.some(change => change.to.path === node.path)).map(node => ({ nodeId: node.id, path: node.path, source: view.files.get(node.path)! })), files: refinementFiles, facts: behaviorFacts, analysis, decisionAuthorities: analysis?.analysis.decisionAuthorities ?? options.plan.decisionAuthorities,  ...(refinement ? { refinement: { candidateDigest: refinement.candidateDigest, diagnostics: refinement.diagnostics } } : {}), mode: preserveBusiness ? 'preserve_business' : 'reelaborate', nodeChanges, verifications: options.plan.verifications.map(item => item.definition), ...(options.plan.contextVerifications ? { contextVerifications: options.plan.contextVerifications } : {}), ...(options.plan.historicalCoverage ? { historicalCoverageDigest: options.plan.historicalCoverage.digest } : {}), implementationWritePaths: options.plan.version === 'sync-coordinator-v2' && options.plan.direction === 'code_to_spec' ? [] : unique(options.plan.writePaths), readonlyTestPaths: unique(options.plan.mandatoryTests.map(test => test.testPath)), authorizedChanges: behaviorAuthorization, historyInput: operation.input, retiredIds: unique([...(options.plan.retiredIds ?? []), ...historicalRetiredIds]), maxRepairs: 0, maxCalls: 2, totalTimeoutMs: operation.deadlineAtMs === null ? null : operation.deadlineAtMs - Date.now(), timeoutMs: callTimeoutMs, signal, model, effort: 'high' as const }
       }
+      const gapInput = (origin: SyncAttempt): ElaborationInput => {
+        const protocol = stage<{ version: 'elaboration-draft-v1'; generationGuidance?: ElaborationGenerationGuidance }>(store, operation, origin, 'elaboration-draft-protocol')
+        return { ...makeElaborationInput(protocol?.version), generationGuidance: protocol?.generationGuidance, requestKey: `sync:${origin.id}:elaborate` }
+      }
+      const gapAggregate = async (origin: SyncAttempt, aggregateRef: BlobRef) => {
+        await yieldToControl(); assertMaterialFence()
+        const checkpoints = candidateHistoryCheckpoints(origin)
+        const source = partitionStage<SavedElaboration>(store, operation, origin, 'elaboration', undefined, checkpoints)
+        const plan = partitionStage<SyncPartitionPlan>(store, operation, origin, 'partition-plan', undefined, checkpoints)
+        if (!partitions || !source || source.resultRef.sha256 !== aggregateRef.sha256 || !plan || canonical(plan.result) !== canonical(partitions)
+          || !elaborationComposedBinding(store, operation, origin, source.result, view.composed, checkpoints)
+          || source.result.phase !== 'partitioned_final' || !source.result.structurePassed || !source.result.reviewPassed || source.result.failure || !source.result.partitionSeal?.passed
+          || source.result.analysisOnlyPartitions?.length && !authenticatedMixedElaborationCoverage(store, operation, origin, partitions, source.result)) fail('candidate_gap_review_binding', '候选GAP复核缺少同一原计划及真实通过的全图封口')
+        const locals = new Map<string, { result: SavedElaboration; resultRef: BlobRef }>()
+        const history = readonlyElaborationHistory(store, operation, candidateHistoryCheckpoints)
+        for (const member of source.result.partitionEvidence ?? []) {
+          await yieldToControl(); assertMaterialFence()
+          const key = `partition:${member.partitionId}:elaboration`
+          const local = reviewedReadonlyLocal(store, operation, origin, key, member.resultRef, source.resultRef, 0, history)
+          const round = local.rounds.at(-1)!, trace = round.traces.find(trace => trace.purpose === 'elaboration_review')!
+          const owner = history.attempts.find(prior => prior.number <= origin.number && prior.dispatchPlans.some(dispatch => canonical(dispatch.session) === canonical({ sessionId: trace.sessionId, threadId: trace.threadId, turnId: trace.turnId })))
+          const dispatch = owner?.dispatchPlans.find(dispatch => dispatch.session?.sessionId === trace.sessionId)
+          const original = owner && dispatch ? authenticatedDraftResult(store, operation, owner, dispatch.key, trace.purpose) : null
+          if (!original?.result || original.result.resultDigest !== trace.resultDigest || canonical(original.result.output) !== canonical(round.reviewOutput)
+            || !round.draft || !round.candidate || round.candidateDigest !== contentHash(JSON.stringify(round.candidate)) || local.candidateDigest !== round.candidateDigest
+            || canonical(local.changes) !== canonical(round.candidate.changes.map(change => ({ ...change, contentDigest: contentHash(change.source) })))) fail('candidate_gap_review_binding', '候选GAP复核缺少原owner Git候选及独立审查认证')
+          readStageDraft(operation.input.source.commonDir, round.draft, round.draft)
+          locals.set(member.partitionId, { result: local, resultRef: member.resultRef })
+        }
+        return { ...source, locals }
+      }
+      type GapReviewSource = Awaited<ReturnType<typeof gapAggregate>> & { attempt: SyncAttempt; evidence: ElaborationGapReviewEvidence; reviewRef: BlobRef; reviewTraces: ElaborationTrace[] }
+      const replayGapReview = async (origin: SyncAttempt): Promise<GapReviewSource | null> => {
+        const saved = partitionStage<ElaborationGapReviewCheckpoint>(store, operation, origin, 'elaboration-gap-review', undefined, candidateHistoryCheckpoints(origin))
+        if (!saved) return null
+        const source = await gapAggregate(origin, saved.result.aggregateRef)
+        let previous: GapReviewSource | null = null
+        if (saved.result.previousReviewRef) {
+          const prior = store.listAttempts(operation.id).filter(prior => prior.number < origin.number && ['failed', 'superseded', 'settled'].includes(prior.status)).find(prior => partitionStage<ElaborationGapReviewCheckpoint>(store, operation, prior, 'elaboration-gap-review', undefined, candidateHistoryCheckpoints(prior))?.resultRef.sha256 === saved.result.previousReviewRef!.sha256)
+          previous = prior ? await replayGapReview(prior) : null
+          if (!previous || previous.evidence.review !== null) fail('candidate_gap_review_binding', 'GAP协议续审必须引用同operation严格较早的失败独审')
+        }
+        const resource = store.findResource(origin.id, saved.result.requestKey)
+        const injected = !resource ? stage<{ result: ElaborationSessionResult }>(store, operation, origin, `injected:${saved.result.requestKey}`) : null
+        const nativeRef = resource ? resource.checkpoints.some(item => item.checkpointRef.sha256 === saved.result.resultRef.sha256) || resource.checkpointRef.sha256 === saved.result.resultRef.sha256
+          : injected && contentHash(JSON.stringify(injected)) === saved.result.resultRef.sha256
+        if (!nativeRef) fail('candidate_gap_review_binding', '候选GAP复核没有原Native结果引用')
+        const output = (JSON.parse(readEvidence(operation.input.source.commonDir, saved.result.resultRef).toString('utf8')) as { result: ElaborationSessionResult }).result.output
+        const evidence = await inspectPartitionedElaborationGaps(gapInput(origin), partitions!, saved.result.aggregateRef, async request => {
+          const result = completedNativeStageResult(store, operation, origin, request, saved.result.trace, output, saved.result.candidateDigest, candidateHistoryCheckpoints(origin))
+          if (!result) fail('candidate_gap_review_binding', '候选GAP复核的完整只读请求、独立身份或正式Native结果失配')
+          return result!
+        }, view.composed, previous ? { ref: previous.reviewRef, evidence: previous.evidence, traces: previous.reviewTraces } : undefined, partitionCheckpoints)
+        if (!evidence) fail('candidate_gap_review_binding', '原GAP复核不匹配当前候选资格')
+        const { reviewOutput: _output, review: _review, findings: _findings, ...binding } = evidence!
+        const { resultRef: _resultRef, ...original } = saved.result
+        if (canonical(binding) !== canonical(original)) fail('candidate_gap_review_binding', '原GAP复核的输入、并集、GAP集合或trace失配')
+        return { attempt: origin, ...source, evidence: evidence!, reviewRef: saved.resultRef, reviewTraces: [...previous?.reviewTraces ?? [], evidence!.trace] }
+      }
+      let gapRepairSource: ReturnType<typeof replayGapReview> | undefined
+      const loadGapRepairSource = () => gapRepairSource ??= (async () => {
+        if (reviewContinuation || !partitions || options.plan.version !== 'sync-coordinator-v2' || options.plan.direction !== 'code_to_spec' || !options.plan.agentWorkflow) return null
+        for (const prior of store.listAttempts(operation.id).filter(prior => prior.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(prior.status)).reverse()) {
+          const saved = partitionStage<ElaborationGapReviewCheckpoint>(store, operation, prior, 'elaboration-gap-review', undefined, candidateHistoryCheckpoints(prior))
+          if (!saved || readonlyBase && saved.result.aggregateRef.sha256 !== readonlyBase.resultRef.sha256) continue
+          const source = await replayGapReview(prior)
+          if (source) return elaborationGapRepairFindings(source.evidence, source.result).length ? source : null
+        }
+        return null
+      })()
       let cacheDraft: ElaborationDraft | undefined
       const reusableElaborationCache = (cached: SavedElaboration, tagged: boolean): boolean => {
         const draftProtocol = tagged || cached.rounds.some(round => round.draft) ? 'elaboration-draft-v1' : undefined
@@ -3065,6 +3164,50 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         continue
       }
       if (reviewContinuation?.elaboration && canonical(elaboration) !== canonical(reviewContinuation.elaboration.result)) fail('review_source_binding', '当前P1重新封口与原候选的实际批准原件不同')
+      if (!reviewContinuation && partitions && options.plan.version === 'sync-coordinator-v2' && options.plan.direction === 'code_to_spec' && options.plan.agentWorkflow
+        && elaboration.gaps.some(gap => gap.gapKind === 'missing_fact' && ['code', 'derived'].includes(gap.source.kind))) {
+        const aggregateRef = writeEvidence(operation.input.source.commonDir, elaboration)
+        let inspected: { evidence: ElaborationGapReviewEvidence; reviewRef: BlobRef } | null = null
+        let previous: { ref: BlobRef; evidence: ElaborationGapReviewEvidence; traces: ElaborationTrace[] } | undefined
+        for (const origin of store.listAttempts(operation.id).filter(origin => origin.id === attempt!.id || origin.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(origin.status)).reverse()) {
+          const cached = partitionStage<ElaborationGapReviewCheckpoint>(store, operation, origin, 'elaboration-gap-review', undefined, candidateHistoryCheckpoints(origin))
+          if (!cached || cached.result.aggregateRef.sha256 !== aggregateRef.sha256) continue
+          const source = await replayGapReview(origin)
+          if (!source) continue
+          if (!source.evidence.review && origin.id !== attempt.id) { previous = { ref: source.reviewRef, evidence: source.evidence, traces: source.reviewTraces }; break }
+          inspected = source
+          if (origin.id !== attempt.id) saveStage(store, fence, 'elaboration-gap-review-provenance', { fromAttemptId: origin.id, reviewRef: source.reviewRef, aggregateRef })
+          break
+        }
+        if (!inspected) {
+          let resultRef: BlobRef | undefined
+          const evidence = await inspectPartitionedElaborationGaps(gapInput(store.readAttempt(attempt.id)), partitions, aggregateRef, async request => {
+            await gapAggregate(store.readAttempt(attempt!.id), aggregateRef)
+            const result = await runner(request)
+            assertMaterialFence()
+            const origin = store.readAttempt(attempt!.id), resource = store.findResource(origin.id, request.requestKey)
+            const injected = !resource ? stage<{ result: ElaborationSessionResult }>(store, operation, origin, `injected:${request.requestKey}`) : null
+            resultRef = resource?.checkpointRef ?? (injected ? { sha256: contentHash(JSON.stringify(injected)) } : undefined)
+            if (!resultRef) fail('candidate_gap_review_binding', '候选GAP复核没有正式原生结果原件')
+            return result
+          }, view.composed, previous, partitionCheckpoints)
+          if (evidence) {
+            const { reviewOutput: _output, review: _review, findings: _findings, ...binding } = evidence
+            const checkpoint: ElaborationGapReviewCheckpoint = { ...binding, resultRef: resultRef! }
+            inspected = { evidence, reviewRef: saveStage(store, fence, 'elaboration-gap-review', checkpoint, !operation.baselineSelection ? { readSetDigest: operation.readSetDigest } : undefined) }
+          }
+        }
+        if (inspected) {
+          if (!inspected.evidence.review) {
+            store.recordFailure(fence, failure('candidate_gap_review_invalid', '候选GAP复核没有通过完整独审协议校验，原批准与GAP保持', 'repairable', [inspected.reviewRef]))
+            continue
+          }
+          if (elaborationGapRepairFindings(inspected.evidence, elaboration).length) {
+            store.recordFailure(fence, failure('candidate_gap_repair', '候选GAP需由原owner沿原事实续稿并重新独审', 'repairable', [aggregateRef, inspected.reviewRef]))
+            continue
+          }
+        }
+      }
       const acceptedFiles = new Map(view.files)
       seed = undefined; refinement = undefined
       for (const change of elaboration.nodeChanges ?? []) if (change.action === 'retire' || change.from.path !== change.to.path) acceptedFiles.delete(change.from.path)

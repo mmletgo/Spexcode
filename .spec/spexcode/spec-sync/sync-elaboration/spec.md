@@ -13,6 +13,9 @@ code:
   - spec-cli/src/sync/elaboration.ts#projectElaborationFlowReadiness
   - spec-cli/src/sync/elaboration.ts#verifyElaborationDraftCache
   - spec-cli/src/sync/elaboration.ts#partitionSealRepairContext
+  - spec-cli/src/sync/elaboration.ts#inspectElaborationGaps
+  - spec-cli/src/sync/elaboration.ts#elaborationGapRepairContext
+  - spec-cli/src/sync/elaboration.ts#elaborationGapRepairFindings
 related:
   - spec-cli/src/sync/elaboration-orchestration.test.ts
   - spec-cli/src/sync/elaboration-target-binding.test.ts
@@ -24,17 +27,25 @@ related:
 
 从用户原意生成可完成主流程、适用状态事件处置、规则和验收；无法确认的重要业务政策成为 GAP，只阻塞依赖分支。
 
+只读候选复核可复用当前 P1 独审 schema、边界与范围校验。聚焦 GAP 的调用绑定同一冻结完整输入、原候选摘要、明确 GAP 集合和真实只读树，并与原生成、独审及分析会话独立；保留模型原始输出与全部拒因。其返回值仅为诊断，不授予候选批准、事实修订、稳定 ID 删除或人工裁决权限。
+
 ## expanded spec
+
+同一冻结候选的 GAP 复核经 [[sync-coordinator]] 认证后，只可触发原 owner 的候选误报续稿。资格由独立 review 的 affectedIds 精确命中本轮新提议、code/derived 来源的 missing_fact GAP，不能从说明文字推测。新 gapRepair 仅引用原复核及 accepted owner；临时读取原结果诊断、原已审并集和 Git 草稿，不改旧批准。只可移除命中的临时 GAP 及指向已移除 GAP 的 typed 引用，原 metadata、raw、说明、其他业务列、稳定 ID、AC/VERIFY 和适用性逐值保持；真实未知可原样保留。新独审须与原生成、原独审、GAP 复核和当前生成独立，完整结构、演进和严格全图封口照常执行。诊断不能自行清除 GAP、取得人工裁决或改变实现权限。
+
+GAP 续稿的固定比较基准是该新并集中最近已批准的 owner 原件。此前普通返修已接受的事实值或遗漏返修新增的合法行必须保留，不能退回作者旧正文；当前 GAP 输入只含自己的诊断与原件引用，不承接旧 readonlySpecRepair/refinement 的可编辑范围。退回旧事实、丢掉新增义务或再次修改既有字段都在新独审前拒绝。
 
 同一已审候选的 owner 契约遗漏复用只读返修容器，以 contract_omission 区分普通 candidate_review 事实诊断。只从已认证的专用 marker、同 owner 既有 ID 和原候选派生局部 refinement；保留其原已审正文、raw、稳定身份及 REQ/RULE/AC/VERIFY 全部列与测试/来源绑定。现有 reelaborate、P0 影响范围和原意支持仍决定能否新增细节；refinement 不把未变化 P0 或普通事实诊断变成业务变更授权。不适用的差量继续明确拒绝。
 
 同 owner 同时含普通事实与遗漏时，两类资格分别检查。普通事实只消费 candidate-review-repair 的 typed relatedIds；遗漏发现的 relatedIds 不进入事实白名单。原 V5 资格、description/prose/命中 RULE.basis 范围保持；遗漏不能改既有政策或验收，普通事实不能增删业务行。局部独审、冷缓存及最终全图 seal 继续复验，不能用两个范围的并集放开整个 owner。
 
+普通 candidate_review 与 contract_omission 返修都逐值保留原已审候选内的 GAP 身份、类别、未知项、影响项、证据、决定、来源与依赖。此保护由局部候选和严格全图 seal 共用，不能借普通事实或遗漏诊断提前删除、改类或重绑 GAP；独立 GAP 续稿仍只消费自己的已认证诊断。
+
 同一次全图封口先按原证据核局部事实与遗漏的可编辑范围，再按各 ID 的历史验证资格核验完整图。历史未执行资格不扩大当前 owner 的返修权限。
 
 完整 seal 在已经构建的唯一契约图上消费 [[sync-historical-coverage]] 冷验通过的 ID，仅改变原 missing-acceptance 的未执行资格，其他结构与演进门保持。历史资格摘要参与完整输入绑定，但不进入生成或独审模型任务，局部验证不取得该豁免。
 
-完整分区封口将可信 contextVerifications 与本轮 verifications 合并后冻结，逐项校验完整候选中未选 owner 的既有 AC/VERIFY 引用。局部生成和独审保持原登记，不据此增加可写目标、业务义务或实际验收运行；重复、错误与未知定义继续拒绝，旧输入缺席不补入。
+完整分区封口将可信 contextVerifications 与本轮 verifications 合并后冻结，逐项校验完整候选中未选 owner 的既有 AC/VERIFY 引用。GAP 首次复核与冷恢复重验共用这一完整输入和严格 seal，并重新消费原历史覆盖冷验；缺证明、登记或完整输入失配时不得派发或承接诊断。局部生成和独审保持原登记，不据此增加可写目标、业务义务或实际验收运行；重复、错误与未知定义继续拒绝，旧输入缺席不补入。
 
 只读 V1 引用返修先以原批准正文合并 Agent 草稿。结构化诊断只允许替换命中的治理或 related 引用及指定业务项的 code 来源，保持原引用角色和符号粒度。缺失的具体 related 文件只能改为冻结树中的具体文件。其余元数据、原意、说明、业务表、稳定 ID、适用性、测试引用和可信命令保持，越权差量在派发独审前拒绝。派发可把同一原引用的重复诊断按实际受影响 ID 归并，原失败原件保持，仍须重新独审与完整 V1。
 
