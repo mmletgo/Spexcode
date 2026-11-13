@@ -5028,26 +5028,43 @@ test('v2最终预算只列真实实现派发，纯父接口不产生虚构生成
 
 for (const mode of ['historical-aggregate', 'historical-v2-aggregate', 'historical-v3-aggregate', 'historical-v5-aggregate', 'historical-v5-local', 'current-aggregate', 'current-local', 'same-guidance', 'same-guidance-local'] as const) test(`v2指导缓存 ${mode} 正式pause恢复不把旧accept无ID gap直接复用`, async t => {
   const rawOnly = original.slice(0, original.indexOf('## expanded spec')).replace('contract-schema: sync-v1\n', '')
-  const f = await fixture(t, { maxAttempts: 3, maxCalls: 20, maxRepairs: 2, timeoutMs: 120000 }, false, rawOnly, 'project', original, { version: 'sync-coordinator-v2', direction: 'code_to_spec', partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, sourcePaths: ['src'], commitTrigger: { before: null, paths: ['src/export.js'] } }, undefined, 'code')
+  const f = await fixture(t, { maxAttempts: 3, maxCalls: 20, maxRepairs: 2, timeoutMs: 120000 }, false, rawOnly, 'project', original, { version: 'sync-coordinator-v2', direction: 'code_to_spec', agentWorkflow: 'native-worktree-v1', partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, sourcePaths: ['src'], commitTrigger: { before: null, paths: ['src/export.js'] } }, undefined, 'code', 'claude:default')
   const same = mode.startsWith('same-guidance'), checkpoint = f.store.checkpoint.bind(f.store)
+  if (!same) {
+    const claimed = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30000, expectedMessageId: f.operation.dispatchMessageId })
+    const protocol = { version: 'code-behavior-draft-v1', contextTransport: 'git-json-v5' }, resultRef = writeEvidence(f.input.source.commonDir, protocol)
+    f.store.checkpoint(claimed.fence, { ...writeEvidence(f.input.source.commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: claimed.attempt.id, inputId: f.input.id, policyDigest: f.operation.policyDigest, stage: 'behavior-draft-protocol', resultRef }), artifacts: syncCheckpointArtifacts(protocol, resultRef) })
+  }
   f.store.checkpoint = (fence, ref) => {
     const value = JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())
     if (f.store.readAttempt(fence.attemptId).number === 1 && value.version === 'sync-stage-v1' && (value.stage === 'analysis' || value.stage?.endsWith(':analysis'))) {
       if (mode.startsWith('historical-')) value.guidanceContractVersion = mode.includes('v5') ? 'code-behavior-guidance-v5' : mode === 'historical-v3-aggregate' ? 'code-behavior-guidance-v3' : mode === 'historical-v2-aggregate' ? 'code-behavior-guidance-v2' : 'code-behavior-guidance-v1'
-      else if (mode === 'same-guidance' || mode === 'same-guidance-local' && value.stage !== 'analysis') value.guidanceContractVersion = CODE_BEHAVIOR_GUIDANCE_VERSION
+      else if (mode === 'same-guidance' || mode === 'same-guidance-local' && value.stage !== 'analysis') {
+        assert.equal(value.guidanceContractVersion, CODE_BEHAVIOR_GUIDANCE_VERSION, '同指导必须由真实v6请求生成，不能给旧fixture补签全局版本')
+        assert.equal(JSON.parse(readEvidence(f.input.source.commonDir, value.resultRef).toString()).guidanceContractVersion, CODE_BEHAVIOR_GUIDANCE_VERSION)
+      }
       else delete value.guidanceContractVersion
       ref = writeEvidence(f.input.source.commonDir, value)
     }
     return checkpoint(fence, ref)
   }
-  f.transform((output, request) => {
-    if (request.purpose === 'code_behavior_analyze') {
-      const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!)
-      return { ...(output as object), changes: (output as { changes: { paths: string[] }[] }).changes.map(change => ({ ...change, kind: attempt.number === 1 && change.paths.some(path => path.startsWith('src/')) ? 'coverage_gap' : 'refactor', affectedIds: [], ruleIds: [], evidence: '实现与原意相符，仅尚无待生成的规格叶', counterexample: '未生成规格叶不应成为业务事实未知' })) }
-    }
+  f.options.runner = async request => {
+    f.calls.push(request)
     if (request.purpose === 'elaboration_generate') throw Object.assign(new Error('新指导已进入P1，机制回归在细化正文前停止'), { code: 'unsupported' })
-    return output
-  })
+    assert.ok(request.worktree)
+    const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!)
+    const currentGuidance = same || attempt.number > 1
+    const descriptor = JSON.parse(request.prompt.split('\n任务:\n')[1].split('\n草稿文件=')[0])
+    assert.equal(descriptor.contextTransport, currentGuidance ? 'git-json-v6' : 'git-json-v5')
+    const context = readCodeBehaviorContext(request, f.input.source.commonDir), paths = context.task.requiredChangedPaths as string[], pending = context.pendingAnalysis
+    if (pending) assert.equal(pending.analysis.guidanceContractVersion, currentGuidance ? CODE_BEHAVIOR_GUIDANCE_VERSION : undefined)
+    const output = pending
+      ? { inputDigest: request.inputDigest, analysisDigest: pending.analysisDigest, verdict: 'accept', checkedPaths: paths, checkedChangeIds: pending.analysis.changes.map(change => change.id), findings: [] }
+      : { changes: paths.map(path => ({ kind: attempt.number === 1 && path.startsWith('src/') ? 'coverage_gap' : 'refactor', paths: [path], affectedIds: [], ruleIds: [], originalIntent: '遵守导出明确原意', previousBehavior: '导出任务结果不变', sourceBehavior: '内部实现文字编辑，导出结果不变', deliveryBehavior: '共同已验证语义不变', evidence: '实现与原意相符，仅尚无待生成的规格叶', counterexample: '未生成规格叶不应成为业务事实未知' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    const worktree = committedDraftFixture(f, request, output, join(f.parent, `guidance-cache-${f.calls.length}`))
+    const dispatch = attempt.dispatchPlans.find(item => item.key === request.requestKey)!, receipt = { summary: '真实同指导缓存与无ID发现阻断回归' }
+    return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `guidance-cache-${request.requestKey}`, turnId: 'turn', output: receipt, resultDigest: contentHash(JSON.stringify(receipt)), worktree }
+  }
   const first = await runSyncOperation(f.store, f.operation.id, f.options)
   assert.equal(first.status, 'needs_input', JSON.stringify(f.store.listAttempts(f.operation.id).map(attempt => attempt.failure))); assert.equal(first.failure!.code, 'unbound_behavior_finding')
   assert.deepEqual(readCurrentSyncAnalysis(f.store, first.operation)!.ref, first.failure!.evidenceRefs[0], '旧指导已审原件仍可显示并作为明确choice来源，不能当自动cache')
