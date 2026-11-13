@@ -2150,7 +2150,7 @@ test('旧failed计划retry读集变更拒绝，fresh正式操作冻结owned只�
       const retryAttempt = f.application.store.bindComposedInput(retryClaim.fence, currentComposed)
       assert.throws(() => assemblePublicationBase(f.application.store, retried, retryAttempt, currentComposed, paths), /read closure differs/)
       const publication = assemblePublicationBase(f.application.store, retried, retryAttempt, currentComposed, derivedReadPaths)
-      const provenance = verifyPublicationBase(retried, retryAttempt, publication)
+      const provenance = verifyPublicationBase(f.application.store, retried, retryAttempt, publication)
       assert.deepEqual(provenance.readPaths, derivedReadPaths)
       assert.equal(provenance.writePaths.includes(dependencyPath), false)
       f.application.store.startGeneration(retryClaim.fence)
@@ -2168,7 +2168,7 @@ test('旧failed计划retry读集变更拒绝，fresh正式操作冻结owned只�
         const tree = writeTree(snapshot.source.commonDir, changedEntries), forgedEntries = readTree(snapshot.source.commonDir, tree)
         const forgedComposed = { ...publication.composed, tree, manifestBlob: writeEvidence(snapshot.source.commonDir, { version: 1, entries: forgedEntries }), contentDigest: contentHash(JSON.stringify(forgedEntries)) }
         const forged = { ...publication, composed: forgedComposed, provenanceBlob: writeEvidence(snapshot.source.commonDir, { ...provenance, composed: forgedComposed }) }
-        assert.throws(() => verifyPublicationBase(retried, retryAttempt, forged), /actual publication images differ/)
+        assert.throws(() => verifyPublicationBase(f.application.store, retried, retryAttempt, forged), /actual publication images differ/)
       }
       f.application.store.recordFailure(retryClaim.fence, { code: 'offline_fixture_complete', message: '仅验证冻结读取和发布保护，未派发模型', kind: 'unsupported', evidenceRefs: [] })
       const indexOnlyPath = 'src/related/index-only.mjs'

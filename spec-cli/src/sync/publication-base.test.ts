@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -14,16 +14,17 @@ import { deliverVerifiedAttempt, planPrivateDelivery } from './private-delivery.
 import type { PrivateDeliveryOptions } from './private-delivery.js'
 import { assemblePublicationBase, verifyPublicationBase } from './publication-base.js'
 import { captureInputSnapshot, contentHash, objectGit, readEvidence, readObject, readTree, verifySnapshot, writeEvidence, writeObject, writeTree } from './snapshot.js'
+import { fastForwardSource, prepareSourceAdoption } from './source-adoption.js'
 import { SyncStore } from './store.js'
 
-async function fixture(t: test.TestContext, dirtyReadonly = true) {
+async function fixture(t: test.TestContext, { dirtyReadonly = true, dirtySource = true } = {}) {
   const parent = realpathSync(mkdtempSync(join(tmpdir(), 'spex-publication-base-'))), root = join(parent, 'source'), managed = join(parent, 'managed'), runtime = join(parent, 'runtime')
   mkdirSync(root); mkdirSync(managed, { mode: 0o700 }); mkdirSync(join(runtime, 'dist/sync'), { recursive: true }); mkdirSync(join(runtime, 'templates/hooks'), { recursive: true })
   const git = (...args: string[]): string => execFileSync('/usr/bin/git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
   git('init', '-b', 'main'); git('config', 'user.name', 'Publication fixture'); git('config', 'user.email', 'publication@example.invalid')
   for (const path of ['a.txt', 'b.txt', 'config.txt', 'oracle.txt']) writeFileSync(join(root, path), `base-${path}\n`)
   git('add', '.'); git('commit', '-m', 'base')
-  writeFileSync(join(root, 'a.txt'), 'author-A2-unconsumed\n')
+  if (dirtySource) writeFileSync(join(root, 'a.txt'), 'author-A2-unconsumed\n')
   if (dirtyReadonly) { writeFileSync(join(root, 'config.txt'), 'readonly-current-config\n'); writeFileSync(join(root, 'oracle.txt'), 'readonly-current-oracle\n') }
   const input = await captureInputSnapshot(root), commonDir = input.source.commonDir, index = readFileSync(join(root, '.git/index'))
   const protocol = openProtocol(join(commonDir, 'sync.sqlite'))
@@ -107,6 +108,59 @@ for (const order of [['a.txt', 'b.txt'], ['b.txt', 'a.txt']]) test(`同HEAD并�
   }
   assert.equal(f.text(lastTree, 'a.txt'), 'delivered-A1\n'); assert.equal(f.text(lastTree, 'b.txt'), 'delivered-B2\n')
   assert.equal(readFileSync(join(f.root, 'a.txt'), 'utf8'), 'author-A2-unconsumed\n'); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+})
+
+for (const firstPath of ['a.txt', 'b.txt']) for (const adoptFirst of [true, false]) test(`同HEAD独立交付连续快进：${firstPath}先发布，第一份采纳=${adoptFirst ? '在第二份冻结前' : '在第二份交付后'}`, { timeout: 60000 }, async t => {
+  const f = await fixture(t, { dirtyReadonly: false, dirtySource: false })
+  const secondPath = firstPath === 'a.txt' ? 'b.txt' : 'a.txt'
+  const first = f.claim(firstPath), second = f.claim(secondPath)
+  const adopt = async (claimed: ClaimedAttempt, path: string): Promise<void> => {
+    fastForwardSource(prepareSourceAdoption(f.store, f.store.readOperation(claimed.operation.id), await captureInputSnapshot(f.root), {
+      tools: f.options.tools, canonicalBranch: 'refs/heads/main', readPaths: f.reads(path),
+    }))
+  }
+  f.freeze(first, firstPath, 'first verified change\n')
+  const firstDelivery = await deliverVerifiedAttempt(f.store, first.fence, f.options)
+  if (adoptFirst) await adopt(first, firstPath)
+  const staleStat = new Date(Date.now() - 60000)
+  utimesSync(join(f.root, 'oracle.txt'), staleStat, staleStat)
+  const indexBeforeFreeze = readFileSync(join(f.root, '.git/index'))
+  const frozen = f.freeze(second, secondPath, 'second verified change\n')
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), indexBeforeFreeze, '读取父提交不能刷新原 index')
+  const secondDelivery = await deliverVerifiedAttempt(f.store, second.fence, { ...f.options, beforeApply: async () => {
+    assert.equal(f.git('rev-parse', 'HEAD'), adoptFirst ? firstDelivery.receipt.actualCommit : f.input.headCommit)
+    assert.equal(f.git('status', '--porcelain'), '')
+  } })
+  if (!adoptFirst) await adopt(first, firstPath)
+  assert.equal(f.git('rev-parse', 'HEAD'), firstDelivery.receipt.actualCommit)
+  await adopt(second, secondPath)
+  assert.equal(frozen.base.parentCommit, firstDelivery.receipt.actualCommit)
+  assert.equal(f.git('rev-parse', 'HEAD'), secondDelivery.receipt.actualCommit)
+  assert.equal(f.git('rev-parse', 'HEAD^'), firstDelivery.receipt.actualCommit)
+  assert.equal(f.git('show', `HEAD:${firstPath}`), 'first verified change')
+  assert.equal(f.git('show', `HEAD:${secondPath}`), 'second verified change')
+  assert.deepEqual(f.store.listJournals(second.operation.id)[0].plan.files.map(file => file.path), [secondPath])
+  const settled = f.store.readAttempt(second.attempt.id)
+  assert.deepEqual(assemblePublicationBase(f.store, f.store.readOperation(second.operation.id), settled, settled.composedInput!, f.reads(secondPath)), frozen.base)
+})
+
+test('v2 拒绝同 tree 的伪造来源 HEAD 和错误 receipt，保留已冻结实际 parent', { timeout: 60000 }, async t => {
+  const f = await fixture(t, { dirtyReadonly: false, dirtySource: false }), first = f.claim('a.txt'), second = f.claim('b.txt')
+  f.freeze(first, 'a.txt', 'first verified change\n')
+  const firstDelivery = await deliverVerifiedAttempt(f.store, first.fence, f.options)
+  const base = assemblePublicationBase(f.store, second.operation, second.attempt, second.attempt.composedInput!, f.reads('b.txt'))
+  const evidence = verifyPublicationBase(f.store, second.operation, second.attempt, base)
+  assert.equal(evidence.version, 'sync-publication-base-v2')
+  assert.equal(evidence.parentSource.kind, 'settled-delivery')
+  const wrongReceipt = { ...evidence, parentSource: { ...evidence.parentSource, receiptId: 'receipt-unrelated' } }
+  assert.throws(() => f.store.bindPublicationBase(second.fence, { ...base, provenanceBlob: writeEvidence(f.commonDir, wrongReceipt) }), /actual parent source differs/)
+  const forgedCommit = objectGit(f.commonDir, ['commit-tree', base.parentTree, '-p', f.input.headCommit], Buffer.from('same tree from a different branch\n')).toString().trim()
+  const forged = { ...base, parentCommit: forgedCommit, provenanceBlob: writeEvidence(f.commonDir, {
+    ...evidence, parentCommit: forgedCommit, parentSource: { kind: 'source-head', headCommit: forgedCommit },
+  }) }
+  assert.throws(() => f.store.bindPublicationBase(second.fence, forged), /source changed before binding/)
+  assert.equal(f.git('rev-parse', 'HEAD'), f.input.headCommit)
+  assert.equal(f.store.bindPublicationBase(second.fence, base).publicationBase?.parentCommit, firstDelivery.receipt.actualCommit)
 })
 
 test('伪造parent/读闭包/absence/来源拒绝；base绑定后不能替换、candidate冻结后不能再绑定', { timeout: 30000 }, async t => {
@@ -213,7 +267,7 @@ test('failed/superseded发布仍有未知resource时持久阻B；真实removed�
 })
 
 test('已绑定base重入与verified新apply核全heads；legacy实际head推进后明确stale且无A journal', { timeout: 60000 }, async t => {
-  const f = await fixture(t, false), a = f.claim('a.txt'), b = f.claim('b.txt'), base = assemblePublicationBase(f.store, a.operation, a.attempt, a.attempt.composedInput!, f.reads('a.txt'))
+  const f = await fixture(t, { dirtyReadonly: false }), a = f.claim('a.txt'), b = f.claim('b.txt'), base = assemblePublicationBase(f.store, a.operation, a.attempt, a.attempt.composedInput!, f.reads('a.txt'))
   f.store.bindPublicationBase(a.fence, base)
   // 旧冻结操作不带publicationBase，沿原真实交付路径结算，验证新门禁不会假定heads永不变。
   for (const [claimed, path, composed, content] of [[b, 'b.txt', b.attempt.composedInput!, 'delivered-B2\n'], [a, 'a.txt', base.composed, 'delivered-A1\n']] as const) {
@@ -238,7 +292,7 @@ test('不相关legacy只作诊断；已提交新HEAD对象保留，不用旧deli
     tx.exec('INSERT INTO sync_baseline_heads(source_key,resource_key,pair_id,legacy_reason) VALUES(?,?,NULL,?)', String(key), 'path:unrelated-legacy.txt', 'unknown legacy proof')
   })
   const base = assemblePublicationBase(f.store, b.operation, b.attempt, b.attempt.composedInput!, f.reads('b.txt'))
-  const evidence = verifyPublicationBase(b.operation, b.attempt, base)
+  const evidence = verifyPublicationBase(f.store, b.operation, b.attempt, base)
   assert.equal(f.text(base.parentTree, 'a.txt'), 'committed-A3\n'); assert.equal(evidence.paths.find(path => path.path === 'a.txt')?.cause, 'current_head')
   assert.deepEqual(evidence.heads.unknownPaths, [{ path: 'unrelated-legacy.txt', reason: 'unknown legacy proof' }])
   f.store.bindPublicationBase(b.fence, base)

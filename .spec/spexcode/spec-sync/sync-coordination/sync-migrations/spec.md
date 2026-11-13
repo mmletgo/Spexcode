@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+v45 追加 SELECT 1 writer marker，保护 [[sync-publication-base]] 绑定真实来源 HEAD 或正式交付 receipt 的 v2 父提交证据。升级先正式停稳 v44 writer、结算资源并在线备份，历史发布基树、候选及原迁移保持原字节。回滚恢复一致的 v44 备份和配套证据及 Git 引用。
+
 v44 追加 SELECT 1 writer marker，保护 P0 分析的 git-json-v5 冻结协议。升级先正式停稳 v43 writer、结算资源并在线备份，原迁移、历史请求和证据原字节保留。回滚先停稳新 writer，再恢复一致的 v43 备份和配套证据及 Git 引用。
 
 v43 追加 `SELECT 1` writer marker，保护手动只读操作的未执行覆盖选择、正式验证清单和验证检查点中的镜像卷遮盖。升级先正式停稳 v42 writer、结算资源并在线备份。历史请求与迁移字节保持。回滚先停稳新版，再恢复配套的 v42 备份、证据和 Git 引用。

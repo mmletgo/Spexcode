@@ -1784,10 +1784,11 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           if (retrySource.attempt.publicationBase) {
             await acquirePublication()
             const currentAttempt = store.readAttempt(attempt.id)
-            const base = assemblePublicationBase(store, operation, currentAttempt, view.composed, view.readPaths)
-            const { operationId: _newOperation, attemptId: _newAttempt, parentCommit: _newMetadata, ...currentBase } = verifyPublicationBase(operation, currentAttempt, base)
-            const { operationId: _oldOperation, attemptId: _oldAttempt, parentCommit: _oldMetadata, ...originalBase } = verifyPublicationBase(source, retrySource.attempt, retrySource.attempt.publicationBase)
-            if (canonical(currentBase) !== canonical(originalBase)) fail('candidate_retry_binding', '原候选发布基树已变化，不能覆盖新发布')
+            const original = verifyPublicationBase(store, source, retrySource.attempt, retrySource.attempt.publicationBase)
+            const base = assemblePublicationBase(store, operation, currentAttempt, view.composed, view.readPaths, original)
+            const { operationId: _newOperation, attemptId: _newAttempt, parentCommit: _newMetadata, ...currentBase } = verifyPublicationBase(store, operation, currentAttempt, base)
+            const { operationId: _oldOperation, attemptId: _oldAttempt, parentCommit: _oldMetadata, ...originalBase } = original
+            if (canonical(currentBase) !== canonical(originalBase) || original.version === 'sync-publication-base-v2' && base.parentCommit !== original.parentCommit) fail('candidate_retry_binding', '原候选发布基树已变化，不能覆盖新发布')
             store.bindPublicationBase(fence, base)
           }
         }
@@ -1820,8 +1821,20 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         }
       }
       const runner = options.runner ? injectedRunner(store, fence, options.runner) : createAttemptRunner(store, fence, { retireSettledWorktrees: true })
+      const historicalStageIndexes = new Map<string, SyncCheckpointStageView>()
+      const historyCheckpoints = (owner: SyncOperation, prior: SyncAttempt): SyncCheckpointStageView => {
+        const checkpoints = historicalStageIndexes.get(prior.id) ?? readSyncCheckpointStageIndex(store, owner, prior)
+        historicalStageIndexes.set(prior.id, checkpoints)
+        return checkpoints
+      }
       let readonlySourceHistory: ReturnType<typeof readonlyElaborationHistory> | undefined
-      const readonlySources = () => readonlySourceHistory ??= readonlyElaborationHistory(store, operation)
+      const readonlySources = () => {
+        if (!readonlySourceHistory) {
+          const owner = operation
+          readonlySourceHistory = readonlyElaborationHistory(store, owner, prior => prior.id === attempt!.id ? readSyncCheckpointStageIndex(store, owner, prior) : historyCheckpoints(owner, prior))
+        }
+        return readonlySourceHistory
+      }
       const readonlyAccepted = (key: string, binding: NonNullable<ElaborationResult['partitionBinding']>, inputDigest: string): SavedElaboration | null => {
         if (!readonlyBase || readonlyActiveOwners.some(owner => owner.key === key)) return null
         const approved = readonlyBase!.result
@@ -1890,12 +1903,6 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           return seed
         }
         return null
-      }
-      const historicalStageIndexes = new Map<string, SyncCheckpointStageView>()
-      const historyCheckpoints = (owner: SyncOperation, prior: SyncAttempt): SyncCheckpointStageView => {
-        const checkpoints = historicalStageIndexes.get(prior.id) ?? readSyncCheckpointStageIndex(store, owner, prior)
-        historicalStageIndexes.set(prior.id, checkpoints)
-        return checkpoints
       }
       const draftMaterialStage = (owner: SyncOperation, prior: SyncAttempt, key: string): { result: SavedElaboration; resultRef: BlobRef } | null => {
         const checkpoints = historyCheckpoints(owner, prior)
@@ -2894,9 +2901,11 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           return draft && cacheDraft ? { ...draft, errors: [...draft.errors, ...cacheDraft.errors] } : draft
         } : undefined
         const maxParallel = options.plan.version === 'sync-coordinator-v2' ? options.plan.partitionPolicy.maxParallel : 1
-        const serialRetry = partitions && draftProtocol && maxParallel > 1 && attempt.number > 1 && store.listAttempts(operation.id).some(prior =>
-          prior.number < attempt!.number && prior.status === 'superseded' && prior.failure?.kind === 'repairable'
-          && (prior.failure.serialElaborationRetry || isNativeObservationFailure(prior.failure)))
+        const previousElaboration = partitions && draftProtocol && maxParallel > 1 && attempt.number > 1
+          ? store.listAttempts(operation.id).reverse().find(prior => prior.number < attempt!.number && prior.dispatchPlans.some(dispatch => dispatch.purpose.startsWith('elaboration_')))
+          : undefined
+        const serialRetry = previousElaboration?.status === 'superseded' && previousElaboration.failure?.kind === 'repairable'
+          && (previousElaboration.failure.serialElaborationRetry || isNativeObservationFailure(previousElaboration.failure))
         const result = partitions ? await elaborateSyncPartitions(elaborationInput, partitions, serialRetry ? 1 : maxParallel, partitionCheckpoints, runner, view.composed) : await elaborate(elaborationInput, { runner, draft: cacheDraft, loadDraft, loadDraftMaterial: draftProtocol ? (schemaDigest, request) => loadElaborationDraftMaterial('elaboration', undefined, schemaDigest, request) : undefined, seed: loadElaborationRepairSeed('elaboration', freezeElaborationInput(elaborationInput).inputDigest) ?? undefined, repairDiagnostics: loadElaborationRepairDiagnostics('elaboration', freezeElaborationInput(elaborationInput).inputDigest) ?? undefined })
         const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = result
         elaboration = compact; saveStage(store, fence, 'elaboration', compact, !operation.baselineSelection ? { readSetDigest: operation.readSetDigest } : undefined, { composedTree: view.composed.tree, composedContentDigest: view.composed.contentDigest })
