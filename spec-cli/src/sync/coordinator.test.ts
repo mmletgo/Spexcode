@@ -6433,7 +6433,10 @@ for (const [guidance, purpose] of [
   const f = await fixture(t, { maxAttempts: 1, maxCalls: 4, maxRepairs: 0, timeoutMs: 120_000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, 'spec', 'claude:default')
   const claimed = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30_000, expectedMessageId: f.operation.dispatchMessageId })
   const commonDir = f.input.source.commonDir
-  const expectedProtocol = { version: 'elaboration-draft-v1', ...(guidance === 'absent' ? {} : { generationGuidance: guidance }) }
+  const expectedProtocol = { version: 'elaboration-draft-v1',
+    ...(guidance === 'absent' ? {} : { generationGuidance: guidance }),
+    ...(guidance === ELABORATION_GENERATION_GUIDANCE ? { compactSealDiagnostics: true, citationRepairDiagnostics: 'actionable-v1' } : {}),
+  }
   if (guidance !== ELABORATION_GENERATION_GUIDANCE) {
     const value = expectedProtocol, resultRef = writeEvidence(commonDir, value)
     const wrapper = writeEvidence(commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: claimed.attempt.id, inputId: f.input.id, policyDigest: f.operation.policyDigest, stage: 'elaboration-draft-protocol', resultRef })

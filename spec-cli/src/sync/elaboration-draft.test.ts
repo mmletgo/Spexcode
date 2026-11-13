@@ -1145,6 +1145,55 @@ test('V1 baseline只绑定原acceptedRef及本owner正文，legacy不补新brief
   assert.equal(legacy.status, 'complete'); assert.deepEqual(requests.map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
 })
 
+test('新只读V1请求只省略历史提示性警告并逐字沿用草稿', async t => {
+  const f = await anchorRepairFixture(t)
+  const { candidate } = (JSON.parse(readEvidence(f.commonDir, f.repair.acceptedRef).toString()) as ElaborationResult).rounds.at(-1)!
+  const repair: ReadonlySpecRepair = { ...f.repair, applicability: candidate!.applicability, findings: f.repair.findings.map(finding => ({ ...finding, citation: { origin: 'source', ref: 'src/export.js#permitted' } })) }
+  const input = { ...f.input, readonlySpecRepair: repair }
+  const corrected = { ...f.corrected, applicability: repair.applicability! }
+  const retained = [
+    repair.findings[0],
+    { code: 'acceptance-not-executed', severity: 'error', message: '同名真错误' },
+    { code: 'semantic-review-required', message: '未标明严重程度' },
+    { code: 'another-warning', severity: 'warning', message: '其它警告保留' },
+  ] satisfies typeof f.draft.errors
+  const errors = [...retained, ...Array.from({ length: 30 }, (_, index) => ({
+    code: index % 2 ? 'acceptance-not-executed' : 'semantic-review-required',
+    severity: 'warning' as const, message: `历史警告 ${index} ${'提示'.repeat(100)}`,
+  }))]
+  const history = { priorDraft: { sourceInputId: f.snapshot.id, errors }, materialErrors: errors, runtimeFindings: errors, seedFindings: errors, readonlyFindings: repair.findings, materialDiagnostics: { materialErrors: errors, otherEvidence: errors } }
+  const original = JSON.stringify(history)
+  const run = f.run((_request, workspace, draftPath) => {
+    assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), f.badText)
+    return JSON.stringify(corrected)
+  })
+  const draftMaterial = { source: f.badText, errors, diagnostics: history }
+  const before = f.requests.length
+  const old = await elaborate(input, { draftMaterial, runner: run })
+  const current = await elaborate({ ...input, requestKey: 'citation-diagnostics-v1', citationRepairDiagnostics: 'actionable-v1' }, { draftMaterial, runner: run })
+  assert.equal(old.status, 'complete', JSON.stringify(old.failure))
+  assert.equal(current.status, 'complete', JSON.stringify(current.failure))
+  const [oldGeneration, oldReview, newGeneration, newReview] = f.requests.slice(before)
+  const diagnosis = (request: ElaborationSessionRequest) => JSON.parse(request.prompt.split('\n失败诊断（不是新授权）:\n')[1].split('\n草稿业务schema只读文件=')[0])
+  const previous = diagnosis(oldGeneration)
+  const currentDiagnostics = diagnosis(newGeneration)
+  assert.deepEqual(previous.materialErrors, errors)
+  assert.deepEqual(previous.materialDiagnostics, history)
+  assert.deepEqual(currentDiagnostics.materialErrors, retained)
+  assert.deepEqual(currentDiagnostics.materialDiagnostics, { ...history,
+    priorDraft: { ...history.priorDraft, errors: retained }, materialErrors: retained, runtimeFindings: retained, seedFindings: retained,
+    materialDiagnostics: { materialErrors: retained, otherEvidence: errors },
+  })
+  assert.equal(JSON.stringify(history), original)
+  assert.notEqual(newGeneration.inputDigest, oldGeneration.inputDigest)
+  assert.deepEqual(newGeneration.worktree, oldGeneration.worktree)
+  assert.equal(newReview.prompt, oldReview.prompt)
+  assert.deepEqual(newReview.worktree, oldReview.worktree)
+  assert.equal(current.inputDigest, old.inputDigest)
+  assert.equal(current.candidateDigest, old.candidateDigest)
+  assert.equal(current.reviewPassed, true)
+})
+
 
 test('V1真实caller区分投影seed与完整accepted target，VERIFY剔表不误拒baseline guard', async t => {
   const f = await anchorRepairFixture(t), originalEntry = readTree(f.commonDir, f.snapshot.immutableTree).find(entry => entry.path === path)!, original = readObject(f.commonDir, originalEntry.oid).toString('utf8')
