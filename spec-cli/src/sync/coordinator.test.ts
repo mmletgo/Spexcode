@@ -8306,6 +8306,7 @@ for (const mode of ['original', 'resume', 'legacy-cleared', 'missing-cause', 'co
   }
   const commonDir = f.input.source.commonDir, protectedObjects = readTree(commonDir, f.input.immutableTree).filter(entry => !entry.path.startsWith('.spec/'))
   const calls: { attempt: number; purpose: string }[] = []
+  let sourceIndexWindow = false, readonlyProofSaved = false, resumedGeneration = false, sourceIndexesBeforeProof = 0, sourceIndexesAfterProof = 0
   let legacy: { ref: { sha256: string }; bytes: Buffer; attemptId: string } | undefined, finalV1 = false
   const first = f.store.claimQueuedAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30000, expectedRevision: f.store.readOperation(f.operation.id).revision })
   const originalProtocol = { version: 'elaboration-draft-v1', generationGuidance: ELABORATION_GENERATION_GUIDANCE_V4 }, originalProtocolRef = writeEvidence(commonDir, originalProtocol)
@@ -8330,6 +8331,7 @@ for (const mode of ['original', 'resume', 'legacy-cleared', 'missing-cause', 'co
   f.options.runner = async request => {
     const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!), seed = request.worktree!
     calls.push({ attempt: attempt.number, purpose: request.purpose })
+    if (mode === 'original' && attempt.number === 3 && request.purpose === 'elaboration_generate') { resumedGeneration = true; sourceIndexWindow = false }
     assert.notEqual(request.purpose, 'code_generate')
     let output: unknown
     if (request.purpose === 'code_behavior_analyze') output = { changes: [], facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
@@ -8380,17 +8382,32 @@ for (const mode of ['original', 'resume', 'legacy-cleared', 'missing-cause', 'co
   const paused = f.store.readAttempt(legacy.attemptId)
   assert.equal(paused.status, 'superseded'); assert.equal(paused.failure, null)
   assert.equal(calls.some(call => call.attempt === 2), false)
+  const originalOwnerAttempt = f.store.readAttempt(first.attempt.id)
   f.closeForRestart()
   let protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
   let store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) }); f.useStore(store); f.store = store
   const claim = store.claimQueuedAttempt.bind(store)
   store.claimQueuedAttempt = input => { if (store.listAttempts(f.operation.id).length >= 5) throw new Error('禁止无派发热循环'); return claim(input) }
   store.requestControl(f.operation.id, 'run')
+  if (mode === 'original') {
+    const clone = globalThis.structuredClone
+    globalThis.structuredClone = ((value: unknown, options?: Parameters<typeof clone>[1]): unknown => {
+      const wrappers = value as { value?: { version?: string; attemptId?: string } }[]
+      if (sourceIndexWindow && Array.isArray(wrappers) && wrappers.some(entry => entry?.value?.version === 'sync-stage-v1' && entry.value.attemptId === first.attempt.id)) {
+        if (readonlyProofSaved) sourceIndexesAfterProof++
+        else sourceIndexesBeforeProof++
+      }
+      return clone(value, options)
+    }) as typeof structuredClone
+    t.after(() => { globalThis.structuredClone = clone })
+    sourceIndexWindow = true
+  }
   let suspended = false
   const save = store.checkpoint.bind(store)
   store.checkpoint = (fence, ref) => {
     const saved = save(fence, ref)
     const wrapper = JSON.parse(readEvidence(commonDir, ref).toString()) as { stage?: string }
+    if (mode === 'original' && store.readAttempt(fence.attemptId).number === 3 && wrapper.stage?.endsWith(':readonly-repair-provenance')) readonlyProofSaved = true
     if (!suspended && store.readAttempt(fence.attemptId).number === 5 && wrapper.stage === 'elaboration') {
       suspended = true
       throw Object.assign(new Error('完整P1已保存，模拟同attempt进程边界'), { code: 'SYNC_FENCE_EXPIRED' })
@@ -8399,6 +8416,11 @@ for (const mode of ['original', 'resume', 'legacy-cleared', 'missing-cause', 'co
   }
   result = await runSyncOperation(store, f.operation.id, f.options)
   assert.equal(result.status, 'recovery_required', JSON.stringify(result.failure)); assert.equal(suspended, true)
+  if (mode === 'original') {
+    t.diagnostic(JSON.stringify({ sourceIndexesBeforeProof, sourceIndexesAfterProof, readonlyProofSaved, resumedGeneration }))
+    assert.equal(readonlyProofSaved, true); assert.equal(resumedGeneration, true); assert.ok(sourceIndexesBeforeProof > 0)
+    assert.equal(sourceIndexesAfterProof, 0, '同一P1恢复已认证只读来源后，草稿查询不得重建同attempt的typed检查点视图')
+  }
   const completedP1 = calls.filter(call => call.purpose.startsWith('elaboration_'))
   protocol.close()
   protocol = openProtocol(join(f.parent, 'sync.sqlite'))
@@ -8415,6 +8437,11 @@ for (const mode of ['original', 'resume', 'legacy-cleared', 'missing-cause', 'co
   assert.equal(read<{ generationGuidance: string }>(0, 'elaboration-draft-protocol').generationGuidance, ELABORATION_GENERATION_GUIDANCE_V4)
   assert.equal(read<{ generationGuidance: string }>(2, 'elaboration-draft-protocol').generationGuidance, ELABORATION_GENERATION_GUIDANCE)
   const repaired = read<{ readonlyOwnerRepair: Parameters<typeof continuationCoordinator.validateReadonlyRepair>[2] }>(2, 'repair-input').readonlyOwnerRepair
+  for (const owner of repaired.owners) {
+    assert.equal(owner.fromAttemptId, originalOwnerAttempt.id)
+    assert.equal(owner.resultRef.sha256, contentHash(JSON.stringify(read(0, owner.key))), '共享视图仍选原已审owner的精确resultRef')
+  }
+  assert.deepEqual(store.readAttempt(first.attempt.id), originalOwnerAttempt)
   assert.deepEqual(repaired.findings[0].relatedIds, ['RULE-EXPORT-05'])
   assert.deepEqual(read<{ readonlyOwnerRepair: typeof repaired }>(3, 'repair-input').readonlyOwnerRepair.findings[0].relatedIds, ['RULE-EXPORT-02'])
   assert.deepEqual(calls.filter(call => call.attempt === 4).map(call => call.purpose), ['elaboration_generate'], '未命中05再次改值在独审前机械拒绝')

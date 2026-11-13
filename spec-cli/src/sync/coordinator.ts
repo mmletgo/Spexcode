@@ -1820,8 +1820,20 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         }
       }
       const runner = options.runner ? injectedRunner(store, fence, options.runner) : createAttemptRunner(store, fence, { retireSettledWorktrees: true })
+      const historicalStageIndexes = new Map<string, SyncCheckpointStageView>()
+      const historyCheckpoints = (owner: SyncOperation, prior: SyncAttempt): SyncCheckpointStageView => {
+        const checkpoints = historicalStageIndexes.get(prior.id) ?? readSyncCheckpointStageIndex(store, owner, prior)
+        historicalStageIndexes.set(prior.id, checkpoints)
+        return checkpoints
+      }
       let readonlySourceHistory: ReturnType<typeof readonlyElaborationHistory> | undefined
-      const readonlySources = () => readonlySourceHistory ??= readonlyElaborationHistory(store, operation)
+      const readonlySources = () => {
+        if (!readonlySourceHistory) {
+          const owner = operation
+          readonlySourceHistory = readonlyElaborationHistory(store, owner, prior => prior.id === attempt!.id ? readSyncCheckpointStageIndex(store, owner, prior) : historyCheckpoints(owner, prior))
+        }
+        return readonlySourceHistory
+      }
       const readonlyAccepted = (key: string, binding: NonNullable<ElaborationResult['partitionBinding']>, inputDigest: string): SavedElaboration | null => {
         if (!readonlyBase || readonlyActiveOwners.some(owner => owner.key === key)) return null
         const approved = readonlyBase!.result
@@ -1890,12 +1902,6 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           return seed
         }
         return null
-      }
-      const historicalStageIndexes = new Map<string, SyncCheckpointStageView>()
-      const historyCheckpoints = (owner: SyncOperation, prior: SyncAttempt): SyncCheckpointStageView => {
-        const checkpoints = historicalStageIndexes.get(prior.id) ?? readSyncCheckpointStageIndex(store, owner, prior)
-        historicalStageIndexes.set(prior.id, checkpoints)
-        return checkpoints
       }
       const draftMaterialStage = (owner: SyncOperation, prior: SyncAttempt, key: string): { result: SavedElaboration; resultRef: BlobRef } | null => {
         const checkpoints = historyCheckpoints(owner, prior)
