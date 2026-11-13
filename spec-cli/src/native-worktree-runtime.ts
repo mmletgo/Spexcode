@@ -299,6 +299,23 @@ function persistNativeOrphanObservation(plan: NativeOwnedPlan, observation: Nati
   writeFileSync(join(plan.root, 'unattributed-processes.json'), JSON.stringify(observation.unattributed), { mode: 0o600 })
 }
 
+export function stopNativeWorktreeDescendants(plan: NativeOwnedPlan, deadline: number, canStop: () => boolean): Promise<void> {
+  return observeSerially(plan, async limit => {
+    const rows = await nativeProcessCensus(plan, limit)
+    captureOwnedProcesses(plan, limit, rows)
+    const owned = JSON.parse(readFileSync(join(plan.root, 'owned-processes.json'), 'utf8')) as ProcessIdentity[]
+    for (const identity of owned) {
+      assertObservationDeadline(limit)
+      if (!canStop()) return
+      if (identity.pid === plan.pid || processStartToken(identity.pid)?.replace(/\s+/g, ' ') !== identity.startToken) continue
+      assertObservationDeadline(limit)
+      if (!canStop()) return
+      try { process.kill(identity.pid, 'SIGTERM') }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error }
+    }
+  }, deadline)
+}
+
 /** receipt/历史 owned 与正向任务关联分别结算；系统旁观进程不进入任务容量。 */
 export function nativeWorktreeProcessesStopped(plan: NativeOwnedPlan, terminate = false, deadline?: number): Promise<boolean> {
   return observeSerially(plan, limit => processesStopped(plan, terminate, limit), deadline)
