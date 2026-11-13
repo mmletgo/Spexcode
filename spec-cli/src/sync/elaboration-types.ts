@@ -82,6 +82,8 @@ export type ElaborationInput = {
   decisionAuthorities?: readonly SyncDecisionAuthority[]
   refinement?: { candidateDigest: string; diagnostics: readonly { code: string; message: string }[] }
   readonlySpecRepair?: ReadonlySpecRepair
+  /** 同一候选GAP复核的原件引用；诊断正文从原Native结果读取，仅进入当次请求。 */
+  gapRepair?: ElaborationGapRepair
   /** 冻结上下文中的源码/测试字节；存在时验证契约绑定指向真实文件。 */
   files?: ReadonlyMap<string, string>
   maxRepairs?: number
@@ -105,7 +107,7 @@ export type VerificationOwnershipProjection = {
 export type ElaborationReviewFinding = { code: string; kind: 'repair' | 'missing_fact' | 'conflict'; message: string; affectedIds: string[]; evidence: string; decision: string }
 export type ElaborationReview = { inputDigest: string; candidateDigest: string; verdict: 'accept' | 'repair' | 'needs_input' | 'conflict'; checkedBoundaries: ElaborationBoundary[]; findings: ElaborationReviewFinding[] }
 export type ElaborationTrace = { purpose: string; sessionId: string; threadId: string; turnId: string; resultDigest: string; inputDigest: string }
-export type ElaborationGapReviewBasis = { aggregateRef: BlobRef; partitionPlanDigest: string; ownerRefs: { partitionId: string; resultRef: BlobRef }[] }
+export type ElaborationGapReviewBasis = { aggregateRef: BlobRef; partitionPlanDigest: string; ownerRefs: { partitionId: string; resultRef: BlobRef }[]; previousReviewRef?: BlobRef }
 /** 只读复核原件，不是新的 P1 批准、返修授权或业务裁决。 */
 export type ElaborationGapReviewEvidence = ElaborationGapReviewBasis & {
   diagnosticOnly: true
@@ -119,6 +121,9 @@ export type ElaborationGapReviewEvidence = ElaborationGapReviewBasis & {
   review: ElaborationReview | null
   findings: ContractFinding[]
 }
+/** 不重复归档review正文；resultRef指向已有正式Native/注入结果。 */
+export type ElaborationGapReviewCheckpoint = Omit<ElaborationGapReviewEvidence, 'reviewOutput' | 'review' | 'findings'> & { resultRef: BlobRef }
+export type ElaborationGapRepair = { reviewRef: BlobRef; acceptedRef: BlobRef; baseInputDigest: string }
 /** 草稿正文只存在真实Git blob中；这是未批准材料的身份，不是成功或accept证明。 */
 export type ElaborationDraft = {
   version: 'elaboration-draft-v1'; ownerDigest: string; sourceInputId: string; schemaDigest: string
@@ -151,6 +156,7 @@ export type ElaborationResult = {
   phase?: ElaborationPhase
   partitionBinding?: ElaborationPartitionBinding
   readonlySpecRepair?: ReadonlySpecRepair
+  gapRepair?: ElaborationGapRepair
   inputDigest: string
   candidateDigest: string | null
   prior: ElaborationPriorReference | null

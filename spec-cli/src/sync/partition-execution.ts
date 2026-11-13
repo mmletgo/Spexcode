@@ -8,8 +8,8 @@ import type { CodeBehaviorApprovalBinding, CodeBehaviorInput, CodeBehaviorContin
 import { elaborationSchema, outputErrors } from './elaboration-schema.js'
 import { elaborate, freezeElaborationInput, inspectElaborationGaps, verifyElaborationDraftCache, projectElaborationFlowReadiness, sealPartitionedElaboration, partitionSealRepairContext } from './elaboration.js'
 import type { Contract, ContractFinding, Verification } from '@spexcode/spec-core/contracts'
-import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE, partitionedElaborationInputDigest } from './elaboration-types.js'
-import type { AnalysisOnlyPartitionEvidence, Applicability, ElaborationGapReviewEvidence, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationTrace, ElaborationSessionRequest, ElaborationChange, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ReadonlySpecRepair, VerificationOwnershipProjection } from './elaboration-types.js'
+import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE, partitionedElaborationCoverageMatches, partitionedElaborationInputDigest } from './elaboration-types.js'
+import type { AnalysisOnlyPartitionEvidence, Applicability, ElaborationGapRepair, ElaborationGapReviewCheckpoint, ElaborationGapReviewEvidence, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationTrace, ElaborationSessionRequest, ElaborationChange, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ReadonlySpecRepair, VerificationOwnershipProjection } from './elaboration-types.js'
 import { elaborationTargetBindings, projectVerificationTable, withoutVerificationTables, readonlyFactRepairPreservesTarget, targetHasCurrentChanges } from './elaboration-markdown.js'
 import { actualTreeDiff, isHostPrivatePath, verifyCandidate } from './candidate.js'
 import type { CandidateChanges } from './candidate.js'
@@ -45,6 +45,7 @@ export type PartitionCheckpoints = {
   readonlyFactRepairSource?(key: string, repair: ReadonlySpecRepair): boolean
   loadReadonlySpecRepair?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string, localInput: ElaborationInput): PartitionSealRepair | null | Promise<PartitionSealRepair | null>
   loadPartitionSealRepair?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): PartitionSealRepair | null | Promise<PartitionSealRepair | null>
+  loadGapRepair?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): { prior: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>; repair: ElaborationGapRepair } | null | Promise<{ prior: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>; repair: ElaborationGapRepair } | null>
   save(key: string, value: unknown): BlobRef
 }
 export type PartitionAnalysisFailure = { partitionId: string; code: string; message: string; error?: unknown }
@@ -364,10 +365,8 @@ export function analysisOnlyPartitionEvidence(commonDir: string, plan: SyncParti
   })
 }
 
-/** 纯父按祖先层级先审自身原意接口；叶继承只读接口，新归属按真实 codePath 唯一分区。 */
-export async function elaborateSyncPartitions(input: ElaborationInput, plan: SyncPartitionPlan, maxParallel: number, checkpoints: PartitionCheckpoints, runner: ElaborationRunner, composed?: ComposedInputRef): Promise<ElaborationResult> {
-  const { signal, ...data } = input
-  input = { ...structuredClone(data), signal }; plan = structuredClone(plan); composed = composed && structuredClone(composed)
+/** 真实composed只补程序全图校验与完整候选复核，不扩大局部生成输入。 */
+async function partitionSealInput(input: ElaborationInput, plan: SyncPartitionPlan, composed?: ComposedInputRef): Promise<ElaborationInput> {
   const commonDir = input.historyInput!.source.commonDir
   let sealInput = input
   if (composed) {
@@ -382,6 +381,14 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
     for (const change of input.nodeChanges ?? []) { excluded.add(change.from.path); if (change.action === 'move') excluded.add(change.to.path) }
     sealInput = { ...input, files, context: [...input.context ?? [], ...frozen.nodes.filter(node => !excluded.has(node.path)).map(node => ({ nodeId: node.id, path: node.path, source: files.get(node.path)! }))] }
   }
+  return sealInput
+}
+
+/** 纯父按祖先层级先审自身原意接口；叶继承只读接口，新归属按真实 codePath 唯一分区。 */
+export async function elaborateSyncPartitions(input: ElaborationInput, plan: SyncPartitionPlan, maxParallel: number, checkpoints: PartitionCheckpoints, runner: ElaborationRunner, composed?: ComposedInputRef): Promise<ElaborationResult> {
+  const { signal, ...data } = input
+  input = { ...structuredClone(data), signal }; plan = structuredClone(plan); composed = composed && structuredClone(composed)
+  const commonDir = input.historyInput!.source.commonDir, sealInput = await partitionSealInput(input, plan, composed)
   const { seeds, descendants } = interfaceSeedPartitions(input, plan)
   const analysisOnlyPartitions = analysisOnlyPartitionEvidence(commonDir, plan, input.analysis)
   if (analysisOnlyPartitions.length && !checkpoints.authenticateAnalysisOnly?.(plan, input.analysis!, analysisOnlyPartitions)) reject('仅分析分区缺少原正式P0与独审派发证明')
@@ -427,28 +434,30 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
     } : undefined
     const inputDigest = freezeElaborationInput(localInput).inputDigest
     const readonlyRepair = await checkpoints.loadReadonlySpecRepair?.(key, partitionBinding, inputDigest, localInput) ?? await checkpoints.loadPartitionSealRepair?.(key, partitionBinding, inputDigest)
-    if (readonlyRepair) {
-      const priorBase = readonlyRepair.priorInput ?? localInput
-      const priorInput = readonlyRepair.prior.readonlySpecRepair ? readonlyRepairInput(priorBase, readonlyRepair.prior.readonlySpecRepair, checkpoints.readonlyFactRepairSource?.(key, readonlyRepair.prior.readonlySpecRepair) === true) : priorBase
-      if (freezeElaborationInput(priorInput).inputDigest !== readonlyRepair.prior.inputDigest) reject('只读V1修复的已审owner不匹配当前完整局部输入')
-      const originalRepairInput = readonlyRepairInput(localInput, readonlyRepair.repair, checkpoints.readonlyFactRepairSource?.(key, readonlyRepair.repair) === true)
+    const gapRepair = readonlyRepair ? null : await checkpoints.loadGapRepair?.(key, partitionBinding, inputDigest)
+    if (readonlyRepair || gapRepair) {
+      const prior = (readonlyRepair ?? gapRepair)!.prior
+      const priorBase = readonlyRepair?.priorInput ?? localInput
+      const priorInput = prior.gapRepair ? { ...priorBase, gapRepair: prior.gapRepair } : prior.readonlySpecRepair ? readonlyRepairInput(priorBase, prior.readonlySpecRepair, checkpoints.readonlyFactRepairSource?.(key, prior.readonlySpecRepair) === true) : priorBase
+      if (freezeElaborationInput(priorInput).inputDigest !== prior.inputDigest) reject('只读修复的已审owner不匹配当前完整局部输入')
+      const originalRepairInput = gapRepair ? { ...localInput, gapRepair: gapRepair.repair } : readonlyRepairInput(localInput, readonlyRepair!.repair, checkpoints.readonlyFactRepairSource?.(key, readonlyRepair!.repair) === true)
       const originalRepairDigest = freezeElaborationInput(originalRepairInput).inputDigest
-      const wholeFileSourcePaths = readonlyRepair.wholeFileSourcePaths
+      const wholeFileSourcePaths = readonlyRepair?.wholeFileSourcePaths
       const repairedInput = wholeFileSourcePaths?.length
-        ? { ...originalRepairInput, readonlySpecRepair: { ...readonlyRepair.repair, wholeFileSourcePaths } }
+        ? { ...originalRepairInput, readonlySpecRepair: { ...readonlyRepair!.repair, wholeFileSourcePaths } }
         : originalRepairInput
       const usesWholeFiles = repairedInput !== originalRepairInput
       const repairInputDigest = usesWholeFiles ? freezeElaborationInput(repairedInput).inputDigest : originalRepairDigest
       const repairInputs = [{ input: originalRepairInput, digest: originalRepairDigest }]
       if (usesWholeFiles) repairInputs.push({ input: repairedInput, digest: repairInputDigest })
-      for (const target of readonlyRepair.repair.kind === 'candidate_review' ? repairedInput.targets : []) if (target.source !== null && target.source !== localInput.targets.find(original => original.path === target.path)!.source) factBaselines.set(target.path, target.source)
-      const cached = saved && repairInputs.find(item => saved.inputDigest === item.digest && JSON.stringify(saved.readonlySpecRepair) === JSON.stringify(item.input.readonlySpecRepair))
+      for (const target of readonlyRepair?.repair.kind === 'candidate_review' ? repairedInput.targets : []) if (target.source !== null && target.source !== localInput.targets.find(original => original.path === target.path)!.source) factBaselines.set(target.path, target.source)
+      const cached = saved && repairInputs.find(item => saved.inputDigest === item.digest && JSON.stringify(saved.readonlySpecRepair) === JSON.stringify(item.input.readonlySpecRepair) && JSON.stringify(saved.gapRepair) === JSON.stringify(item.input.gapRepair))
       if (cached && reusableCache(cached.input, saved)) return saved
-      if (saved && !cached && contentHash(JSON.stringify(saved)) !== readonlyRepair.repair.acceptedRef.sha256) reject('只读V1修复不能绕过另一份当前局部原件')
+      if (saved && !cached && contentHash(JSON.stringify(saved)) !== (readonlyRepair?.repair.acceptedRef ?? gapRepair!.repair.acceptedRef).sha256) reject('只读修复不能绕过另一份当前局部原件')
       for (const { input, digest } of repairInputs) {
         const accepted = (interfaceSeed ? checkpoints.loadAcceptedInterfaceSeed : checkpoints.loadAcceptedElaboration)?.(key, partitionBinding, digest)
         if (accepted) {
-          if (JSON.stringify(accepted.readonlySpecRepair) !== JSON.stringify(input.readonlySpecRepair)) reject('只读修复承接不能改变原诊断来源')
+          if (JSON.stringify(accepted.readonlySpecRepair) !== JSON.stringify(input.readonlySpecRepair) || JSON.stringify(accepted.gapRepair) !== JSON.stringify(input.gapRepair)) reject('只读修复承接不能改变原诊断来源')
           if (reusableCache(input, accepted)) return accepted
         }
       }
@@ -457,7 +466,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
       const oldSchemaDigest = usesWholeFiles ? contentHash(JSON.stringify(elaborationSchema(originalRepairInput, { purpose: schemaPurpose }))) : undefined
       const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = await elaborate(repairedInput, {
         runner, partitionSealFiles: sealInput.files, seed,
-        draft: oldSchemaDigest && cacheDraft?.schemaDigest === oldSchemaDigest ? undefined : cacheDraft,
+        draft: oldSchemaDigest && cacheDraft?.schemaDigest === oldSchemaDigest ? undefined : cacheDraft ?? (gapRepair || prior.gapRepair ? prior.rounds.at(-1)?.draft : undefined),
         loadDraft: loadDraft ? schemaDigest => loadDraft(schemaDigest, repairInputDigest) : undefined,
         loadDraftMaterial: localInput.draftProtocol ? async (schemaDigest, request) => {
           const material = await checkpoints.loadElaborationDraftMaterial?.(key, partitionBinding, schemaDigest, request)
@@ -473,6 +482,11 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
       return compact
     }
     const cachedInput = (cached: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>): ElaborationInput => {
+      if (cached.gapRepair) {
+        const restored = { ...localInput, gapRepair: cached.gapRepair }
+        if (freezeElaborationInput(restored).inputDigest !== cached.inputDigest) reject('已审GAP续稿原件不匹配当前完整局部输入')
+        return restored
+      }
       if (!cached.readonlySpecRepair) return localInput
       const restored = readonlyRepairInput(localInput, cached.readonlySpecRepair, checkpoints.readonlyFactRepairSource?.(key, cached.readonlySpecRepair) === true)
       if (freezeElaborationInput(restored).inputDigest !== cached.inputDigest) reject('已审只读owner续修原件不匹配当前唯一冻结摘要')
@@ -508,7 +522,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
   const first = results[0]
   if (!first) reject('分区细化结果为空')
   independentTraces(results.flatMap(result => result.rounds.flatMap(round => round.traces)))
-  const reviewedChanges = distinct(results.flatMap(result => result.changes.map(change => result.readonlySpecRepair ? { ...change, beforeDigest: input.targets.find(target => target.nodeId === change.nodeId && target.path === change.path)!.sourceDigest } : change)), change => change.path, 'target')
+  const reviewedChanges = distinct(results.flatMap(result => result.changes.map(change => result.readonlySpecRepair || result.gapRepair ? { ...change, beforeDigest: input.targets.find(target => target.nodeId === change.nodeId && target.path === change.path)!.sourceDigest } : change)), change => change.path, 'target')
   const partitionEvidence = results.map((result, index) => ({ partitionId: writers[index].id, resultRef: writeEvidence(commonDir, result) }))
   const projection = input.verifications && results.every(result => result.structurePassed && result.reviewPassed)
     ? projectPartitionVerificationOwnership(input, reviewedChanges, elaborationTargetBindings(input).filter(binding => plan.partitions.some(partition => partition.targets.some(target => target.path === input.targets[binding.targetIndex].path)) || descendants.some(node => node.path === binding.path)).map(binding => binding.path)) : null
@@ -527,7 +541,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
     ? failed?.status ?? 'failed'
     : gaps.some(gap => gap.gapKind === 'conflict') ? 'conflict' : gaps.length ? 'needs_input' : 'complete'
   const failure = failed?.failure ?? (!seal.seal.passed ? { code: 'partition_final_seal_failed', message: JSON.stringify(seal.seal.findings.map(({ code, itemId, message }) => ({ code, itemId, message }))) } : null)
-  const compact = { ...first, partitionBinding: undefined, readonlySpecRepair: undefined, repairDiagnostics: undefined, phase: 'partitioned_final' as const, inputDigest: partitionedElaborationInputDigest(plan.digest, results.map(result => result.inputDigest), analysisOnlyPartitions), candidateDigest: seal.seal.candidateDigest, changes,
+  const compact = { ...first, partitionBinding: undefined, readonlySpecRepair: undefined, gapRepair: undefined, repairDiagnostics: undefined, phase: 'partitioned_final' as const, inputDigest: partitionedElaborationInputDigest(plan.digest, results.map(result => result.inputDigest), analysisOnlyPartitions), candidateDigest: seal.seal.candidateDigest, changes,
     readyIds: structurePassed ? seal.coverage.items.filter(item => item.blockedBy.length === 0 && item.kind !== 'GAP').map(item => item.id) : [], readyFlowIds: readiness.readyFlowIds,
     blockedIds: seal.coverage.items.filter(item => item.blockedBy.length > 0).map(item => item.id), blockedFlows: readiness.blockedFlows,
     retiredIds: unique([...results.flatMap(result => result.retiredIds), ...seal.resolvedGapIds]), nodeChanges: [...input.nodeChanges ?? []],
@@ -540,9 +554,10 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
   return compact
 }
 
-/** 独立取证不接入自动协调；旧批准和未知业务保持原件，后续返修须另经正式来源门。 */
-export async function inspectPartitionedElaborationGaps(input: ElaborationInput, plan: SyncPartitionPlan, aggregateRef: BlobRef, runner: ElaborationRunner): Promise<ElaborationGapReviewEvidence | null> {
+/** 完整候选复核沿原分区覆盖取证；协调器认证正式来源，输出不代替原批准。 */
+export async function inspectPartitionedElaborationGaps(input: ElaborationInput, plan: SyncPartitionPlan, aggregateRef: BlobRef, runner: ElaborationRunner, composed?: ComposedInputRef, previous?: { ref: BlobRef; evidence: ElaborationGapReviewEvidence; traces: readonly ElaborationTrace[] }): Promise<ElaborationGapReviewEvidence | null> {
   if (!input.historyInput) reject('GAP复核缺少冻结输入')
+  input = await partitionSealInput(input, plan, composed)
   const commonDir = input.historyInput!.source.commonDir
   const aggregate = JSON.parse(readEvidence(commonDir, aggregateRef).toString('utf8')) as Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>
   const seal = aggregate.partitionSeal
@@ -554,8 +569,9 @@ export async function inspectPartitionedElaborationGaps(input: ElaborationInput,
     if (!plan.partitions.some(partition => partition.id === owner.partitionId) || local.partitionBinding?.planDigest !== plan.digest || local.partitionBinding.partitionId !== owner.partitionId || !local.structurePassed || !local.reviewPassed || local.failure) reject('GAP复核局部原件不属于同一已审分区计划')
     return local
   })
-  if (new Set(ownerRefs.map(owner => owner.partitionId)).size !== ownerRefs.length || ownerRefs.length !== plan.partitions.length || aggregate.analysisOnlyPartitions?.length
-    || aggregate.inputDigest !== partitionedElaborationInputDigest(plan.digest, locals.map(local => local.inputDigest))) reject('GAP复核缺少完整且唯一的P1 owner原件')
+  if (!partitionedElaborationCoverageMatches(plan.partitions.map(partition => partition.id), ownerRefs.map(owner => owner.partitionId), aggregate.analysisOnlyPartitions?.map(owner => owner.partitionId) ?? [])
+    || JSON.stringify(aggregate.analysisOnlyPartitions ?? []) !== JSON.stringify(analysisOnlyPartitionEvidence(commonDir, plan, input.analysis))
+    || aggregate.inputDigest !== partitionedElaborationInputDigest(plan.digest, locals.map(local => local.inputDigest), aggregate.analysisOnlyPartitions)) reject('GAP复核缺少完整且唯一的P1/P0 owner原件')
   const changes = locals.flatMap(local => local.changes)
   if (changes.length !== seal!.changes.length || new Set(changes.map(change => change.path)).size !== changes.length
     || seal!.changes.some(change => !changes.some(local => local.path === change.path && local.nodeId === change.nodeId && local.beforeDigest === change.beforeDigest && withoutVerificationTables(local.source) === withoutVerificationTables(change.source)))
@@ -563,10 +579,11 @@ export async function inspectPartitionedElaborationGaps(input: ElaborationInput,
     || aggregate.changes.length !== seal!.changes.length) reject('GAP复核并集与原已审owner正文不一致')
   if (freezeElaborationInput({ ...input, phase: undefined, validationScope: undefined }).inputDigest !== seal!.inputDigest) reject('GAP复核当前完整输入不匹配原封口候选')
   const existing = new Set([...input.targets, ...input.context ?? []].flatMap(target => target.source ? parseContract({ ...target, source: target.source }).contract?.items.map(item => item.id) ?? [] : []))
-  const gapIds = seal!.changes.flatMap(change => parseContract(change).contract!.items).filter(item => item.kind === 'GAP' && item.gapKind === 'missing_fact' && ['code', 'derived'].includes(item.source.kind) && !existing.has(item.id)).map(item => item.id)
+  const reviewed = new Set(locals.flatMap(local => local.gapRepair ? (JSON.parse(readEvidence(commonDir, local.gapRepair.reviewRef).toString('utf8')) as ElaborationGapReviewCheckpoint).gapIds : []))
+  const gapIds = seal!.changes.flatMap(change => parseContract(change).contract!.items).filter(item => item.kind === 'GAP' && item.gapKind === 'missing_fact' && ['code', 'derived'].includes(item.source.kind) && !existing.has(item.id) && !reviewed.has(item.id)).map(item => item.id)
   if (!gapIds.length) return null
   const candidate = { inputDigest: seal!.inputDigest, changes: seal!.changes, applicability: seal!.applicability, nodeChanges: seal!.nodeChanges }
-  return inspectElaborationGaps(input, candidate, gapIds, { aggregateRef, partitionPlanDigest: plan.digest, ownerRefs }, locals.flatMap(local => local.rounds.flatMap(round => round.traces)), runner)
+  return inspectElaborationGaps(input, candidate, gapIds, { aggregateRef, partitionPlanDigest: plan.digest, ownerRefs, ...(previous ? { previousReviewRef: previous.ref } : {}) }, [...locals.flatMap(local => local.rounds.flatMap(round => round.traces)), ...previous?.traces ?? []], runner, previous?.evidence)
 }
 
 /** P1新身份与实际依赖完成后冻结候选审查覆盖；沿用原分区身份及原独审原件。 */

@@ -12,6 +12,9 @@ code:
   - spec-cli/src/sync/elaboration.ts#projectElaborationFlowReadiness
   - spec-cli/src/sync/elaboration.ts#verifyElaborationDraftCache
   - spec-cli/src/sync/elaboration.ts#partitionSealRepairContext
+  - spec-cli/src/sync/elaboration.ts#inspectElaborationGaps
+  - spec-cli/src/sync/elaboration.ts#elaborationGapRepairContext
+  - spec-cli/src/sync/elaboration.ts#elaborationGapRepairFindings
 related:
   - spec-cli/src/sync/elaboration-orchestration.test.ts
   - spec-cli/src/sync/elaboration-target-binding.test.ts
@@ -26,6 +29,8 @@ related:
 只读候选复核可复用当前 P1 独审 schema、边界与范围校验。聚焦 GAP 的调用绑定同一冻结完整输入、原候选摘要、明确 GAP 集合和真实只读树，并与原生成、独审及分析会话独立；保留模型原始输出与全部拒因。其返回值仅为诊断，不授予候选批准、事实修订、稳定 ID 删除或人工裁决权限。
 
 ## expanded spec
+
+同一冻结候选的 GAP 复核经 [[sync-coordinator]] 认证后，只可触发原 owner 的候选误报续稿。资格由独立 review 的 affectedIds 精确命中本轮新提议、code/derived 来源的 missing_fact GAP，不能从说明文字推测。新 gapRepair 仅引用原复核及 accepted owner；临时读取原结果诊断、原已审并集和 Git 草稿，不改旧批准。只可移除命中的临时 GAP 及指向已移除 GAP 的 typed 引用，原 metadata、raw、说明、其他业务列、稳定 ID、AC/VERIFY 和适用性逐值保持；真实未知可原样保留。新独审须与原生成、原独审、GAP 复核和当前生成独立，完整结构、演进和严格全图封口照常执行。诊断不能自行清除 GAP、取得人工裁决或改变实现权限。
 
 只读 V1 引用返修先以原批准正文合并 Agent 草稿。结构化诊断只允许替换命中的治理或 related 引用及指定业务项的 code 来源，保持原引用角色和符号粒度。缺失的具体 related 文件只能改为冻结树中的具体文件。其余元数据、原意、说明、业务表、稳定 ID、适用性、测试引用和可信命令保持，越权差量在派发独审前拒绝。派发可把同一原引用的重复诊断按实际受影响 ID 归并，原失败原件保持，仍须重新独审与完整 V1。
 

@@ -13,6 +13,8 @@ code:
 
 ## expanded spec
 
+ElaborationGapReviewEvidence 是当次调用的内存诊断。持久 GAP 复核只保存原 aggregate/local/result refs、完整输入与候选摘要、GAP IDs、请求及独立 trace/seed 绑定，不重复保存 review、findings 或说明正文。原结果 ref 指向已有正式 Native/注入结果；新 owner 的 gapRepair 只保存 reviewRef、acceptedRef 和 baseInputDigest，并进入当前输入摘要。协议续审只追加previousReviewRef，冷恢复按严格较早来源重建原请求和全部旧审查身份，诊断正文现读。原作者或已采纳 GAP 不取得该资格，旧字段缺席不追补。
+
 P1生成指导保留V1–V4原值，并以ac-test-flow-review-verify-fact-repair-v5作为新阶段缺省。只有V5完整叶candidate_review返修可取得[[sync-elaboration]]的窄事实资格；该资格进入当前返修业务摘要，不改历史摘要，也不让无repair的兄弟批准失效。readonlySpecRepair本身不新增能力字段，旧缺席或旧指导不追补。新持久语义由[[sync-migrations]]的writer33围栏保护。
 
 partitioned_final的analysisOnlyPartitions仅在存在无写义务的已审P0分区时保存本区P0原件ref和whole P0 ref。它们按原分区顺序进入全局inputDigest，与真实partitionEvidence分开。无该字段的原聚合摘要保持原字节；rounds只来自真实P1局部，不为仅分析组补建review、candidate或trace。

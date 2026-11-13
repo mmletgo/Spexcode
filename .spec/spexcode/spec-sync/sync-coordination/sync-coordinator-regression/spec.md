@@ -295,3 +295,5 @@ ZCode P0 completed/events-RPC定向回归以真实分区协调器、Git/隔离SQ
 原request/plan/init/echo/正式stop、source/schema与当前fence均认证后，实际干净HEAD仍等于原seed的无进度候选先沿既有分支跳过，再判断输出终态形状；不将无JSON的exit143旧失败误判为missing-final阻断新任务。该skip不代表成功或格式资格，foreign身份、未知停止/进程与真实新提交仍不得借此越过认证；exit143已有新稿不取得本轮明确exit1错误材料资格。
 
 真实 Docker 回归覆盖只读未执行声明的交付与保护测试失败。核对 V1–V4、未执行清单、实际测试运行原件、源码和测试 Git 对象，以及失败没有交付。
+
+P1候选GAP回归用真实Git提交、两owner和隔离SQLite先证旧accept封口后仍持续blocked，再经一次只读完整并集复核、原owner原JSON字节续稿、新独审与严格seal结清误报，兄弟原件保持。复核后和完整新P1后的暂停/SQLite重启均保旧attempt及CAS字节；needs_input、conflict、无新发现和作者既有GAP不重复派发，mixed诊断只处理typed repair而保真实未知。未知ID和复用原线程先拒绝，下一原预算attempt仅沿previousReviewRef重审同一候选，合法前不派owner；候选/result refs失配及借诊断修改业务列继续拒绝。新独审实际seed须含原并集诊断文件；持久新增checkpoint不得复制review/findings正文。正常Native资源桥另核原只读请求、canonical结果及removed原件，后续P2回授仍绑定已结清GAP的新P1批准。全部场景保原预算、截止时间、source/index、非Spec Git对象与零交付journal；受控模型和Docker前停止不声称真实模型、V3或产品交付已通过。
