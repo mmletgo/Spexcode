@@ -9372,7 +9372,23 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
       return saved
     }
   }
-  let result = await runSyncOperation(store, f.operation.id, f.options)
+  const observeReviewReads = boundary === 'model-handoff' && !withGap
+  let formatReviewBlobReads = 0
+  if (observeReviewReads) {
+    const originalExec = execFileSync
+    t.mock.method(createRequire(import.meta.url)('node:child_process'), 'execFileSync', (...args: Parameters<typeof execFileSync>) => {
+      const command = args[1] as string[]
+      if (args[0] === 'git' && command.includes('cat-file') && command.includes('blob') && new Error().stack?.includes('failedCandidateReviewSource')) formatReviewBlobReads++
+      return Reflect.apply(originalExec, undefined, args)
+    })
+    syncBuiltinESMExports()
+  }
+  let result: Awaited<ReturnType<typeof runSyncOperation>>
+  try { result = await runSyncOperation(store, f.operation.id, f.options) }
+  finally {
+    if (observeReviewReads) { t.mock.restoreAll(); syncBuiltinESMExports() }
+  }
+  if (observeReviewReads) assert.equal(formatReviewBlobReads, 0, '候选续审不逐Spec启动Git检查每份旧独审')
   if (missingSource) {
     store.listAttempts = listOriginalAttempts
     assert.equal(result.failure?.code, 'frozen_candidate_analysis_binding', JSON.stringify(result.failure))

@@ -51,7 +51,7 @@ import { NATIVE_PERIODIC_OBSERVATION_FAILURE, NATIVE_PROCESS_OBSERVATION_PENDING
 import { readRecord } from '../session-record.js'
 import { structuredExecutionPolicy, StructuredSessionError } from '../session-structured-policy.js'
 import { SettledSessionCreateTimeoutError } from '../session-structured.js'
-import { canonicalSnapshotSource, captureInputSnapshot, contentHash, identifyRawWorktree, objectGit, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot, visitObjectBatch, withReadonlySnapshotQuery, writeEvidence } from './snapshot.js'
+import { canonicalSnapshotSource, captureInputSnapshot, contentHash, identifyRawWorktree, objectGit, readEvidence, readObject, readObjectBatch, readTree, validateRepositoryPath, verifySnapshot, visitObjectBatch, withReadonlySnapshotQuery, writeEvidence } from './snapshot.js'
 import type { SnapshotManifest, TreeEntry } from './snapshot.js'
 import { SyncStoreError } from './store.js'
 import type { SyncStore } from './store.js'
@@ -954,9 +954,14 @@ export function failedCandidateReviewSource(store: SyncStore, operation: SyncOpe
   const writable = aggregate.p2SpecWritePaths ?? (savedPlan.version === 'sync-coordinator-v2' && savedPlan.direction === 'code_to_spec' ? [] : undefined)
   const completed = result.reviewOutput !== null
   if (completed) {
-    const contracts = verifyCandidate(operation.input.source.commonDir, candidate).filter(entry => entry.mode !== '120000' && entry.path.startsWith('.spec/') && entry.path.endsWith('/spec.md')).flatMap(entry => parseContract({ nodeId: entry.path.split('/').at(-2)!, path: entry.path, source: readObject(operation.input.source.commonDir, entry.oid).toString('utf8') }).contract ?? [])
-    if (!writable) return null
-    if (candidateReviewError(result.reviewOutput, { inputId: operation.input.id, candidateDigest: candidate.digest, requiredIds: [], actualIds: contracts.flatMap(contract => contract.items.map(item => item.id)), priorIds: [] }) || candidateReviewLocationError(result.reviewOutput as NonNullable<GenerationResult['review']>, contracts, writable)?.code !== 'review_location_format' || result.failure && !completedReviewRepairCodes.has(result.failure.code) || result.review !== null && canonical(result.review) !== canonical(result.reviewOutput)) return null
+    const output = result.reviewOutput as NonNullable<GenerationResult['review']>
+    if (!writable || result.failure && !completedReviewRepairCodes.has(result.failure.code) || result.review !== null && canonical(result.review) !== canonical(output)
+      || candidateReviewError(output, { inputId: operation.input.id, candidateDigest: candidate.digest, requiredIds: [], actualIds: [], priorIds: [] })?.startsWith('评审 schema')
+      || output.verdict !== 'repair' || !output.findings.some(finding => finding.ruleLocation.replace(/^contract:/, '').startsWith('.spec/'))) return null
+    const entries = verifyCandidate(operation.input.source.commonDir, candidate).filter(entry => entry.mode !== '120000' && entry.path.startsWith('.spec/') && entry.path.endsWith('/spec.md'))
+    const blobs = readObjectBatch(operation.input.source.commonDir, entries.map(entry => entry.oid))
+    const contracts = entries.flatMap(({ path, oid }) => parseContract({ nodeId: path.split('/').at(-2)!, path, source: blobs.get(oid)!.toString('utf8') }).contract ?? [])
+    if (candidateReviewError(output, { inputId: operation.input.id, candidateDigest: candidate.digest, requiredIds: [], actualIds: contracts.flatMap(contract => contract.items.map(item => item.id)), priorIds: [] }) || candidateReviewLocationError(output, contracts, writable)?.code !== 'review_location_format') return null
   } else if (!reviewFormatRepairCodes.has(result.failure?.code ?? '') || result.review !== null) return null
   const requestKey = `sync:${origin.id}:generation:final:${key.slice('partition:'.length, -':candidate-review'.length)}:code_review`
   const resource = store.findResource(origin.id, requestKey)
@@ -985,26 +990,29 @@ export function failedCandidateReviewSource(store: SyncStore, operation: SyncOpe
 }
 
 /** 失租约不补写旧失败；只有完整同候选审查及资源原件已结算才可接回业务诊断。 */
-export function* candidateReviewAuthentication(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, generation: SavedGeneration, readIndex: (source: SyncAttempt) => SyncCheckpointStageView, options?: { readNativeRecord?: typeof readRecord }): Generator<void, boolean> {
-  if (!(attempt.status === 'superseded' && attempt.failure === null || ['failed', 'superseded'].includes(attempt.status) && attempt.failure?.kind === 'repairable') || !generation.candidateValidated || !generation.candidate || generation.reviewPassed || generation.validationFindings.some(finding => finding.severity === 'error')) return false
+function* candidateReviewAuthentication(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, generation: SavedGeneration, readIndex: (source: SyncAttempt) => SyncCheckpointStageView, options?: { readNativeRecord?: typeof readRecord }): Generator<void, string[] | null> {
+  if (!(attempt.status === 'superseded' && attempt.failure === null || ['failed', 'superseded'].includes(attempt.status) && attempt.failure?.kind === 'repairable') || !generation.candidateValidated || !generation.candidate || generation.reviewPassed || generation.validationFindings.some(finding => finding.severity === 'error')) return null
   const checkpoints = readIndex(attempt), candidate = generation.candidate
   const frozen = partitionStage<CandidateRef>(store, operation, attempt, 'partition:candidate', undefined, checkpoints)?.result
   const plan = reviewPlanStage(store, operation, attempt, 'candidate-partition-plan', undefined, readIndex)?.result
   const budget = stage<{ requiredKeys: string[] }>(store, operation, attempt, 'partition-generation-budget', 'automatic', checkpoints)
-  if (!plan || !budget || canonical(frozen) !== canonical(candidate) || store.listResources(attempt.id).some(resource => resource.operationId !== operation.id || resource.attemptId !== attempt.id || resource.plan.inputId !== operation.input.id || resource.phase !== 'removed')) return false
+  if (!plan || !budget || canonical(frozen) !== canonical(candidate) || store.listResources(attempt.id).some(resource => resource.operationId !== operation.id || resource.attemptId !== attempt.id || resource.plan.inputId !== operation.input.id || resource.phase !== 'removed')) return null
   const prefix = `sync:${attempt.id}:generation:final:`
   const required = budget.requiredKeys.filter(key => key.startsWith(prefix) && key.endsWith(':code_review')).map(key => `partition:${key.slice(prefix.length, -':code_review'.length)}:candidate-review`)
   const actual = checkpoints.json.map(({ value }) => value as Stage).filter(value => value.stage?.endsWith(':candidate-review')).map(value => value.stage)
-  if (!required.length || new Set(required).size !== required.length || canonical([...required].sort()) !== canonical([...actual].sort())) return false
+  if (!required.length || new Set(required).size !== required.length || canonical([...required].sort()) !== canonical([...actual].sort())) return null
+  const formatKeys: string[] = []
   for (const key of required) {
     const saved = partitionStage<SavedGeneration>(store, operation, attempt, key, undefined, checkpoints)!
     const original = partitionStage<ReturnType<typeof freezeGenerationInput>['inputEvidence']>(store, operation, attempt, `${key}:input`, undefined, checkpoints)?.result
     const input = original ? restoreGenerationInput(original) : acceptedReviewInput(store, operation, attempt, key, saved.resultRef, checkpoints)
-    if (!(input && completedCandidateReviewSource(store, operation, attempt, key, candidate, plan, input, readIndex, true))
-      && !failedCandidateReviewSource(store, operation, attempt, key, candidate, plan, input ?? undefined, readIndex, options?.readNativeRecord)) return false
+    if (!(input && completedCandidateReviewSource(store, operation, attempt, key, candidate, plan, input, readIndex, true))) {
+      if (!failedCandidateReviewSource(store, operation, attempt, key, candidate, plan, input ?? undefined, readIndex, options?.readNativeRecord)) return null
+      formatKeys.push(key)
+    }
     yield
   }
-  return true
+  return formatKeys
 }
 
 function interruptedCandidateReviewComplete(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, generation: SavedGeneration, readIndex: (source: SyncAttempt) => SyncCheckpointStageView): boolean {
@@ -1013,7 +1021,7 @@ function interruptedCandidateReviewComplete(store: SyncStore, operation: SyncOpe
     const proof = candidateReviewAuthentication(store, operation, attempt, generation, readIndex)
     let step = proof.next()
     while (!step.done) step = proof.next()
-    return step.value
+    return step.value !== null
   })
 }
 
@@ -1485,7 +1493,7 @@ function authenticatedMixedElaborationCoverage(store: SyncStore, operation: Sync
   })
 }
 
-type FrozenCandidateAnalysis = { operationId: string; sourceAttemptId: string; candidateDigest: string; analysisRef: BlobRef; analysisRefs: string[] }
+type FrozenCandidateAnalysis = { operationId: string; sourceAttemptId: string; candidateDigest: string; analysisRef: BlobRef; analysisRefs: string[]; formatReviewKeys: string[] }
 
 /** 同operation原冻结候选专用冷验；沿原正式生产者核证，不补指导或启动模型。 */
 export async function authenticateFrozenCandidateAnalysis(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, options: { renew?: () => Promise<void>; readNativeRecord?: typeof readRecord; allGuidance?: true } = {}): Promise<FrozenCandidateAnalysis | null> {
@@ -1546,11 +1554,10 @@ export async function authenticateFrozenCandidateAnalysis(store: SyncStore, oper
         await renew()
       }
       const p2 = candidateReviewAuthentication(store, operation, attempt, generation, readIndex, { readNativeRecord: scope.readNativeRecord })
-      for (let step = p2.next(); ; step = p2.next()) {
-        if (step.done) { if (!step.value) reject('原候选缺少全部required独审结论及精确Native结算'); break }
-        await renew()
-      }
-      return { operationId: operation.id, sourceAttemptId: attempt.id, candidateDigest: candidate.digest, analysisRef: evidence.ref, analysisRefs: [...scope.refs] }
+      let step = p2.next()
+      while (!step.done) { await renew(); step = p2.next() }
+      const formatReviewKeys = step.value ?? reject('原候选缺少全部required独审结论及精确Native结算')
+      return { operationId: operation.id, sourceAttemptId: attempt.id, candidateDigest: candidate.digest, analysisRef: evidence.ref, analysisRefs: [...scope.refs], formatReviewKeys }
     } finally { scope.active = false; scope.refs.clear(); scope.selectionMatches?.clear(); delete scope.readIndex }
   }))
 }
@@ -2054,10 +2061,12 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         store.renewLease(fence!, leaseMs)
       }
       const handoffParent = reviewHandoffParent(store, operation)
+      let authenticatedCandidate: FrozenCandidateAnalysis | null = null
       if (handoffParent) {
         const prior = store.listAttempts(handoffParent.id).reverse().find(prior => ['failed', 'superseded'].includes(prior.status) && stage<SavedGeneration>(store, handoffParent, prior, 'generation')?.candidate)
         const proof = prior && await authenticateFrozenCandidateAnalysis(store, handoffParent, prior, { renew: renewReadonlyRecovery, allGuidance: true })
         if (!proof) fail('review_handoff_binding', '显式模型交接没有可认证的原完整P0/P1及未完成P2候选，不能从P0重新开始')
+        authenticatedCandidate = proof
         legacy.candidateDigest = proof.candidateDigest
         for (const ref of proof.analysisRefs) legacy.refs.add(ref)
       }
@@ -2065,7 +2074,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         for (const prior of store.listAttempts(operation.id).filter(prior => prior.number < attempt!.number && ['failed', 'superseded'].includes(prior.status)).reverse()) {
           if (!stage<SavedGeneration>(store, operation, prior, 'generation')) continue
           const proof = await authenticateFrozenCandidateAnalysis(store, operation, prior, { renew: renewReadonlyRecovery })
-          if (proof) { legacy.candidateDigest = proof.candidateDigest; for (const ref of proof.analysisRefs) legacy.refs.add(ref) }
+          if (proof) { authenticatedCandidate = proof; legacy.candidateDigest = proof.candidateDigest; for (const ref of proof.analysisRefs) legacy.refs.add(ref) }
           break
         }
       }
@@ -2161,22 +2170,34 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           const candidatePlan = reviewPlanStage(store, owner, prior, 'candidate-partition-plan', undefined, readIndex)?.result
           const candidate = generation.candidate
           if (!candidate || !generation.candidateValidated || generation.reviewPassed || generation.validationFindings.some(finding => finding.severity === 'error') || !approved || !elaborationComposedBinding(store, owner, prior, approved, view.composed, checkpoints) || !originalPlan || !candidatePlan || canonical(candidate.coveredScope.paths) !== canonical(operation.scope.paths)) break
-          if (prior.status === 'superseded' && prior.failure === null) {
-            const complete = await withReadonlySnapshotQuery(async () => {
+          let failedReviewKeys = authenticatedCandidate?.operationId === owner.id && authenticatedCandidate.sourceAttemptId === prior.id && authenticatedCandidate.candidateDigest === candidate.digest
+            ? authenticatedCandidate.formatReviewKeys : undefined
+          if (!failedReviewKeys && prior.status === 'superseded' && prior.failure === null) {
+            const classified = await withReadonlySnapshotQuery(async () => {
               const proof = candidateReviewAuthentication(store, owner, prior, generation, readIndex)
               for (let step = proof.next(); ; step = proof.next()) {
                 if (step.done) return step.value
-                store.renewLease(fence!, leaseMs)
-                await yieldToControl()
-                if (signal.aborted) fail('cancelled', '候选独审来源认证已停止')
-                store.renewLease(fence!, leaseMs)
+                await renewReadonlyRecovery()
               }
             })
-            if (!complete) fail('review_source_binding', '失租约候选缺少完整required outcomes或精确结算原件，不能从汇总猜测续审资格')
+            failedReviewKeys = classified ?? fail('review_source_binding', '失租约候选缺少完整required outcomes或精确结算原件，不能从汇总猜测续审资格')
           }
-          const reviewKeys = checkpoints.json.map(({ value }) => value as Stage).filter(value => value.stage?.endsWith(':candidate-review')).map(value => value.stage)
-          const failedReviewKeys = reviewKeys.filter(key => failedCandidateReviewSource(store, owner, prior, key, candidate, candidatePlan, undefined, readIndex))
-          if (!failedReviewKeys.length || !reviewKeys.every(key => { const result = partitionStage<SavedGeneration>(store, owner, prior, key, undefined, checkpoints)?.result; return result?.review && ['accept', 'repair'].includes(result.review.verdict) && !result.failure || failedReviewKeys.includes(key) })) break
+          if (!failedReviewKeys) {
+            const reviewKeys = checkpoints.json.map(({ value }) => value as Stage).filter(value => value.stage?.endsWith(':candidate-review')).map(value => value.stage)
+            failedReviewKeys = await withReadonlySnapshotQuery(async () => {
+              const keys: string[] = []
+              for (const key of reviewKeys) {
+                if (failedCandidateReviewSource(store, owner, prior, key, candidate, candidatePlan, undefined, readIndex)) keys.push(key)
+                else {
+                  const result = partitionStage<SavedGeneration>(store, owner, prior, key, undefined, checkpoints)?.result
+                  if (!result?.review || !['accept', 'repair'].includes(result.review.verdict) || result.failure) return []
+                }
+                await renewReadonlyRecovery()
+              }
+              return keys
+            })
+          }
+          if (!failedReviewKeys.length) break
           verifyCandidate(operation.input.source.commonDir, candidate)
           const approvedRef = writeEvidence(operation.input.source.commonDir, approved)
           let sourceElaboration: ApprovedElaborationSource | undefined

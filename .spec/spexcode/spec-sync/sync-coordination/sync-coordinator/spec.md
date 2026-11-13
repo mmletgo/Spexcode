@@ -312,6 +312,8 @@ P0/P1/P2 共用 typed Native RPC 已结算准入：仅当前 control/physical ru
 
 generation 已完整保存、但收尾失租约留下 superseded 且 failure=null 时，不补签旧失败或收据。只有同 operation/input/candidate、原完整 requiredKeys 的唯一正式审查结果、原 plan/scope/P1、全部 Native 完成或格式失败原件及资源 removed 逐一成立，才可继续同候选协议或业务返修；零调用、无 generation 的中间控制 attempt 不取代该来源。缺 outcome、未知停止、未结算资源或身份漂移继续拒绝。单次恢复在已结算 attempt 内复用 stage index，不跨新的检查点、候选或控制状态缓存授信。
 
+完整冷验在同一恢复内把真实格式失败组传给同 operation、同 attempt、同候选的续审选择器。已认证的组不再进行全树筛选；新独审前仍核当前完整输入和原 Native 请求。需要读取历史位置字段的原件时批读候选 Spec，每组间让出控制。旧成功原件的坏位置仍沿同一格式与原请求资格。
+
 旧轮重复细化后，已有候选可能实际使用同一冻结输入下另一份完整已审P1。只在上述精确候选续审路径，回到生成该候选的原attempt，冷验其完整封口、原计划全分区覆盖、每个owner的Native生成与独立审查、Git草稿和原局部输入。当前完整局部输入仍须一致，重组后的全图P1必须逐值等于原候选所用原件；缺证或漂移明确拒绝，不回退另一份P1或重新派发生成。此候选继续沿原builder真实请求/Git差量、独审输入及V1–V4验证；普通实现修复的首个批准选择器及全局增补链保持，不把该来源变成任意最新P1批准。
 
 格式诊断不加入全局repairContext；已有accept的局部或跨边独审仍逐项沿原完整输入、Native传输请求/schema/seed/模型/policy及停止原件核验。原Native请求比较复用资源桥的nativeConfiguration、内部effort与精准ZCode read policy统一冻结接缝，按原saved字段重建；新cli-config-v1省略同步内部默认high，旧请求保原字段和缺席，不向历史补默认。仅失败组取得reviewRepair原result/NativePlan/checkpoint引用；从原canonical record和failed→removed停止证明认证完整final后，在只读临时seed提供原回答及精确schema，要求Agent基于旧回答继续输出合法最终JSON。原文仍未批准，不抽取其中JSON、不补checkedIds/accept/receipt，不读thinking、不改业务候选。旧GenerationResult及raw ref缺席保持；新独审、V1–V4/Docker/Git/adopt和预算照常。
