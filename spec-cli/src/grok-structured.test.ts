@@ -383,10 +383,16 @@ test('Grok read uses native plan mode, removes plan exit and leaves the original
   const result = await f.run()
   assert.equal(result.text, finalText)
   const invocation = JSON.parse(readFileSync(f.started, 'utf8')) as { prompt: string }
-  assert.match(invocation.prompt, /built-in file readers or read-only shell commands/)
-  assert.match(invocation.prompt, /avoid the search_tool and use_tool discovery wrappers/)
+  assert.match(invocation.prompt, /read_file, grep, and list_dir/)
+  assert.match(invocation.prompt, /Do not use run_terminal_command to inspect checked-out files/)
+  assert.match(invocation.prompt, /if the task explicitly requires inspecting a historical Git object/)
+  const planPath = join(f.sessionRoot, 'plan.json'), originalPlan = readFileSync(planPath, 'utf8')
+  assert.equal(JSON.parse(originalPlan).readGuidance, 'native-file-read-v2')
   assert.equal(nativeWorktreeResult(f.workspace, f.worktree).headCommit, f.worktree.baseCommit)
   assert.deepEqual(await f.run(f.state(), replayCallbacks), result)
+  rmSync(planPath)
+  writeFileSync(planPath, JSON.stringify({ ...JSON.parse(originalPlan), readGuidance: 'direct-git-read-v1' }))
+  await assert.rejects(f.run(f.state(), replayCallbacks), { code: 'stale_result' })
 })
 
 for (const scenario of ['wrong-session', 'wrong-cwd', 'missing-request', 'duplicate-terminal', 'missing-terminal'] as const) {
