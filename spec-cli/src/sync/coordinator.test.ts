@@ -6,7 +6,7 @@ import { createRequire, syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { applyComponentMigrations, openProtocol, type SqlParam } from '@spexcode/session-protocol'
 import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
 import { putBlob, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
@@ -8658,9 +8658,10 @@ for (const mode of ['original', 'resume', 'legacy-cleared', 'missing-cause', 'co
   for (const ref of immutableRefs) assert.ok(store.readAttempt(approvedAttempt.id).checkpointRefs.some(current => current.sha256 === ref.sha256))
   assert.deepEqual(readTree(commonDir, resumed.candidate!.tree).filter(entry => !entry.path.startsWith('.spec/')), protectedObjects)
 })
-for (const boundary of ['failed', 'superseded-zero-call'] as const) test(`P2混合普通修复、契约遗漏与格式失败经SQLite冷续只补原评审再回精确owner ${boundary}`, { timeout: 180000 }, async t => {
+for (const boundary of ['failed', 'superseded-zero-call', 'legacy-v4'] as const) test(`P2混合普通修复、契约遗漏与格式失败经SQLite冷续只补原评审再回精确owner ${boundary}`, { timeout: 180000 }, async t => {
+  const legacy = boundary === 'legacy-v4', analysisOnlyPath = 'tests/independent-smoke.test.mjs'
   const protocolAttempt = boundary === 'failed' ? 2 : 3, ownerAttempt = protocolAttempt + 1
-  const definitions = ['export', 'import', 'archive', 'quiet'].map(word => {
+  const definitions = (legacy ? ['export', 'import', 'archive'] : ['export', 'import', 'archive', 'quiet']).map(word => {
     const upper = word.toUpperCase(), nodeId = `${word}-contract`, path = word === 'export' ? contractPath : `.spec/project/${word}/${nodeId}/spec.md`
     const sourcePath = word === 'export' ? 'src/export.js' : `src/${word}/${word}.js`, testPath = `tests/${word}.test.mjs`
     const source = original.replaceAll('export-job', `${word}-job`).replaceAll('EXPORT', upper).replaceAll('export-contract', nodeId).replaceAll('src/export.js', sourcePath).replaceAll('tests/export.test.mjs', testPath)
@@ -8670,14 +8671,36 @@ for (const boundary of ['failed', 'superseded-zero-call'] as const) test(`P2混�
   })
   const environment = { version: 'trusted-test-v1' as const, image: 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392', platform: 'linux/arm64' as const, memoryBytes: 128 * 1024 * 1024, cpus: 1, pidsLimit: 64, scratchBytes: 16 * 1024 * 1024, logBytes: 128 * 1024 }
   const extras = Object.fromEntries(definitions.slice(1).flatMap(item => [[item.path, item.source], [item.sourcePath, readFileSync(new URL('src/export.js', fixturePath), 'utf8')], [item.testPath, readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', item.upper).replaceAll('src/export.js', item.sourcePath)]]))
+  if (legacy) extras[analysisOnlyPath] = 'import test from "node:test"\ntest("standalone smoke", () => {})\n'
   const f = await fixture(t, { maxAttempts: ownerAttempt, maxCalls: 40, maxRepairs: ownerAttempt - 1, timeoutMs: 180000 }, false, original, 'project', original, {
-    version: 'sync-coordinator-v2', direction: 'code_to_spec', agentWorkflow: 'native-worktree-v1', sourcePaths: ['src'], writePaths: ['.spec'],
+    version: 'sync-coordinator-v2', direction: 'code_to_spec', agentWorkflow: 'native-worktree-v1', sourcePaths: ['src', ...(legacy ? [analysisOnlyPath] : [])], writePaths: ['.spec'],
     targets: definitions.map(({ nodeId, path }) => ({ nodeId, path })), facts: definitions.map(item => ({ source: `decision:${item.upper}-POLICY`, text: item.source })),
     verifications: definitions.map(({ verification: item }) => ({ definition: { id: item.id, command: item.command, cwd: item.cwd, timeoutMs: item.timeoutMs }, environment })),
     mandatoryTests: definitions.map(item => ({ verificationId: item.verification.id, testPath: item.testPath, testId: `AC-${item.upper}-03` })),
-    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 32768, maxParallel: 1 }, commitTrigger: { before: null, paths: definitions.map(item => item.sourcePath) },
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 32768, maxParallel: 1 }, commitTrigger: { before: null, paths: [...definitions.map(item => item.sourcePath), ...(legacy ? [analysisOnlyPath] : [])] },
   }, undefined, 'code', 'claude:default', true, extras)
   let store = f.store
+  let historicalRun = runSyncOperation
+  if (legacy) {
+    // 历史程序自然生成v4/v7原件；当前consumer不改指导标记，也不把模拟批准写进历史。
+    const directory = join(f.parent, 'historical-producer'), revision = '369e08be1da6d3e664a44b5084f031c53bc1620d'
+    mkdirSync(directory)
+    const require = createRequire(import.meta.url)
+    for (const name of ['code-behavior', 'coordinator']) {
+      const source = execFileSync('/usr/bin/git', ['show', `${revision}:spec-cli/src/sync/${name}.ts`], { cwd: fileURLToPath(new URL('../../../', import.meta.url)), encoding: 'utf8', stdio: 'pipe' })
+      const restored = source.replace(/((?:from\s+|import\s*\()\s*)['"]([^'"]+)['"]/g, (_match, prefix: string, specifier: string) => {
+        const target = specifier === './code-behavior.js' ? pathToFileURL(join(directory, 'code-behavior.mts')).href
+          : specifier.startsWith('.') ? new URL(specifier, import.meta.url).href
+          : specifier.startsWith('node:') ? specifier : pathToFileURL(require.resolve(specifier)).href
+        return `${prefix}${JSON.stringify(target)}`
+      })
+      writeFileSync(join(directory, `${name}.mts`), restored, 'utf8')
+    }
+    historicalRun = (await import(pathToFileURL(join(directory, 'coordinator.mts')).href) as typeof continuationCoordinator).runSyncOperation
+    const claimed = store.claimQueuedAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: f.options.leaseMs!, expectedRevision: f.operation.revision })
+    const protocol = { version: 'code-behavior-draft-v1', contextTransport: 'git-json-v4' }, resultRef = writeEvidence(f.input.source.commonDir, protocol)
+    store.checkpoint(claimed.fence, { ...writeEvidence(f.input.source.commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: claimed.attempt.id, inputId: f.input.id, policyDigest: f.operation.policyDigest, readSetDigest: f.operation.readSetDigest, baselineSelectionRef: writeEvidence(f.input.source.commonDir, f.operation.baselineSelection), stage: 'behavior-draft-protocol', resultRef }), artifacts: syncCheckpointArtifacts(protocol, resultRef) })
+  }
   const calls: { attempt: number; purpose: string; group?: string; nodeId?: string; repairKind?: string }[] = [], records = new Map<string, NativeRunRecord>()
   const roles = new Map<string, { kind: 'ordinary' | 'omission' | 'format' | 'quiet'; definition: typeof definitions[number] }>()
   const rejected = '{original-mixed-review-final: only this group may resume}'
@@ -8689,6 +8712,7 @@ for (const boundary of ['failed', 'superseded-zero-call'] as const) test(`P2混�
     return createAttemptRunner(store, fence, { pollMs: 2, runtime: { readRecord: id => records.get(id) ?? null, cancel: async () => { throw new Error('fixture不得控制真实Native') }, run: async native => {
       const sessionId = sessionIdForCreateKey(native.sessionCreateKey!), identity = { threadId: `mixed-${sessionId}`, turnId: 'turn' }, resultDigest = contentHash(JSON.stringify(output)), execution = structuredExecutionPolicy(native)
       records.set(sessionId, { session: sessionId, status: 'awaiting', harnessSessionId: identity.threadId, createRequestId: contentHash(native.sessionCreateKey!), createPayloadHash: contentHash(JSON.stringify({ prompt: native.worktree ? nativeWorktreePrompt(native.prompt, native.worktree) : native.prompt, parent: null, launcher: null, ...(native.base?.trim() ? { base: native.base.trim() } : {}), structuredExecution: execution })), structuredExecution: { ...execution, ...identity, state: 'completed', output, resultDigest, ...(worktree ? { resultWorktree: worktree } : {}) } })
+      if (legacy) writeRecord({ governed: false, worktreePath: worktree?.worktreePath ?? f.root, branch: null, title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(), harness: 'claude', runtimeStartToken: null, stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: null, launchOwner: null, base: native.base, forkCommit: native.base, ...records.get(sessionId)! })
       return { sessionId, ...identity, output, resultDigest, ...(worktree ? { worktree } : {}) }
     } } })(request)
   }
@@ -8702,7 +8726,7 @@ for (const boundary of ['failed', 'superseded-zero-call'] as const) test(`P2混�
       const group = request.requestKey.split(':final:')[1]; call.group = group
       const definition = definitions.find(item => identity.requiredIds.includes(`AC-${item.upper}-03`))!
       assert.ok(definition)
-      if (attempt.number === 1 && !roles.has(group)) roles.set(group, { kind: (['ordinary', 'omission', 'format', 'quiet'] as const)[roles.size], definition })
+      if (attempt.number === 1 && !roles.has(group)) roles.set(group, { kind: (legacy ? ['ordinary', 'format', 'quiet'] as const : ['ordinary', 'omission', 'format', 'quiet'] as const)[roles.size], definition })
       const role = roles.get(group)!
       output = { inputId: identity.inputId, candidateDigest: identity.candidateDigest, verdict: 'accept', checkedIds: identity.requiredIds, findings: [] }
       if (attempt.number === 1 && ['ordinary', 'omission'].includes(role.kind)) output = { ...(output as object), verdict: 'repair', findings: [{ kind: 'repair', affectedIds: [`RULE-${definition.upper}-05`], ruleLocation: `${role.kind === 'omission' ? 'contract-omission:' : 'contract:'}${definition.path}#RULE-${definition.upper}-05`, codeLocation: `${definition.sourcePath}#ExportService`, evidence: '冻结原意支持的精确边界需要本owner重新核对', counterexample: '同一输入与原稳定规则未完整对应', message: '只沿原意核对，不授新业务或源码写权' }] }
@@ -8727,7 +8751,7 @@ for (const boundary of ['failed', 'superseded-zero-call'] as const) test(`P2混�
       assert.equal(attempt.number, ownerAttempt, '协议尚未完成时不得先改业务候选')
     }
     if (request.purpose === 'elaboration_review') output = { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
-    else if (request.purpose === 'code_behavior_analyze') output = { changes: task!.requiredChangedPaths!.map(path => ({ kind: 'refactor', paths: [path], affectedIds: [`RULE-${definition.upper}-05`], ruleIds: [`RULE-${definition.upper}-05`], originalIntent: '保留原业务', previousBehavior: '原导出行为', sourceBehavior: '原导出行为', deliveryBehavior: '原导出行为', evidence: path, counterexample: '不得改变权限及验收' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    else if (request.purpose === 'code_behavior_analyze') output = { changes: task!.requiredChangedPaths!.map(path => ({ kind: 'refactor', paths: [path], affectedIds: path === analysisOnlyPath ? [] : [`RULE-${definition.upper}-05`], ruleIds: path === analysisOnlyPath ? [] : [`RULE-${definition.upper}-05`], originalIntent: '保留原业务', previousBehavior: '原导出行为', sourceBehavior: '原导出行为', deliveryBehavior: '原导出行为', evidence: path, counterexample: '不得改变权限及验收' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
     else if (request.purpose === 'code_behavior_review') {
       const state = readCodeBehaviorContext(request, f.input.source.commonDir).pendingAnalysis! as { analysisDigest: string; analysis: import('./writeback-types.js').CodeBehaviorAnalysis }
       output = { inputDigest: request.inputDigest, analysisDigest: state.analysisDigest, verdict: 'accept', checkedPaths: task!.requiredChangedPaths, checkedChangeIds: state.analysis.changes.map(change => change.id), findings: [] }
@@ -8738,8 +8762,16 @@ for (const boundary of ['failed', 'superseded-zero-call'] as const) test(`P2混�
       output = adaptElaborationNativeOutput(request, generated)
     }
     const dispatch = attempt.dispatchPlans.find(dispatch => dispatch.key === request.requestKey)!
-    const worktree = seed.mode === 'edit' ? committedDraftFixture(f, request, output, join(f.parent, `mixed-stage-${calls.length}`)) : undefined
+    let worktree = seed.mode === 'edit' ? committedDraftFixture(f, request, output, join(f.parent, `mixed-stage-${calls.length}`)) : undefined
     if (worktree) output = { summary: '按原raw复核并正常提交原稿' }
+    if (legacy) {
+      if (!worktree) {
+        const root = join(f.parent, `mixed-stage-${calls.length}`)
+        f.git('worktree', 'add', '--detach', root, seed.baseCommit)
+        worktree = nativeWorktreeResult(root, seed)
+      }
+      return completeReview(request, output, worktree)
+    }
     return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `mixed-stage-${request.requestKey}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)), ...(worktree ? { worktree } : {}) }
   }
   const claim = store.claimQueuedAttempt.bind(store)
@@ -8747,12 +8779,32 @@ for (const boundary of ['failed', 'superseded-zero-call'] as const) test(`P2混�
     if (store.listAttempts(f.operation.id).some(attempt => attempt.number === 1 && attempt.status === 'failed')) throw Object.assign(new Error('fixture真实SQLite冷恢复边界'), { code: 'unsupported' })
     return claim(input)
   }
-  await runSyncOperation(store, f.operation.id, f.options)
+  const produced = await historicalRun(store, f.operation.id, f.options)
   const first = store.listAttempts(f.operation.id)[0], originalStages = stages(first), originalBlobs = first.checkpointRefs.map(ref => ({ ref, bytes: readEvidence(f.input.source.commonDir, ref) }))
-  assert.equal(roles.size, 4); assert.equal(first.status, 'failed')
+  assert.equal(roles.size, definitions.length, JSON.stringify({ failure: produced.failure, calls })); assert.equal(first.status, 'failed')
+  if (legacy) {
+    const p0 = originalStages.find(stage => stage.stage === 'analysis')! as typeof originalStages[number] & { guidanceContractVersion?: string }
+    assert.equal(p0.guidanceContractVersion, 'code-behavior-guidance-v7')
+    assert.equal(read<{ guidanceContractVersion?: string }>(p0.resultRef).guidanceContractVersion, undefined)
+    const p1 = read<ElaborationResult>(originalStages.find(stage => stage.stage === 'elaboration')!.resultRef)
+    assert.equal(p1.partitionEvidence?.length, 3); assert.equal(p1.analysisOnlyPartitions?.length, 1)
+    assert.equal(first.candidate, null, '原P2收齐混合独审时尚未执行正式freezeCandidate')
+    let renewals = 0
+    const current = store.readOperation(f.operation.id), proof = await continuationCoordinator.authenticateFrozenCandidateAnalysis(store, current, first, { renew: async () => { renewals++; await new Promise<void>(resolve => setImmediate(resolve)) } })
+    assert.equal(proof?.analysisRefs.length, 5); assert.equal(renewals, 10, '四个P0、三个P1和三个P2 owner均有控制机会')
+    assert.equal(calls.length, 17, '原失败认证不新增模型调用')
+    const missingP0 = { ...first, checkpointRefs: first.checkpointRefs.filter(ref => read<{ stage?: string }>(ref).stage !== originalStages.find(stage => stage.stage.startsWith('partition:') && stage.stage.endsWith(':analysis'))!.stage) }
+    await assert.rejects(continuationCoordinator.authenticateFrozenCandidateAnalysis(store, current, missingP0), /frozen_candidate_analysis_binding/, '缺任何一个原P0 owner批准均拒绝')
+    const originalAnalyze = first.dispatchPlans.find(dispatch => dispatch.purpose === 'code_behavior_analyze')!.session!.sessionId
+    await assert.rejects(continuationCoordinator.authenticateFrozenCandidateAnalysis(store, current, first, { readNativeRecord: id => {
+      const record = readRecord(id)
+      return id === originalAnalyze && record?.structuredExecution ? { ...record, structuredExecution: { ...record.structuredExecution, resultDigest: '0'.repeat(64) } } : record
+    } }), /frozen_candidate_analysis_binding/, 'canonical Native原输出身份漂移不能继承旧批准')
+    await assert.rejects(continuationCoordinator.authenticateFrozenCandidateAnalysis(store, { ...current, id: `${current.id}-foreign` }, first), /binding/, '原分析不得跨operation取得批准')
+  }
   const initialGeneration = read<import('./generation-types.js').GenerationResult>(originalStages.find(stage => stage.stage === 'generation')!.resultRef)
   assert.equal(initialGeneration.review?.verdict, 'repair'); assert.equal(initialGeneration.review!.findings.some(finding => finding.ruleLocation.startsWith('contract-omission:')), false)
-  if (boundary === 'superseded-zero-call') {
+  if (boundary !== 'failed') {
     // 控制前置精确模拟已观察的失租约元数据；业务/CAS/Native原件均来自上面的真实首轮。
     const interrupted = { ...first, status: 'superseded' as const, failure: null }
     f.protocol.withTransaction(tx => tx.exec('UPDATE sync_attempts SET status=?,record_json=? WHERE id=?', interrupted.status, JSON.stringify(interrupted), interrupted.id))
@@ -8783,11 +8835,15 @@ for (const boundary of ['failed', 'superseded-zero-call'] as const) test(`P2混�
     if (role.kind === 'format' || role.kind === 'quiet') assert.deepEqual(third.find(stage => stage.stage === before.stage)?.resultRef, before.resultRef)
   }
   for (const { ref, bytes } of originalBlobs) assert.deepEqual(readEvidence(f.input.source.commonDir, ref), bytes)
-  if (boundary === 'superseded-zero-call') for (const attempt of attempts.slice(0, 2)) { assert.equal(attempt.status, 'superseded'); assert.equal(attempt.failure, null) }
+  if (boundary !== 'failed') for (const attempt of attempts.slice(0, 2)) { assert.equal(attempt.status, 'superseded'); assert.equal(attempt.failure, null) }
   const repair = read<{ readonlyOwnerRepair: Parameters<typeof continuationCoordinator.validateReadonlyRepair>[2] }>(third.find(stage => stage.stage === 'repair-input')!.resultRef).readonlyOwnerRepair
   const readAttempt = store.readAttempt.bind(store), listResources = store.listResources.bind(store)
   const settled = { ...readAttempt(repair.fromAttemptId), status: 'superseded' as const, failure: null }
   store.readAttempt = id => id === settled.id ? settled : readAttempt(id)
+  const validate = async (): Promise<void> => {
+    if (legacy) assert.ok(await continuationCoordinator.authenticateFrozenCandidateAnalysis(store, store.readOperation(f.operation.id), store.readAttempt(repair.fromAttemptId)))
+    else continuationCoordinator.validateReadonlyRepair(store, store.readOperation(f.operation.id), repair)
+  }
   const treeReads: string[] = [], originalExec = execFileSync
   t.mock.method(createRequire(import.meta.url)('node:child_process'), 'execFileSync', (...args: Parameters<typeof execFileSync>) => {
     const command = args[1] as string[]
@@ -8796,7 +8852,7 @@ for (const boundary of ['failed', 'superseded-zero-call'] as const) test(`P2混�
   })
   syncBuiltinESMExports()
   try {
-    assert.doesNotThrow(() => continuationCoordinator.validateReadonlyRepair(store, store.readOperation(f.operation.id), repair), '完整已结算aggregate可直接认证superseded/null来源，不补失败状态')
+    await assert.doesNotReject(validate, '完整已结算aggregate可直接认证superseded/null来源，不补失败状态')
   } finally {
     t.mock.restoreAll()
     syncBuiltinESMExports()
@@ -8805,12 +8861,13 @@ for (const boundary of ['failed', 'superseded-zero-call'] as const) test(`P2混�
   const rereads = treeReads.filter(tree => tree === frozenTree).length
   t.diagnostic(JSON.stringify({ totalTreeReads: treeReads.length, frozenCandidateTreeReads: rereads, candidateReviewGroups: roles.size }))
   assert.equal(rereads, 1, '同一结算候选的完整Git树只核一次')
+  if (legacy) assert.throws(() => continuationCoordinator.validateReadonlyRepair(store, store.readOperation(f.operation.id), repair), /readonly_spec_repair_binding/, '冷验scope退出后，普通自动stage仍不能继承旧v7批准')
   const missing = { ...settled, checkpointRefs: settled.checkpointRefs.filter(ref => !read<{ stage?: string }>(ref).stage?.endsWith(':candidate-review')).concat(settled.checkpointRefs.filter(ref => read<{ stage?: string }>(ref).stage?.endsWith(':candidate-review')).slice(1)) }
   store.readAttempt = id => id === settled.id ? missing : readAttempt(id)
-  assert.throws(() => continuationCoordinator.validateReadonlyRepair(store, store.readOperation(f.operation.id), repair), /readonly_spec_repair_binding/, '缺一个required outcome不能接回失租约业务诊断')
+  await assert.rejects(validate, /(?:readonly_spec_repair_binding|frozen_candidate_analysis_binding)/, '缺一个required outcome不能接回失租约业务诊断')
   store.readAttempt = id => id === settled.id ? settled : readAttempt(id)
   store.listResources = id => listResources(id).map((resource, index) => id === settled.id && index === 0 ? { ...resource, phase: 'created' } : resource)
-  assert.throws(() => continuationCoordinator.validateReadonlyRepair(store, store.readOperation(f.operation.id), repair), /readonly_spec_repair_binding/, '资源尚未精确结算不能借完整aggregate接回')
+  await assert.rejects(validate, /(?:readonly_spec_repair_binding|frozen_candidate_analysis_binding)/, '资源尚未精确结算不能借完整aggregate接回')
   store.readAttempt = readAttempt; store.listResources = listResources
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
   assert.deepEqual(store.listJournals(f.operation.id), [])
