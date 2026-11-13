@@ -529,15 +529,15 @@ function partitionElaborationStage(store: SyncStore, operation: SyncOperation, a
 }
 
 /** 跨正式重试的批准仍属于原模型、Git生成和独立只读审查。 */
-function authenticatedApprovedElaboration(store: SyncStore, owner: SyncOperation, prior: SyncAttempt, result: SavedElaboration, reviewInSourceAttempt = false): boolean {
+function authenticatedApprovedElaboration(store: SyncStore, owner: SyncOperation, prior: SyncAttempt, result: SavedElaboration, options: { reviewInSourceAttempt?: boolean; allowDeferredImplementation?: boolean } = {}): boolean {
   const round = result.rounds.at(-1), review = round?.traces.find(trace => trace.purpose === 'elaboration_review')
-  if (!round?.draft || !round.candidate || !review || round.traces.length !== 2 || !hasApprovedElaborationReview(result) || round.review?.verdict !== 'accept'
+  if (!round?.draft || !round.candidate || !review || round.traces.length !== 2 || !hasApprovedElaborationReview(result) || !options.allowDeferredImplementation && round.review?.verdict !== 'accept'
     || round.candidate.inputDigest !== result.inputDigest || round.candidateDigest !== contentHash(JSON.stringify(round.candidate)) || round.candidateDigest !== result.candidateDigest
     || canonical(round.review) !== canonical({ ...(round.reviewOutput as object), inputDigest: result.inputDigest, candidateDigest: result.candidateDigest })
     || ELABORATION_BOUNDARIES.some(boundary => !round.review!.checkedBoundaries.includes(boundary))) return false
   const generation = elaborationGenerationSource(store, owner, prior, round)
   const reviewed = store.listAttempts(owner.id).filter(attempt => attempt.number <= prior.number).find(attempt => attempt.dispatchPlans.some(dispatch => dispatch.purpose === review.purpose && canonical(dispatch.session) === canonical({ sessionId: review.sessionId, threadId: review.threadId, turnId: review.turnId })))
-  if (reviewInSourceAttempt && reviewed?.id !== prior.id) return false
+  if (options.reviewInSourceAttempt && reviewed?.id !== prior.id) return false
   const dispatch = reviewed?.dispatchPlans.find(dispatch => dispatch.purpose === review.purpose && dispatch.session?.sessionId === review.sessionId)
   const source = reviewed && dispatch ? authenticatedDraftResult(store, owner, reviewed, dispatch.key, review.purpose) : null
   if (!generation?.request || !source?.request || !source.result || source.request.inputDigest !== review.inputDigest || source.result.resultDigest !== review.resultDigest || canonical(source.result.output) !== canonical(round.reviewOutput)
@@ -576,7 +576,7 @@ function elaborationDraftGenerationSource(store: SyncStore, owner: SyncOperation
     planRef = plan.resultRef.sha256
     const provenance = partitionStage<{ fromOperationId: string; fromAttemptId: string; resultRef: BlobRef }>(store, origin.owner, origin.prior, key + ':provenance', basis?.selection, checkpoints)
     if (!provenance) {
-      if (!authenticatedApprovedElaboration(store, origin.owner, origin.prior, result, true)) return null
+      if (!authenticatedApprovedElaboration(store, origin.owner, origin.prior, result, { reviewInSourceAttempt: true })) return null
       const generation = elaborationGenerationSource(store, origin.owner, origin.prior, round)
       return generation && { ...generation, ownerId: origin.owner.id }
     }
@@ -1852,7 +1852,9 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         const history = readonlySources()
         for (const origin of history.attempts.filter(item => item.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(item.status)).reverse()) {
           const source = readonlyLocalSource(store, operation, origin, key, expected.resultRef, readonlyBase!.resultRef, history)
-          if (!source || !source.result.structurePassed || !source.result.reviewPassed || source.result.failure || source.result.rounds.at(-1)?.review?.verdict !== 'accept' || canonical(source.result.partitionBinding) !== canonical(binding) || (source.result.readonlySpecRepair?.baseInputDigest ?? source.result.inputDigest) !== inputDigest) continue
+          if (!source || !source.result.structurePassed || !source.result.reviewPassed || source.result.failure || canonical(source.result.partitionBinding) !== canonical(binding) || (source.result.readonlySpecRepair?.baseInputDigest ?? source.result.inputDigest) !== inputDigest) continue
+          if (source.result.rounds.at(-1)?.review?.verdict !== 'accept'
+            && (source.result.phase !== undefined || !authenticatedApprovedElaboration(store, operation, origin, source.result, { allowDeferredImplementation: true }))) continue
           saveStage(store, fence!, `${key}:provenance`, { fromOperationId: operation.id, fromAttemptId: origin.id, resultRef: source.resultRef })
           partitionCheckpoints.save(key, source.result)
           return source.result
@@ -2552,7 +2554,9 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           if (readonly) return readonly
           for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(item.status))) {
             const source = partitionElaborationStage(store, operation, prior, key, binding, inputDigest)
-            if (!source || !source.result.structurePassed || !source.result.reviewPassed || source.result.failure || source.result.phase !== undefined || !['complete', 'needs_input', 'conflict'].includes(source.result.status) || source.result.rounds.at(-1)?.review?.verdict !== 'accept') continue
+            if (!source || !source.result.structurePassed || !source.result.reviewPassed || source.result.failure || source.result.phase !== undefined || !['complete', 'needs_input', 'conflict'].includes(source.result.status)) continue
+            if (source.result.rounds.at(-1)?.review?.verdict !== 'accept'
+              && !authenticatedApprovedElaboration(store, operation, prior, source.result, { allowDeferredImplementation: true })) continue
             saveStage(store, fence!, `${key}:provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef })
             partitionCheckpoints.save(key, source.result)
             return source.result
