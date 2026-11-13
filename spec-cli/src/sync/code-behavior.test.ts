@@ -9,7 +9,7 @@ import { isHostPrivatePath } from './candidate.js'
 import { isUtf8Text } from './composition.js'
 import { analyzeCodeBehavior, CODE_BEHAVIOR_REVIEW_SCHEMA, CODE_BEHAVIOR_SCHEMA, deriveBehaviorAuthorization, packBehaviorBodies, readCodeBehaviorContext, referenceCodeBehaviorMetadata, type FrozenBehaviorBody } from './code-behavior.js'
 import type { CodeBehaviorInput, CodeBehaviorContinuation } from './code-behavior.js'
-import { behaviorMaterialTaskMatches } from './coordinator.js'
+import { behaviorMaterialTaskMatches, syncPlanDigest } from './coordinator.js'
 import { nativeWorktreeResult } from '../native-worktree-runtime.js'
 import { readStageDraft } from './stage-worktree.js'
 import { adoptedDeliveryPaths, composeInputSnapshots, readCompositionEvidence, type IntentObject, type IntentResidual, type SelectedCompositionEvidence } from './composition.js'
@@ -90,6 +90,28 @@ function runner(kind: CodeBehaviorKind, patch?: (proposal: Record<string, unknow
     return { sessionId: `session-${request.purpose}`, threadId: `thread-${request.purpose}`, turnId: 'turn-1', output, resultDigest: contentHash(JSON.stringify(output)) }
   }
 }
+
+for (const partition of [false, true]) test(`P0模型任务不携全图contextVerifications且保全局政策绑定 partition=${partition}`, async t => {
+  const f = await fixture(t)
+  writeFileSync(join(f.root, 'src/export.js'), `${f.source}\n// formatting only\n`)
+  const input = await f.input()
+  input.plan.contextVerifications = [{ id: 'VERIFY-UNSELECTED-01', command: ['node', '--test', 'tests/unselected.test.mjs'], cwd: '.', timeoutMs: 7000 }]
+  input.policyDigest = syncPlanDigest(input.plan)
+  if (partition) input.partition = { id: 'export-partition', changedPaths: ['src/export.js'], factSourcePaths: ['src/export.js'] }
+  const before = structuredClone(input.plan), requests: ElaborationSessionRequest[] = [], fake = runner('refactor')
+  const result = await analyzeCodeBehavior(input, async request => {
+    requests.push(request)
+    const task = readFrozenBehaviorContext<{ plan: typeof input.plan; policyDigest: string }>(request)
+    assert.equal(task.plan.contextVerifications, undefined)
+    assert.equal(request.prompt.includes('VERIFY-UNSELECTED-01'), false)
+    assert.deepEqual(task.plan.verifications, before.verifications); assert.deepEqual(task.plan.mandatoryTests, before.mandatoryTests)
+    assert.equal(task.policyDigest, input.policyDigest)
+    return fake(request)
+  })
+  assert.equal(result.reviewPassed, true); assert.equal(requests.length, 2)
+  assert.equal(result.policyDigest, syncPlanDigest(before))
+  assert.deepEqual(input.plan, before)
+})
 
 test('Native P0历史seed复用已校验old tree entries且输入与接受门不变', async t => {
   const f = await fixture(t, undefined, {}, process.env.SPEX_P0_LOCAL_TREE_REUSE_FIXTURE), sourcePath = join(f.root, 'src/export.js'), marker = '// immutable tree reuse fixture change'
@@ -2642,6 +2664,123 @@ test('native worktree P0看见受控raw和完整repo，省略的相关文件可�
   })
   assert.equal(result.reviewPassed, true); assert.deepEqual(calls, ['code_behavior_analyze', 'code_behavior_review'])
   assert.equal(readFileSync(join(f.root, 'src/export.js'), 'utf8'), 'later WIP\n')
+})
+
+for (const source of ['ui', 'commit', 'mixed', 'readonly'] as const) test(`P0 v6当前作者意图与真实冻结方向同时进入分析和独审 source=${source}`, async t => {
+  const specPath = '.spec/export/export-contract/spec.md', codePath = 'src/export.js', testPath = 'tests/format-json.test.mjs'
+  const code = readFileSync(new URL('src/export.js', fixturePath), 'utf8') + '\nexport const formatJson = value => JSON.stringify(value, null, 4)\n'
+  const tests = 'import assert from "node:assert/strict"\nimport test from "node:test"\nimport { formatJson } from "../src/export.js"\ntest("JSON-INDENT-01", () => assert.equal(formatJson({a:1}), \'{\\n    "a": 1\\n}\'))\n'
+  const f = await fixture(t, body => body.replace('此输入是固定业务验收夹具；', '导出 JSON 使用四个空格缩进。此输入是固定业务验收夹具；'), { [codePath]: code, [testPath]: tests })
+  const original = await f.input(), next = f.raw.replace('四个空格', '两个空格')
+  let prepared = original
+  if (source === 'ui') {
+    const edit = prepareControlledRequest(original.snapshot, { path: specPath, source: f.raw, next, changed: true, startLine: 1, endLine: 1 }, { kind: 'user_edit', requestId: 'author-indent-two', nodeId: 'export-contract', intent: '导出 JSON 使用两个空格缩进' })
+    assert.ok(edit.changed)
+    prepared = { ...original, composed: composeControlledRequest(original.snapshot, original.composed, edit.requestBlob, { retainConflicts: true }).composed! }
+  } else {
+    if (source !== 'readonly') writeFileSync(join(f.root, specPath), next)
+    if (source === 'mixed') writeFileSync(join(f.root, 'src/export.js'), f.source.replace("['CANCEL', 'RETRY', 'DOWNLOAD']", "['CANCEL', 'RETRY']"))
+    if (source === 'readonly') writeFileSync(join(f.root, codePath), code.replace('null, 4', 'null, 2'))
+    git(f.root, 'add', '.'); git(f.root, 'commit', '-m', 'freeze the actual author change')
+    prepared = await f.input()
+  }
+  const direction = source === 'readonly' ? 'code_to_spec' : source === 'mixed' ? 'combined' : 'spec_to_code'
+  const input: CodeBehaviorInput = {
+    ...prepared, draftProtocol: 'code-behavior-draft-v1', contextTransport: 'git-json-v6',
+    origin: source === 'readonly' ? 'code' : source === 'mixed' ? 'combined' : 'spec',
+    plan: { ...prepared.plan, version: 'sync-coordinator-v2', direction, agentWorkflow: 'native-worktree-v1', sourcePaths: ['src'],
+      writePaths: source === 'readonly' ? ['.spec'] : prepared.plan.writePaths,
+      mandatoryTests: [{ verificationId: 'VERIFY-EXPORT-01', testPath, testId: 'JSON-INDENT-01' }], partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 } },
+  }
+  const index = readFileSync(join(f.root, '.git/index')), inputBytes = JSON.stringify(input)
+  const historical: { request: ElaborationSessionRequest; bytes: string; context: string }[] = []
+  if (source === 'ui') for (const contextTransport of [undefined, 'git-json-v1', 'git-json-v2', 'git-json-v3', 'git-json-v4', 'git-json-v5'] as const) {
+    const stopped = new Error('仅捕获原历史运输，不执行模型')
+    await assert.rejects(analyzeCodeBehavior({ ...input, contextTransport }, async request => {
+      const context = readCodeBehaviorContext(request, input.snapshot.source.commonDir)
+      assert.equal(context.task.direction, undefined, '历史任务不补签 direction')
+      assert.doesNotMatch(request.prompt, /当前作者意图：/)
+      historical.push({ request, bytes: JSON.stringify(request), context: JSON.stringify(context) })
+      throw stopped
+    }), stopped)
+  }
+  assert.ok(historical.every(item => item.request.inputDigest === historical[0].request.inputDigest), '旧运输继续使用同一原 v7 业务身份')
+  const guidance: string[] = [], calls: string[] = []
+  let checkpoint: CodeBehaviorContinuation | null = null
+  const checkpoints = { load: () => checkpoint, save: (value: CodeBehaviorContinuation) => { checkpoint = structuredClone(value) } }
+  let rejectedReview: { oid: string; source: string } | undefined
+  const dispatch: ElaborationRunner = async request => {
+    calls.push(request.purpose)
+    const seed = request.worktree!, descriptor = JSON.parse(request.prompt.split('\n任务:\n')[1].split('\n草稿文件=')[0])
+    const context = JSON.parse(git(f.root, 'show', `${seed.baseCommit}:${descriptor.path}`)) as ReturnType<typeof readCodeBehaviorContext>
+    const task = context.task
+    if (historical.length) assert.notEqual(request.inputDigest, historical[0].request.inputDigest, '新指导不能承接旧业务摘要下的批准')
+    assert.equal(task.direction, direction, '冻结计划的真实方向不能在 Native brief 丢失')
+    assert.deepEqual(readCodeBehaviorContext(request, input.snapshot.source.commonDir), context)
+    const shared = request.prompt.match(/^当前作者意图：.*$/m)?.[0]
+    assert.ok(shared, '分析与独审都必须收到当前作者意图规则')
+    guidance.push(shared)
+    assert.match(shared, /authorChanges.*beforeRaw\/afterRaw.*historicalRoles/)
+    assert.match(shared, /spec_to_code.*combined.*allowed_change/)
+    assert.match(shared, /旧代码.*旧测试.*不是.*否决/)
+    assert.match(shared, /独立.*conflict.*coverage_gap/)
+    assert.match(shared, /code_to_spec.*只读.*readonly_implementation_gap/)
+    assert.match(shared, /独审.*repair/)
+    assert.match(request.prompt, /可自由读取整个仓库/)
+    assert.doesNotMatch(request.prompt, /spex_read_frozen|bodyIndex|bodyRef/)
+    const authors = task.authorChanges as NonNullable<CodeBehaviorAnalysis['authorChanges']>
+    if (source === 'readonly') {
+      assert.deepEqual(authors, [], '外部源码变化不能升级为作者 raw 意图')
+      assert.deepEqual(task.allowedWritePaths, ['.spec'])
+      assert.equal(git(f.root, 'show', `${seed.baseCommit}:${codePath}`), code.replace('null, 4', 'null, 2').trim())
+    } else {
+      assert.equal(authors.length, 1); assert.equal(authors[0].path, specPath)
+      assert.match(authors[0].beforeRaw!, /四个空格/); assert.match(authors[0].afterRaw!, /两个空格/)
+      assert.ok(authors[0].changedIds.includes('REQ-EXPORT-01'))
+      assert.match(git(f.root, 'show', `${seed.baseCommit}:${specPath}`), /两个空格/)
+      assert.equal(git(f.root, 'show', `${seed.baseCommit}:${codePath}`), (source === 'mixed' ? code.replace("['CANCEL', 'RETRY', 'DOWNLOAD']", "['CANCEL', 'RETRY']") : code).trim())
+      assert.equal(git(f.root, 'show', `${seed.baseCommit}:${testPath}`), tests.trim())
+    }
+    const roles = task.historicalRoles as { role: string; baseCommit: string }[]
+    const before = roles.find(role => role.role === 'authorBaseline')!
+    assert.match(git(f.root, 'show', `${before.baseCommit}:${specPath}`), /四个空格/)
+    const changedPaths = task.requiredChangedPaths as string[], stage = context.pendingAnalysis
+    // 此 runner 只验证真实请求/草稿/门禁，不模拟模型如何判断业务语义。
+    const output = stage
+      ? { inputDigest: request.inputDigest, analysisDigest: stage.analysisDigest, verdict: 'accept', checkedPaths: [...new Set([...changedPaths, specPath, codePath, testPath])], checkedChangeIds: stage.analysis.changes.map(change => change.id), findings: [] }
+      : { changes: changedPaths.map(path => {
+          const permissionConflict = source === 'mixed' && path === codePath
+          return { kind: permissionConflict || source === 'readonly' ? 'conflict' : 'allowed_change', paths: [path], affectedIds: permissionConflict ? ['RULE-EXPORT-01', 'AC-EXPORT-03'] : ['REQ-EXPORT-01'], ruleIds: permissionConflict ? ['RULE-EXPORT-01'] : ['REQ-EXPORT-01'], originalIntent: 'JSON缩进与下载权限是独立政策', previousBehavior: '四空格且仅所有者可下载', sourceBehavior: permissionConflict ? '外部删除下载权限检查' : '精确冻结的作者或代码差量', deliveryBehavior: '四空格且仅所有者可下载', evidence: path, counterexample: permissionConflict ? '非所有者可下载与未修改权限意图冲突' : '两个空格的代码与四个空格的原要求不能同时满足' }
+        }), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    const workspace = join(f.root, '..', `author-direction-${calls.length}`), draft = /草稿文件=([^\s；]+)/.exec(request.prompt)![1]
+    git(f.root, 'worktree', 'add', '--detach', workspace, seed.baseCommit)
+    const malformed = source === 'ui' && stage && !rejectedReview
+    if (rejectedReview) {
+      assert.equal(git(workspace, 'rev-parse', `HEAD:${draft}`), rejectedReview.oid)
+      assert.equal(readFileSync(join(workspace, draft), 'utf8'), rejectedReview.source, '格式失败沿同一 JSON 原稿续审')
+    }
+    const draftSource = malformed ? '{ "inputDigest":' : JSON.stringify(output)
+    mkdirSync(join(workspace, draft, '..'), { recursive: true }); writeFileSync(join(workspace, draft), draftSource)
+    git(workspace, 'add', draft); git(workspace, 'commit', '-m', 'normal fixture JSON draft')
+    if (malformed) rejectedReview = { oid: git(workspace, 'rev-parse', `HEAD:${draft}`), source: draftSource }
+    const receipt = { summary: '冻结方向与作者证据回归' }
+    return { sessionId: `author-${calls.length}`, threadId: `author-thread-${calls.length}`, turnId: 'turn', output: receipt, resultDigest: contentHash(JSON.stringify(receipt)), worktree: nativeWorktreeResult(workspace, seed) }
+  }
+  if (source === 'ui') {
+    await assert.rejects(analyzeCodeBehavior(input, dispatch, undefined, checkpoints), { code: 'behavior_output_json' })
+    assert.ok(checkpoint!.readyAnalysis)
+  }
+  const result = await analyzeCodeBehavior(input, dispatch, undefined, checkpoints)
+  assert.deepEqual(calls, ['code_behavior_analyze', 'code_behavior_review', ...source === 'ui' ? ['code_behavior_review'] : []])
+  assert.ok(guidance.every(item => item === guidance[0])); assert.equal(result.reviewPassed, true)
+  if (rejectedReview) assert.equal(readObject(input.snapshot.source.commonDir, rejectedReview.oid).toString('utf8'), rejectedReview.source)
+  for (const item of historical) {
+    assert.equal(JSON.stringify(item.request), item.bytes)
+    assert.equal(JSON.stringify(readCodeBehaviorContext(item.request, input.snapshot.source.commonDir)), item.context)
+  }
+  assert.deepEqual(result.findings.map(finding => ({ kind: finding.kind, paths: finding.paths })), source === 'mixed' || source === 'readonly' ? [{ kind: 'conflict', paths: [codePath] }] : [], '提示修复不能由程序清除真实独立冲突')
+  assert.deepEqual(result.authorizedChanges, [], '任务方向和提示本身不授予 AC/VERIFY 写权')
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), index); assert.equal(JSON.stringify(input), inputBytes)
 })
 
 test('Native分析与独审共享业务语义且允许已知行为走newNodes交P1', async t => {

@@ -11,6 +11,10 @@ code:
 
 ## expanded spec
 
+historicalCoverageDigest 只绑定完整 seal 的程序资格，局部输入移除该字段。封口及候选 GAP 复核沿原 checkpoint 接缝取得 [[sync-historical-coverage]] 的逐 ID 冷验回调并传入同一严格候选校验器；有摘要却无可信回调时拒绝，不由模型或局部结果声明历史授信。
+
+composed 全树补入的未选 owner 声明可使用原计划冻结的 contextVerifications 完成最终 seal 登记校验。该字段在局部输入复制时移除；局部模型原 verifications、文件视图、writer 和真实 V3 范围保持。只有完整 seal 合并定义并绑定摘要，不把未选定义迁入当前候选或局部 VERIFY 归属投影。
+
 P0/P1分区材料回调透传可await结果，使归档失败来源能沿同一checkout临时恢复/严格观察/回收接缝续原稿。分区身份、读取/预算、输入摘要、原candidate/批准与并发语义保持，无新持久字段。
 
 

@@ -24,10 +24,12 @@ import { projectSyncPartition, rawOnlyInterfaceSeedEvidence } from './partitioni
 import { historicalOwnerPaths, historicalRetiredIds, obligationPaths, projectPriorContext } from './prior-context.js'
 import type { RawOnlyInterfaceSeedDescendant, RawOnlyInterfaceSeedEvidence, SyncPartition, SyncPartitionPlan } from './partitioning.js'
 import type { CodeBehaviorAnalysis, CodeBehaviorEvidence } from './writeback-types.js'
+import type { HistoricalCoverageCheck } from './historical-coverage.js'
 
 type PartitionSealRepair = { prior: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>; repair: ReadonlySpecRepair; priorInput?: ElaborationInput; wholeFileSourcePaths?: string[] }
 export type PartitionCheckpoints = {
   load<T>(key: string): T | null
+  historicalCoverage?(digest: string): HistoricalCoverageCheck
   loadCandidateReviewRepair?(key: string, plan: SyncPartitionPlan, input: GenerationInput, candidate: NonNullable<GenerationResult['candidate']>): GenerationInput['reviewRepair'] | null
   loadAcceptedCandidateReview?(key: string, plan: SyncPartitionPlan, input: GenerationInput, candidate: NonNullable<GenerationResult['candidate']>, builders: readonly ElaborationTrace[], current?: Omit<GenerationResult, 'candidateFiles'>): Omit<GenerationResult, 'candidateFiles'> | null
   elaborationDraftTagged?(key: string, result: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>): boolean
@@ -411,6 +413,8 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
     const seedTarget = interfaceSeed ? targets[0] : undefined
     const intent = seedTarget && seedTarget.nodeId !== input.intent.nodeId ? { nodeId: seedTarget.nodeId, rawSource: parseParts(seedTarget.source ?? '')?.rawSource ?? seedTarget.rawSource! } : input.intent
     const localInput: ElaborationInput = { ...input, requestKey: `${input.requestKey}:partition:${partition.id}`, intent, targets, context,
+      contextVerifications: undefined,
+      historicalCoverageDigest: undefined,
       partitionBinding,
       files: new Map([...input.files ?? []].filter(([path]) => within(path, readPaths)).map(([path, source]) => [path, settledSources.get(path) ?? source])), analysis,
       validationScope: 'partition_local',
@@ -530,7 +534,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
   const candidateChanges = (projection?.changes ?? reviewedChanges).map(({ nodeId, path, beforeDigest, source }) => ({ nodeId, path, beforeDigest, source }))
   const changes = candidateChanges.map(change => ({ ...change, contentDigest: contentHash(change.source) }))
   const applicability = partitionApplicability(results)
-  const seal = sealPartitionedElaboration(sealInput, candidateChanges, applicability, results.flatMap(result => result.readonlySpecRepair?.kind === 'candidate_review' ? [result.readonlySpecRepair] : []), factBaselines)
+  const seal = sealPartitionedElaboration(sealInput, candidateChanges, applicability, results.flatMap(result => result.readonlySpecRepair?.kind === 'candidate_review' ? [result.readonlySpecRepair] : []), factBaselines, input.historicalCoverageDigest ? checkpoints.historicalCoverage?.(input.historicalCoverageDigest) : undefined)
   const readiness = seal.seal.passed ? projectElaborationFlowReadiness(seal.graph, seal.coverage) : { readyFlowIds: [], blockedFlows: [] }
   const gaps = seal.contracts.flatMap(contract => contract.items.filter((item): item is import('@spexcode/spec-core/contracts').Gap => item.kind === 'GAP'))
   const localStructurePassed = results.every(result => result.structurePassed)
@@ -555,7 +559,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
 }
 
 /** 完整候选复核沿原分区覆盖取证；协调器认证正式来源，输出不代替原批准。 */
-export async function inspectPartitionedElaborationGaps(input: ElaborationInput, plan: SyncPartitionPlan, aggregateRef: BlobRef, runner: ElaborationRunner, composed?: ComposedInputRef, previous?: { ref: BlobRef; evidence: ElaborationGapReviewEvidence; traces: readonly ElaborationTrace[] }): Promise<ElaborationGapReviewEvidence | null> {
+export async function inspectPartitionedElaborationGaps(input: ElaborationInput, plan: SyncPartitionPlan, aggregateRef: BlobRef, runner: ElaborationRunner, composed?: ComposedInputRef, previous?: { ref: BlobRef; evidence: ElaborationGapReviewEvidence; traces: readonly ElaborationTrace[] }, checkpoints: Pick<PartitionCheckpoints, 'historicalCoverage'> = {}): Promise<ElaborationGapReviewEvidence | null> {
   if (!input.historyInput) reject('GAP复核缺少冻结输入')
   input = await partitionSealInput(input, plan, composed)
   const commonDir = input.historyInput!.source.commonDir
@@ -577,13 +581,12 @@ export async function inspectPartitionedElaborationGaps(input: ElaborationInput,
     || seal!.changes.some(change => !changes.some(local => local.path === change.path && local.nodeId === change.nodeId && local.beforeDigest === change.beforeDigest && withoutVerificationTables(local.source) === withoutVerificationTables(change.source)))
     || aggregate.changes.some(change => change.contentDigest !== contentHash(change.source) || !seal!.changes.some(sealed => sealed.path === change.path && sealed.nodeId === change.nodeId && sealed.beforeDigest === change.beforeDigest && sealed.source === change.source))
     || aggregate.changes.length !== seal!.changes.length) reject('GAP复核并集与原已审owner正文不一致')
-  if (freezeElaborationInput({ ...input, phase: undefined, validationScope: undefined }).inputDigest !== seal!.inputDigest) reject('GAP复核当前完整输入不匹配原封口候选')
   const existing = new Set([...input.targets, ...input.context ?? []].flatMap(target => target.source ? parseContract({ ...target, source: target.source }).contract?.items.map(item => item.id) ?? [] : []))
   const reviewed = new Set(locals.flatMap(local => local.gapRepair ? (JSON.parse(readEvidence(commonDir, local.gapRepair.reviewRef).toString('utf8')) as ElaborationGapReviewCheckpoint).gapIds : []))
   const gapIds = seal!.changes.flatMap(change => parseContract(change).contract!.items).filter(item => item.kind === 'GAP' && item.gapKind === 'missing_fact' && ['code', 'derived'].includes(item.source.kind) && !existing.has(item.id) && !reviewed.has(item.id)).map(item => item.id)
   if (!gapIds.length) return null
   const candidate = { inputDigest: seal!.inputDigest, changes: seal!.changes, applicability: seal!.applicability, nodeChanges: seal!.nodeChanges }
-  return inspectElaborationGaps(input, candidate, gapIds, { aggregateRef, partitionPlanDigest: plan.digest, ownerRefs, ...(previous ? { previousReviewRef: previous.ref } : {}) }, [...locals.flatMap(local => local.rounds.flatMap(round => round.traces)), ...previous?.traces ?? []], runner, previous?.evidence)
+  return inspectElaborationGaps(input, candidate, gapIds, { aggregateRef, partitionPlanDigest: plan.digest, ownerRefs, ...(previous ? { previousReviewRef: previous.ref } : {}) }, [...locals.flatMap(local => local.rounds.flatMap(round => round.traces)), ...previous?.traces ?? []], runner, previous?.evidence, input.historicalCoverageDigest ? checkpoints.historicalCoverage?.(input.historicalCoverageDigest) : undefined)
 }
 
 /** P1新身份与实际依赖完成后冻结候选审查覆盖；沿用原分区身份及原独审原件。 */

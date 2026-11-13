@@ -113,22 +113,16 @@ export function syncObserverProjection(observation, sourceWorktrees = null) {
     : null
   let baseline = null
   if (latest) {
-    const bindings = latest.selection?.bindings
-    if (!Array.isArray(bindings)) {
+    const coverage = latest.baseline
+    if (!coverage) {
       baseline = { status: 'unavailable', nodeId: differenceNodeId, failure: latest.reason ?? latest.failure ?? null }
     } else {
-      const missingResources = bindings.flatMap((binding) => {
-        const pair = binding.resource.kind === 'path' ? binding.bytePair : binding.intentPair
-        if (pair) return []
-        const resource = binding.resource
-        return [resource.kind === 'path' ? resource.path : `${resource.kind}:${resource.id}`]
-      })
       baseline = {
         status: 'available',
         nodeId: differenceNodeId,
-        resourceCount: bindings.length,
-        establishedCount: bindings.length - missingResources.length,
-        missingResources,
+        resourceCount: coverage.resourceCount,
+        establishedCount: coverage.resourceCount - coverage.missingResources.length,
+        missingResources: coverage.missingResources,
       }
     }
   }

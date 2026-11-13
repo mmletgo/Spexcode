@@ -150,6 +150,53 @@ test('全局seal只路由真实error owner及引用依赖，无关accept不失�
   assert.throws(() => partitionSealRepairOwners(plan, { ...aggregate, partitionSeal: { ...aggregate.partitionSeal, findings: [{ ...error, path: '.spec/foreign/spec.md' }] } }, locals), { code: 'partition_final_seal_unroutable' })
 })
 
+test('全图seal保留冻结的独立VERIFY登记，局部请求不扩域且旧缺席不读取实时配置', async t => {
+  const prepared = await fixture(t), selected = prepared.input.contracts[0], snapshot = prepared.input.snapshot
+  const partition = prepared.plan.partitions[0]
+  const plan: SyncPartitionPlan = { ...prepared.plan, partitions: [partition], dependencies: [], expectedPaths: partition.changedPaths }
+  const registrations = prepared.input.contracts.flatMap(contract => contract.items.filter(item => item.kind === 'VERIFY').map(item => ({ id: item.id, command: item.command, cwd: item.cwd, timeoutMs: item.timeoutMs })))
+  const source = prepared.input.files.get(selected.path)!
+  const input: ElaborationInput = {
+    root: prepared.root, requestKey: 'scoped-verification-seal', historyInput: snapshot,
+    intent: { nodeId: selected.nodeId, rawSource: selected.rawSource },
+    targets: [{ nodeId: selected.nodeId, path: selected.path, source, sourceDigest: contentHash(source) }],
+    files: new Map([...prepared.input.files].filter(([path]) => partition.readPaths.includes(path))),
+    verifications: [registrations[0]], contextVerifications: registrations.slice(1), maxRepairs: 0, maxCalls: 2,
+  }
+  const composed = composeInputSnapshots(snapshot).composed!, requests: ElaborationSessionRequest[] = []
+  const runner: ElaborationRunner = async request => {
+    const ordinal = requests.push(request)
+    const frozen = JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as { verifications: { id: string }[]; contextVerifications?: unknown; files: [string, string][] }
+    assert.deepEqual(frozen.verifications.map(item => item.id), ['VERIFY-EXPORT-01'])
+    assert.equal(frozen.contextVerifications, undefined, '全图登记不进入局部模型请求')
+    assert.ok(frozen.files.every(([path]) => partition.readPaths.includes(path)))
+    const output = request.purpose === 'elaboration_generate'
+      ? { version: 'elaboration-target-rows-v3', changes: [], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: true, basis: '沿用本区完整已审契约', affectedIds: ['REQ-EXPORT-01'] })) }
+      : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+    return { sessionId: `registration-session-${ordinal}`, threadId: `registration-thread-${ordinal}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+  }
+  const checkpoints: PartitionCheckpoints = { load: () => null, save: (_key, value) => writeEvidence(snapshot.source.commonDir, value) }
+  const original = JSON.stringify(input)
+  const result = await elaborateSyncPartitions(input, plan, 1, checkpoints, runner, composed)
+  assert.equal(result.structurePassed, true, JSON.stringify(result.partitionSeal?.findings))
+  assert.equal(result.partitionSeal?.passed, true)
+  assert.equal(requests.length, 2)
+  assert.equal(JSON.stringify(input), original)
+  assert.deepEqual(result.changes.map(change => change.path), [selected.path])
+
+  const { contextVerifications: _context, ...legacy } = input
+  writeFileSync(join(prepared.root, '.spec/spexcode.json'), JSON.stringify({ sync: { verifications: registrations.map(definition => ({ definition })) } }))
+  const legacyResult = await elaborateSyncPartitions(legacy, plan, 1, checkpoints, runner, composed)
+  assert.equal(legacyResult.partitionSeal?.passed, false, '旧冻结缺席不能从实时配置补登记')
+  assert.ok(legacyResult.partitionSeal!.findings.some(issue => issue.code === 'verification_registration_mismatch' && issue.itemId === 'VERIFY-IMPORT-01'))
+  assert.equal(Object.hasOwn(legacy, 'contextVerifications'), false)
+
+  const changed = { ...input, contextVerifications: registrations.slice(1).map(item => item.id === 'VERIFY-IMPORT-01' ? { ...item, timeoutMs: item.timeoutMs + 1 } : item) }
+  const rejected = await elaborateSyncPartitions(changed, plan, 1, checkpoints, runner, composed)
+  assert.equal(rejected.partitionSeal?.passed, false, '只读登记的错误命令预算仍严格拒绝')
+  assert.ok(rejected.partitionSeal!.findings.some(issue => issue.code === 'verification_registration_mismatch' && issue.itemId === 'VERIFY-IMPORT-01'))
+})
+
 test('局部分区最终封口读取composed全树承接，真实缺失仍由strict门拒绝', async t => {
   const prepared = await fixture(t), parentPath = '.spec/export/spec.md'
   const parent = `---

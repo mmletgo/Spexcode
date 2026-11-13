@@ -19,6 +19,12 @@ related:
 
 同一冻结 operation 的 code→spec 原生 P1 完整候选可复核本轮新提议的 code/derived missing_fact GAP。复用原 runner、request/session、fence、调用/返修预算和阶段 refs；严格核 original aggregate/local Git/独审、plan、readSet/selection、composed、完整输入与只读 Native 请求及正式结果。合法 repair 只派原 GAP owner 续稿并新独审，旧 accept 不改成失败；仍须当前严格 seal 和全部 P2 门。已复核的真实未知、冲突或无新发现保持原 blocked，冷恢复重验原结果而不重复模型调用；错绑定或无合法独审不能授予续稿。JSON合法但ID、边界或独立性协议未过时，在原预算下一attempt只续只读审查；previousReviewRef严格指向同operation较早的同候选失败原件，拒因和原输出仅在当次prompt现读，原owner批准保持。合法负例不走该续审。新 checkpoint 只引用已有结果原件和稳定身份，不重复归档诊断正文，不把临时诊断或草稿纳入产品 Git。
 
+P1 全图 seal、GAP 首次复核与冷恢复、完整候选 V1 仅从原 planBlob 的 [[sync-historical-coverage]] 描述构造同一逐 ID 冷验。完整政策摘要、真实 input/composed/candidate 与原收据绑定后才保留历史 warning；不读当前资源头、扩大 ready/coveredScope 或将其记成本轮已执行验收。P1 局部只收到原业务输入。
+
+P1 输入只透传原 planBlob 已冻结的 contextVerifications，供 [[sync-partition-execution]] 的全图封口引用校验；局部模型和 V3 继续使用原 verifications 与 mandatoryTests。旧计划没有该字段时不读取当前 settings 补签。
+
+候选独审未通过后的资源结算使用当前 attempt 的一份已认证阶段索引。每个局部生成或独审按原 resultRef 和精确读集、基线绑定取原结论；同次收尾共用同一选择认证，各组之间交还事件循环。原生 RPC 故障仍核真实停止和资源结算，暂停仍可在写失败结论前中断。
+
 P0 后置回审先按实际受影响的冻结 owner 及 `refactor_business_meaning_changed` 发现筛选原轮。普通 P1 结构、测试绑定或审查诊断留在 P1。跨操作重验命中的 Git 草稿用原已认证 Native 任务的完整 targets 计算 owner，包括 P0 已审后才加入的规格叶，继续核原 schema、真实 Git 对象及保活引用。
 
 Grok Build 的派发、候选和独审沿现有原生工作树编排。续用 Grok 格式拒绝前核对同一原生会话和 request ID。已停的只读复审在原候选下继续。
@@ -50,7 +56,7 @@ P1生成的ZCode `session/events` 精确超时也可沿上述已提交材料准�
 
 上述观察只从通过原请求和停止身份认证的 ZCode Native root 派生原树槽供 [[content-filter]] 字节核验。共用 filter root 指针不能代替原身份。无可认证树槽时仍要求物理字节匹配 Git 对象。
 
-P0 只在本次 attempt 尚无阶段检查点和 code_behavior saved/reserved 派发时冻结 git-json-v5。已冻结的 git-json-v1/v2/v3/v4、缺席字段及原请求保持精确恢复，未知传输在派发前拒绝。新运输沿 v2 正文和失败状态策略以及 [[sync-code-behavior]] 的只读自检，并在分析自检定位非 user:raw 验收变更的未变化只读来源。业务摘要、原草稿及已批准来源保持。真实草稿、审查结果、source/tests 保护及资源结算仍依原门核验。
+P0 只在本次 attempt 尚无阶段检查点和 code_behavior saved/reserved 派发时冻结 git-json-v6。已冻结的 git-json-v1/v2/v3/v4/v5、缺席字段及原请求保持精确恢复，未知传输在派发前拒绝。新运输沿 v2 正文和失败状态策略以及 [[sync-code-behavior]] 的只读自检，并在分析自检定位非 user:raw 验收变更的未变化只读来源；新 v6 另冻结真实方向并向分析和独审共享作者当前意图规则。新指导重新分析与独审，旧请求、原草稿及原批准对象保持。已审 wrapper 的指导从程序 analysis 原字段读取，历史字段缺席保持 v7；不能用当前 writer 的 v8 给旧 v5 任务补签新指导批准。真实草稿、审查结果、source/tests 保护及资源结算仍依原门核验。
 
 显式 retryOf 只沿正式已结算祖先复用通过独审的局部 P0。冻结来源、输入、原意、计划、读集、业务基线、组合及局部 schema 和范围均一致时，认证原分析与独审、Git 原件和旧模型绑定，保存来源和原 resultRef。新操作只派发未批准分区，允许选择不同模型。原 attempt、调用、草稿及独审不补签。更早祖先因新准入被替代时，仍须重新核对已终结 attempt、活租约、资源和 journal 的结算。当前重新装配完整 P0；P1 仅分析资格及候选续验回到原操作复验该批准，全部当前封口和验证继续执行。
 
@@ -80,7 +86,7 @@ P0已校验分析准备独审时，正式认证及停止的历史独审物理稿
 
 P0仅续独审后得到合法业务repair时，最新continuation清除readyAnalysis，但继承的原分析Git稿仍沿已有continuation-provenance逐跳认证真实analyze来源，不能要求本轮存在未派发的analyze。每跳核同operation、已结算且严格较早attempt、完整input/readSet/selection/composed、原分区plan、来源resultRef与完整draft身份，终点保留原Native及Git/schema认证；恢复和保存仍采用最新语义状态与完整finding，不返回祖先ready。review草稿始终要求所属当前attempt的真实产出，只有旧稿搬运且新review cancelled/removed、没有新结果的较新attempt不能遮蔽已认证语义repair；不改变stage排序、历史字段或权限。
 
-正式retryOf迁接上述分析稿时，原continuation的已完成reviewResult独立于父attempt根失败及partitionFailures诊断存在。即使父失败为环境/不支持且短errors为空，也须冷验该review的原Native/Git、完整input、精确schema、原analysisDigest与检查范围，将合法repair的完整原finding字段作为未批准诊断交给同owner的新分析；不能只复制分析稿而丢独审反馈，也不能沿诊断继承ready/accept。原review与continuation引用随既有材料provenance保留，身份、owner或分析绑定失配拒绝迁接，不补写旧原件。
+正式retryOf迁接上述分析稿时，原continuation的已完成reviewResult独立于父attempt根失败及partitionFailures诊断存在。即使父失败为环境/不支持且短errors为空，也须冷验该review的原Native/Git、完整input、精确schema、原analysisDigest与检查范围，将合法repair作为未批准依据交给同owner的新分析。新P0只引用真实Git独审结果的commit与path，旧运输沿原合同传具体finding。原review与continuation身份、owner或分析绑定失配拒绝迁接，不继承ready/accept，不补写旧原件。
 
 new tagged whole current/latestApproved接受先核原source协议；单体用当前完整输入重核Git正文与候选绑定，分区whole回到既有owner缓存重放与strict seal，不以聚合缓存跳过各owner的实际Git/schema校验。source tag沿ref精确匹配的原provenance读取，不能由当前新marker反向补给legacy；新tag缺draft拒绝，无tag旧原件不增新门。
 
@@ -110,7 +116,7 @@ resource-only入口按 [[sync-source-registration]] 使用专用raw Git登记元
 
 同operation已审whole经过原composed、完整局部owner及合法null扩域证明后，普通P2失败沿原partition-plan继续，不因扩展后的readPaths重建分区身份或把局部analysis替为whole。历史只读诊断重验显式使用原wrapper的selection，默认局部loader仍核当前严格选择；接受缓存先验证传入selection自身完整摘要，不以store中的有效选择遮蔽损坏输入。旧原件、请求摘要及业务授权不改签，局部候选重新seal，后续P2与V1–V4保持。
 
-并行分析异常保留全部已在途分区的完整原错误，按partitionId保存原proposal/程序校验/review诊断，并等待在途结算；主错误不能遮蔽其它未知资源或不可修复错误。只有全部错误均属于原允许的业务/结构修复，或原生接缝已精确确认notStarted且terminal→removed的SettledSessionCreateTimeoutError时，才进入原attempt/calls/repairs及绝对deadline内的有限自动修复。普通timeout、未知/未结算资源、绑定及保存错误不因此取得自动续修权。相同operation经明确pause→resume启动的新attempt时，仍可从该operation、同摘要的分区失败stage恢复 `behavior_analysis_invalid` / `behavior_review_failed` 原件，只按partitionId投影到对应分区；不把unsupported或其他基础设施错误作为模型诊断，不取得自动重试资格。下一attempt仅向对应失败分区重送该区历史诊断，已accept区不被兄弟诊断改变摘要；失败原件不是事实或批准。
+并行分析异常等待全部在途分区结算，主错误不能遮蔽其它未知资源或不可修复错误。新P0分区检查点只保失败状态与身份，原原生故障从当前可信资源核验，原独审和草稿沿各自认证来源使用。旧已冻结运输按原合同保留原proposal、校验及review诊断。只有全部错误均属于原允许的业务/结构修复，或原生接缝已精确确认notStarted且terminal→removed的SettledSessionCreateTimeoutError时，才进入原attempt/calls/repairs及绝对deadline内的有限自动修复。普通timeout、未知/未结算资源、绑定及保存错误不因此取得自动续修权。旧已冻结运输的相同operation经明确pause→resume启动的新attempt时，仍可从该operation、同摘要的分区失败stage恢复 `behavior_analysis_invalid` / `behavior_review_failed` 原件，只按partitionId投影到对应分区；不把unsupported或其他基础设施错误作为模型诊断，不取得自动重试资格。下一attempt仅向对应失败分区重送该区历史诊断，已accept区不被兄弟诊断改变摘要；失败原件不是事实或批准。
 
 P2 的 V1 从核验后的实际 candidate tree 重建完整业务契约及必要代码/测试的 UTF-8 普通文件正文，并把同树完整 entry 路径清单交给 [[sync-frozen-contracts]]。宿主私有路径、符号链接和非 UTF-8 对象不进入正文；模型局部读集不代替全局结构图，也不扩大 Agent 任务、ready、写范围或验证政策。错误 related/code/one-govern 及真实全局覆盖缺口在生成修复阶段拒绝，不推进 V2、V3 或 apply journal。
 

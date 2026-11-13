@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+可选 historicalCoverage 仅承载 [[sync-historical-coverage]] 的版本、inputId、摘要和精确 pair/receipt/verificationRef/contractIds 描述，沿整个 plan 参与 policyDigest。它不增加新表、运行范围或显式未执行覆盖许可，旧字段缺席保持严格语义。
+
 SyncCoordinatorOptions 可携可信 verificationTransport server 配置，与 VerificationPolicy 分离；正常与恢复入口原样传给每次独立 run adapter。verificationDriver 保留本地测试接缝，不能使旧 v1 checkpoint 随当前远端配置换主机。
 
 SyncCoordinatorPlanBody可选agentWorkflow:native-worktree-v1固定新工作流并参与完整policyDigest。新应用操作默认带该字段；历史缺席继续原frozen执行，不能由当前配置/重启猜为新协议。它只选择执行合同，不改变scope、partition、预算或业务授权。
@@ -25,6 +27,8 @@ SyncCoordinatorPlan 是普通可内容寻址 JSON；version、intentNodeId、tar
 新规划冻结从版本化 settings.sourcePaths 派生的可选 sourcePaths，表达业务源码角色，参与现有整个 plan 的 canonical policyDigest；它只限制未治理业务源码发现及新业务归属，不扩展 readPaths/writePaths/executionScope。历史持久 JSON 缺此字段时保留原 writePaths 发现及原业务归属判断，旧摘要逐字不变，不从 live settings 补角色或回写 planBlob；无需数据库迁移。回滚实现前先结算使用新字段的活动操作，保留全部历史 blob/摘要；按所用版本发起新的可信请求，不原地删字段或换算已有操作政策。
 
 mandatoryTests 是额外已有独立测试义务，包含 verificationId/testPath/testId；文件不能与模型 writePaths 重叠，必须在冻结读集合，不能由模型改 oracle 自免。未来 ready AC 由可信契约图计算，完整流程使用 readyFlowIds。verification definitions 明确进入 P1 verifications 字段，不能当待裁决业务 facts。
+
+可选 contextVerifications 只保存未选 owner 的可信 VERIFY 定义，参与 plan 的 canonical policyDigest，供全图封口校验既有声明。它不含执行环境，不进入 V3 计划或 mandatoryTests；旧缺席和摘要保持，不通过当前配置升级旧计划。沿既有内容寻址 JSON 保存，不新增表结构；上线须以 writer 围栏阻止旧实现接受同一计划摘要却忽略该字段。回退前先结算使用新字段的活动操作并恢复配套备份，不删改已冻结计划或 marker。
 
 prepareSyncAdmission 返回既有 AdmitSyncInput；runSyncOperation 的 options 提供固定计划、再次读取当前可信计划、source 外预建0700的 managedRoot/artifactRoot及固定可信 tools。可注入模型 runner 或 Docker driver 仅作为明确测试接缝，生产默认既有原生执行。返回操作真实状态/receipt/typed failure，不以本地 Promise 成功代表交付。
 

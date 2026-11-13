@@ -22,6 +22,7 @@ import { claimFileMutex } from './file-mutex.js'
 import { composeControlledRequest, controlledDecisionIdentity, guardControlledRequestPath, prepareControlledDecision, readControlledDecision, prepareControlledRequest, renderControlledDecisionRaw } from './request-input.js'
 import type { CodeBehaviorAnalysis, SyncDecisionInput } from './writeback-types.js'
 import { freezeDeliveryRuntime } from './runtime-freeze.js'
+import { freezeHistoricalCoverage } from './historical-coverage.js'
 import { captureInputSnapshot, captureContinuityConfiguration, contentHash, identifyRawWorktree, identifyWorktree, readRawSource, objectGit, readEvidence, readObject, readPhysicalFingerprint, readTree, verifySnapshot, withReadonlySnapshotQuery, writeEvidence } from './snapshot.js'
 import { readEnabledRecord, registeredSources as enabledSources, sourceRegistrationLock, sourceRegistrationPath, sourceRegistryDirectory, proveSourceContinuity, writeEnabledRecord, writeRegistrationEvidence, readRegistrationEvidence, type EnabledRecord, type PreviousDevices, type SourceContinuityProof } from './source-registration.js'
 import { inspectTrustedRuntime, inspectTrustedRuntimeAsync } from './trusted-hooks.js'
@@ -363,6 +364,8 @@ export class SyncApplication {
       if ('failure' in exact) throw Object.assign(new SyncApplicationError(exact.failure.code, exact.failure.message), { syncFailure: exact.failure })
       const plan = await planner.build(nodeId, exact.selection, planningOptions)
       plan.agentWorkflow = 'native-worktree-v1'
+      const historicalCoverage = await freezeHistoricalCoverage(this.store, snapshot, plan.executionScope, discoverySelection)
+      if (historicalCoverage) plan.historicalCoverage = historicalCoverage
       return { plan, selection: exact.selection }
     })
     if (reuseObserved) this.observedPlans.set(cacheKey, { direction, inputId: snapshot.id, headsDigest, plan: structuredClone(frozen.plan), selection: frozen.selection })
@@ -403,12 +406,12 @@ export class SyncApplication {
     const consumed = this.store.listCommittedObservationFrontiers(snapshot.source).find(observation => {
       const difference = JSON.parse(readEvidence(snapshot.source.commonDir, { sha256: observation.latestDifferenceDigest }).toString('utf8')) as { nodeId: string; consumption?: string }
       if (difference.nodeId !== nodeId) return false
-      return !!observation.operationId && ['admitted', 'coalesced', 'duplicate'].includes(observation.outcome) || difference.consumption === 'baseline' && !!observation.selection?.bindings.some(binding => 'bytePair' in binding ? binding.bytePair : binding.intentPair)
+      return !!observation.operationId && ['admitted', 'coalesced', 'duplicate'].includes(observation.outcome) || difference.consumption === 'baseline' && !!observation.baseline && observation.baseline.resourceCount > observation.baseline.missingResources.length
     })
     const accepted = this.store.findOperationByIngressKey(`observation:${snapshot.source.repositoryId}:${snapshot.id}:${nodeId}`)
     const before = consumed?.input ?? null
     const paths = before ? objectGit(snapshot.source.commonDir, ['diff', '--name-only', '-z', '--no-renames', before.immutableTree, snapshot.immutableTree]).toString('utf8').split('\0').filter(Boolean) : verifySnapshot(snapshot).map(entry => entry.path)
-    const priorPaths = consumed?.selection?.bindings.flatMap(binding => binding.resource.kind === 'path' ? [binding.resource.path] : []) ?? []
+    const priorPaths = consumed?.baseline?.pathResources ?? []
     const relevant = paths.filter(path => coveredPath(path, [...plan.executionScope!.paths, ...plan.readPaths, ...priorPaths]))
     const spec = relevant.some(isSyncSpecPath), code = relevant.some(path => !path.startsWith('.spec/'))
     const origin = accepted?.origin ?? (!before ? 'initial' : spec && code ? 'combined' : code ? 'code' : spec ? 'spec' : null)
@@ -470,7 +473,7 @@ export class SyncApplication {
       }
       const { changed, specChanged, codeChanged, latestDifferenceDigest } = cachedDifference
       const observation = { input: snapshot, configRef, selection, latestDifferenceDigest }
-      const previouslyAdmitted = this.store.listObservations(snapshot.source).some(prior => prior.operationId && ['admitted', 'coalesced', 'duplicate'].includes(prior.outcome) && prior.configRef.sha256 === configRef.sha256 && prior.latestDifferenceDigest === latestDifferenceDigest)
+      const previouslyAdmitted = changed && this.store.hasAdmittedObservation(snapshot.source, configRef, latestDifferenceDigest)
       const ingressKey = snapshot.captureKind === 'commit' ? `observation:${snapshot.source.repositoryId}:${snapshot.id}:${nodeId}` : `observation:${snapshot.source.repositoryId}:${snapshot.id}:${nodeId}:${latestDifferenceDigest}`
       const observedOrigin = snapshot.captureKind === 'commit' ? origin : !selection.bindings.some(binding => ('bytePair' in binding ? binding.bytePair : binding.intentPair)) ? 'initial' : specChanged && codeChanged ? 'combined' : codeChanged ? 'code' : 'spec'
       if (!changed || !observedOrigin || control.control === 'pause' || previouslyAdmitted || this.store.findOperationByIngressKey(ingressKey)) {

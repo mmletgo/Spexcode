@@ -4,6 +4,7 @@ import type { AdmitSyncInput, ApplyReceipt, BaselinePair, BlobRef, FrozenBaselin
 import type { DeliveryTools, PrivateDeliveryOptions } from './private-delivery.js'
 import type { RegisteredVerification } from './verification-plan.js'
 import type { VerificationDriver, VerificationTransportConfiguration } from './verification-executor-types.js'
+import type { HistoricalCoverage } from './historical-coverage.js'
 
 /** 来源与执行政策由可信应用入口冻结，未来业务 ID 由真实细化结果登记。 */
 type SyncCoordinatorPlanBody = {
@@ -17,6 +18,9 @@ type SyncCoordinatorPlanBody = {
   executionScope?: SyncScope
   facts: readonly ElaborationFact[]
   verifications: readonly RegisteredVerification[]
+  /** 全图封口保留未选 owner 的可信定义，不增加本轮验证运行。 */
+  contextVerifications?: readonly RegisteredVerification['definition'][]
+  historicalCoverage?: HistoricalCoverage
   mandatoryTests: readonly { verificationId: string; testPath: string; testId: string }[]
   authorizedChanges?: readonly AuthorizedContractChange[]
   retiredIds?: readonly string[]

@@ -25,6 +25,18 @@ const digest = (value: unknown): string => createHash('sha256').update(JSON.stri
 const physicalScope = ({ repositoryId, canonicalRoot, physicalFingerprint }: PhysicalScope): PhysicalScope => ({ repositoryId, canonicalRoot, physicalFingerprint })
 const resourceKey = (resource: BaselineResource): string => resource.kind === 'path' ? `path:${resource.path}` : `${resource.kind}:${resource.id}`
 const scopeResources = (scope: SyncScope): BaselineResource[] => [...scope.paths.map(path => ({ kind: 'path' as const, path })), ...scope.contractIds.map(id => ({ kind: 'contract' as const, id })), ...scope.flowIds.map(id => ({ kind: 'flow' as const, id }))]
+// 历史观察在 SQLite 内投影，避免把每个 binding 中重复的整份已结算 pair 传入 Node。
+const observationProjection = `CASE WHEN json_type(record_json,'$.selection')='object' THEN
+  json_set(json_remove(record_json,'$.selection'),'$.baseline',json((
+    SELECT json_object('resourceCount',count(*),
+      'pathResources',json_group_array(json_extract(value,'$.resource.path')) FILTER(WHERE json_extract(value,'$.resource.kind')='path'),
+      'missingResources',json_group_array(CASE json_extract(value,'$.resource.kind')
+        WHEN 'path' THEN json_extract(value,'$.resource.path')
+        ELSE json_extract(value,'$.resource.kind')||':'||json_extract(value,'$.resource.id') END)
+        FILTER(WHERE COALESCE(json_type(value,'$.bytePair'),json_type(value,'$.intentPair')) IS NOT 'object'))
+    FROM json_each(record_json,'$.selection.bindings')
+  ))) WHEN json_type(record_json,'$.baseline') IS NOT NULL THEN record_json
+  ELSE json_set(json_remove(record_json,'$.selection'),'$.baseline',NULL) END AS record_json`
 const identityKey = (identity: WorktreeIdentity): string => digest(identity)
 const scopeKeys = (scope: SyncScope): string[] => [...new Set([...scope.paths.map(path => `path:${path}`), ...scope.contractIds.map(id => `contract:${id}`), ...scope.flowIds.map(id => `flow:${id}`)])].sort()
 const pathOverlap = (a: string, b: string): boolean => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`)
@@ -150,14 +162,19 @@ export class SyncStore {
     const headRows = exact.length
       ? tx.query('SELECT resource_key,pair_id,legacy_reason FROM sync_baseline_heads WHERE source_key=? AND resource_key IN (SELECT value FROM json_each(?))', sourceKey, JSON.stringify(exact.map(resourceKey))) : []
     const heads = new Map(headRows.map(row => [String(row.resource_key), row]))
-    const bindings: BaselineBinding[] = []
+    const bindings: BaselineBinding[] = [], pairs = new Map<string, BaselinePair>()
     for (const resource of exact) {
       const legacy = resource.kind === 'path' ? legacyPaths.find(row => pathOverlap(resource.path, String(row.resource_key).slice(5))) : undefined
       if (legacy) return { failure: { code: 'SYNC_BASELINE_LEGACY_UNKNOWN', message: String(legacy.legacy_reason), kind: 'unsupported', evidenceRefs: [] } }
       const head = heads.get(resourceKey(resource))
       if (head?.legacy_reason) return { failure: { code: 'SYNC_BASELINE_LEGACY_UNKNOWN', message: String(head.legacy_reason), kind: 'unsupported', evidenceRefs: [] } }
-      const pair = head?.pair_id ? parseRecord<BaselinePair>(tx.query('SELECT record_json FROM sync_baseline_pairs WHERE id=?', String(head.pair_id))[0])! : null
-      if (head?.pair_id && (!pair || !tx.query("SELECT id FROM sync_apply_journals WHERE receipt_id=? AND status='settled'", pair.receiptId).length)) return { failure: { code: 'SYNC_PUBLICATION_BASE_BINDING', message: 'selected baseline head lacks settled receipt', kind: 'unsupported', evidenceRefs: [] } }
+      const pairId = head?.pair_id ? String(head.pair_id) : null
+      let pair = pairId ? pairs.get(pairId) ?? null : null
+      if (pairId && !pair) {
+        pair = parseRecord<BaselinePair>(tx.query('SELECT record_json FROM sync_baseline_pairs WHERE id=?', pairId)[0])
+        if (!pair || !tx.query("SELECT id FROM sync_apply_journals WHERE receipt_id=? AND status='settled'", pair.receiptId).length) return { failure: { code: 'SYNC_PUBLICATION_BASE_BINDING', message: 'selected baseline head lacks settled receipt', kind: 'unsupported', evidenceRefs: [] } }
+        pairs.set(pairId, pair)
+      }
       bindings.push(resource.kind === 'path' ? { resource, bytePair: pair } : { resource, intentPair: pair })
     }
     const body = { version: 'sync-baseline-selection-v1' as const, source: clone(source), bindings }
@@ -450,9 +467,9 @@ export class SyncStore {
         return finish(prior, 'duplicate')
       }
       if (observation && !input.retryOf && !input.requestBlob) {
-        const previous = parseRecord<SyncObservation>(tx.query("SELECT record_json FROM sync_observations WHERE source_key=? AND json_extract(record_json,'$.configRef.sha256')=? AND json_extract(record_json,'$.latestDifferenceDigest')=? AND json_extract(record_json,'$.selectionDigest')=? AND json_extract(record_json,'$.outcome') IN ('admitted','coalesced','duplicate') AND operation_id IS NOT NULL ORDER BY rowid DESC LIMIT 1", identityKey(input.input.source), observation.configRef.sha256, observation.latestDifferenceDigest, observation.selectionDigest)[0])
+        const previous = tx.query("SELECT operation_id FROM sync_observations WHERE source_key=? AND json_extract(record_json,'$.configRef.sha256')=? AND json_extract(record_json,'$.latestDifferenceDigest')=? AND json_extract(record_json,'$.selectionDigest')=? AND json_extract(record_json,'$.outcome') IN ('admitted','coalesced','duplicate') AND operation_id IS NOT NULL ORDER BY rowid DESC LIMIT 1", identityKey(input.input.source), observation.configRef.sha256, observation.latestDifferenceDigest, observation.selectionDigest)[0]
         if (previous) {
-          const existing = this.operation(tx, previous.operationId!)
+          const existing = this.operation(tx, String(previous.operation_id))
           saveAlias(existing)
           return finish(existing, 'duplicate')
         }
@@ -522,17 +539,30 @@ export class SyncStore {
       return finish(operation, predecessor ? 'coalesced' : 'admitted')
     })
   }
+  private observation(input: SyncObservationInput, expected: { controlRevision: number; selectionDigest: string | null }): SyncObservation {
+    const { selection, ...observed } = input
+    const baseline = selection && {
+      resourceCount: selection.bindings.length,
+      pathResources: selection.bindings.flatMap(({ resource }) => resource.kind === 'path' ? [resource.path] : []),
+      missingResources: selection.bindings.flatMap(binding => {
+        if ('bytePair' in binding ? binding.bytePair : binding.intentPair) return []
+        const resource = binding.resource
+        return [resource.kind === 'path' ? resource.path : resourceKey(resource)]
+      }),
+    }
+    return { ...clone(observed), baseline, id: randomUUID(), ...expected, observedAtMs: this.now(), operationId: null, outcome: 'observed', reason: null }
+  }
   private saveObservation(tx: ProtocolTransaction, observation: SyncObservation): void {
     tx.exec('INSERT INTO sync_observations(id,source_key,operation_id,record_json) VALUES(?,?,?,?)', observation.id, identityKey(observation.input.source), observation.operationId, JSON.stringify(observation))
   }
   recordObservation(input: SyncObservationInput, expected: { controlRevision: number; selectionDigest: string | null }): SyncObservation {
     this.blob(input.configRef); this.blob(input.input.manifestBlob)
-    const observation: SyncObservation = { ...clone(input), id: randomUUID(), ...expected, observedAtMs: this.now(), operationId: null, outcome: 'observed', reason: null }
+    const observation = this.observation(input, expected)
     return this.write(tx => { this.saveObservation(tx, observation); return observation })
   }
   observeAndAdmit(input: SyncObservationInput, admission: AdmitSyncInput, expected: { controlRevision: number; selectionDigest: string }): ObserveAndAdmitResult {
     this.blob(input.configRef)
-    const observation: SyncObservation = { ...clone(input), id: randomUUID(), ...expected, observedAtMs: this.now(), operationId: null, outcome: 'observed', reason: null }
+    const observation = this.observation(input, expected)
     if (input.failure) { observation.outcome = 'blocked'; observation.reason = clone(input.failure); this.write(tx => this.saveObservation(tx, observation)); return { outcome: 'blocked', observation, reason: input.failure } }
     try {
       if (!input.selection || digest(inputPayload(input.input)) !== digest(inputPayload(admission.input)) || input.selection.digest !== admission.baselineSelection?.digest || input.selection.digest !== expected.selectionDigest) fail('SYNC_OBSERVATION_BINDING', 'captured snapshot or selection differs from planned admission')
@@ -547,14 +577,19 @@ export class SyncStore {
     }
   }
   readLatestObservation(source: WorktreeIdentity): SyncObservation | null {
-    return this.write(tx => parseRecord<SyncObservation>(tx.query('SELECT record_json FROM sync_observations WHERE source_key=? ORDER BY rowid DESC LIMIT 1', identityKey(source))[0]))
+    return this.write(tx => parseRecord<SyncObservation>(tx.query(`SELECT ${observationProjection} FROM sync_observations WHERE source_key=? ORDER BY rowid DESC LIMIT 1`, identityKey(source))[0]))
   }
   listObservations(source: WorktreeIdentity, limit = 100): SyncObservation[] {
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) fail('SYNC_LIST_LIMIT', 'limit must be an integer between 1 and 500')
-    return this.write(tx => tx.query('SELECT record_json FROM sync_observations WHERE source_key=? ORDER BY rowid DESC LIMIT ?', identityKey(source), limit).map(row => parseRecord<SyncObservation>(row)!))
+    return this.write(tx => tx.query(`SELECT ${observationProjection} FROM sync_observations WHERE source_key=? ORDER BY rowid DESC LIMIT ?`, identityKey(source), limit).map(row => parseRecord<SyncObservation>(row)!))
   }
   listCommittedObservationFrontiers(source: WorktreeIdentity): SyncObservation[] {
-    return this.write(tx => tx.query("SELECT record_json FROM sync_observations WHERE rowid IN (SELECT MAX(rowid) FROM sync_observations WHERE source_key=? AND json_extract(record_json,'$.input.captureKind')='commit' AND json_extract(record_json,'$.failure') IS NULL AND json_extract(record_json,'$.outcome')!='blocked' GROUP BY json_extract(record_json,'$.input.id'),json_extract(record_json,'$.latestDifferenceDigest'),json_extract(record_json,'$.outcome')) ORDER BY rowid DESC", identityKey(source)).map(row => parseRecord<SyncObservation>(row)!))
+    return this.write(tx => tx.query(`SELECT ${observationProjection} FROM sync_observations WHERE rowid IN (SELECT MAX(rowid) FROM sync_observations WHERE source_key=? AND json_extract(record_json,'$.input.captureKind')='commit' AND json_extract(record_json,'$.failure') IS NULL AND json_extract(record_json,'$.outcome')!='blocked' GROUP BY json_extract(record_json,'$.input.id'),json_extract(record_json,'$.latestDifferenceDigest'),json_extract(record_json,'$.outcome')) ORDER BY rowid DESC`, identityKey(source)).map(row => parseRecord<SyncObservation>(row)!))
+  }
+  hasAdmittedObservation(source: WorktreeIdentity, configRef: BlobRef, latestDifferenceDigest: string): boolean {
+    return this.write(tx => Boolean(tx.query(`SELECT 1 FROM (SELECT record_json,operation_id FROM sync_observations WHERE source_key=? ORDER BY rowid DESC LIMIT 100)
+      WHERE operation_id IS NOT NULL AND json_extract(record_json,'$.outcome') IN ('admitted','coalesced','duplicate')
+        AND json_extract(record_json,'$.configRef.sha256')=? AND json_extract(record_json,'$.latestDifferenceDigest')=? LIMIT 1`, identityKey(source), configRef.sha256, latestDifferenceDigest).length))
   }
   private family(tx: ProtocolTransaction, operation: SyncOperation): { calls: number; attempts: SyncAttempt[] } {
     const root = operation.dispatchAnchor?.budgetRootOperationId ?? operation.id
@@ -1038,6 +1073,9 @@ export class SyncStore {
     return this.write(tx => { this.operation(tx, operationId); return tx.query('SELECT record_json FROM sync_attempts WHERE operation_id=? ORDER BY rowid', operationId).map(row => parseRecord<SyncAttempt>(row)!) })
   }
   readJournal(id: string): ApplyJournal { return this.write(tx => this.journal(tx, id)) }
+  readBaselinePair(id: string): BaselinePair {
+    return this.write(tx => parseRecord<BaselinePair>(tx.query('SELECT record_json FROM sync_baseline_pairs WHERE id=?', id)[0]) ?? fail('SYNC_BASELINE_PAIR_MISSING', id))
+  }
   listJournals(operationId: string): ApplyJournal[] {
     return this.write(tx => { this.operation(tx, operationId); return tx.query('SELECT record_json FROM sync_apply_journals WHERE operation_id=? ORDER BY rowid', operationId).map(row => parseRecord<ApplyJournal>(row)!) })
   }

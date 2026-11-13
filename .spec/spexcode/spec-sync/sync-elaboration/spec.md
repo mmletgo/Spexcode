@@ -9,6 +9,7 @@ code:
   - spec-cli/src/sync/elaboration.ts#elaborationScopeErrors
   - spec-cli/src/sync/elaboration.ts#elaborationReviewScopeErrors
   - spec-cli/src/sync/elaboration.ts#freezeElaborationInput
+  - spec-cli/src/sync/elaboration.ts#sealPartitionedElaboration
   - spec-cli/src/sync/elaboration.ts#projectElaborationFlowReadiness
   - spec-cli/src/sync/elaboration.ts#verifyElaborationDraftCache
   - spec-cli/src/sync/elaboration.ts#partitionSealRepairContext
@@ -31,6 +32,10 @@ related:
 ## expanded spec
 
 同一冻结候选的 GAP 复核经 [[sync-coordinator]] 认证后，只可触发原 owner 的候选误报续稿。资格由独立 review 的 affectedIds 精确命中本轮新提议、code/derived 来源的 missing_fact GAP，不能从说明文字推测。新 gapRepair 仅引用原复核及 accepted owner；临时读取原结果诊断、原已审并集和 Git 草稿，不改旧批准。只可移除命中的临时 GAP 及指向已移除 GAP 的 typed 引用，原 metadata、raw、说明、其他业务列、稳定 ID、AC/VERIFY 和适用性逐值保持；真实未知可原样保留。新独审须与原生成、原独审、GAP 复核和当前生成独立，完整结构、演进和严格全图封口照常执行。诊断不能自行清除 GAP、取得人工裁决或改变实现权限。
+
+完整 seal 在已经构建的唯一契约图上消费 [[sync-historical-coverage]] 冷验通过的 ID，仅改变原 missing-acceptance 的未执行资格，其他结构与演进门保持。历史资格摘要参与完整输入绑定，但不进入生成或独审模型任务，局部验证不取得该豁免。
+
+完整分区封口将可信 contextVerifications 与本轮 verifications 合并后冻结，逐项校验完整候选中未选 owner 的既有 AC/VERIFY 引用。GAP 首次复核与冷恢复重验共用这一完整输入和严格 seal，并重新消费原历史覆盖冷验；缺证明、登记或完整输入失配时不得派发或承接诊断。局部生成和独审保持原登记，不据此增加可写目标、业务义务或实际验收运行；重复、错误与未知定义继续拒绝，旧输入缺席不补入。
 
 只读 V1 引用返修先以原批准正文合并 Agent 草稿。结构化诊断只允许替换命中的治理或 related 引用及指定业务项的 code 来源，保持原引用角色和符号粒度。缺失的具体 related 文件只能改为冻结树中的具体文件。其余元数据、原意、说明、业务表、稳定 ID、适用性、测试引用和可信命令保持，越权差量在派发独审前拒绝。派发可把同一原引用的重复诊断按实际受影响 ID 归并，原失败原件保持，仍须重新独审与完整 V1。
 
