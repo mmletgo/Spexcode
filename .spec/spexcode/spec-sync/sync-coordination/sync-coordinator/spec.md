@@ -23,6 +23,8 @@ related:
 
 候选交接和 [[sync-checkpoint-evidence]] 共用正式直接父操作的授权判据。父操作已批准局部若经正式扩域沿用，接手时仍以父操作原扩域和实际 Native 原件验证其诊断。
 
+候选独审阶段出现原生停止待证时，保留本轮完整分区结果及原失败。正式结算后，新尝试核对候选、全部必要独审组和原生请求，只补原中断组。沿用每个已完成组的 accept 或业务 repair 原件。中断组须有原创建和取消观察、真实停止结算及一致的冻结请求；没有受认证的结果不进入本轮业务诊断。原有格式续稿保留，已停止会话的真实正常提交按 [[sync-generation]] 供同一组继续审查。
+
 同一 operation 的 code_to_spec 已有原冻结候选时，git-json-v4 / v7 的 P0 只可沿该候选专用冷验恢复。原完整计划、读集和基线、P0 每个 owner 的分析及独审、P1 实际生成与独审、仅分析覆盖、候选 Git/CAS 与全部 required P2 原件须一致，Native 成功也核 canonical 请求、输出和身份。正式 freezeCandidate 尚未执行时，原 partition:candidate 与实际独审绑定可证明该既有候选；不能重造候选或补旧 failure。组间交还控制并续原租约，先仅补格式失败，再沿合法发现回精确 P1 owner，随后继续原 V1–V4。资格仅在本轮同 operation/input/source/candidate 范围有效，退出后清除；普通自动复用仍只接受 v8，无正式来源的跨操作、新业务、缺证或漂移不借旧批准。原P0/P1生产者可来自严格更早且正式结算的 retryOf 链；逐跳保原计划、local ref及Git组合内容，null扩域只凭该wrapper原selection/readSet与同次已审whole证明回接。模型按各真实生产者原冻结请求认证，正式重试已换模型不重签旧请求。生成与独审可来自原同操作的不同轮。原 v7 标记、缺席字段、raw、Git/Native 和调用账本保持，不追加数据库协议。
 
 候选独审的已审来源校验沿 [[sync-input-composition]] 的原 v1 分段摘要核精确冻结选择；大范围共享 pair 时也保持原字节顺序及全部身份。
@@ -313,6 +315,8 @@ P0/P1/P2 共用 typed Native RPC 已结算准入：仅当前 control/physical ru
 同候选的合法 accept 与 repair 共用完整输入、Native、schema、seed、输出及 trace 冷验；复用 repair 保留原未批准 verdict、resultRef 和所有 finding，不能伪装 accept 或授业务推进。仅格式失败组续原稿，先不改候选或派发 P1；各组协议完成后，业务路由消费全部正式 partitionEvidence，不以用于显示的首个主失败替代并集。普通只读事实与契约遗漏按精确 owner 分别沿原事实资格和受限 refinement 进入同一 owner 返修调度；未命中 owner 保留原 P1 原件。候选或完整读闭包改变后，不跨不相等身份复用旧批准。
 
 generation 已完整保存、但收尾失租约留下 superseded 且 failure=null 时，不补签旧失败或收据。只有同 operation/input/candidate、原完整 requiredKeys 的唯一正式审查结果、原 plan/scope/P1、全部 Native 完成或格式失败原件及资源 removed 逐一成立，才可继续同候选协议或业务返修；零调用、无 generation 的中间控制 attempt 不取代该来源。缺 outcome、未知停止、未结算资源或身份漂移继续拒绝。单次恢复在已结算 attempt 内复用 stage index，不跨新的检查点、候选或控制状态缓存授信。
+
+显式模型交接完成协议续审、进入本操作的只读 owner 返修后，若新 P1 候选的 V1 锚点未通过，先核同源原 P0 引用与当前返修来源，再按既有 V1 诊断路由接续该 owner 的新草稿。旧 P0 资格仅允许读取已认证分析；本次及父候选均不得因此取得续审资格。当前 owner 的最新批准、源码和测试保护仍按原门禁复验。
 
 完整冷验在同一恢复内把真实格式失败组传给同 operation、同 attempt、同候选的续审选择器。已认证的组不再进行全树筛选；新独审前仍核当前完整输入和原 Native 请求。需要读取历史位置字段的原件时批读候选 Spec，每组间让出控制。旧成功原件的坏位置仍沿同一格式与原请求资格。
 

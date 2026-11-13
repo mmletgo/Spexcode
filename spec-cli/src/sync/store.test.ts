@@ -779,6 +779,62 @@ test('claim exact message and all leases are one transaction, native dispatch bu
   } finally { f.cleanup() }
 })
 
+test('native polling reuses one unchanged precise fence and detects local and external writes', async t => {
+  const f = await fixture()
+  const external = openProtocol(f.path)
+  try {
+    const covered = { paths: ['src/a.ts'], contractIds: Array.from({ length: 1_024 }, (_, i) => `RULE-${i}`), flowIds: [] }
+    const selection = f.store.readBaselineSelection(source(), [
+      { kind: 'path', path: covered.paths[0] },
+      ...covered.contractIds.map(id => ({ kind: 'contract' as const, id })),
+    ])
+    assert.ok('selection' in selection)
+    const { operation, fence } = f.claim({ ...f.admit(source(), 'native-observation', covered), baselineSelection: selection.selection })
+    const dispatch = { key: 'current-review', purpose: 'code_review', requestDigest: 'frozen-review' }
+    f.store.reserveDispatch(fence, dispatch)
+    const transaction = f.protocol.withTransaction.bind(f.protocol)
+    let fullReads = 0
+    f.protocol.withTransaction = body => transaction(tx => body({ ...tx, query: (sql, ...params) => {
+      if (sql.includes('FROM sync_baseline_heads')) fullReads++
+      return tx.query(sql, ...params)
+    } }))
+
+    for (let i = 0; i < 20; i++) f.store.assertObservedDispatch(fence, dispatch)
+    assert.equal(fullReads, 2, '同一冻结选择只检查一遍 legacy 路径及精确头')
+    assert.throws(() => f.store.assertObservedDispatch(fence, { ...dispatch, key: 'unreserved' }), /SYNC_DISPATCH_UNKNOWN/)
+    assert.throws(() => f.store.assertObservedDispatch(fence, { ...dispatch, requestDigest: 'different' }), /SYNC_DISPATCH_CONFLICT/)
+    assert.throws(() => f.store.assertObservedDispatch({ ...fence, generation: fence.generation + 1 }, dispatch), /SYNC_FENCE_EXPIRED/)
+    assert.equal(f.store.readOperation(operation.id).callsUsed, 1)
+    t.diagnostic(JSON.stringify({ exactBindings: selection.selection.bindings.length, polls: 20, fullBaselineReads: fullReads }))
+
+    f.store.renewLease(fence, 1_000)
+    f.store.assertObservedDispatch(fence, dispatch)
+    assert.equal(fullReads, 6, '续租动作与下一次观察各核对一次完整冻结选择')
+    const other = new SyncStore(external, f.options)
+    const physical = other.readPhysicalControl(operation.input.source)
+    other.requestPhysicalControl(operation.input.source, 'pause', physical.revision)
+    assert.throws(() => f.store.assertObservedDispatch(fence, dispatch), /SYNC_FENCE_EXPIRED/)
+    other.requestPhysicalControl(operation.input.source, 'run', physical.revision + 1)
+    f.store.assertObservedDispatch(fence, dispatch)
+    assert.equal(fullReads, 8)
+    other.requestControl(operation.id, 'cancel')
+    assert.throws(() => f.store.assertObservedDispatch(fence, dispatch), /SYNC_FENCE_EXPIRED/)
+  } finally { external.close(); f.cleanup() }
+})
+
+for (const expires of ['lease', 'deadline'] as const) test(`unchanged native observation refuses expired ${expires}`, async () => {
+  const f = await fixture()
+  try {
+    const input = f.admit()
+    const { fence } = f.claim({ ...input, budget: { maxAttempts: 4, maxCalls: 4, maxRepairs: 2, timeoutMs: expires === 'deadline' ? 100 : 10_000 } })
+    const dispatch = { key: 'timed-review', purpose: 'code_review', requestDigest: 'frozen-review' }
+    f.store.reserveDispatch(fence, dispatch)
+    f.store.assertObservedDispatch(fence, dispatch)
+    f.tick(expires === 'deadline' ? 100 : 1_000)
+    assert.throws(() => f.store.assertObservedDispatch(fence, dispatch), /SYNC_FENCE_EXPIRED/)
+  } finally { f.cleanup() }
+})
+
 test('claim skips stopped FIFO heads in the same transaction while preserving every valid queued dispatch', async () => {
   const f = await fixture()
   try {
@@ -2882,12 +2938,16 @@ test('P4 两实际write scope共享readonly配置与REQ仍并行，相关read fr
     assert.equal(f.store.readAttempt(a.attempt.id).status, 'verified')
     assert.equal(f.store.readAttempt(b.attempt.id).status, 'verified')
     assert.ok(!a.operation.scope.paths.includes('config/shared.json'))
+    const review = { key: 'existing-review', purpose: 'code_review', requestDigest: 'frozen-review' }
+    f.store.reserveDispatch(a.fence, review)
+    f.store.assertObservedDispatch(a.fence, review)
     const changedScope = scope('config/shared.json', 'REQ-SHARED'), changed = f.ready({ ...f.admit(source(), 'readonly-config-changed', changedScope), baselineSelection: select(changedScope) })
     const queuedScope = scope('src/queued.ts', 'RULE-QUEUED'), queued = f.store.admitAndEnqueue({ ...f.admit(source(), 'readonly-queued', queuedScope), baselineSelection: select(queuedScope) })
     const journal = f.store.beginApply(changed.fence, changed.plan, changed.target); for (const step of journal.steps) f.store.recordApplyStep(changed.fence, journal.id, { ...step, status: 'completed' }); const receipt = f.receipt(journal.id, changed.plan); f.store.recordReceipt(journal.id, receipt); f.store.settleApply(journal.id, receipt.id)
     assert.throws(() => f.store.beginApply(a.fence, a.plan, a.target), /SYNC_BASELINE_STALE/)
     assert.throws(() => f.store.beginApply(b.fence, b.plan, b.target), /SYNC_BASELINE_STALE/)
     assert.throws(() => f.store.reserveDispatch(a.fence, { key: 'late-stale', purpose: 'repair', requestDigest: 'stale-read' }), /SYNC_BASELINE_STALE/)
+    assert.throws(() => f.store.assertObservedDispatch(a.fence, review), /SYNC_BASELINE_STALE/)
     const ack = f.store.ackDispatch('repo', queued.dispatchMessageId)
     assert.throws(() => f.store.claimQueuedAttempt({ operationId: queued.id, source: queued.input.source, scope: queued.scope, leaseMs: 1000, expectedRevision: ack.revision }), /SYNC_BASELINE_STALE/)
     assert.equal(f.store.listAttempts(queued.id).length, 0)

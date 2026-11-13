@@ -56,6 +56,8 @@ reserveDispatch 在每次原生调用前按key原子预留 callsUsed/maxCalls �
 
 receipt 的实际tree与交付manifest必须精确绑定已冻结候选，错误清单不能进入共同基线，即使其他receipt引用形式正确。
 
+原生等待轮询可观察同一完整 fence 下已预留的请求键、用途与摘要。仅在同一 SQLite 连接的观察事务确认外部提交版本和本连接变更计数均相同时，复用原完整 fence 检查。每次均核 schema、租约到期和操作截止时间。观察从已提交事务发布，任何变更重核完整冻结选择与租约。派发预留、会话绑定及交付动作继续使用正式事务和完整门禁。
+
 协作回写中source与delivery是同一物理树时，仍保留原source→实际delivery历史pair，并建立发布快照sourceInput=verifiedDelivery的后续来源pair；后续人类输入以真实发布字节为基线，不把上一轮Agent输出重新当人类来源差量。
 
 仅供P3冻结历史恢复的readBaseline最新成对baseline由SQLite事务插入顺序（rowid）确定，不以可回拨的settledAtMs排序；结算时间仅用于展示。时间回拨后重新打开数据库，source和发布delivery仍读取最近一次成功结算的pair，不能退回旧输入。

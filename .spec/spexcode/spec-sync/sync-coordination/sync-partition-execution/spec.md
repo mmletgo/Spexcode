@@ -26,7 +26,7 @@ GAP 独审与严格并集合成共用同一作者 CAS 投影：原已审局部�
 
 同一候选的 contract_omission 也沿原 owner 返修容器投影，但仅其精确 typed finding 进入局部 refinement，并以原已审 changes 为保持基准。普通事实资格不由遗漏 ID 派生；源码/tests、现有 P0 范围、独审和全图 seal 保持。新回执只有在原独立批准与局部完整输入验证后才能装配，不重派未受影响 owner。
 
-协议续审可承接同候选上已认证的合法 repair 及 accept 原件，保存各自 verdict 并继续阻断未决发现。缓存当前结果也核同一来源；只重派有原 Native 格式证明的失败组，不能把一次完整分区审查的混合失败变成全部重审或丢失某组业务 finding。
+协议续审可承接同候选上已认证的合法 repair 及 accept 原件，保存各自 verdict 并继续阻断未决发现。缓存当前结果也核同一来源。只重派已认证的格式失败组或具有原生精确停止及正式资源结算证明的中断组。已提交的临时续稿按 [[sync-generation]] 的同组规则重新送审。
 
 原冻结计划中无目标、写路径、契约/流程角色或依赖边的分区，若非空精确源码集合等于变更集合，且已审P0覆盖全部路径、只含无ID和规则授权的refactor或allowed_change、没有作者/生命周期/新节点/裁决/整合/GAP等写义务，程序核原全局和局部P0、冻结计划及真实独审来源后，以仅分析证据进入全局P1。保留P0事实和原件，不派发该组的P1，也不合成局部结果或独审。既有或新派生的真实目标继续走原父/叶细化。空目标无法证明仅分析资格时仍拒绝。真实P1与仅分析分区在原计划上唯一完整覆盖，严格全图封口和后续四层验证照常执行。
 
@@ -58,7 +58,7 @@ P1分区按owner传递[[sync-elaboration]]的草稿引用与具体错误。可�
 
 只读返修将完整局部输入摘要传给 [[sync-coordinator]] 以选择 Git 续稿。启用已冻结的文件级来源路径时，优先复验同任务的已批准旧输入；需要新 schema 时，同任务旧 Git 失败稿沿原绑定读取并作为未批准材料续修。
 
-只读装配late V1锚点诊断只进入精确owner的localInput与唯一冻结摘要：沿原已审局部正文和JSON重新生成及独审，不能当作失败业务seed或事实/授权。其它区不附诊断、不改变targets/context摘要，继续承接原已审ref与traces。当前/历史缓存均不得绕过受影响owner；新局部通过仍重做最终全候选seal与V1。只读候选的有效独审repair使用同一ReadonlySpecRepair容器并标识candidate_review来源，仅相应owner接收原review诊断与候选JSON；以原冻结作者目标和files为演进基准，未交付生成正文不成为新授权，其他owner正文与ref保持。P2的Spec写权限投影只来自真实dispatch的allowedScope与readonlyContractPaths，纯父和其它不可写目标不因同operation另有writable owner而取得P2 writer；投影不改变原权限。
+只读装配late V1锚点诊断只进入精确owner的localInput与唯一冻结摘要：沿原已审局部正文和JSON重新生成及独审，不能当作失败业务seed或事实/授权。原已审 Git 草稿与本轮 schema 相同时，可作为该 owner 的续改正文，仍核草稿的 owner、Git 与 schema。其它区不附诊断、不改变targets/context摘要，继续承接原已审ref与traces。当前/历史缓存均不得绕过受影响owner；新局部通过仍重做最终全候选seal与V1。只读候选的有效独审repair使用同一ReadonlySpecRepair容器并标识candidate_review来源，仅相应owner接收原review诊断与候选JSON；以原冻结作者目标和files为演进基准，未交付生成正文不成为新授权，其他owner正文与ref保持。P2的Spec写权限投影只来自真实dispatch的allowedScope与readonlyContractPaths，纯父和其它不可写目标不因同operation另有writable owner而取得P2 writer；投影不改变原权限。
 
 分析的每个分区执行、来源读取、归属校验及checkpoint保存错误均保留原code/message与partitionId，聚合等待全部在途任务结算后保所有失败及原主错误。完整proposal/review仍在原诊断message中，不按首错丢失其它分区失败。下一attempt诊断按原失败分区路由，只有同operation且完整计划/readSet/selection相同的已终结来源可供修复；其它区的诊断不能进入本区冻结上下文。
 

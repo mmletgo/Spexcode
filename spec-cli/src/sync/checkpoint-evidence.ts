@@ -21,12 +21,15 @@ export type RawFinalEvidence = RejectedStructuredOutput & { ownerInputDigest: st
 type StageBasis = { readSetDigest?: string; baselineSelectionRef?: BlobRef }
 type Wrapper = StageBasis & { version: string; operationId: string; attemptId: string; inputId: string; policyDigest: string; stage: string; resultRef: BlobRef; composedTree?: string; composedContentDigest?: string }
 const checkpointOwner = Symbol('checkpointOwner')
-type PhaseOperation = SyncOperation & { [checkpointOwner]?: SyncOperation }
+const checkpointSelection = Symbol('checkpointSelection')
+type PhaseOperation = SyncOperation & { [checkpointOwner]?: SyncOperation; [checkpointSelection]?: FrozenBaselineSelection }
 
 export function withCheckpointStageBasis(operation: PhaseOperation, readSetDigest: string, baselineSelection?: FrozenBaselineSelection): SyncOperation {
-  const phase: PhaseOperation = { ...operation, readSetDigest, ...(baselineSelection ? { baselineSelection } : {}), [checkpointOwner]: operation[checkpointOwner] ?? operation }
+  const phase: PhaseOperation = { ...operation, readSetDigest, ...(baselineSelection ? { baselineSelection, [checkpointSelection]: baselineSelection } : {}), [checkpointOwner]: operation[checkpointOwner] ?? operation }
   return phase
 }
+
+export function checkpointStageSelection(operation: PhaseOperation): FrozenBaselineSelection | undefined { return operation[checkpointSelection] }
 
 function fail(message: string): never { throw Object.assign(new Error(message), { code: 'checkpoint_artifact_binding' }) }
 const hash = (value: unknown): string => contentHash(JSON.stringify(value))

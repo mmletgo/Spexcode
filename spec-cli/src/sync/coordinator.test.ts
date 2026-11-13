@@ -9134,12 +9134,14 @@ for (const mode of ['repair', 'repair-restart', 'repair-complete-restart', 'nati
   assert.equal(f.store.listJournals(admitted.id).length, 0)
 })
 
-for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', 'omission-drop'] as const) for (const boundary of gapMode === 'none' ? ['failed', 'superseded-zero-call', 'legacy-v4', 'legacy-v4-retry', 'model-handoff', 'legacy-v4-handoff', 'model-handoff-restart', 'legacy-v4-handoff-restart', 'model-handoff-missing-source'] as const : gapMode === 'pending' ? ['failed', 'superseded-zero-call', 'legacy-v4', 'model-handoff', 'legacy-v4-handoff'] as const : ['failed'] as const) test(`${gapMode === 'none' ? '' : gapMode === 'pending' ? 'P1 GAP保持期间，' : `P1 GAP已审基线 ${gapMode}，`}P2混合普通修复、契约遗漏与格式失败经SQLite冷续只补原评审再回精确owner ${boundary}`, { timeout: 180000 }, async t => {
+for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', 'omission-drop'] as const) for (const boundary of gapMode === 'none' ? ['failed', 'superseded-zero-call', 'legacy-v4', 'legacy-v4-retry', 'model-handoff', 'legacy-v4-handoff', 'model-handoff-restart', 'legacy-v4-handoff-restart', 'legacy-v4-handoff-v1-repair', 'model-handoff-missing-source', 'stopped-review-draft'] as const : gapMode === 'pending' ? ['failed', 'superseded-zero-call', 'legacy-v4', 'model-handoff', 'legacy-v4-handoff'] as const : ['failed'] as const) test(`${gapMode === 'none' ? '' : gapMode === 'pending' ? 'P1 GAP保持期间，' : `P1 GAP已审基线 ${gapMode}，`}P2混合普通修复、契约遗漏与格式失败经SQLite冷续只补原评审再回精确owner ${boundary}`, { timeout: 180000 }, async t => {
   const withGap = gapMode !== 'none', repairGap = withGap && gapMode !== 'pending', factBaseline = gapMode.startsWith('fact'), rejectedGap = gapMode.endsWith('rollback') || gapMode.endsWith('drop')
   const handoff = boundary.includes('handoff'), handoffRestart = boundary.endsWith('handoff-restart'), missingSource = boundary.endsWith('missing-source')
+  const stoppedDraft = boundary === 'stopped-review-draft'
+  const handoffV1 = boundary === 'legacy-v4-handoff-v1-repair'
   let handedOff = false
   const legacy = boundary.startsWith('legacy-v4'), legacyRetry = boundary === 'legacy-v4-retry', analysisOnlyPath = 'tests/independent-smoke.test.mjs'
-  const protocolAttempt = handoff ? 1 : boundary === 'failed' ? 2 : 3, ownerAttempt = protocolAttempt + 1 + (handoffRestart ? 1 : 0)
+  const protocolAttempt = handoff ? 1 : boundary === 'failed' || stoppedDraft ? 2 : 3, ownerAttempt = protocolAttempt + 1 + (handoffRestart || stoppedDraft ? 1 : 0)
   const gapAttempt = ownerAttempt + 1
   const definitions = (legacy ? ['export', 'import', 'archive'] as const : ['export', 'import', 'archive', 'quiet'] as const).map(word => {
     const upper = word.toUpperCase(), nodeId = `${word}-contract`, path = word === 'export' ? contractPath : `.spec/project/${word}/${nodeId}/spec.md`
@@ -9152,7 +9154,7 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
   const environment = { version: 'trusted-test-v1' as const, image: 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392', platform: 'linux/arm64' as const, memoryBytes: 128 * 1024 * 1024, cpus: 1, pidsLimit: 64, scratchBytes: 16 * 1024 * 1024, logBytes: 128 * 1024 }
   const extras = Object.fromEntries(definitions.slice(1).flatMap(item => [[item.path, item.source], [item.sourcePath, readFileSync(new URL('src/export.js', fixturePath), 'utf8')], [item.testPath, readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', item.upper).replaceAll('src/export.js', item.sourcePath)]]))
   if (legacy) extras[analysisOnlyPath] = 'import test from "node:test"\ntest("standalone smoke", () => {})\n'
-  const maxAttempts = (repairGap ? gapAttempt : ownerAttempt) + (legacyRetry ? 2 : 0) + (handoff ? 1 : 0)
+  const maxAttempts = (repairGap || handoffV1 ? gapAttempt : ownerAttempt) + (legacyRetry ? 2 : 0) + (handoff ? 1 : 0)
   const f = await fixture(t, { maxAttempts, maxCalls: 40, maxRepairs: maxAttempts - 1, timeoutMs: 180000 }, false, original, 'project', original, {
     version: 'sync-coordinator-v2', direction: 'code_to_spec', agentWorkflow: 'native-worktree-v1', sourcePaths: ['src', ...(legacy ? [analysisOnlyPath] : [])], writePaths: ['.spec'],
     targets: definitions.map(({ nodeId, path }) => ({ nodeId, path })), facts: definitions.map(item => ({ source: `decision:${item.upper}-POLICY`, text: item.source })),
@@ -9194,7 +9196,11 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
   const gapId = 'GAP-EXPORT-CALLER-POLICY', gap = { id: gapId, kind: 'missing_fact', unknown: '端口是否另设重复请求账本', affects: ['RULE-EXPORT-06'], evidence: '须核对调用方现有重试职责', decision: '确认唯一重试属主', source: 'code:src/export.js#ExportService', 'depends-on': ['REQ-EXPORT-01'] }
   const gapReviews: { attempt: number; aggregateRef: BlobRef }[] = []
   const newAcceptanceId = 'AC-EXPORT-OMISSION-RETRY', acceptedBasis = '已审冻结实现由调用方沿同一任务重试，端口不维护第二份账本'
+  const omissionAcceptance = (definition: typeof definitions[number]): string => `AC-${definition.upper}-OMISSION-RETRY`
   const rejected = '{original-mixed-review-final: only this group may resume}'
+  const unapprovedReview = { draft: '已正常提交，仍需独审' }
+  const stopMessage = 'fixture native stop remains unproven'
+  let settleReview: (() => Promise<void>) | undefined, stoppedWorkspace: string | undefined
   const stages = (attempt: SyncAttempt): { stage: string; resultRef: BlobRef }[] => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
   const read = <T,>(ref: BlobRef): T => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as T
   const completeReview = (request: ElaborationSessionRequest, output: unknown, worktree: ElaborationSessionResult['worktree']): Promise<ElaborationSessionResult> => {
@@ -9236,11 +9242,49 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
       const group = request.requestKey.split(':final:')[1]; call.group = group
       const definition = definitions.find(item => identity.requiredIds.includes(`AC-${item.upper}-03`))!
       assert.ok(definition)
-      if (!handedOff && attempt.number === 1 && !roles.has(group)) roles.set(group, { kind: factBaseline ? ({ quiet: 'quiet', export: 'ordinary', import: 'omission', archive: 'format' } as const)[definition.word] : (legacy ? ['ordinary', 'format', 'quiet'] as const : ['ordinary', 'omission', 'format', 'quiet'] as const)[roles.size], definition })
+      if (!handedOff && attempt.number === 1 && !roles.has(group)) roles.set(group, { kind: factBaseline || handoffV1 ? ({ quiet: 'quiet', export: 'ordinary', import: 'omission', archive: 'format' } as const)[definition.word] : (legacy ? ['ordinary', 'format', 'quiet'] as const : ['ordinary', 'omission', 'format', 'quiet'] as const)[roles.size], definition })
       const role = roles.get(group)!
       output = { inputId: identity.inputId, candidateDigest: identity.candidateDigest, verdict: 'accept', checkedIds: identity.requiredIds, findings: [] }
       if (!handedOff && attempt.number === 1 && ['ordinary', 'omission'].includes(role.kind)) output = { ...(output as object), verdict: 'repair', findings: [{ kind: 'repair', affectedIds: [`RULE-${definition.upper}-05`], ruleLocation: `${role.kind === 'omission' ? 'contract-omission:' : 'contract:'}${definition.path}#RULE-${definition.upper}-05`, codeLocation: `${definition.sourcePath}#ExportService`, evidence: '冻结原意支持的精确边界需要本owner重新核对', counterexample: '同一输入与原稳定规则未完整对应', message: '只沿原意核对，不授新业务或源码写权' }] }
       if (!handedOff && attempt.number === 1 && role.kind === 'format') return rejectedReviewFixture({ ...f, store }, request, rejected)
+      if (stoppedDraft && attempt.number === protocolAttempt && role.kind === 'format') {
+        const worktree = committedDraftFixture(f, request, unapprovedReview, join(f.parent, 'interrupted-review-draft'))
+        stoppedWorkspace = worktree.worktreePath
+        const fence = { operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }
+        const runtime: NonNullable<import('./native-run.js').AttemptRunnerOptions['runtime']> = {
+          readRecord,
+          run: async native => {
+            const createKey = native.sessionCreateKey!, sessionId = sessionIdForCreateKey(createKey), execution = structuredExecutionPolicy(native)
+            writeRecord({ session: sessionId, governed: false, worktreePath: worktree.worktreePath, base: seed.baseCommit, forkCommit: seed.baseCommit, branch: null,
+              title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(),
+              harness: 'claude', harnessSessionId: null, runtimeStartToken: null, status: 'error', stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: null, launchOwner: null,
+              createRequestId: contentHash(createKey), createPayloadHash: contentHash(JSON.stringify({ prompt: nativeWorktreePrompt(native.prompt, seed), parent: null, launcher: null, base: seed.baseCommit, structuredExecution: execution })),
+              structuredExecution: { ...execution, state: 'cancelling', turnStartRequested: true, error: stopMessage, cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: false, acknowledged: false } } })
+            throw new StructuredSessionError('cancellation_pending', stopMessage, { sessionId })
+          },
+          cancel: async sessionId => {
+            const record = readRecord(sessionId)!, state = record.structuredExecution!
+            const stop = { nativeStopped: true, acknowledged: false, nativeStatus: 'stopped' }
+            writeRecord({ ...record, stopped: true, structuredExecution: { ...state, state: 'cancelled', cancellation: { ...state.cancellation!, ...stop } } })
+            return { sessionId, state: 'cancelled', ...stop }
+          },
+        }
+        settleReview = async () => {
+          const resource = store.findResource(attempt.id, request.requestKey)!
+          const native = read<NativeRunPlan>(resource.plan.planBlob)
+          await assert.rejects(createAttemptRunner(store, fence, { runtime, pollMs: 2 })({ ...native.request, signal: AbortSignal.abort() }), { code: 'cancelled' })
+          assert.equal(store.findResource(attempt.id, request.requestKey)?.phase, 'removed')
+        }
+        return createAttemptRunner(store, fence, { runtime, pollMs: 2 })(request)
+      }
+      if (stoppedDraft && attempt.number === protocolAttempt + 1) {
+        assert.equal(role.kind, 'format', '结算后只补中断组')
+        const path = /草稿文件=([^；]+)/.exec(request.prompt)![1]
+        const entry = readTree(f.input.source.commonDir, seed.tree).find(entry => entry.path === path)!
+        assert.deepEqual(JSON.parse(readObject(f.input.source.commonDir, entry.oid).toString()), unapprovedReview, '继续原正常提交的未批准JSON')
+        const worktree = committedDraftFixture(f, request, output, join(f.parent, 'settled-review-draft'))
+        return completeReview(request, output, worktree)
+      }
       if ((!handoff || handedOff) && attempt.number === protocolAttempt) {
         assert.equal(role.kind, 'format', '混合失败的冷续只能重派格式组，合法业务repair原件也须复用')
         assert.equal(seed.mode, 'edit')
@@ -9258,7 +9302,9 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
     if (request.purpose === 'elaboration_generate' && attempt.number > 1) {
       call.repairKind = task?.readonlySpecRepair?.kind ?? task?.repair?.kind
       const role = [...roles.values()].find(role => role.definition.nodeId === definition.nodeId)!
-      if (attempt.number === gapAttempt) {
+      if (handoffV1 && attempt.number === gapAttempt) {
+        assert.equal(role.kind, 'omission')
+      } else if (attempt.number === gapAttempt) {
         assert.equal(repairGap, true); assert.equal(definition.word, 'export')
         assert.equal(task?.repair?.kind, 'candidate_gap'); assert.equal(task?.refinement, undefined)
         assert.equal(task?.readonlySpecRepair, undefined)
@@ -9272,13 +9318,18 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
       }
     }
     if (request.purpose === 'elaboration_review') output = { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
-    else if (request.purpose === 'code_behavior_analyze') output = { changes: task!.requiredChangedPaths!.map(path => ({ kind: withGap && definition.word === 'export' ? 'allowed_change' : 'refactor', paths: [path], affectedIds: path === analysisOnlyPath ? [] : [`RULE-${definition.upper}-05`], ruleIds: path === analysisOnlyPath ? [] : [`RULE-${definition.upper}-05`], originalIntent: '保留原业务', previousBehavior: '原导出行为', sourceBehavior: '原导出行为', deliveryBehavior: '原导出行为', evidence: path, counterexample: '不得改变权限及验收' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    else if (request.purpose === 'code_behavior_analyze') output = { changes: task!.requiredChangedPaths!.map(path => ({ kind: withGap && definition.word === 'export' || handoffV1 && definition.word === 'import' ? 'allowed_change' : 'refactor', paths: [path], affectedIds: path === analysisOnlyPath ? [] : [`RULE-${definition.upper}-05`], ruleIds: path === analysisOnlyPath ? [] : [`RULE-${definition.upper}-05`], originalIntent: '保留原业务', previousBehavior: '原导出行为', sourceBehavior: '原导出行为', deliveryBehavior: '原导出行为', evidence: path, counterexample: '不得改变权限及验收' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
     else if (request.purpose === 'code_behavior_review') {
       const state = readCodeBehaviorContext(request, f.input.source.commonDir).pendingAnalysis! as { analysisDigest: string; analysis: import('./writeback-types.js').CodeBehaviorAnalysis }
       output = { inputDigest: request.inputDigest, analysisDigest: state.analysisDigest, verdict: 'accept', checkedPaths: task!.requiredChangedPaths, checkedChangeIds: state.analysis.changes.map(change => change.id), findings: [] }
     } else {
       assert.equal(request.purpose, 'elaboration_generate')
       const generated = rows(definition.source, definition.path); generated.changes[0].nodeId = definition.nodeId
+      if (handoffV1 && handedOff && attempt.number >= ownerAttempt && definition.word === 'import') {
+        const acceptance = generated.changes[0].tables.AC.find(row => row.id === 'AC-IMPORT-03')!
+        generated.changes[0].tables.AC.push({ ...acceptance, id: omissionAcceptance(definition),
+          source: attempt.number === ownerAttempt ? `code:${definition.testPath}#${acceptance.id}` : `code:${definition.sourcePath}#ExportService` })
+      }
       if (withGap && definition.word === 'export') {
         if (attempt.number !== gapAttempt) generated.changes[0].tables.GAP.push(gap)
         if (repairGap && attempt.number >= ownerAttempt && !(rejectedGap && attempt.number === gapAttempt)) {
@@ -9364,7 +9415,7 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
   }
   const initialGeneration = read<import('./generation-types.js').GenerationResult>(originalStages.find(stage => stage.stage === 'generation')!.resultRef)
   assert.equal(initialGeneration.review?.verdict, 'repair'); assert.equal(initialGeneration.review!.findings.some(finding => finding.ruleLocation.startsWith('contract-omission:')), false)
-  if (boundary !== 'failed' && !handoff) {
+  if (boundary !== 'failed' && !handoff && !stoppedDraft) {
     // 控制前置精确模拟已观察的失租约元数据；业务/CAS/Native原件均来自上面的真实首轮。
     const interrupted = { ...first, status: 'superseded' as const, failure: null }
     f.protocol.withTransaction(tx => tx.exec('UPDATE sync_attempts SET status=?,record_json=? WHERE id=?', interrupted.status, JSON.stringify(interrupted), interrupted.id))
@@ -9391,6 +9442,15 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
   store = new SyncStore(protocol, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) }); f.useStore(store)
   const stopBeforeVerification = () => { throw Object.assign(new Error('P2与原owner分流已完整通过，fixture在V3前停止'), { code: 'unsupported' }) }
   store.freezeCandidate = stopBeforeVerification
+  if (handoffV1) {
+    const recordFailure = store.recordFailure.bind(store)
+    store.recordFailure = (fence, issue) => {
+      const prior = store.readAttempt(fence.attemptId)
+      const result = recordFailure(fence, issue)
+      if (prior.number === ownerAttempt && issue.code === 'generation_failed') store.requestControl(f.operation.id, 'pause')
+      return result
+    }
+  }
   const listOriginalAttempts = store.listAttempts.bind(store)
   if (missingSource) store.listAttempts = id => listOriginalAttempts(id).map(prior => id === originalOperation.id && prior.id === first.id
     ? { ...prior, checkpointRefs: prior.checkpointRefs.filter(ref => read<{ stage?: string }>(ref).stage !== originalStages.find(stage => stage.stage.endsWith(':candidate-review'))!.stage) } : prior)
@@ -9438,6 +9498,22 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
     assert.deepEqual(store.listAttempts(originalOperation.id), originalAttempts)
     return
   }
+  if (stoppedDraft) {
+    assert.equal(result.failure?.code, 'cancellation_pending', JSON.stringify({ failure: result.failure, calls }))
+    const interrupted = store.readAttempt(result.operation.currentAttemptId!), before = [...interrupted.checkpointRefs]
+    assert.ok(settleReview)
+    assert.ok(stoppedWorkspace)
+    store.requestControl(f.operation.id, 'pause')
+    await settleReview()
+    records.clear()
+    const reopened = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => reopened.close())
+    store = new SyncStore(reopened, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) }); f.useStore(store)
+    store.freezeCandidate = stopBeforeVerification
+    store.requestControl(f.operation.id, 'run')
+    result = await runSyncOperation(store, f.operation.id, f.options)
+    assert.deepEqual(store.readAttempt(interrupted.id).checkpointRefs, before)
+    assert.deepEqual(calls.filter(call => call.attempt === protocolAttempt + 1).map(call => call.purpose), ['code_review'], JSON.stringify({ failure: result.failure, calls }))
+  }
   if (handoffRestart) {
     assert.equal(result.status, 'paused', JSON.stringify({ failure: result.failure, calls }))
     const partial = store.readAttempt(result.operation.currentAttemptId!), proofs = partial.checkpointRefs.flatMap(ref => [ref, ...ref.artifacts?.map(item => item.ref) ?? []]).map(ref => ({ ref, bytes: readEvidence(f.input.source.commonDir, ref) }))
@@ -9450,6 +9526,37 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
     assert.deepEqual(store.readAttempt(partial.id), partial, '新模型完成的局部独审在SQLite冷重启后保持原件')
     for (const { ref, bytes } of proofs) assert.deepEqual(readEvidence(f.input.source.commonDir, ref), bytes)
     assert.deepEqual(calls.filter(call => call.attempt === protocolAttempt + 1), [], '完整aggregate之前重启也不重派已通过的新独审')
+  }
+  if (handoffV1) {
+    assert.equal(result.operation.phase, 'paused', JSON.stringify({ status: result.status, failure: result.failure, operationFailure: result.operation.currentAttemptId && store.readAttempt(result.operation.currentAttemptId).failure, calls }))
+    const failed = store.readAttempt(result.operation.currentAttemptId!), checkpoints = stages(failed)
+    const approvedRef = checkpoints.find(stage => stage.stage === 'elaboration')!.resultRef
+    const failedGeneration = read<import('./generation-types.js').GenerationResult>(checkpoints.find(stage => stage.stage === 'generation')!.resultRef)
+    assert.notEqual(approvedRef.sha256, originalStages.find(stage => stage.stage === 'elaboration')!.resultRef.sha256)
+    assert.notEqual(failedGeneration.candidate!.tree, initialGeneration.candidate!.tree)
+    assert.equal(failedGeneration.candidateValidated, false)
+    assert.ok(failedGeneration.validationFindings.some(finding => finding.code === 'anchor-dead'))
+    assert.equal(calls.some(call => call.attempt === ownerAttempt && call.purpose === 'code_review'), false)
+    records.clear(); protocol.close()
+    const reopened = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => reopened.close())
+    store = new SyncStore(reopened, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) }); f.useStore(store)
+    store.freezeCandidate = stopBeforeVerification; store.requestControl(f.operation.id, 'run')
+    result = await runSyncOperation(store, f.operation.id, f.options)
+    assert.deepEqual(store.readAttempt(failed.id), failed, '续作保持原V1和派发原件')
+    assert.deepEqual(calls.filter(call => call.attempt === gapAttempt && call.purpose === 'elaboration_generate').map(call => call.nodeId), ['import-contract'], JSON.stringify({ status: result.status, failure: result.failure, attempts: store.listAttempts(f.operation.id).map(({ number, status, failure }) => ({ number, status, failure })), calls }))
+    const completed = stages(store.readAttempt(result.operation.currentAttemptId!))
+    const approved = read<ElaborationResult>(completed.find(stage => stage.stage === 'elaboration')!.resultRef)
+    const original = read<ElaborationResult>(approvedRef)
+    const importOwner = definitions.find(definition => definition.word === 'import')!
+    const readAcceptance = (result: ElaborationResult) => parseContract(result.changes.find(change => change.path === importOwner.path)!).contract!.items.find(item => item.id === omissionAcceptance(importOwner))!
+    const accepted = readAcceptance(original), repaired = readAcceptance(approved)
+    assert.deepEqual(repaired, { ...accepted, source: { kind: 'code', ref: `${importOwner.sourcePath}#ExportService` } }, '只修复新增验收的源码锚点')
+    assert.deepEqual(approved.changes.filter(change => change.path !== importOwner.path), original.changes.filter(change => change.path !== importOwner.path))
+    const generated = read<import('./generation-types.js').GenerationResult>(completed.find(stage => stage.stage === 'generation')!.resultRef)
+    assert.equal(generated.candidateValidated, true)
+    assert.equal(generated.reviewPassed, true)
+    const protectedObjects = (tree: string) => readTree(f.input.source.commonDir, tree).filter(entry => !entry.path.startsWith('.spec/'))
+    assert.deepEqual(protectedObjects(generated.candidate!.tree), protectedObjects(f.input.immutableTree))
   }
   if (repairGap) {
     assert.equal(result.status, 'paused', JSON.stringify({ failure: result.failure, calls }))
@@ -9465,7 +9572,7 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
   else assert.equal(result.failure?.message, 'P2与原owner分流已完整通过，fixture在V3前停止', JSON.stringify({ failure: result.failure, calls }))
   assert.deepEqual(calls.filter(call => call.attempt === protocolAttempt).map(call => call.purpose), ['code_review'])
   assert.deepEqual(calls.filter(call => call.attempt === ownerAttempt && call.purpose === 'elaboration_generate').map(call => call.nodeId).sort(), [...roles.values()].filter(role => role.kind === 'ordinary' || role.kind === 'omission').map(role => role.definition.nodeId).sort())
-  const attempts = store.listAttempts(f.operation.id), second = stages(attempts.find(attempt => attempt.number === protocolAttempt + (handoffRestart ? 1 : 0))!), third = stages(attempts.find(attempt => attempt.number === ownerAttempt)!)
+  const attempts = store.listAttempts(f.operation.id), second = stages(attempts.find(attempt => attempt.number === protocolAttempt + (handoffRestart || stoppedDraft ? 1 : 0))!), third = stages(attempts.find(attempt => attempt.number === ownerAttempt)!)
   if (withGap) {
     assert.deepEqual(gapReviews.map(item => item.attempt), legacy ? [ownerAttempt] : [1, ownerAttempt])
     const original = read<ElaborationResult>(originalStages.find(stage => stage.stage === 'elaboration')!.resultRef)
@@ -9507,8 +9614,8 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
     if (role.kind === 'format' || role.kind === 'quiet') assert.deepEqual(third.find(stage => stage.stage === before.stage)?.resultRef, before.resultRef)
   }
   for (const { ref, bytes } of originalBlobs) assert.deepEqual(readEvidence(f.input.source.commonDir, ref), bytes)
-  if (boundary !== 'failed' && !handoff) for (const attempt of attempts.slice(0, 2)) { assert.equal(attempt.status, 'superseded'); assert.equal(attempt.failure, null) }
-  if (!repairGap) {
+  if (boundary !== 'failed' && !handoff && !stoppedDraft) for (const attempt of attempts.slice(0, 2)) { assert.equal(attempt.status, 'superseded'); assert.equal(attempt.failure, null) }
+  if (!repairGap && !handoffV1) {
     const repair = read<{ readonlyOwnerRepair: Parameters<typeof continuationCoordinator.validateReadonlyRepair>[2] }>(third.find(stage => stage.stage === 'repair-input')!.resultRef).readonlyOwnerRepair
     const readAttempt = store.readAttempt.bind(store), listResources = store.listResources.bind(store), findResource = store.findResource.bind(store)
     const settled = { ...readAttempt(repair.fromAttemptId), status: 'superseded' as const, failure: null }
