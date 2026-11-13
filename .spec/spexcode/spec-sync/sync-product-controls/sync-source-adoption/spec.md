@@ -27,7 +27,7 @@ settledReceipt及既有scope覆盖谓词可由[[sync-application]]复用为纯�
 
 完整 receipt 和只读 landing 已证明 sourceSynced 时，经过上述授权、结算证据和干净原树检查后直接幂等返回，不再要求写入用 hooks/footprint 与交付前冻结值相等；合法 post-merge 刷新不会把已采纳读取变成写入失败。
 
-所有前置检查保持业务 source、index、HEAD 与分支只读；沿应用既有快照读取可保存内容寻址对象和私有保活 metadata。真正写入前取得协调器既有 artifacts/.publication-locks 的同 source file-mutex，在锁内重读操作、snapshot、授权、证据及 hook binding，再执行普通 git merge --ff-only --no-autostash。清除内部发布模式、注入与 lint/defer bypass 环境；不禁用 hooks，不增加另一套 hook 协议。锁只协调正式服务写者，不能替用户锁住外部编辑器。
+所有前置检查保持业务 source、index、HEAD 与分支只读；沿应用既有快照读取可保存内容寻址对象和私有保活 metadata。真正写入前取得协调器既有 artifacts/.publication-locks 的同 source file-mutex，在锁内重读操作、snapshot、授权、证据及 hook binding，再执行普通 git merge --ff-only --no-autostash --no-overwrite-ignore。交付新文件与原工作树的忽略文件冲突时，Git 拒绝覆盖并保留私有收据。清除内部发布模式、注入与 lint/defer bypass 环境；不禁用 hooks，不增加另一套 hook 协议。锁只协调正式服务写者，不能替用户锁住外部编辑器。
 
 临近 merge 的同步边界再次核实 symbolic-ref HEAD 与实际 HEAD 仍为计划中的原分支/提交；preflight 后切支或推进 HEAD 明确拒绝。执行后的身份与分支仍需核实。这些复核不承诺阻绝任意外部进程同时操作 Git，最终仍以正常 hooks 和实际状态投影为准。
 

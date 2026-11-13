@@ -23,7 +23,7 @@ const settings: SyncSettings = {
   verifications: [{ definition: { id: 'VERIFY-DEMO-01', command: ['node', '--test', 'tests/demo.test.mjs'], cwd: '.', timeoutMs: 1000 }, environment: { version: 'v1', image: `node@sha256:${'a'.repeat(64)}`, platform: 'linux/arm64', memoryBytes: 100000000, cpus: 1, pidsLimit: 64, scratchBytes: 1000000, logBytes: 100000 } }],
   mandatoryTests: [], facts: [], budget: { maxAttempts: 2, maxCalls: 4, maxRepairs: 1, timeoutMs: 30000 },
 }
-async function fixture(t: test.TestContext, options: { branch?: string; gitFailureAfterMerge?: boolean; activeResource?: boolean; exactSelection?: boolean; automatic?: boolean } = {}) {
+async function fixture(t: test.TestContext, options: { branch?: string; gitFailureAfterMerge?: boolean; activeResource?: boolean; exactSelection?: boolean; automatic?: boolean; ignoredNewPath?: string } = {}) {
   const temp = realpathSync(mkdtempSync(join(tmpdir(), 'spex-source-adoption-'))), root = join(temp, 'source'), runtime = join(temp, 'trusted'), appRuntime = join(temp, 'application')
   const committed = options.automatic !== undefined
   mkdirSync(join(root, '.spec/demo'), { recursive: true }); mkdirSync(join(root, 'src')); mkdirSync(join(root, 'tests'))
@@ -59,6 +59,7 @@ async function fixture(t: test.TestContext, options: { branch?: string; gitFailu
   const selection = selected && 'selection' in selected ? selected.selection : undefined
   const ingressKey = committed ? `observation:${input.source.repositoryId}:${input.id}:demo` : `adopt:${input.id}`
   const admission = await prepareSyncAdmission(input, plan, { ingressKey, rootCauseId: 'adopt', origin: 'initial', budget: settings.budget, managedRoot: join(appRuntime, 'managed'), ...(selection ? { baselineSelection: selection } : {}), ...(options.automatic ? { automaticSourceAdoption: 'canonical-source-v1' } : {}) })
+  if (options.ignoredNewPath) admission.scope = { ...admission.scope, paths: [...admission.scope.paths, options.ignoredNewPath] }
   let operation: SyncOperation
   if (committed) {
     assert.ok(selection)
@@ -76,7 +77,7 @@ async function fixture(t: test.TestContext, options: { branch?: string; gitFailu
   const composed = composeInputSnapshots(input, selection, { executionPaths: operation.scope.paths, contextPaths: plan.readPaths }).composed!
   application.store.bindComposedInput(claimed.fence, composed); application.store.startGeneration(claimed.fence)
   const entry = verifySnapshot(input).find(file => file.path === 'src/demo.mjs')!
-  const candidate = freezeCandidate(input, { version: 'sync-files-v1', changes: [{ path: entry.path, beforeDigest: entry.digest, beforeMode: entry.mode, content: 'export const demo = text => `${text}!`\n' }] }, operation.scope, composed)
+  const candidate = freezeCandidate(input, { version: 'sync-files-v1', changes: [{ path: entry.path, beforeDigest: entry.digest, beforeMode: entry.mode, content: 'export const demo = text => `${text}!`\n' }, ...(options.ignoredNewPath ? [{ path: options.ignoredNewPath, beforeDigest: null, beforeMode: null, content: 'verified new tracked content\n' }] : [])] }, operation.scope, composed)
   application.store.freezeCandidate(claimed.fence, candidate)
   const evidence = writeEvidence(input.source.commonDir, { fixture: '受控的四层前置证据；此测试只验证真实Git交付和采纳，不代替模型/Docker产品验收' })
   const bindings = { inputId: input.id, candidateDigest: candidate.digest, policyDigest: operation.policyDigest, readSetDigest: operation.readSetDigest, ...(selection ? { baselineSelectionDigest: selection.digest } : {}), environmentDigest: 'fixture', contextDigest: 'fixture' }
@@ -285,6 +286,21 @@ test('AC-ADOPT-02 暂存、未暂存与未跟踪修改均拒绝并完整保留',
   await rejectedUnchanged(f, 'sync_adoption_source_dirty')
   writeFileSync(path, original); writeFileSync(join(f.root, 'human-untracked.txt'), 'preserve me\n')
   await rejectedUnchanged(f, 'sync_adoption_source_dirty')
+})
+
+test('AC-ADOPT-10 快进不会覆盖与交付新文件冲突的 ignored 作者文件', { timeout: 90000 }, async t => {
+  const path = 'src/ignored.mjs', f = await fixture(t, { ignoredNewPath: path })
+  assert.equal(f.git('show', `${f.receipt.actualCommit}:${path}`), 'verified new tracked content')
+  writeFileSync(join(f.root, '.git/info/exclude'), `/${path}\n`)
+  writeFileSync(join(f.root, path), 'local ignored content\n')
+  assert.equal(f.git('check-ignore', path), path)
+  assert.equal(f.git('status', '--porcelain'), '')
+  const index = readFileSync(join(f.root, '.git/index'))
+  await assert.rejects(f.application.adopt(f.operation.id), { code: 'sync_adoption_git_failed' })
+  assert.equal(f.git('rev-parse', 'HEAD'), f.input.headCommit)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), index)
+  assert.equal(readFileSync(join(f.root, path), 'utf8'), 'local ignored content\n')
+  assert.deepEqual(f.application.store.listJournals(f.operation.id), [f.journal])
 })
 
 test('AC-ADOPT-03 原分支分叉拒绝，feature快进只投影source采纳', { timeout: 90000 }, async t => {

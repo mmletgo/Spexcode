@@ -21,6 +21,8 @@ code:
 
 preflight 产出计划后切支或改动 HEAD，最终同步写入边界必须快速拒绝，不向其他分支落入交付提交。
 
+AC-ADOPT-10 从真实私有收据快进到新增路径时，已由本地 Git 忽略的作者文件必须保持原字节，原 HEAD、index 和收据同时保持。
+
 已结算后仅向真实 hooks 目录加入非执行 sample，不改变 canonical 可执行 hook digests，仍必须因冻结 footprint.files 的目录清单摘要改变拒绝；拒绝前后业务 source、index 与 HEAD 保持不变。
 
 成功采纳后再加入相同非执行 sample，重复 adopt 仍须按已验证 receipt 与当前 landing 幂等成功；post-merge trace 不增加，证明没有再次 merge。
