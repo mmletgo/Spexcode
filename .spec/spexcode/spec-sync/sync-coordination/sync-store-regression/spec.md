@@ -14,7 +14,7 @@ code:
 
 ## expanded spec
 
-writer46→47 使用隔离 SQLite 验证正常 online backup、仅追加程序语义 marker、旧 writer 写前拒绝与备份可由原迁移集合恢复。所有表行、完整 schema（含原自动采纳索引）和已有迁移字节保持；重复升级不重做备份。
+writer46→47 及 writer47→48 使用隔离 SQLite 验证正常 online backup、仅追加程序语义 marker、旧 writer 写前拒绝与备份可由原迁移集合恢复。所有表行、完整 schema（含原自动采纳索引）和已有迁移字节保持；重复升级不重做备份。
 
 自动采纳政策回归覆盖新字段的 payload/规范语义/alias 冻结、无效来源拒绝、正式 retry 保原值，以及有/无标记的旧操作在同提交重复观察中不升权、不丢权、不新增消息。候选查询使用真实 SQLite 的结算记录，核完整来源、当前 settled attempt、全部 settled journal、完整 scope、精确父 HEAD、noop 排除和确定顺序；超过 500 条无关历史不漏候选，执行计划须命中父 HEAD 及 journal 索引。此测试只证明存储查询，真实 Git 采纳由 [[sync-source-adoption]] 验收。
 
