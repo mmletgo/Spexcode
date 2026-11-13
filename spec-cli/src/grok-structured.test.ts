@@ -15,7 +15,7 @@ const schema = { type: 'object', properties: { marker: { type: 'string' } }, req
 const finalText = '{"marker":"终态"}'
 const sha256 = (text: string): string => createHash('sha256').update(text).digest('hex')
 
-type Scenario = 'success' | 'wrong-session' | 'wrong-cwd' | 'missing-request' | 'duplicate-terminal' | 'missing-terminal' | 'wrong-format' | 'bad-schema' | 'hang' | 'read' | 'periodic' | 'split-settlement-window' | 'cancel-during-settlement' | 'inherited-stdout' | 'inherited-stdout-trailing' | 'parent-awaits-owned-child' | 'parent-restarts-owned-child' | 'natural-child-shutdown' | 'short-lived-terminal-parent' | 'unowned-stdout'
+type Scenario = 'success' | 'wrong-session' | 'wrong-cwd' | 'missing-request' | 'duplicate-terminal' | 'missing-terminal' | 'wrong-format' | 'bad-schema' | 'hang' | 'read' | 'periodic' | 'split-settlement-window' | 'cancel-during-settlement' | 'inherited-stdout' | 'inherited-stdout-trailing' | 'parent-awaits-owned-child' | 'parent-restarts-owned-child' | 'natural-child-shutdown' | 'short-lived-terminal-parent' | 'unowned-stdout' | 'terminal-exit-timeout' | 'terminal-timeout-unowned-stdout'
 
 function fixture(t: TestContext, scenario: Scenario, model = 'grok:default') {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'spex-grok-fixture-')))
@@ -86,12 +86,20 @@ if (scenario === 'split-settlement-window' || scenario === 'cancel-during-settle
   descendant.unref()
   setTimeout(finish, 400)
   setTimeout(() => {}, splitWindow ? 13000 : 900)
-} else if (scenario === 'unowned-stdout') {
+} else if (scenario === 'unowned-stdout' || scenario === 'terminal-timeout-unowned-stdout') {
   const outside = dirname(dirname(cwd))
-  const childCode = "const fs=require('node:fs');fs.writeFileSync(process.argv[1],String(process.pid));setTimeout(()=>{},22000);process.on('SIGTERM',()=>process.exit(0))"
-  const descendant = spawn(process.execPath, ['-e', childCode, join(dirname(promptFile), 'descendant-ready')], { cwd: outside, detached: true, stdio: ['ignore', 'inherit', 'ignore'] })
-  descendant.unref()
+  const blockedExit = scenario === 'terminal-timeout-unowned-stdout'
+  const childCode = "const fs=require('node:fs');fs.writeFileSync(process.argv[1],String(process.pid));setTimeout(()=>{},Number(process.argv[2]));process.on('SIGTERM',()=>process.exit(0))"
+  const args = [childCode, join(dirname(promptFile), 'descendant-ready'), blockedExit ? '45000' : '22000']
+  const intermediaryCode = "const cp=require('node:child_process');cp.spawn(process.execPath,['-e',...process.argv.slice(1)],{detached:true,stdio:['ignore','inherit','ignore']}).unref();process.exit(0)"
+  if (blockedExit) execFileSync(process.execPath, ['-e', intermediaryCode, ...args], { cwd: outside, stdio: ['ignore', 'inherit', 'ignore'] })
+  else spawn(process.execPath, ['-e', ...args], { cwd: outside, detached: true, stdio: ['ignore', 'inherit', 'ignore'] }).unref()
   finish()
+  if (blockedExit) setTimeout(() => {}, 15_750)
+} else if (scenario === 'terminal-exit-timeout') {
+  process.on('SIGTERM', () => {})
+  finish()
+  setTimeout(() => {}, 15_750)
 } else if (scenario === 'short-lived-terminal-parent') {
   const ready = join(dirname(promptFile), 'late-descendant-ready')
   const childCode = "require('node:fs').writeFileSync(process.argv[1],String(process.pid));setTimeout(()=>{},5000)"
@@ -334,6 +342,56 @@ test('Grok settles when the original CLI starts another owned child during termi
   const owned = JSON.parse(readFileSync(join(f.sessionRoot, 'owned-processes.json'), 'utf8')) as { pid: number }[]
   assert.ok(owned.some(identity => identity.pid === latePid))
   assert.throws(() => process.kill(latePid, 0), { code: 'ESRCH' })
+})
+
+for (const externallyCancelled of [false, true]) {
+  test(`Grok settles ${externallyCancelled ? 'external cancellation' : 'a failed native exit'} after the successful terminal window expires`, { timeout: 35_000 }, async t => {
+    const f = fixture(t, 'terminal-exit-timeout'), controller = new AbortController()
+    const flight = f.run(f.state(), { ...f.callbacks, signal: controller.signal })
+    const rejected = assert.rejects(flight, externallyCancelled ? { code: 'cancelled' }
+      : { code: 'failed', message: 'Grok native exit was not observed before the settlement deadline' })
+    let abortTimer: NodeJS.Timeout | undefined
+    try {
+      await waitForFixture(f.started)
+      if (externallyCancelled) abortTimer = setTimeout(() => controller.abort(), 15_400)
+      await rejected
+      assert.equal(existsSync(join(f.sessionRoot, 'result.json')), false)
+      assert.equal(existsSync(join(f.sessionRoot, 'settlement.json')), false)
+      const observations = readFileSync(join(f.sessionRoot, 'process-stop-observations.jsonl'), 'utf8').trim().split('\n')
+      assert.equal(JSON.parse(observations.at(-1)!).nativeStopped, true)
+    } finally {
+      clearTimeout(abortTimer)
+      await delay(900)
+      assert.equal((await stopGrokStructuredTurn(f.state(), 5_000)).nativeStopped, true)
+    }
+  })
+}
+
+test('Grok rejects a late exit observed before the overdue timer callback', { timeout: 35_000 }, async t => {
+  const f = fixture(t, 'terminal-exit-timeout')
+  const flight = assert.rejects(f.run(), { code: 'failed', message: 'Grok native exit was not observed before the settlement deadline' })
+  await waitForFixture(f.started)
+  await delay(14_200)
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2_000)
+  await flight
+  assert.equal(existsSync(join(f.sessionRoot, 'result.json')), false)
+  assert.equal(existsSync(join(f.sessionRoot, 'settlement.json')), false)
+})
+
+test('Grok keeps the expired exit unsettled when an unowned writer holds stdout', { timeout: 40_000 }, async t => {
+  const f = fixture(t, 'terminal-timeout-unowned-stdout')
+  const ready = join(f.sessionRoot, 'descendant-ready')
+  const rejected = assert.rejects(f.run(), { code: 'cancellation_pending' })
+  await waitForFixture(ready)
+  const pid = Number(readFileSync(ready, 'utf8'))
+  assert.ok(Number.isSafeInteger(pid) && pid > 1)
+  try {
+    await rejected
+    assert.equal(process.kill(pid, 0), true)
+    assert.equal(existsSync(join(f.sessionRoot, 'settlement.json')), false)
+  } finally {
+    try { process.kill(-pid, 'SIGTERM') } catch (error) { assert.equal((error as NodeJS.ErrnoException).code, 'ESRCH') }
+  }
 })
 
 test('Grok still rejects data after the terminal when an owned descendant closes stdout', { timeout: 25_000 }, async t => {
