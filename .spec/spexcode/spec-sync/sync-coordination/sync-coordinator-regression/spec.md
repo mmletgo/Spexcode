@@ -49,7 +49,7 @@ ZCode停止材料回归复用真实Git/私有SQLite及正式adapter.stop/资源�
 
 P0 历史 ZCode 结果未发布的回归使用真实 Git、私有 SQLite 和正式停止与归档。原 Native 已成功封存、正式观察到失败、最终结算为 cancelled 时，下一 attempt 跳过该来源并用无旧稿的 seed 派发。封存被改、exit 缺失或未曾正式观察失败时不得派发。原归档引用、Native 字节、原 attempt 和资源保持。尚未结算的 RPC 资源应返回 recovery_required，等待结算并保持后续派发为零。新 P0 的停止材料引用保原状态码与来源引用。损坏的旧终态 JSON 仍明确拒绝，正式失败摘要不携解析原文。
 
-新 P0 冷恢复回归校验失败诊断正文缺席于 Git context、Native 请求、continuation 与失败证据。业务返修通过真实原审查的 Git 引用读取拒因，经过中断与承接副本仍须指向原派发。原 JSON、已校验分析与兄弟批准来源保持。
+新 P0 冷恢复回归校验失败诊断正文缺席于 Git context、Native 请求、continuation 与失败证据。业务返修通过真实原审查的 Git 引用读取拒因，经过中断与承接副本仍须指向原派发。正式 retryOf 的祖先以 unsupported 结束、没有分区失败正文时，同样核对原 owner、完整输入、审核范围与原生身份，拒绝被篡改的审查。原 JSON、已校验分析与兄弟批准来源保持。
 
 新 attempt 在真实 Git 和隔离 SQLite 首次冻结 git-json-v6，保留 v5 分析自检对未变化只读验收来源的定位，并向分析与独审传递相同的当前作者意图规则；真实 v2 计划方向进入 Native task，旧计划无方向时为 null。已有 git-json-v2/v3/v4/v5 检查点与预留记录保持原对象、原选择及对应自检范围，不补 direction 或新指导。v1、缺席与未知传输的回归保持。另以真实旧 v5 和新 v6 正常 Git 生成/独审，先复现旧结果被当前 writer 错贴 v8，再核已审 wrapper 只能标原指导：v5 原 analysis 字段缺席且 wrapper v7，v6 明确 v8；原 P1 派发和结果内容摘要继续绑定。
 
@@ -79,7 +79,7 @@ code→Spec的分区AC提案引用未变只读父规则时，完整原proposal�
 
 有限与unlimited对照回归沿分析/细化/生成及各自独审核对真实派发timeout值，null仅由unlimited冻结预算派生；不改变租约、资源、VERIFY或交付门。
 
-同operation局部多轮的真实Git/SQLite回归先复现已accept分析区和叶P1在兄弟失败后被重复派发，再证明下一attempt仅运行失败区；原ref/review/traces、预算/绝对deadline、source/index及零journal保持，SQLite重启和正式pause→resume后旧fence仍拒写。readSet/input/未审/foreign/ref污染拒绝承接，局部并集仍通过新的严格seal。并行分析回归保存所有在途失败及原proposal/review诊断，checkpoint绑定错误也保primary且不能借空失败列表取得有限修复权；确定性runner仅证明机制，不声称真实Native、Docker或完整交付通过。
+同operation局部多轮的真实Git/SQLite回归先复现已accept分析区和叶P1在兄弟失败后被重复派发，再证明下一attempt仅运行失败区；原ref/review/traces、预算/绝对deadline、source/index及零journal保持，SQLite重启和正式pause→resume后旧fence仍拒写。readSet/input/未审/foreign/ref污染拒绝承接，局部并集仍通过新的严格seal。并行分析回归核全部在途结算、原生失败身份与兄弟独审续修。新P0检查点和新请求不复制历史错误正文，旧运输沿原合同；checkpoint绑定错误仍保primary且不能借空失败列表取得有限修复权。确定性runner仅证明机制，不声称真实Native、Docker或完整交付通过。
 
 正式 retryOf 的局部 P0 回归先使首分区通过独审、兄弟失败且旧 whole 缺席，关闭重开 SQLite 后换模型重试。原分区零重派，旧 trace、Git 和 resultRef 保留，新的批准来自当前模型；来源记录和未完成侧的校验保持。第二代重试经原已替代祖先取得批准，P0 零重派；混合仅分析分区扩域及冷恢复仍验原 ref，伪造来源在 P1 前拒绝。更换模型的 V3 前置失败保留已批准 P0，后续生成与独审按新模型正常执行。
 
