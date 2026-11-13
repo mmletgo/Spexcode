@@ -318,14 +318,13 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
           const exitDeadline = deadline
           const stillWaiting = (): boolean => Date.now() < exitDeadline && !exitObserved && !timedOut && !observerFailure && !processFailed
             && !callbacks.signal?.aborted && !existsSync(join(root, 'cancel.json')) && sha256(readFileSync(receiptFile)) === binding.receiptDigest
+          const signalAfter = exitDeadline - STOP_MS + NATIVE_SHUTDOWN_GRACE_MS
           const signaled = new Map<number, string>()
-          let delayMs = NATIVE_SHUTDOWN_GRACE_MS
           while (stillWaiting()) {
-            await Promise.race([exited, new Promise<void>(resolve => { reapTimer = setTimeout(resolve, delayMs) })])
+            await Promise.race([exited, new Promise<void>(resolve => { reapTimer = setTimeout(resolve, 500) })])
             clearTimeout(reapTimer)
-            delayMs = 500
             if (!stillWaiting()) break
-            await Promise.race([exited, stopNativeWorktreeDescendants(ownedLaunch, exitDeadline, stillWaiting, signaled).catch(error => {
+            await Promise.race([exited, stopNativeWorktreeDescendants(ownedLaunch, exitDeadline, stillWaiting, signaled, signalAfter).catch(error => {
               if (!(error instanceof StructuredSessionError && error.code === 'cancellation_pending')) throw error
             })])
           }
