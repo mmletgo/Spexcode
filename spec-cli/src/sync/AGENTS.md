@@ -48,7 +48,7 @@
 
 - v22登记owner Git草稿续修与已证停止RPC故障的显式准入。草稿只存Git对象身份，不借raw权限；旧缺席字段不追补，已接受候选仍须原绑定。只有现有停止协议确证并结算资源后，运行中的有效fence才能续修，用户暂停/取消和未知停止不自动重启。 缺final的typed格式失败可独立保Git；旧无witness及安全暂停稿只在新有效attempt按原request/owner/seed/schema、完整source/tests对象及正式stop/removed观察最新正常Git，旧record/checkpoint不补签，普通暂停不赋格式码。 明确已停CLI错误终态只授未批准Git材料，不借格式或success角色；可选native-protocol.jsonl只记安全元数据，冷验不追补。
 
-- 新P0首次冻结git-json-v6，沿v5自检并冻结原plan.direction；分析和独审共用authorChanges及原Git对象的当前作者意图规则，旧实现未跟上明确新raw不构成独立冲突，真实独立冲突与只读code_to_spec保持。分析只读自检以正式判据定位当前非`user:raw`验收更新中的未变化只读来源。续修同一JSON，诊断只输出给当次会话，持久失败保持状态。v1–v5、缺席字段和saved/reserved按原绑定恢复；新v6指导重新分析和独审，同版JSON续稿保持。writer44只追加SELECT1，升级先停稳结算并online backup，回滚恢复一致v43库及evidence/Git refs。
+- 新P0首次冻结git-json-v6，沿v5自检并冻结原plan.direction；分析和独审共用authorChanges及原Git对象的当前作者意图规则，旧实现未跟上明确新raw不构成独立冲突，真实独立冲突与只读code_to_spec保持。分析只读自检以正式判据定位当前非`user:raw`验收更新中的未变化只读来源。续修同一JSON，诊断只输出给当次会话，持久失败保持状态。v1–v5、缺席字段和saved/reserved按原绑定恢复；新v6指导重新分析和独审，同版JSON续稿保持；wrapper沿原analysis指导，不按当前writer补签。writer48保护此协议，升级停稳旧writer、结算资源及租约并online backup，回滚恢复一致v47库和原证据/Git refs。writer44只追加SELECT1，升级先停稳结算并online backup，回滚恢复一致v43库及evidence/Git refs。
 
 - writer38保护提交快照初始化的接入：被替换且从未领取时，新显式请求用新交付计划入队，继承原预算、截止时间及队列锚。旧请求身份、已有领取和自动观察去重保持。升级先停稳结算并 online backup，回滚恢复一致 v37 库及证据和 Git refs。
 
