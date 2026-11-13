@@ -25,6 +25,7 @@
 - 执行器单测：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/verification-executor.test.ts`；真实 Linux/arm64 Docker 验收：先准备测试中冻结的镜像，再 `SPEX_DOCKER_VERIFICATION_TEST=1 npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/verification-executor.docker.test.ts`。`SPEX_VERIFICATION_EVIDENCE_DIR` 可指定已存在的外部证据目录；未设置时用系统临时目录，不把运行证据写入源码。
 
 - 持久协调使用 `operation-types.ts` 共享身份，原source/composed/candidate分离；所有写入走store动作门禁及既有protocol事务，native/Git/FS副作用放事务外。
+- writer49 保护观察覆盖投影；旧观察在 SQL 内按原选择投影，保留原 JSON、选择摘要和证据引用。升级停稳并结算旧 writer，回滚恢复一致 v48 在线备份及配套证据和 Git refs。
 - `sync resources recover` 仅结算显式 operation/input 的既有 owned 资源；普通 `sync recover` 还可回放 journal。资源清理不授予来源连续性，来源不匹配仍不得 resume/adopt。
 - 普通协调器逐任务回收已完成或精确停止且clean的Native工作树，正式close保branch/archive/record与原结果/错误；removed不代表物理删除。已归档失败稿经原认证临时restore→严格观察→复用物理回收段，保原archive/Native，零launch/wake；仅回收registry内本次created场地。dirty/未知停止保留，pending不改业务结果或烧新调用。
 - 存储验证：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/store.test.ts packages/session-protocol/src/adopter-seams.test.ts`。

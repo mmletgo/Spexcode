@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+v49 追加 SELECT 1 writer marker，保护 [[sync-store]] 的新观察覆盖投影。升级先停稳并结算 v48 writer，保留一致 online backup；原观察 JSON、旧迁移 checksum、完整基线与收据原件保持。新版按旧字段投影读取。旧 writer 在写入或派发前拒绝。回滚停稳新版后恢复一致 v48 备份及配套证据和 Git 引用。
+
 v48 只追加 SELECT 1 writer marker，保护 [[sync-code-behavior]] 新 git-json-v6 的冻结方向、当前作者意图指导及程序 analysis 的真实指导版本。升级先正式停稳 v47 writer、结算资源与租约并保存 online backup，再由原组件事务追加；v1–v47 SQL/checksum、历史请求与缺席字段、原 Git/CAS 和自动采纳索引保持。旧 writer 在写入或派发前拒绝，迁移失败整体回滚。回滚先停稳新版并结算资源，再恢复一致 v47 备份及配套证据和 Git 引用，不删 marker 或补签旧批准。
 
 v47 只追加 SELECT 1 writer marker，保护 [[sync-coordinator-types]] 的 contextVerifications 完整封口语义。升级先停稳 v46 writer、正式结算资源并 online backup；既有自动采纳索引、迁移 checksum 和历史计划/记录原字节保持。旧 writer 在写入或派发前拒绝。回滚先停稳新 writer，再恢复一致 v46 备份及配套证据和 Git 引用，不删 marker 或改签旧计划。
