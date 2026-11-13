@@ -213,12 +213,12 @@ type Stage = { version: 'sync-stage-v1'; operationId: string; attemptId: string;
 const behaviorAnalysisStage = (name: string): boolean => name === 'analysis' || name.startsWith('partition:') && name.endsWith(':analysis')
 type SavedElaboration = Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>
 type SavedGeneration = Omit<GenerationResult, 'candidateFiles'> & { p2SpecWritePaths?: string[] }
-function stageSelectionMatches(store: SyncStore, operation: SyncOperation, saved: Stage): boolean {
+function stageSelectionMatches(store: SyncStore, operation: SyncOperation, saved: Stage, businessSelection?: FrozenBaselineSelection): boolean {
   if (!operation.baselineSelection) return true
   if (!saved.baselineSelectionRef || !saved.readSetDigest) return false
   const selected = JSON.parse(readEvidence(operation.input.source.commonDir, saved.baselineSelectionRef).toString('utf8')) as FrozenBaselineSelection
   verifyBaselineSelection(operation.input, selected)
-  const business = store.readBusinessBaselineSelection(operation.id)!
+  const business = businessSelection ?? store.readBusinessBaselineSelection(operation.id)!
   return selected.digest === business.digest
     ? saved.readSetDigest === operation.readSetDigest
     : extendsWithUninitializedResources(selected, business)
@@ -273,13 +273,13 @@ function elaborationRepairSeed(result: SavedElaboration | null, requestKey: stri
     ? { settled: true, requestKey, inputDigest: result.inputDigest, candidateDigest: last.candidateDigest, output: last.output, candidate: last.candidate, findings: last.findings, review: last.review, traces: last.traces } : undefined
 }
 
-function partitionStage<T>(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string, sourceSelection?: FrozenBaselineSelection, checkpoints: SyncCheckpointStageView = readSyncCheckpoints(store, operation, attempt)): { result: T; resultRef: BlobRef } | null {
-  const result = stage<T>(store, operation, attempt, key, 'automatic', checkpoints)
+function partitionStage<T>(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string, sourceSelection?: FrozenBaselineSelection, checkpoints: SyncCheckpointStageView = readSyncCheckpoints(store, operation, attempt), selectionCheck?: { expectedRef: BlobRef; matches: (value: Stage) => boolean }): { result: T; resultRef: BlobRef } | null {
+  const result = stage<T>(store, operation, attempt, key, 'automatic', checkpoints, selectionCheck?.matches)
   if (!result) return null
   const resultRef = writeEvidence(operation.input.source.commonDir, result)
   const original = checkpoints.json.map(({ value }) => value as Partial<Stage>)
     .find(value => value.version === 'sync-stage-v1' && value.stage === key && value.operationId === operation.id && value.attemptId === attempt.id && value.inputId === operation.input.id && value.policyDigest === operation.policyDigest && value.resultRef?.sha256 === resultRef.sha256)
-  if (original?.readSetDigest !== operation.readSetDigest || operation.baselineSelection && original.baselineSelectionRef?.sha256 !== writeEvidence(operation.input.source.commonDir, sourceSelection ?? store.readBusinessBaselineSelection(operation.id)).sha256) return null
+  if (original?.readSetDigest !== operation.readSetDigest || operation.baselineSelection && original.baselineSelectionRef?.sha256 !== (selectionCheck?.expectedRef ?? writeEvidence(operation.input.source.commonDir, sourceSelection ?? store.readBusinessBaselineSelection(operation.id))).sha256) return null
   return { result, resultRef }
 }
 
@@ -3140,13 +3140,31 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         const kind: SyncFailure['kind'] = oracleErrors.length ? 'repairable' : generated.status === 'needs_input' ? 'missing_input' : generated.status === 'conflict' ? 'conflict' : generated.status === 'unsupported' || generated.failure?.code === 'input_invalid' ? 'unsupported' : 'repairable'
         const issue = failure(oracleFailure?.code ?? generated.failure?.code ?? 'generation_failed', oracleFailure?.message ?? generated.failure?.message ?? '实现候选或独立评审未通过', kind, [writeEvidence(operation.input.source.commonDir, generated)])
         if (signal.aborted || generated.status === 'cancelled') fail('cancelled', issue.message, issue.evidenceRefs)
-        const localFailures = partitions ? readSyncCheckpoints(store, operation, store.readAttempt(attempt.id)).json.flatMap(({ value }) => {
-          const saved = value as Partial<Stage>
-          if (saved.version !== 'sync-stage-v1' || !saved.stage?.startsWith('partition:') || ![':generation', ':candidate-review'].some(suffix => saved.stage!.endsWith(suffix))) return []
-          const source = partitionStage<GenerationResult>(store, operation, store.readAttempt(attempt!.id), saved.stage)
-          return source ? [source.result] : []
-        }) : []
-        requireSettledRpcSources(store, operation, store.readAttempt(attempt.id), [generated, ...localFailures], issue.evidenceRefs)
+        const finishedAttempt = store.readAttempt(attempt.id), localResults: GenerationResult[] = []
+        if (partitions) {
+          const checkpoints = readSyncCheckpointStageIndex(store, operation, finishedAttempt)
+          const keys = new Set(checkpoints.json.flatMap(({ value }) => {
+            const key = (value as Stage).stage
+            return key?.startsWith('partition:') && (key.endsWith(':generation') || key.endsWith(':candidate-review')) ? [key] : []
+          }))
+          const business = operation.baselineSelection ? store.readBusinessBaselineSelection(operation.id)! : undefined
+          const selections = new Map<string, boolean>()
+          const selectionCheck = business ? {
+            expectedRef: writeEvidence(operation.input.source.commonDir, business),
+            matches: (wrapper: Stage) => {
+              const key = JSON.stringify([wrapper.readSetDigest, wrapper.baselineSelectionRef?.sha256])
+              if (!selections.has(key)) selections.set(key, stageSelectionMatches(store, operation, wrapper, business))
+              return selections.get(key)!
+            },
+          } : undefined
+          for (const key of keys) {
+            const source = partitionStage<GenerationResult>(store, operation, finishedAttempt, key, undefined, checkpoints, selectionCheck)
+            if (source) localResults.push(source.result)
+            await yieldToControl()
+            if (signal.aborted) fail('cancelled', issue.message, issue.evidenceRefs)
+          }
+        }
+        requireSettledRpcSources(store, operation, finishedAttempt, [generated, ...localResults], issue.evidenceRefs)
         if (generated.failure?.code === 'cancellation_pending') fail('cancellation_pending', issue.message, issue.evidenceRefs)
         if (kind === 'repairable' && generated.review?.verdict === 'repair' && generated.candidate && !nodeChanges.length) {
           const omissions = generated.review.findings.filter(finding => contractOmissionBound(finding, accepted.contracts))

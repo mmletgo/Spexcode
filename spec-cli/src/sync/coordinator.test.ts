@@ -4351,11 +4351,12 @@ test('readonly-owner零派发guard只阻相同候选诊断，真实owner新派�
   assert.equal(readonlySpecRepairStalled(repair, 'same', [{ ...findings[0], message: '另一真实错误' }], attempt), false)
 })
 
-for (const mode of ['review-format-continuation', 'review-format-interleaved', 'review-format-finite-one', 'review-format-finite-zero', 'existing', 'mixed-citations', 'new-leaf', 'aggregate-only', 'review', 'review-anchor-reference', 'review-accepted-reuse', 'review-accepted-reuse-repair', 'review-partial', 'review-pending', 'review-pending-unchanged', 'review-pending-sibling', 'review-pending-cross-source', 'review-pending-missing-owner', 'review-pending-lineage', 'review-pending-foreign-base', 'review-pending-unreviewed-base', 'review-prose', 'review-prose-cross-owner', 'review-prose-unknown', 'review-prose-path', 'review-prose-empty', 'review-multi', 'review-p1-fail', 'review-rebind', 'review-rebind-native', 'review-resume', 'review-location', 'review-ref', 'wrong-ref', 'unaffected-ref', 'readset', 'selection', 'selection-deleted', 'selection-source', 'non-null-selection', 'input-digest', 'foreign', 'policy', 'candidate', 'missing-owner'] as const) test(`readonly-owner late V1 ${mode} 只返修精确owner`, async t => {
+for (const mode of ['review-format-continuation', 'review-format-interleaved', 'review-format-finite-one', 'review-format-finite-zero', 'review-failure-settlement', 'existing', 'mixed-citations', 'new-leaf', 'aggregate-only', 'review', 'review-anchor-reference', 'review-accepted-reuse', 'review-accepted-reuse-repair', 'review-partial', 'review-pending', 'review-pending-unchanged', 'review-pending-sibling', 'review-pending-cross-source', 'review-pending-missing-owner', 'review-pending-lineage', 'review-pending-foreign-base', 'review-pending-unreviewed-base', 'review-prose', 'review-prose-cross-owner', 'review-prose-unknown', 'review-prose-path', 'review-prose-empty', 'review-multi', 'review-p1-fail', 'review-rebind', 'review-rebind-native', 'review-resume', 'review-location', 'review-ref', 'wrong-ref', 'unaffected-ref', 'readset', 'selection', 'selection-deleted', 'selection-source', 'non-null-selection', 'input-digest', 'foreign', 'policy', 'candidate', 'missing-owner'] as const) test(`readonly-owner late V1 ${mode} 只返修精确owner`, async t => {
   const formatFinite = mode === 'review-format-finite-one' || mode === 'review-format-finite-zero'
   const formatRemaining = mode === 'review-format-finite-one' ? 1 : 0
+  const settleFailureOnly = mode === 'review-failure-settlement'
   const formatInterleaved = mode === 'review-format-interleaved'
-  const formatContinuation = mode === 'review-format-continuation' || formatInterleaved || formatFinite
+  const formatContinuation = mode === 'review-format-continuation' || formatInterleaved || formatFinite || settleFailureOnly
   const reuse = formatContinuation || mode.startsWith('review-accepted-reuse'), reuseRepair = mode === 'review-accepted-reuse-repair'
   const ordinaryAnchor = mode === 'review-anchor-reference'
   const partial = mode === 'review-partial' || ordinaryAnchor
@@ -4669,7 +4670,43 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
       return clone(value, options)
     })
   }
+  const settlement = { attemptId: '', fullClones: 0, indexClones: 0 }
+  if (settleFailureOnly) {
+    const checkpoint = f.store.checkpoint.bind(f.store), finish = f.store.recordFailure, clone = globalThis.structuredClone
+    f.store.checkpoint = (fence, ref) => {
+      const saved = checkpoint(fence, ref)
+      if (JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()).stage === 'generation') settlement.attemptId = fence.attemptId
+      return saved
+    }
+    f.store.recordFailure = (fence, issue) => {
+      settlement.attemptId = ''
+      const result = finish(fence, issue)
+      f.store.requestControl(f.operation.id, 'pause')
+      return result
+    }
+    t.mock.method(globalThis, 'structuredClone', (value: unknown, options?: Parameters<typeof clone>[1]): unknown => {
+      const checkpoint = value as { json?: { value?: { version?: string; attemptId?: string } }[]; raw?: unknown } | null
+      const entries = Array.isArray(value) ? value as NonNullable<typeof checkpoint>['json'] : checkpoint?.json
+      if (settlement.attemptId && entries?.some(entry => entry.value?.version === 'sync-stage-v1' && entry.value.attemptId === settlement.attemptId)) {
+        if (checkpoint?.raw instanceof Map) settlement.fullClones++
+        else if (Array.isArray(value)) settlement.indexClones++
+      }
+      return clone(value, options)
+    })
+  }
   const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  if (settleFailureOnly) {
+    t.diagnostic(JSON.stringify(settlement))
+    assert.equal(f.store.readOperation(f.operation.id).phase, 'paused')
+    assert.equal(f.store.readOperation(f.operation.id).control, 'pause')
+    assert.equal(reviewCalls.length, 6)
+    assert.equal(f.store.listAttempts(f.operation.id).length, 1)
+    assert.deepEqual(f.store.listRecoverableResources(), [])
+    assert.equal(f.store.listJournals(f.operation.id).length, 0)
+    assert.equal(settlement.fullClones, 0, '候选失败收尾只读取阶段索引')
+    assert.equal(settlement.indexClones, 1, '同次失败内各组共享阶段索引')
+    return
+  }
   if (countCandidateHistory) {
     const maximumIndexClones = Math.max(0, ...candidateHistory.indexClones.values())
     t.diagnostic(JSON.stringify({ candidateHistory: { windows: candidateHistory.windows, fullClones: candidateHistory.fullClones, maximumIndexClones } }))
