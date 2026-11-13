@@ -207,12 +207,12 @@ for (const missingOldAcceptance of [true, false]) test(`历史已采纳未执行
   const f = await independentCommit(await fixture(t, missingOldAcceptance)), proof = f.plan.historicalCoverage
   assert.equal(Boolean(proof), missingOldAcceptance)
   if (proof) {
-    assert.deepEqual(Object.keys(proof).sort(), ['digest', 'inputId', 'proofs', 'version'])
-    assert.equal(proof.inputId, f.next.input.id); assert.equal(proof.proofs.length, 1)
-    assert.deepEqual(Object.keys(proof.proofs[0]).sort(), ['contractIds', 'pairId', 'receiptId', 'verificationRef'])
-    assert.deepEqual(proof.proofs[0].contractIds, [unexecutedId])
-    assert.deepEqual(proof.proofs[0].verificationRef, f.reportRef)
-    assert.equal(proof.proofs[0].receiptId, f.journal.receipt!.id)
+    assert.deepEqual(Object.keys(proof).sort(), ['digest', 'entries', 'inputId', 'version'])
+    assert.equal(proof.inputId, f.next.input.id); assert.equal(proof.entries.length, 1)
+    assert.deepEqual(Object.keys(proof.entries[0]).sort(), ['contractIds', 'pairId', 'receiptId', 'verificationRef'])
+    assert.deepEqual(proof.entries[0].contractIds, [unexecutedId])
+    assert.deepEqual(proof.entries[0].verificationRef, f.reportRef)
+    assert.equal(proof.entries[0].receiptId, f.journal.receipt!.id)
   }
   assert.deepEqual(f.plan.verifications.map(item => item.definition.id), ['VERIFY-OTHER-01'])
   assert.deepEqual(f.plan.mandatoryTests.map(item => item.testId), ['AC-OTHER-03'])
@@ -330,7 +330,7 @@ test('历史覆盖只承接原ID，owner、源码、测试、跨owner依赖、mo
 
 test('历史覆盖缺原授信、报告ID、精确来源或真实采纳均不获资格；坏原件明确拒绝', { timeout: 180000 }, async t => {
   const f = await independentCommit(await fixture(t)), store = f.application.store, commonDir = f.next.input.source.commonDir
-  const proof = f.plan.historicalCoverage!, record = proof.proofs[0], pair = store.readBaselinePair(record.pairId)
+  const proof = f.plan.historicalCoverage!, record = proof.entries[0], pair = store.readBaselinePair(record.pairId)
   const originalOperation = store.readOperation(f.operation.id), originalAttempt = store.readAttempt(f.journal.attemptId)
   const selection = store.readBaselineSelection(f.next.input.source, store.listBaselineResources(f.next.input.source)); assert.ok('selection' in selection)
   const check = () => candidateContext(store, f.next, f.candidate)
@@ -358,7 +358,7 @@ test('历史覆盖缺原授信、报告ID、精确来源或真实采纳均不获
   assert.throws(() => f.git('merge-base', '--is-ancestor', f.journal.receipt!.actualCommit!, unadopted.headCommit))
   assert.equal(await freezeHistoricalCoverage(store, unadopted, f.next.scope, selection.selection), undefined, '源码相同但正式receipt不在冻结HEAD祖先链仍不授信')
   f.git('switch', 'unadopted-source'); f.git('branch', '-f', 'main', f.next.input.headCommit); f.git('switch', 'main')
-  const wrongRef = { ...proof, proofs: [{ ...record, verificationRef: writeEvidence(commonDir, { unrelated: true }) }] }
+  const wrongRef = { ...proof, entries: [{ ...record, verificationRef: writeEvidence(commonDir, { unrelated: true }) }] }
   assert.throws(() => historicalCoverageCheck(store, f.next.input, f.next.scope, wrongRef, verifySnapshot(f.next.input)), { code: 'historical_coverage_binding' })
   f.protocol.withTransaction(tx => tx.exec('UPDATE sync_apply_journals SET record_json=? WHERE id=?', JSON.stringify({ ...f.journal, receipt: { ...f.journal.receipt, actualCommit: originalOperation.input.headCommit } }), f.journal.id))
   await assert.rejects(check(), { code: 'sync_adoption_receipt_invalid' })
@@ -454,7 +454,7 @@ test('历史覆盖相同owner增加旧ID不重复读取原件，55-owner同树�
   const result = { inputId: input.id, inputTree: input.immutableTree, owners: profile.ownerPaths.length, historicalOwners: onePerOwner.size, historicalIds: oldIds.length, counts, proofs: Object.fromEntries(proofs), findings: Object.fromEntries(findings) }
   if (profileRoot) writeFileSync(join(profileRoot, `${process.env.SPEX_HISTORICAL_COVERAGE_PROFILE_LABEL ?? 'latest'}.json`), JSON.stringify(result, null, 2))
   t.diagnostic(JSON.stringify({ owners: result.owners, historicalIds: result.historicalIds, counts }))
-  assert.deepEqual(proofs.get('all')!.proofs.flatMap(proof => proof.contractIds).sort(), [...oldIds].sort())
+  assert.deepEqual(proofs.get('all')!.entries.flatMap(proof => proof.contractIds).sort(), [...oldIds].sort())
   assert.equal(counts['freeze-all'].pairReads, counts['freeze-one'].pairReads)
   assert.equal(counts['candidate-all'].pairReads, counts['candidate-one'].pairReads)
   assert.equal(counts['freeze-all'].ownerBlobReads, counts['freeze-one'].ownerBlobReads, '同owner新增旧ID不应重读/解析原owner')
@@ -469,7 +469,7 @@ test('真实应用与Docker新receipt不传播历史未执行覆盖，原pair、
   })
   retainHistoricalFrozenWorkflow(initial.application)
   const f = await independentCommit(initial), store = f.application.store, commonDir = f.next.input.source.commonDir
-  const proof = f.plan.historicalCoverage!.proofs[0], pair = store.readBaselinePair(proof.pairId)
+  const proof = f.plan.historicalCoverage!.entries[0], pair = store.readBaselinePair(proof.pairId)
   const resources = [{ kind: 'contract' as const, id: unexecutedId }, ...[oldSpec, 'src/export.js', 'tests/export.test.mjs'].map(path => ({ kind: 'path' as const, path }))]
   const heads = store.readBaselineSelection(f.next.input.source, resources); assert.ok('selection' in heads)
   const calls: ElaborationSessionRequest[] = []

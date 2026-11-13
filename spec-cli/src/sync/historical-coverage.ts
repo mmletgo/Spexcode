@@ -14,7 +14,7 @@ import type { SyncStore } from './store.js'
 export type HistoricalCoverage = {
   version: 'sync-historical-unexecuted-coverage-v1'
   inputId: string
-  proofs: { pairId: string; receiptId: string; verificationRef: BlobRef; contractIds: string[] }[]
+  entries: { pairId: string; receiptId: string; verificationRef: BlobRef; contractIds: string[] }[]
   digest: string
 }
 export type HistoricalCoverageCheck = (graph: ContractGraph, files: ReadonlyMap<string, string>) => ReadonlySet<string>
@@ -113,26 +113,26 @@ export async function freezeHistoricalCoverage(store: SyncStore, input: InputSna
     if (!item || !['REQ', 'RULE', 'TR'].includes(item.kind) || scope.contractIds.includes(item.id) || within(item.path, scope.paths)) continue
     groups.set(binding.intentPair.id, [...groups.get(binding.intentPair.id) ?? [], item.id])
   }
-  const original = new Map(entries.map(entry => [entry.path, entry])), proofs: HistoricalCoverage['proofs'] = []
+  const original = new Map(entries.map(entry => [entry.path, entry])), historicalEntries: HistoricalCoverage['entries'] = []
   for (const [pairId, ids] of groups) {
     const prior = priorProof(store, input, pairId)
     if (!prior) continue
     const contractIds = unchangedHistoricalIds(input, scope, ids, prior, frozen.graph, original, original, files).sort()
-    if (contractIds.length) proofs.push({ pairId, receiptId: prior.pair.receiptId, verificationRef: prior.verificationRef, contractIds })
+    if (contractIds.length) historicalEntries.push({ pairId, receiptId: prior.pair.receiptId, verificationRef: prior.verificationRef, contractIds })
   }
-  if (!proofs.length) return undefined
-  const body = { version: 'sync-historical-unexecuted-coverage-v1' as const, inputId: input.id, proofs: proofs.sort((left, right) => left.pairId.localeCompare(right.pairId)) }
+  if (!historicalEntries.length) return undefined
+  const body = { version: 'sync-historical-unexecuted-coverage-v1' as const, inputId: input.id, entries: historicalEntries.sort((left, right) => left.pairId.localeCompare(right.pairId)) }
   return { ...body, digest: bodyDigest(body) }
 }
 
 /** 全图 seal 与 V1 共用同一冷验；只给未变的既有 ID 保留未执行事实。 */
 export function historicalCoverageCheck(store: SyncStore, input: InputSnapshot, scope: SyncScope, proof: HistoricalCoverage, entries: readonly TreeEntry[]): HistoricalCoverageCheck {
   const { digest, ...body } = proof
-  if (proof.version !== 'sync-historical-unexecuted-coverage-v1' || proof.inputId !== input.id || bodyDigest(body) !== digest || !proof.proofs.length) fail('历史覆盖证明不匹配冻结输入或摘要')
+  if (proof.version !== 'sync-historical-unexecuted-coverage-v1' || proof.inputId !== input.id || bodyDigest(body) !== digest || !proof.entries.length) fail('历史覆盖证明不匹配冻结输入或摘要')
   const original = new Map(verifySnapshot(input).map(entry => [entry.path, entry]))
   return (graph, files) => {
     const candidate = candidateEntries(input, entries, files), accepted = new Set<string>(), ids = new Set<string>()
-    for (const record of proof.proofs) {
+    for (const record of proof.entries) {
       const prior = priorProof(store, input, record.pairId)
       if (!prior || prior.pair.receiptId !== record.receiptId || !isDeepStrictEqual(prior.verificationRef, record.verificationRef) || !record.contractIds.length) fail('冻结历史覆盖原件已失配或不再可证')
       for (const id of record.contractIds) {

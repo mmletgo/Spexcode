@@ -183,7 +183,7 @@ CREATE INDEX sync_apply_journals_operation ON sync_apply_journals(operation_id,a
 ` }, { version: 47, sql: 'SELECT 1; -- Protect frozen full-graph verification context from older writers.' },
 { version: 48, sql: 'SELECT 1; -- Protect frozen P0 current-author direction guidance and its actual reviewed version from older writers.' },
 { version: 49, sql: 'SELECT 1; -- Protect the observation baseline summary read by committed frontier consumption from older writers.' },
-{ version: 50, sql: 'SELECT 1; -- Protect exact adopted historical unexecuted coverage proofs from older writers.' }]
+{ version: 50, sql: 'SELECT 1; -- Protect exact adopted historical unexecuted coverage evidence from older writers.' }]
 
 /** 升级前以 SQLite online backup 保存一致性旧库；迁移本身由组件事务执行。 */
 export async function migrateSyncStore(protocol: SessionProtocol, options: { backupPath?: string } = {}): Promise<number> {
