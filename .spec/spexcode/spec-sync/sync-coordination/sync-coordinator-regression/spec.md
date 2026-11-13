@@ -16,6 +16,8 @@ related:
 
 ## expanded spec
 
+混合候选的冷验计数检查同一真实冻结 Git 树只完整读取一次。原候选、已拒稿及全部独审结论保持完整认证。
+
 P2 混合失败使用真实 Git/Native 资源记录与 SQLite 冷开：普通 repair 排首、后组 contract-omission、另一组格式失败和一个 accept 同轮结算。冷续只重派原格式稿，保相同 candidate、合法 repair/accept 的原 resultRef；之后只回相应 P1 owner，保未命中原件与旧 CAS。覆盖完整 aggregate 后失租约的 superseded/null、零调用中间 attempt、缺 required outcome 及资源未 removed；不得补旧失败或收据。权限回归另在同 owner 核 ordinary 白名单与 omission 的已接受字段保护，不以并集扩权。
 
 当前协议的只读候选续审回归通过真实 Git 草稿取得 P0 v8 和 P1 原件。有限预算、多个格式拒稿、独审缓存和锚点返修均从各阶段的冻结输入与精确 Git seed 检查。冻结上下文旧运输另由历史请求验证。

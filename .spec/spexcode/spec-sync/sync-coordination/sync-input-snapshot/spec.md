@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+候选恢复也可按一次同步或异步冷验短暂共享这个读树视图，保持同一物理仓库与完整 tree OID 的核验。结束、错误及后继尝试重新读取。
+
 [[sync-source-registration]] 的显式见证在公共identify/fingerprint接缝投影logical repositoryId及本root已证明的physicalFingerprint；actual路径、Git登记与branch仍真实读取，snapshot/source字段和顺序不增加wrapper。commonDir共享仓库ID，新managed root保真实新physical；未证明linked旧权限不能借repo共享继续。失效v2正常读取fail closed，不fallback新namespace。仅正式continuity配置核验与resource-only清理可用具名raw探针，normal capture/currentness/V4/准入不采用raw旁路。
 
 明确 blob OID 集合的批读接缝先批量查询真实对象类型和大小，再复用读树原有的容量分组、framing、完整字节与 SHA-1/SHA-256 OID 校验。去重只减少同次重复对象读取，不改变调用者的逐路径解析；空集合不启动 Git，单对象沿用原路径。元数据不匹配、缺失和损坏明确失败，每次调用重新读取，不建立跨调用缓存或放宽单对象容量。
@@ -44,7 +46,7 @@ code:
 
 [[sync-coordinator]] 的一次输入装配或当前性检查可显式传递本地树缓存，按该调用已绑定的 commonDir 与完整 tree OID 复用完整校验成功的 entries，命中返回独立副本。缓存不保存快照验证结论：各次 verifySnapshot 仍核原 HEAD/tree/index、manifest SHA、contentDigest 和身份；原/现快照各保留一次完整对象读取。作者投影、真实组合正文、只读引用闭包和 index/HEAD 清单沿用同一读取接缝；不同 OID 不混用，onObject 仍完整读回并逐对象交出真实 bytes。缓存只在该业务调用内传递，不进入持久状态或跨调用复用，也不扩大只读 HTTP 查询作用域。
 
-仅只读 HTTP status/detail 查询可用 `withReadonlySnapshotQuery` 在本次异步上下文内重用无回调且完整读回/OID 核验成功的 TreeEntry。key 同时绑定 commonDir 的 realpath、既有物理 dev/ino/birthtime 与完整 tree OID；命中返回独立副本。`onObject` 始终走原批量字节路径并交出每个对象；失败读不留下成功项。作用域结束或失败后立即停用并清空，继承上下文的遗留异步任务也不能命中。verifySnapshot 每次仍核对 HEAD/tree、manifest blob、contentDigest 与 snapshot id，不缓存验证结论。业务写入、派发、采纳、验证交付等真实动作入口保持在作用域外；只读查询保留快照自身原有 owned private evidence/ref 写入。未显式传入调用级树缓存且无只读查询作用域的读树继续逐次完整读取。
+只读 HTTP status/detail 查询可用 `withReadonlySnapshotQuery` 在本次异步上下文内重用无回调且完整读回/OID 核验成功的 TreeEntry。key 同时绑定 commonDir 的 realpath、既有物理 dev/ino/birthtime 与完整 tree OID；命中返回独立副本。`onObject` 始终走原批量字节路径并交出每个对象；失败读不留下成功项。作用域结束或失败后立即停用并清空，继承上下文的遗留异步任务也不能命中。verifySnapshot 每次仍核对 HEAD/tree、manifest blob、contentDigest 与 snapshot id，不缓存验证结论。业务写入、派发、采纳、验证交付等真实动作入口保持在作用域外；只读查询保留快照自身原有 owned private evidence/ref 写入。未显式传入调用级树缓存且无只读查询作用域的读树继续逐次完整读取。
 
 自动提交输入使用同一 captureInputSnapshot 的 committed 模式：前后核对物理来源、分支、HEAD 与其不可变 tree，仅从 Git 对象读取条目和原字节。它不读取工作文件、用户 index 或 untracked 字节；同期保存、暂存和冲突 index 不影响该输入，HEAD 变化仍有限重试。InputSnapshot.captureKind=commit 参与新身份摘要，immutableTree/indexTree 均等于已冻结 HEAD tree，indexDigest 是该 tree OID 的 SHA256，不伪称保存了用户 index。读回同时验证 HEAD/tree/index 绑定。缺 captureKind 的历史记录及默认显式工作区采集保原摘要算法、index 与完整工作字节语义，不能升级重写历史快照身份。
 

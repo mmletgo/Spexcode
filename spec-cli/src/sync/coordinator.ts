@@ -50,7 +50,7 @@ import { NATIVE_PERIODIC_OBSERVATION_FAILURE, NATIVE_PROCESS_OBSERVATION_PENDING
 import { readRecord } from '../session-record.js'
 import { structuredExecutionPolicy, StructuredSessionError } from '../session-structured-policy.js'
 import { SettledSessionCreateTimeoutError } from '../session-structured.js'
-import { canonicalSnapshotSource, captureInputSnapshot, contentHash, identifyRawWorktree, objectGit, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot, visitObjectBatch, writeEvidence } from './snapshot.js'
+import { canonicalSnapshotSource, captureInputSnapshot, contentHash, identifyRawWorktree, objectGit, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot, visitObjectBatch, withReadonlySnapshotQuery, writeEvidence } from './snapshot.js'
 import type { SnapshotManifest, TreeEntry } from './snapshot.js'
 import { SyncStoreError } from './store.js'
 import type { SyncStore } from './store.js'
@@ -859,7 +859,7 @@ export function acceptedCandidateReviewSource(store: SyncStore, operation: SyncO
 }
 
 /** 格式续审沿原正式Native失败取诊断；完整业务输入及原请求必须仍可逐字重建。 */
-export function failedCandidateReviewSource(store: SyncStore, operation: SyncOperation, origin: SyncAttempt, key: string, candidate: CandidateRef, plan: SyncPartitionPlan, input?: GenerationInput, readIndex?: (source: SyncAttempt) => SyncCheckpointStageView): GenerationInput['reviewRepair'] | null {
+export function failedCandidateReviewSource(store: SyncStore, operation: SyncOperation, origin: SyncAttempt, key: string, candidate: CandidateRef, plan: SyncPartitionPlan, input?: GenerationInput, readIndex?: (source: SyncAttempt) => SyncCheckpointStageView, readNativeRecord?: typeof readRecord): GenerationInput['reviewRepair'] | null {
   const checkpointsAtEntry = readIndex?.(origin) ?? readSyncCheckpointStageIndex(store, operation, origin)
   readIndex ??= source => source.id === origin.id ? checkpointsAtEntry : readSyncCheckpointStageIndex(store, operation, source)
   const checkpoints = readIndex?.(origin), source = partitionStage<SavedGeneration>(store, operation, origin, key, undefined, checkpoints), result = source?.result
@@ -887,7 +887,7 @@ export function failedCandidateReviewSource(store: SyncStore, operation: SyncOpe
   } else {
     const packet = checkpoint.failure?.rejectedOutput
     if (!packet || !result.failure || native.request.purpose !== 'code_review' || native.request.inputDigest !== result.inputDigest || native.candidateDigest !== resource.plan.candidateDigest || native.candidateDigest !== null && native.candidateDigest !== candidate.digest || checkpoint.failure?.code !== result.failure.code || checkpoint.failure.message !== result.failure.message || checkpoint.phase !== 'removed' || checkpoint.nativeState !== 'failed' || checkpoint.stop?.nativeStopped !== true) return null
-    const state = authenticateNativeRejectedFinal(store, operation, origin, requestKey, result.failure, packet)
+    const state = authenticateNativeRejectedFinal(store, operation, origin, requestKey, result.failure, packet, readNativeRecord)
     if (state.cancellation?.nativeStopped !== true || checkpoint.stop.nativeStatus !== state.cancellation.nativeStatus || checkpoint.requestDigest !== native.requestDigest || checkpoint.operationId !== operation.id || checkpoint.attemptId !== origin.id || checkpoint.inputId !== operation.input.id || checkpoint.expectedSessionId !== result.failure.sessionId || checkpoint.session.sessionId !== result.failure.sessionId || checkpoint.session.threadId !== result.failure.threadId || checkpoint.session.turnId !== result.failure.turnId) return null
   }
   if (input) {
@@ -902,7 +902,7 @@ export function failedCandidateReviewSource(store: SyncStore, operation: SyncOpe
 }
 
 /** 失租约不补写旧失败；只有完整同候选审查及资源原件已结算才可接回业务诊断。 */
-function interruptedCandidateReviewComplete(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, generation: SavedGeneration, readIndex: (source: SyncAttempt) => SyncCheckpointStageView): boolean {
+export function* candidateReviewAuthentication(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, generation: SavedGeneration, readIndex: (source: SyncAttempt) => SyncCheckpointStageView, options?: { readNativeRecord?: typeof readRecord }): Generator<void, boolean> {
   if (attempt.status !== 'superseded' || attempt.failure !== null || !generation.candidateValidated || !generation.candidate || generation.reviewPassed || generation.validationFindings.some(finding => finding.severity === 'error')) return false
   const checkpoints = readIndex(attempt), candidate = generation.candidate
   const frozen = partitionStage<CandidateRef>(store, operation, attempt, 'partition:candidate', undefined, checkpoints)?.result
@@ -913,12 +913,23 @@ function interruptedCandidateReviewComplete(store: SyncStore, operation: SyncOpe
   const required = budget.requiredKeys.filter(key => key.startsWith(prefix) && key.endsWith(':code_review')).map(key => `partition:${key.slice(prefix.length, -':code_review'.length)}:candidate-review`)
   const actual = checkpoints.json.map(({ value }) => value as Stage).filter(value => value.stage?.endsWith(':candidate-review')).map(value => value.stage)
   if (!required.length || new Set(required).size !== required.length || canonical([...required].sort()) !== canonical([...actual].sort())) return false
-  return required.every(key => {
+  for (const key of required) {
     const saved = partitionStage<SavedGeneration>(store, operation, attempt, key, undefined, checkpoints)!
     const original = partitionStage<ReturnType<typeof freezeGenerationInput>['inputEvidence']>(store, operation, attempt, `${key}:input`, undefined, checkpoints)?.result
     const input = original ? restoreGenerationInput(original) : acceptedReviewInput(store, operation, attempt, key, saved.resultRef, checkpoints)
-    return !!input && !!completedCandidateReviewSource(store, operation, attempt, key, candidate, plan, input, readIndex, true)
-      || !!failedCandidateReviewSource(store, operation, attempt, key, candidate, plan, input ?? undefined, readIndex)
+    if (!(input && completedCandidateReviewSource(store, operation, attempt, key, candidate, plan, input, readIndex, true))
+      && !failedCandidateReviewSource(store, operation, attempt, key, candidate, plan, input ?? undefined, readIndex, options?.readNativeRecord)) return false
+    yield
+  }
+  return true
+}
+
+function interruptedCandidateReviewComplete(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, generation: SavedGeneration, readIndex: (source: SyncAttempt) => SyncCheckpointStageView): boolean {
+  return withReadonlySnapshotQuery(() => {
+    const proof = candidateReviewAuthentication(store, operation, attempt, generation, readIndex)
+    let step = proof.next()
+    while (!step.done) step = proof.next()
+    return step.value
   })
 }
 
@@ -1034,11 +1045,13 @@ function readonlyRepairOriginalShape(derived: ReadonlyOwnerRepair | null, origin
 
 /** 原件完整冷验；只在derived对照中保留旧relatedIds缺席，不为历史冻结输入追补权限。 */
 export function validateReadonlyRepair(store: SyncStore, operation: SyncOperation, repair: ReadonlyOwnerRepair): void {
-  const source = store.readAttempt(repair.fromAttemptId)
-  const context = readonlyRepairContext(store, operation, source, repair.generationRef)
-  const derived = readonlyRepairFromAttempt(store, context, source)
-  const originalShape = readonlyRepairOriginalShape(derived, repair)
-  if (source.operationId !== operation.id || canonical(originalShape) !== canonical(repair)) fail('readonly_spec_repair_binding', '只读V1续修来源、owner或原件绑定失配')
+  withReadonlySnapshotQuery(() => {
+    const source = store.readAttempt(repair.fromAttemptId)
+    const context = readonlyRepairContext(store, operation, source, repair.generationRef)
+    const derived = readonlyRepairFromAttempt(store, context, source)
+    const originalShape = readonlyRepairOriginalShape(derived, repair)
+    if (source.operationId !== operation.id || canonical(originalShape) !== canonical(repair)) fail('readonly_spec_repair_binding', '只读V1续修来源、owner或原件绑定失配')
+  })
 }
 
 function refinementGeneration(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, refinement: Refinement): SavedGeneration {
@@ -1866,7 +1879,19 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           const candidatePlan = reviewPlanStage(store, operation, prior, 'candidate-partition-plan', undefined, readIndex)?.result
           const candidate = generation.candidate
           if (!candidate || !generation.candidateValidated || generation.reviewPassed || generation.validationFindings.some(finding => finding.severity === 'error') || !approved || writeEvidence(operation.input.source.commonDir, approved).sha256 !== readonlyBase.resultRef.sha256 || !elaborationComposedBinding(store, operation, prior, approved, view.composed) || !originalPlan || !candidatePlan || canonical(candidate.coveredScope.paths) !== canonical(operation.scope.paths)) break
-          if (prior.status === 'superseded' && prior.failure === null && !interruptedCandidateReviewComplete(store, operation, prior, generation, readIndex)) fail('review_source_binding', '失租约候选缺少完整required outcomes或精确结算原件，不能从汇总猜测续审资格')
+          if (prior.status === 'superseded' && prior.failure === null) {
+            const complete = await withReadonlySnapshotQuery(async () => {
+              const proof = candidateReviewAuthentication(store, operation, prior, generation, readIndex)
+              for (let step = proof.next(); ; step = proof.next()) {
+                if (step.done) return step.value
+                store.renewLease(fence!, leaseMs)
+                await yieldToControl()
+                if (signal.aborted) fail('cancelled', '候选独审来源认证已停止')
+                store.renewLease(fence!, leaseMs)
+              }
+            })
+            if (!complete) fail('review_source_binding', '失租约候选缺少完整required outcomes或精确结算原件，不能从汇总猜测续审资格')
+          }
           const reviewKeys = checkpoints.json.map(({ value }) => value as Stage).filter(value => value.stage?.endsWith(':candidate-review')).map(value => value.stage)
           const failedReviewKeys = reviewKeys.filter(key => failedCandidateReviewSource(store, operation, prior, key, candidate, candidatePlan, undefined, readIndex))
           if (!failedReviewKeys.length || !reviewKeys.every(key => { const result = partitionStage<SavedGeneration>(store, operation, prior, key, undefined, checkpoints)?.result; return result?.review && ['accept', 'repair'].includes(result.review.verdict) && !result.failure || failedReviewKeys.includes(key) })) break
