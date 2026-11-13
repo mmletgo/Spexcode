@@ -1658,6 +1658,33 @@ test('模型续审交接保原预算族、剩余调用、截止时间和原父�
   } finally { f.cleanup() }
 })
 
+test('模型续审交接仅在前一模型正式结算后沿原父候选使用下一模型', async () => {
+  const f = await fixture()
+  try {
+    const policy = f.put(readonlyCoveragePlan)
+    const input: AdmitSyncInput = { ...f.admit(), origin: 'initial', model: 'cursor:default', planBlob: policy, policyDigest: policy.sha256 }
+    const original = f.claim(input)
+    f.store.reserveDispatch(original.fence, { key: 'original-review', purpose: 'code_review', requestDigest: 'original-review' })
+    const parent = f.store.requestControl(original.operation.id, 'cancel')
+    assert.equal(f.store.hasVerificationOrJournal(parent.id), false)
+    const handoff: AdmitSyncInput = { ...input, retryOf: parent.id, inheritRetryBudget: true, model: 'grok:default', ingressKey: 'grok-review', rootCauseId: 'grok-review' }
+    const first = f.store.admitAndEnqueue(handoff)
+    const nextInput: AdmitSyncInput = { ...handoff, model: 'claude:default', ingressKey: 'claude-review', rootCauseId: 'claude-review' }
+    assert.throws(() => f.store.admitAndEnqueue(nextInput), /SYNC_RETRY_BUDGET_BINDING/)
+    const claim = f.store.claimAttempt({ operationId: first.id, source: input.input.source, scope: input.scope, leaseMs: 1000, expectedMessageId: first.dispatchMessageId })
+    f.store.reserveDispatch(claim.fence, { key: 'grok-review', purpose: 'code_review', requestDigest: 'grok-review' })
+    const settled = f.store.requestControl(first.id, 'cancel')
+    const next = f.store.admitAndEnqueue(nextInput)
+    assert.equal(next.model, 'claude:default')
+    assert.equal(next.retryOf, parent.id)
+    assert.equal(next.deadlineAtMs, parent.deadlineAtMs)
+    assert.equal(f.store.readBudgetUsage(next.id).callsUsed, 2)
+    assert.equal(f.store.admitAndEnqueue({ ...handoff, ingressKey: 'grok-review-alias', rootCauseId: 'grok-review-alias' }).id, first.id)
+    assert.deepEqual(f.store.readOperation(first.id), settled)
+    assert.deepEqual(f.store.readOperation(parent.id), parent)
+  } finally { f.cleanup() }
+})
+
 test('superseded结算资格要求本操作current与全部历史attempt终结，冷读不改记录', async () => {
   const f = await fixture()
   try {
@@ -1701,6 +1728,7 @@ test('superseded结算资格逐项拒绝活租约、历史未removed资源和未
   try {
     const ready = f.ready(), planned = f.put({ phase: 'planned' })
     const resource = f.store.planResource(ready.fence, { key: 'settlement-proof', kind: 'verification', payloadDigest: 'fixed-proof', inputId: ready.operation.input.id, candidateDigest: ready.candidate.digest, planBlob: planned, checkpointRef: planned })
+    assert.equal(f.store.hasVerificationOrJournal(ready.operation.id), true)
     const binding = { operationId: resource.operationId, attemptId: resource.attemptId, inputId: resource.plan.inputId, candidateDigest: resource.plan.candidateDigest }
     const terminal = f.put({ phase: 'terminal' }), removed = f.put({ phase: 'removed' })
     f.store.recordResourceCheckpoint(resource.id, { ...binding, phase: 'terminal', expectedCheckpointRef: planned, checkpointRef: terminal })

@@ -377,16 +377,17 @@ export class SyncStore {
     validateScope({ paths: files.map(file => file.path), contractIds: [], flowIds: [] })
     return files as ApplyFilePlan[]
   }
-  private normalizedSemanticDigest(input: Pick<SyncOperation, 'input' | 'requestBlob' | 'origin' | 'policyDigest' | 'scope' | 'retryOf' | 'baselineSelection' | 'recordUnverifiedCoverage' | 'automaticSourceAdoption'>): string {
+  private normalizedSemanticDigest(input: Parameters<typeof syncSemanticDigest>[0]): string {
     if (!input.requestBlob) return syncSemanticDigest(input)
     const evidence = JSON.parse(this.blob(input.requestBlob).toString('utf8')) as { type?: string }
+    const handoff = input.inheritRetryBudget ? { handoffModel: input.model } : {}
     if (evidence.type === 'sync.decision') {
       const decision = readControlledDecision(input.input, input.requestBlob)
-      return digest({ source: input.input.source, inputId: input.input.id, origin: input.origin, decision: controlledDecisionIdentity(decision), retryOf: input.retryOf ?? null })
+      return digest({ source: input.input.source, inputId: input.input.id, origin: input.origin, decision: controlledDecisionIdentity(decision), retryOf: input.retryOf ?? null, ...handoff })
     }
     if (evidence.type === 'sync.history') {
       const { requestId: _requestId, ...request } = readHistoryRequest(input.input, input.requestBlob)
-      return digest({ source: input.input.source, inputId: input.input.id, origin: input.origin, history: request, retryOf: input.retryOf ?? null })
+      return digest({ source: input.input.source, inputId: input.input.id, origin: input.origin, history: request, retryOf: input.retryOf ?? null, ...handoff })
     }
     const request = readControlledRequest(input.input, input.requestBlob)
     const { requestId: _requestId, ...origin } = request.origin
@@ -502,13 +503,16 @@ export class SyncStore {
         const selectionMatches = revalidation ? !!input.baselineSelection && this.revalidationSelection(tx, previous, input.baselineSelection) : (previous.baselineSelection?.digest ?? null) === (input.baselineSelection?.digest ?? null)
         if (!selectionMatches || revalidation && (digest(previous.budget) !== digest(input.budget) || digest(previous.scope) !== digest(canonicalScope(input.scope))) || previous.origin !== input.origin || identityKey(previous.input.source) !== identityKey(input.input.source) || digest(inputPayload(previous.input)) !== digest(inputPayload(input.input)) || (previous.requestBlob?.sha256 ?? null) !== (input.requestBlob?.sha256 ?? null) || previous.policyDigest !== input.policyDigest || previous.impactDigest !== input.impactDigest || previous.readSetDigest !== input.readSetDigest || previous.deliveryPlan.baseCommit !== input.deliveryPlan.baseCommit || (previous.previousBaselinePair?.id ?? null) !== (input.previousBaselinePair?.id ?? null) || digest(previous.scope.paths) !== digest(canonicalScope(input.scope).paths) || !contains(previous.scope, input.scope)) fail('SYNC_RETRY_BINDING', '显式重试必须完整复用原冻结来源、用户请求、政策及授权范围')
         if (input.ingressKey === previous.ingressKey || input.rootCauseId === previous.rootCauseId) fail('SYNC_RETRY_BINDING', '显式重试需要新的用户请求身份')
+        const siblings = tx.query("SELECT record_json FROM sync_operations WHERE repository_id=? AND source_key=? AND json_extract(record_json,'$.retryOf')=? AND (? OR json_extract(record_json,'$.inheritRetryBudget')=1)", input.input.source.repositoryId, identityKey(input.input.source), previous.id, input.inheritRetryBudget ? 1 : 0).map(row => parseRecord<SyncOperation>(row)!)
+        if (siblings.some(operation => operation.inheritRetryBudget !== input.inheritRetryBudget)) fail('SYNC_RETRY_BUDGET_BINDING', '同一原候选的重试必须保留同一交接授权')
         if (input.inheritRetryBudget) {
-          if (revalidation || previous.delivery || !contains(emptyScope(), previous.deliveredScope) || !previous.currentAttemptId
+          if (revalidation || !previous.currentAttemptId
             || previous.recordUnverifiedCoverage !== input.recordUnverifiedCoverage || digest(previous.scope) !== digest(canonicalScope(input.scope))
-            || digest(previous.budget) !== digest(input.budget) || syncModel(previous) === syncModel(input)
-            || tx.query("SELECT id FROM sync_attempts WHERE operation_id=? AND status NOT IN ('failed','superseded','settled') LIMIT 1", previous.id).length
-            || tx.query("SELECT id FROM sync_resources WHERE operation_id=? AND kind='verification' LIMIT 1", previous.id).length
-            || tx.query('SELECT id FROM sync_apply_journals WHERE operation_id=? LIMIT 1', previous.id).length) fail('SYNC_RETRY_BUDGET_BINDING', '候选续审交接需要同一完整范围与预算、不同模型、原尝试已结算且未进入交付验证')
+            || digest(previous.budget) !== digest(input.budget) || syncModel(previous) === syncModel(input)) fail('SYNC_RETRY_BUDGET_BINDING', '候选续审交接需要同一完整范围与预算及不同模型')
+          if ([previous, ...siblings].some(source => source.delivery || !contains(emptyScope(), source.deliveredScope)
+            || source !== previous && !this.retryEligibility(tx, source).eligible
+            || tx.query("SELECT id FROM sync_attempts WHERE operation_id=? AND status NOT IN ('failed','superseded','settled') LIMIT 1", source.id).length
+            || this.verificationOrJournalExists(tx, source.id))) fail('SYNC_RETRY_BUDGET_BINDING', '原操作和此前的模型交接都必须正式结算且未进入交付验证')
           retryBudgetSource = previous
         }
       }
@@ -1046,6 +1050,13 @@ export class SyncStore {
     }
     return this.write(tx => this.retryEligibility(tx, this.operation(tx, operationId), proof))
   }
+  private verificationOrJournalExists(tx: ProtocolTransaction, operationId: string): boolean {
+    return tx.query(`SELECT EXISTS (SELECT 1 FROM sync_apply_journals WHERE operation_id=?)
+      OR EXISTS (SELECT 1 FROM sync_resources WHERE operation_id=? AND kind='verification')
+      OR EXISTS (SELECT 1 FROM sync_attempts WHERE operation_id=? AND json_type(record_json,'$.verification')='object') AS found`, operationId, operationId, operationId)[0].found === 1
+  }
+  /** 查指定操作曾否进入验证或应用，避免把尝试与资源原件搬到协调器。 */
+  hasVerificationOrJournal(operationId: string): boolean { return this.write(tx => this.verificationOrJournalExists(tx, operationId)) }
   /** 仅核指定已替换操作的结算事实；原批准与输入绑定仍由调用者认证。 */
   isSupersededOperationSettled(operationId: string): boolean {
     return this.write(tx => {

@@ -14,7 +14,9 @@ code:
 
 ## expanded spec
 
-显式候选续审交接只接收已结算、无验证资源或交付日志的原生 code→Spec 父操作，保持其冻结业务范围与覆盖授权。新的模型与请求获得自己的 operation、fence 和 FIFO 位置，沿原预算根与截止时间继续计算调用、attempt 和返修。请求和 ingress receipt 冻结交接授权，重放不能改成独立预算。候选与全部原件由 [[sync-coordinator]] 在派发前认证。
+显式候选续审交接只接收已结算、无验证资源或交付日志的原生 code→Spec 父操作，保持其冻结业务范围与覆盖授权。新的模型与请求获得自己的 operation、fence 和 FIFO 位置，沿原预算根与截止时间继续计算调用、attempt 和返修。同一候选按模型去重；只有同一父操作此前的交接均已正式结算且未进入交付验证，才可交给下一模型。请求和 ingress receipt 冻结交接授权，重放不能改成独立预算。候选与全部原件由 [[sync-coordinator]] 在派发前认证。
+
+交接准入和冷恢复共用指定 operation 的验证存在性判据，沿 operation 索引检查持久 verification、验证资源或任意应用日志，仅返回布尔值。
 
 readBaselinePair(id) 在既有 assertSchema 事务中按精确主键只读取得一个持久 pair，缺失明确报错，供 [[sync-historical-coverage]] 冷验。它不读取或推进当前 heads，不枚举历史，不改写原件或增加表结构。
 

@@ -2281,6 +2281,35 @@ test('原生只读同步的未执行覆盖授权在同输入正式重试中绑�
   } finally { await f.application.stopService(); f.cleanup() }
 })
 
+test('正式模型交接通过应用冻结新执行器及原预算，物理暂停时零派发', async () => {
+  const f = await fixture(settings, undefined, true)
+  try {
+    governDemoCode(f)
+    await f.application.enable()
+    await f.application.automaticControl('pause')
+    const parent = (await f.application.submit({ nodeId: 'demo', requestId: 'initial-cursor', origin: 'initial', committed: true, model: 'cursor:default' })).operation!
+    await f.application.automaticControl('resume')
+    const finished = await f.application.wait(parent.id)
+    assert.equal(finished.operation.phase, 'failed')
+    assert.ok(finished.attempt?.dispatchPlans.some(dispatch => dispatch.purpose === 'code_behavior_analyze'))
+    await f.application.automaticControl('pause')
+    const terminal = f.application.store.readOperation(parent.id)
+    const admitted = { nodeId: 'demo', requestId: 'grok-handoff', retryOf: parent.id, model: 'grok:default', inheritRetryBudget: true } as const
+    const next = (await f.application.submit(admitted)).operation!
+    assert.equal(next.inheritRetryBudget, true)
+    assert.deepEqual(next.input, terminal.input)
+    assert.equal(next.model, 'grok:default'); assert.deepEqual(next.budget, terminal.budget)
+    assert.equal(next.deadlineAtMs, terminal.deadlineAtMs)
+    assert.equal(next.dispatchAnchor?.budgetRootOperationId, terminal.dispatchAnchor?.budgetRootOperationId)
+    const runtime = JSON.parse(readFileSync(join(f.temp, 'runtime', 'artifacts', `application-runtime-${contentHash(next.ingressKey)}.json`), 'utf8')) as { model: string }
+    assert.equal(runtime.model, next.model)
+    assert.equal((await f.application.submit(admitted)).operation?.id, next.id)
+    await assert.rejects(f.application.submit({ ...admitted, inheritRetryBudget: undefined }), { code: 'SYNC_IDEMPOTENCY_CONFLICT' })
+    assert.equal(f.application.store.readOperation(next.id).callsUsed, 0)
+    await f.application.control(next.id, 'cancel')
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+
 test('没有冻结保护测试时拒绝未执行覆盖授权', async () => {
   const f = await fixture(settings, undefined, true)
   try {
