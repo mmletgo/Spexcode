@@ -2213,8 +2213,24 @@ test('普通Spec→Code已生成且V1通过的候选只续审，不重派builder
   const actualEntries = verifyCandidate(input.snapshot.source.commonDir, first.candidate!)
   assert.notDeepEqual(actualEntries.filter(entry => entry.path.startsWith('src/')), input.manifest.entries.filter(entry => entry.path.startsWith('src/')), '首轮scratch正常提交实际改变源码Git对象')
   const before = runtime.calls.length, current = new Map<string, unknown>([['file-writer-plan', JSON.parse(readEvidence(input.snapshot.source.commonDir, first.fileWriterPlanRef!).toString())]])
-  const resumed: PartitionCheckpoints = { load: <T>(key: string) => current.get(key) as T ?? null, save: (key, value) => { current.set(key, value); return writeEvidence(input.snapshot.source.commonDir, value) }, loadCompletedCandidateReview: key => key === failedKey ? null : checkpoints.load(key) }
-  const result = await generateSyncPartitions({ ...input, requestKey: 'next-review' }, plan, 1, false, { runner: async request => { assert.equal(request.purpose, 'code_review'); assert.ok(request.requestKey.includes(':final:part-export:')); return runtime.runner(request) }, reviewCandidate: first.candidate!, builderTraces, validateCandidate: async () => { validations++; return [] } }, resumed)
+  const reviewOrder = implementationGenerationDispatch(input, plan, false).reviews.map(review => `partition:${review.id}:candidate-review`)
+  assert.ok(reviewOrder.indexOf(failedKey) < reviewOrder.length - 1, '缺失组后必须仍有可承接的历史审查')
+  const prepared: string[] = []
+  const resumed: PartitionCheckpoints = {
+    load: <T>(key: string) => current.get(key) as T ?? null,
+    save: (key, value) => { current.set(key, value); return writeEvidence(input.snapshot.source.commonDir, value) },
+    loadCompletedCandidateReview: key => { prepared.push(key); return key === failedKey ? null : checkpoints.load(key) },
+  }
+  const result = await generateSyncPartitions({ ...input, requestKey: 'next-review' }, plan, 1, false, {
+    runner: async request => {
+      assert.deepEqual(prepared, reviewOrder, '所有历史审查先通过来源核验，再启动新原生会话')
+      assert.equal(request.purpose, 'code_review')
+      assert.ok(request.requestKey.includes(':final:part-export:'))
+      assert.ok(current.has(`${failedKey}:input`), '新会话启动前已保存完整冻结输入')
+      return runtime.runner(request)
+    },
+    reviewCandidate: first.candidate!, builderTraces, validateCandidate: async () => { validations++; return [] },
+  }, resumed)
   assert.equal(result.status, 'reviewed', JSON.stringify(result.failure))
   assert.deepEqual(result.candidate, first.candidate); assert.equal(validations, 2)
   assert.deepEqual(verifyCandidate(input.snapshot.source.commonDir, result.candidate!), actualEntries, '续审保全部path/mode/OID及absence')

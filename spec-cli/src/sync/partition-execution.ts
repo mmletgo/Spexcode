@@ -824,7 +824,7 @@ export async function generateSyncPartitions(input: GenerationInput, plan: SyncP
   const reviews = dispatch.reviews
   const settledReviewTraces = [...builders]
   const reviewCache: GenerationReadCache = { trees: new Map(), textByRepository: new Map() }
-  const checked = await mapSyncPartitions(reviews, maxParallel, input.signal, async local => {
+  const preparedReviews = await mapSyncPartitions(reviews, 1, input.signal, async local => {
     const key = `partition:${local.id}:candidate-review`, saved = checkpoints.load<GenerationResult>(key)
     const baseInput = { ...local.input, requestKey: `${input.requestKey}:final:${local.id}` }
     const repair = await checkpoints.loadCandidateReviewRepair?.(key, plan, baseInput, candidate, reviewCache)
@@ -832,15 +832,18 @@ export async function generateSyncPartitions(input: GenerationInput, plan: SyncP
     if (saved) {
       if (JSON.stringify(saved.candidate) !== JSON.stringify(candidate)) reject('分区独审绑定了另一候选')
       const current = saved.review ? checkpoints.loadCompletedCandidateReview?.(key, plan, reviewInput, candidate, settledReviewTraces, saved, reviewCache) ?? saved : saved
-      settledReviewTraces.push(...current.traces); return current
+      settledReviewTraces.push(...current.traces); return { result: current }
     }
     const completed = checkpoints.loadCompletedCandidateReview?.(key, plan, reviewInput, candidate, settledReviewTraces, undefined, reviewCache)
-    if (completed) { settledReviewTraces.push(...completed.traces); return completed }
+    if (completed) { settledReviewTraces.push(...completed.traces); return { result: completed } }
     checkpoints.save(`${key}:input`, freezeGenerationInput(reviewInput).inputEvidence)
-    const result = await runGeneration(reviewInput, { ...options, beforeFreezeCandidate: undefined, reviewCandidate: candidate, reviewSpecWritePaths: dispatch.specWritePaths, builderTraces: builders, validateCandidate: async () => validationFindings }, reviewCache)
+    return { key, input: reviewInput }
+  })
+  const checked = await mapSyncPartitions(preparedReviews, maxParallel, input.signal, async review => {
+    if (review.result) return review.result
+    const result = await runGeneration(review.input, { ...options, beforeFreezeCandidate: undefined, reviewCandidate: candidate, reviewSpecWritePaths: dispatch.specWritePaths, builderTraces: builders, validateCandidate: async () => validationFindings }, reviewCache)
     const { candidateFiles: _files, ...compact } = result
-    settledReviewTraces.push(...compact.traces)
-    checkpoints.save(key, compact)
+    checkpoints.save(review.key, compact)
     return compact
   })
   if (!checked.length) reject('最终候选缺少分区独审覆盖')
