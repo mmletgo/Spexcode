@@ -3878,7 +3878,7 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-form
   const formalRetry = mode === 'format-formal-retry', codeToSpec = formatTwice || formalRetry
   const partitioned = mode === 'partition' || codeToSpec
   const plan = partitioned ? { version: 'sync-coordinator-v2' as const, direction: codeToSpec ? 'code_to_spec' as const : 'spec_to_code' as const, sourcePaths: ['src/export.js'], ...(codeToSpec ? { writePaths: ['.spec'], commitTrigger: { before: null, paths: ['src/export.js'] } } : {}), partitionPolicy: { version: 'sync-partition-policy-v1' as const, maxReadBytes: 524288, maxParallel: 1 } } : {}
-  const f = await fixture(t, { maxAttempts: ['newer-generation', 'paused-review', 'wrong-task', 'format-twice', 'format-wrong-packet'].includes(mode) ? 3 : 2, maxCalls: 30, maxRepairs: ['wrong-task', 'format-twice', 'format-wrong-packet'].includes(mode) ? 2 : 1, timeoutMs: 120_000 }, false, original, 'project', original, { ...plan, agentWorkflow: 'native-worktree-v1', ...(formalRetry ? { executionScope: { paths: [contractPath], contractIds: [], flowIds: [] } } : {}) }, undefined, codeToSpec ? 'code' : 'spec', 'zcode:default', partitioned)
+  const f = await fixture(t, { maxAttempts: ['newer-generation', 'paused-review', 'wrong-task', 'format-twice', 'format-formal-retry', 'format-wrong-packet'].includes(mode) ? 3 : 2, maxCalls: 30, maxRepairs: ['wrong-task', 'format-twice', 'format-wrong-packet'].includes(mode) ? 2 : 1, timeoutMs: 120_000 }, false, original, 'project', original, { ...plan, agentWorkflow: 'native-worktree-v1', ...(formalRetry ? { executionScope: { paths: [contractPath], contractIds: [], flowIds: [] } } : {}) }, undefined, codeToSpec ? 'code' : 'spec', 'zcode:default', partitioned)
   const calls: ElaborationSessionRequest[] = []
   if (mode === 'paused' || mode === 'newer-generation') {
     const recordFailure = f.store.recordFailure.bind(f.store)
@@ -4113,11 +4113,11 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-form
     const { fence } = f.store.claimQueuedAttempt({ operationId: active.id, source: active.input.source, scope: active.scope, leaseMs: 30_000, expectedRevision: active.revision })
     f.store.bindComposedInput(fence, retry.composedInput!)
     const baselineSelectionRef = writeEvidence(commonDir, f.store.readBusinessBaselineSelection(active.id))
-    const stageRef = (stage: string, value: unknown, readSetDigest = active.readSetDigest, target = { attemptId: fence.attemptId, selectionRef: baselineSelectionRef }) => {
+    const stageRef = (stage: string, value: unknown, readSetDigest = active.readSetDigest, target = { operationId: active.id, attemptId: fence.attemptId, selectionRef: baselineSelectionRef }) => {
       const resultRef = writeEvidence(commonDir, value)
       const artifacts = [...syncCheckpointArtifacts(value, resultRef), { kind: 'json' as const, ref: target.selectionRef }]
       const composition = stage === 'elaboration' ? { composedTree: retry.composedInput!.tree, composedContentDigest: retry.composedInput!.contentDigest } : {}
-      return { ...writeEvidence(commonDir, { version: 'sync-stage-v1', operationId: active.id, attemptId: target.attemptId, inputId: active.input.id, policyDigest: active.policyDigest, readSetDigest, baselineSelectionRef: target.selectionRef, ...composition, stage, resultRef }), artifacts }
+      return { ...writeEvidence(commonDir, { version: 'sync-stage-v1', operationId: target.operationId, attemptId: target.attemptId, inputId: active.input.id, policyDigest: active.policyDigest, readSetDigest, baselineSelectionRef: target.selectionRef, ...composition, stage, resultRef }), artifacts }
     }
     const lineage = { fromOperationId: owner.id, fromAttemptId: retry.id, resultRef: sourceStage.resultRef }
     const provenanceKey = `${key}:provenance`, localRef = stageRef(key, reviewed)
@@ -4184,13 +4184,54 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-form
     const resumed = f.store.requestControl(active.id, 'run')
     const { fence: resumedFence } = f.store.claimQueuedAttempt({ operationId: resumed.id, source: resumed.input.source, scope: resumed.scope, leaseMs: 30_000, expectedRevision: resumed.revision, continuation: true })
     f.store.bindComposedInput(resumedFence, rebound.composedInput!)
-    const target = { attemptId: resumedFence.attemptId, selectionRef: writeEvidence(commonDir, resumed.baselineSelection) }
+    const target = { operationId: resumed.id, attemptId: resumedFence.attemptId, selectionRef: writeEvidence(commonDir, resumed.baselineSelection) }
     f.store.checkpoint(resumedFence, stageRef(provenanceKey, { fromOperationId: active.id, fromAttemptId: rebound.id, resultRef: sourceStage.resultRef }, expandedReadSet, target))
     const carried = f.store.checkpoint(resumedFence, stageRef(key, reviewed, expandedReadSet, target))
     assert.deepEqual(readSyncCheckpoints(f.store, resumed, carried).raw.get(rawRef.sha256), packet)
     assert.equal(readSyncCheckpointStageIndex(f.store, resumed, carried).raw.has(rawRef.sha256), true)
     assert.deepEqual(carried.dispatchPlans, [])
     assert.deepEqual(readEvidence(commonDir, rawRef), Buffer.from(packet.text, 'utf8'))
+
+    const parent = f.store.requestControl(resumed.id, 'cancel')
+    const handoff = await prepareSyncAdmission(f.input, f.plan, {
+      ingressKey: 'approved-p1-model-handoff', rootCauseId: 'approved-p1-model-handoff', retryOf: parent.id,
+      inheritRetryBudget: true, model: 'grok:default', origin: parent.origin, budget: parent.budget,
+      baselineSelection: parent.baselineSelection, executionScope: parent.scope, impactDigest: parent.impactDigest, managedRoot: f.managedRoot,
+    })
+    const admitted = f.store.admitAndEnqueue(handoff)
+    const child = f.store.ackDispatch(f.input.source.repositoryId, admitted.dispatchMessageId)
+    const { fence: childFence } = f.store.claimQueuedAttempt({ operationId: child.id, source: child.input.source, scope: child.scope, leaseMs: 30_000, expectedRevision: child.revision })
+    f.store.bindComposedInput(childFence, carried.composedInput!)
+    const childTarget = { operationId: child.id, attemptId: childFence.attemptId, selectionRef: target.selectionRef }
+    const childStage = (stage: string, value: unknown) => stageRef(stage, value, child.readSetDigest, childTarget)
+    const handoffProvenance = { fromOperationId: parent.id, fromAttemptId: carried.id, resultRef: sourceStage.resultRef }
+    f.store.checkpoint(childFence, childStage('partition-plan', JSON.parse(readEvidence(commonDir, savedPlan.resultRef).toString('utf8'))))
+    f.store.checkpoint(childFence, childStage(provenanceKey, handoffProvenance))
+    const childAttempt = f.store.checkpoint(childFence, childStage(key, reviewed))
+    const scan = readSyncCheckpoints(f.store, child, childAttempt)
+    assert.deepEqual(scan.raw.get(rawRef.sha256), packet)
+    assert.equal(scan.json.some(({ ref }) => ref.sha256 === rawRef.sha256), false)
+    assert.equal(readSyncCheckpointStageIndex(f.store, child, childAttempt).raw.has(rawRef.sha256), true)
+    assert.deepEqual(childAttempt.dispatchPlans, [])
+    assert.throws(() => readSyncCheckpoints(f.store, { ...child, inheritRetryBudget: undefined }, childAttempt), { code: 'checkpoint_artifact_binding' }, '普通retry不获准读取父操作扩域前的旧批准')
+
+    const findIngressReceipt = f.store.findIngressReceipt.bind(f.store), readOperation = f.store.readOperation.bind(f.store)
+    const receipt = findIngressReceipt(child.ingressKey)!
+    try {
+      f.store.findIngressReceipt = key => key === child.ingressKey ? { ...receipt, inheritRetryBudget: undefined } : findIngressReceipt(key)
+      assert.throws(() => readSyncCheckpoints(f.store, child, childAttempt), { code: 'checkpoint_artifact_binding' }, '操作标记不能替代正式接入回执')
+      f.store.findIngressReceipt = findIngressReceipt
+      f.store.readOperation = id => id === parent.id ? { ...parent, contractScopeExpansions: [] } : readOperation(id)
+      assert.throws(() => readSyncCheckpoints(f.store, child, childAttempt), { code: 'checkpoint_artifact_binding' }, '缺少父操作正式扩域')
+      f.store.readOperation = id => id === parent.id ? { ...parent, contractScopeExpansions: parent.contractScopeExpansions!.map(expansion => ({ ...expansion, evidenceRef: sourceStage.resultRef })) } : readOperation(id)
+      assert.throws(() => readSyncCheckpoints(f.store, child, childAttempt), { code: 'checkpoint_artifact_binding' }, '缺少精确全局批准')
+    } finally {
+      f.store.findIngressReceipt = findIngressReceipt
+      f.store.readOperation = readOperation
+    }
+    const wrongSource = childStage(provenanceKey, { ...handoffProvenance, fromOperationId: owner.id, fromAttemptId: retry.id })
+    assert.throws(() => readSyncCheckpoints(f.store, child, { ...childAttempt, checkpointRefs: [childAttempt.checkpointRefs[0], wrongSource, childAttempt.checkpointRefs.at(-1)!] }), { code: 'checkpoint_artifact_binding' }, '不得跨过获准直接父')
+    assert.deepEqual(f.store.readAttempt(carried.id).checkpointRefs, carried.checkpointRefs)
   }
   assert.equal(calls.some(call => call.purpose === 'code_generate'), false)
   assert.deepEqual(f.store.listJournals(f.operation.id), [])

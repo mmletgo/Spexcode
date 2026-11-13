@@ -11,6 +11,7 @@ import { partitionedElaborationCoverageMatches, partitionedElaborationInputDiges
 import type { ElaborationResult, ElaborationRound } from './elaboration-types.js'
 import type { CodeBehaviorAnalysis } from './writeback-types.js'
 import { extendsWithUninitializedResources, verifyBaselineSelection } from './composition.js'
+import { syncModel } from './model-selection.js'
 import type { SyncCoordinatorPlan } from './coordinator-types.js'
 import type { BlobRef, ComposedInputRef, FrozenBaselineSelection, SyncAttempt, SyncCheckpointRef, SyncOperation } from './operation-types.js'
 import type { SyncStore } from './store.js'
@@ -41,6 +42,32 @@ export function* retryOperationLineage(store: SyncStore, operation: SyncOperatio
     yield owner
     owner = owner.retryOf ? store.readOperation(owner.retryOf) : null
   }
+}
+
+export function settledApprovalSource(store: SyncStore, source: SyncOperation): boolean {
+  if (source.phase !== 'superseded') return ['failed', 'budget_exhausted', 'cancelled'].includes(source.phase) && store.readRetryEligibility(source.id).eligible
+  return store.isSupersededOperationSettled(source.id)
+}
+
+/** 显式候选交接仅承接已结算的直接父操作及其原冻结授权。 */
+export function findReviewHandoffParent(store: SyncStore, operation: SyncOperation): SyncOperation | null {
+  if (!operation.inheritRetryBudget) return null
+  const parent = operation.retryOf ? store.readOperation(operation.retryOf) : null
+  const receipt = store.findIngressReceipt(operation.ingressKey), initialScope = operation.contractScopeExpansions?.[0]
+  const selection = store.readBusinessBaselineSelection(operation.id)
+  if (!parent || receipt?.operationId !== operation.id || !receipt.inheritRetryBudget || !receipt.baselineSelection || !selection || !settledApprovalSource(store, parent) || syncModel(parent) === syncModel(operation)
+    || !isDeepStrictEqual(parent.input, operation.input) || parent.origin !== operation.origin || parent.policyDigest !== operation.policyDigest
+    || parent.planBlob?.sha256 !== operation.planBlob?.sha256 || !initialScope && parent.readSetDigest !== operation.readSetDigest || parent.impactDigest !== operation.impactDigest
+    || (initialScope ? !(['paths', 'contractIds', 'flowIds'] as const).every(field => parent.scope[field].every(value => operation.scope[field].includes(value))) : !isDeepStrictEqual(parent.scope, operation.scope))
+    || !isDeepStrictEqual(store.readBusinessBaselineSelection(parent.id), receipt.baselineSelection)
+    || selection.digest !== receipt.baselineSelection.digest && (!initialScope || !extendsWithUninitializedResources(receipt.baselineSelection, selection))
+    || initialScope && initialScope.previousBaselineSelectionDigest !== receipt.baselineSelection.digest
+    || (parent.requestBlob?.sha256 ?? null) !== (operation.requestBlob?.sha256 ?? null) || (parent.previousBaselinePair?.id ?? null) !== (operation.previousBaselinePair?.id ?? null)
+    || parent.delivery || parent.deliveryPlan.baseCommit !== operation.deliveryPlan.baseCommit || parent.recordUnverifiedCoverage !== operation.recordUnverifiedCoverage || parent.automaticSourceAdoption !== operation.automaticSourceAdoption
+    || !isDeepStrictEqual(parent.budget, operation.budget) || parent.deadlineAtMs !== operation.deadlineAtMs
+    || !parent.dispatchAnchor || operation.dispatchAnchor?.budgetRootOperationId !== parent.dispatchAnchor.budgetRootOperationId
+    || store.hasVerificationOrJournal(parent.id)) return null
+  return parent
 }
 
 /** 仅在正式 null 扩域已核实后，允许同一冻结树按新选择重算合成元数据。 */
@@ -168,6 +195,7 @@ function scanSyncCheckpoints(store: SyncStore, operation: PhaseOperation, attemp
     return null
   }
   let lineage: SyncOperation[] | undefined
+  const handoffParents = new Map<string, SyncOperation>()
   const inheritedDiagnosticOwner = (saved: Saved, original: Saved, diagnostic: NonNullable<Saved['repairDiagnostics']>, origin: SyncAttempt): SyncOperation => {
     if (!saved.structurePassed || !saved.reviewPassed || saved.failure || saved.rounds.at(-1)?.review?.verdict !== 'accept'
       || !saved.partitionBinding || !isDeepStrictEqual(saved.partitionBinding, original.partitionBinding) || saved.inputDigest !== original.inputDigest) fail('跨重试raw诊断必须来自同一已审局部原件')
@@ -175,12 +203,12 @@ function scanSyncCheckpoints(store: SyncStore, operation: PhaseOperation, attemp
     if (diagnostic.requestKey !== `sync:${origin.id}:elaborate:partition:${saved.partitionBinding.partitionId}`) fail('跨重试raw诊断不匹配原失败owner')
     let basis: StageBasis = { readSetDigest: operation.readSetDigest }, scope = operation.scope
     let expectedSelection = attempt.baselineSelectionDigest, expectedComposition = attempt.composedInput
-    let expandedAt: string | undefined
+    let expandedAt: string | undefined, rebasedOwnerId: string | undefined, expansionOwnerId = operation.id
     lineage ??= [...retryOperationLineage(store, operation)]
     let owner = operation, source = attempt, position = 0
     for (;;) {
       if (!stageResult(owner, source, key, digest, basis)) {
-        if (basis.baselineSelectionRef || owner.id !== operation.id) fail('跨重试raw诊断缺少原批准resultRef')
+        if (rebasedOwnerId === owner.id || owner.id !== expansionOwnerId) fail('跨重试raw诊断缺少原批准resultRef')
         const local = stageResult(owner, source, key, digest, null)
         if (!local?.readSetDigest || !local.baselineSelectionRef || !owner.baselineSelection || !expectedComposition || owner.planBlob?.sha256 !== owner.policyDigest) fail('跨重试raw诊断缺少原批准resultRef')
         const before = read<FrozenBaselineSelection>(local.baselineSelectionRef)
@@ -201,6 +229,7 @@ function scanSyncCheckpoints(store: SyncStore, operation: PhaseOperation, attemp
         if (!extendsWithUninitializedResources(before, owner.baselineSelection)) fail('跨重试raw诊断扩域改变原冻结选择')
         scope = originalScope
         expectedSelection = before.digest
+        rebasedOwnerId = owner.id
         if (!earlierAttempt) expandedAt = source.id
       }
       if (owner.id === origin.operationId) {
@@ -218,8 +247,14 @@ function scanSyncCheckpoints(store: SyncStore, operation: PhaseOperation, attemp
         ? composedBeforeNullExpansionMatches(composed, expectedComposition, expectedSelection)
         : isDeepStrictEqual(composed, expectedComposition)
       if (previous.operationId !== previousOwner.id || nextPosition === position && previous.number >= source.number || !['failed', 'superseded', 'settled'].includes(previous.status)
-        || (!(basis.baselineSelectionRef && previousOwner.id === operation.id) && (previousOwner.readSetDigest !== basis.readSetDigest || !isDeepStrictEqual(previousOwner.scope, scope)))
+        || (previousOwner.id !== rebasedOwnerId && (previousOwner.readSetDigest !== basis.readSetDigest || !isDeepStrictEqual(previousOwner.scope, scope)))
         || previous.baselineSelectionDigest !== expectedSelection || !unchangedComposition) fail('跨重试raw诊断的原attempt或冻结范围失配')
+      if (owner.id === expansionOwnerId && owner.inheritRetryBudget && owner.retryOf === previousOwner.id) {
+        const parent = handoffParents.get(owner.id) ?? findReviewHandoffParent(store, owner)
+        if (parent?.id !== previousOwner.id || previousOwner.baselineSelection?.digest !== expectedSelection) fail('跨重试raw诊断的正式换模型交接失配')
+        handoffParents.set(owner.id, parent)
+        expansionOwnerId = previousOwner.id
+      }
       expectedComposition = composed
       owner = previousOwner; source = previous; position = nextPosition
     }
