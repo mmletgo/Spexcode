@@ -23,6 +23,7 @@ import { authenticateNativeFailure, authenticateNativeRejectedFinal, composedBef
 import type { SyncCheckpointStageView } from './checkpoint-evidence.js'
 import type { FileMutex } from './file-mutex.js'
 import { checkGenerationContractIntent, isSyncSpecPath, readFrozenContracts } from './frozen-contracts.js'
+import { historicalCoverageCheck } from './historical-coverage.js'
 import { findWholeFileSourcePaths, isReadonlyCitationFailure } from './frozen-anchors.js'
 import { decisionAuthorizationErrors, sameContractBusinessMeaning } from './contract-evolution.js'
 import type { FrozenContracts, GenerationContractPolicy } from './frozen-contracts.js'
@@ -1282,7 +1283,7 @@ function unexecutedAcceptanceIds(elaboration: Pick<SavedElaboration, 'rounds' | 
   const findings = elaboration.partitionSeal?.findings ?? elaboration.rounds.at(-1)?.findings ?? []
   return unique(findings.flatMap(finding => finding.code === 'acceptance-not-executed' && finding.severity === 'warning' && finding.itemId ? [finding.itemId] : []))
 }
-export async function candidateContext(operation: SyncOperation, candidate: CandidateRef, elaboration?: Pick<SavedElaboration, 'rounds' | 'partitionSeal'>): Promise<FrozenContracts> {
+export async function candidateContext(store: SyncStore, operation: SyncOperation, candidate: CandidateRef, elaboration?: Pick<SavedElaboration, 'rounds' | 'partitionSeal'>): Promise<FrozenContracts> {
   const files = new Map<string, string>()
   const entries = verifyCandidate(operation.input.source.commonDir, candidate)
   readTree(operation.input.source.commonDir, candidate.tree, (entry, bytes) => {
@@ -1290,7 +1291,10 @@ export async function candidateContext(operation: SyncOperation, candidate: Cand
     if (isUtf8Text(bytes)) files.set(entry.path, bytes.toString('utf8'))
   })
   const reviewed = operation.recordUnverifiedCoverage && elaboration ? new Set(unexecutedAcceptanceIds(elaboration)) : undefined
-  return readFrozenContracts(operation.input.source.canonicalRoot, files, new Set(entries.map(entry => entry.path)), reviewed && (id => reviewed.has(id)))
+  const plan = operation.planBlob ? JSON.parse(readEvidence(operation.input.source.commonDir, operation.planBlob).toString('utf8')) as SyncCoordinatorPlan : null
+  if (plan?.historicalCoverage && syncPlanDigest(plan) !== operation.policyDigest) fail('policy_binding', '历史覆盖证明未绑定原冻结计划')
+  const historical = plan?.historicalCoverage ? historicalCoverageCheck(store, operation.input, operation.scope, plan.historicalCoverage, entries) : undefined
+  return readFrozenContracts(operation.input.source.canonicalRoot, files, new Set(entries.map(entry => entry.path)), reviewed && (id => reviewed.has(id)), historical)
 }
 /** 完整结构上下文不授予新意图；真实Spec差量的未读前态只取候选基树。 */
 export async function checkCandidateContractIntent(operation: SyncOperation, candidate: CandidateRef, accepted: FrozenContracts, frozen: FrozenContracts, policy: GenerationContractPolicy): Promise<ContractFinding[]> {
@@ -1490,7 +1494,7 @@ async function verificationRetrySource(store: SyncStore, operation: SyncOperatio
     if (verifiedCarriers.length) {
       const historical = new Set([...(owner.previousBaselinePair?.retiredIds ?? []), ...(owner.baselineSelection ? selectedRetiredIds(store.readBusinessBaselineSelection(owner.id)!) : [])])
       const before = await readFrozenContracts(owner.input.source.canonicalRoot, priorDeliveryFiles({ ...owner, baselineSelection: store.readBusinessBaselineSelection(owner.id) }, view, [...policy.readPaths, ...owner.scope.paths], policy))
-      const frozen = await candidateContext(owner, candidate, p1)
+      const frozen = await candidateContext(store, owner, candidate, p1)
       const runs = acceptanceRuns(frozen, owner.readyScope, policy, { before, ids: p1.retiredIds.filter(id => !historical.has(id)) }, unexecutedCandidateIds(owner, frozen, owner.readyScope))
       for (const carrier of verifiedCarriers) {
         await renew()
@@ -1600,7 +1604,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
     if (attempt.publicationBase) await acquirePublication()
     if (!attempt.candidate) store.freezeCandidate(fence!, candidate)
     else if (canonical(attempt.candidate) !== canonical(candidate)) fail('candidate_binding', '已有候选不能替换')
-    const frozenCandidate = await candidateContext(operation, candidate, elaboration)
+    const frozenCandidate = await candidateContext(store, operation, candidate, elaboration)
     const unexecutedContractIds = unexecutedCandidateIds(operation, frozenCandidate, ready)
     const runs = acceptanceRuns(frozenCandidate, ready, options.plan, { before: retirementBefore, ids: retiredIds }, unexecutedContractIds)
     const candidateExportPath = join(options.artifactRoot, `export-${attempt.id}`), scratch = join(options.artifactRoot, `scratch-${attempt.id}`)
@@ -1778,7 +1782,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         for (const change of elaboration.nodeChanges ?? []) if (change.action === 'retire' || change.from.path !== change.to.path) files.delete(change.from.path)
         for (const change of elaboration.changes) files.set(change.path, change.source)
         const accepted = await readFrozenContracts(operation.input.source.canonicalRoot, files), candidate = generation.candidate!
-        const frozen = await candidateContext(operation, candidate, elaboration)
+        const frozen = await candidateContext(store, operation, candidate, elaboration)
         const findings = [...frozen.findings, ...await checkCandidateContractIntent(operation, candidate, accepted, frozen, { newNodeRawSources: new Map([...(options.plan.newNodeRawSources ?? []), ...analysis.analysis.newNodes].map(item => [item.path, item.rawSource])), verifications: options.plan.verifications.map(item => item.definition) })]
         for (const oracle of options.plan.mandatoryTests) if (frozen.files.get(oracle.testPath) !== view.files.get(oracle.testPath)) fail('candidate_retry_binding', '续验候选改变原独立oracle')
         if (findings.some(finding => finding.severity === 'error')) fail('candidate_retry_binding', '原冻结候选未通过本次机械V1', [writeEvidence(operation.input.source.commonDir, findings)])
@@ -2455,6 +2459,11 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
         return null
       }
       const partitionCheckpoints: PartitionCheckpoints = {
+        historicalCoverage: digest => {
+          const proof = options.plan.historicalCoverage
+          if (!proof || proof.digest !== digest) fail('historical_coverage_binding', '全图封口未绑定原历史覆盖证明')
+          return historicalCoverageCheck(store, operation.input, operation.scope, proof, readTree(operation.input.source.commonDir, view.composed.tree))
+        },
         load: <T>(key: string) => stage<T>(store, operation, store.readAttempt(attempt!.id), key),
         elaborationDraftTagged: (key, result) => elaborationDraftTagged(store, operation, store.readAttempt(attempt!.id), key, result),
         loadAcceptedCandidateReview: (key, plan, input, candidate, builders, current) => {
@@ -2882,7 +2891,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           targets = targets.map(target => { const source = priorFiles.get(target.path) ?? target.source; return { ...target, source, sourceDigest: source === null ? null : contentHash(source) } })
           refinementFiles = new Map(readTree(operation.input.source.commonDir, refinement.candidate.tree).filter(entry => within(entry.path, options.plan.readPaths) && entry.mode !== '120000').flatMap(entry => { const bytes = readObject(operation.input.source.commonDir, entry.oid); return isUtf8Text(bytes) ? [[entry.path, bytes.toString('utf8')] as [string, string]] : [] }))
         }
-        return { ...(draftProtocol ? { draftProtocol } : {}), ...(operation.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), ...(options.plan.agentWorkflow ? { worktree: stageWorktree(operation.input.source.commonDir, operation.input.headCommit, refinement?.candidate.tree ?? view.composed.tree) } : {}), root: operation.input.source.canonicalRoot, base: operation.input.headCommit, requestKey: `sync:${attempt!.id}:elaborate`, intent: { nodeId: effectiveIntentNodeId, rawSource }, targets, context: view.frozen.nodes.filter(node => !targets.some(target => target.path === node.path) && !moved.some(change => change.to.path === node.path)).map(node => ({ nodeId: node.id, path: node.path, source: view.files.get(node.path)! })), files: refinementFiles, facts: behaviorFacts, analysis, decisionAuthorities: analysis?.analysis.decisionAuthorities ?? options.plan.decisionAuthorities,  ...(refinement ? { refinement: { candidateDigest: refinement.candidateDigest, diagnostics: refinement.diagnostics } } : {}), mode: preserveBusiness ? 'preserve_business' : 'reelaborate', nodeChanges, verifications: options.plan.verifications.map(item => item.definition), ...(options.plan.contextVerifications ? { contextVerifications: options.plan.contextVerifications } : {}), implementationWritePaths: options.plan.version === 'sync-coordinator-v2' && options.plan.direction === 'code_to_spec' ? [] : unique(options.plan.writePaths), readonlyTestPaths: unique(options.plan.mandatoryTests.map(test => test.testPath)), authorizedChanges: behaviorAuthorization, historyInput: operation.input, retiredIds: unique([...(options.plan.retiredIds ?? []), ...historicalRetiredIds]), maxRepairs: 0, maxCalls: 2, totalTimeoutMs: operation.deadlineAtMs === null ? null : operation.deadlineAtMs - Date.now(), timeoutMs: callTimeoutMs, signal, model, effort: 'high' as const }
+        return { ...(draftProtocol ? { draftProtocol } : {}), ...(operation.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), ...(options.plan.agentWorkflow ? { worktree: stageWorktree(operation.input.source.commonDir, operation.input.headCommit, refinement?.candidate.tree ?? view.composed.tree) } : {}), root: operation.input.source.canonicalRoot, base: operation.input.headCommit, requestKey: `sync:${attempt!.id}:elaborate`, intent: { nodeId: effectiveIntentNodeId, rawSource }, targets, context: view.frozen.nodes.filter(node => !targets.some(target => target.path === node.path) && !moved.some(change => change.to.path === node.path)).map(node => ({ nodeId: node.id, path: node.path, source: view.files.get(node.path)! })), files: refinementFiles, facts: behaviorFacts, analysis, decisionAuthorities: analysis?.analysis.decisionAuthorities ?? options.plan.decisionAuthorities,  ...(refinement ? { refinement: { candidateDigest: refinement.candidateDigest, diagnostics: refinement.diagnostics } } : {}), mode: preserveBusiness ? 'preserve_business' : 'reelaborate', nodeChanges, verifications: options.plan.verifications.map(item => item.definition), ...(options.plan.contextVerifications ? { contextVerifications: options.plan.contextVerifications } : {}), ...(options.plan.historicalCoverage ? { historicalCoverageDigest: options.plan.historicalCoverage.digest } : {}), implementationWritePaths: options.plan.version === 'sync-coordinator-v2' && options.plan.direction === 'code_to_spec' ? [] : unique(options.plan.writePaths), readonlyTestPaths: unique(options.plan.mandatoryTests.map(test => test.testPath)), authorizedChanges: behaviorAuthorization, historyInput: operation.input, retiredIds: unique([...(options.plan.retiredIds ?? []), ...historicalRetiredIds]), maxRepairs: 0, maxCalls: 2, totalTimeoutMs: operation.deadlineAtMs === null ? null : operation.deadlineAtMs - Date.now(), timeoutMs: callTimeoutMs, signal, model, effort: 'high' as const }
       }
       let cacheDraft: ElaborationDraft | undefined
       const reusableElaborationCache = (cached: SavedElaboration, tagged: boolean): boolean => {
@@ -3087,7 +3096,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
             }
             await yieldToControl(); store.renewLease(fence!, leaseMs)
           }
-          const frozen = await candidateContext(operation, candidate, elaboration)
+          const frozen = await candidateContext(store, operation, candidate, elaboration)
           const inheritedGapFindings = new Set<string>()
           if (elaboration.partitionSeal?.passed) {
             const commonDir = operation.input.source.commonDir, base = readTree(commonDir, candidate.baseTree), entries = verifyCandidate(commonDir, candidate)

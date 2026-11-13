@@ -1,4 +1,5 @@
 import { parseContract } from '@spexcode/spec-core/contracts'
+import type { Contract } from '@spexcode/spec-core/contracts'
 import { relationClaimsPath } from '@spexcode/spec-core'
 import type { GenerationInput } from './generation-types.js'
 import type { ContractNodeChange } from './writeback-types.js'
@@ -45,8 +46,8 @@ export function historicalRetiredIds(input: Pick<GenerationInput, 'nodeChanges' 
 }
 
 /** 从旧 Spec 正文展开实际快照中的 code/related/测试/源码义务；解析失败时只保留真实存在的Spec自身。 */
-export function obligationPaths(source: string, path: string, actualPaths: readonly string[], retainLiteralAbsence = false): string[] {
-  const contract = parseContract({ nodeId: path.split('/').at(-2) ?? path, path, source }).contract
+export function obligationPaths(source: string, path: string, actualPaths: readonly string[], retainLiteralAbsence = false, parsed?: Contract): string[] {
+  const contract = parsed ?? parseContract({ nodeId: path.split('/').at(-2) ?? path, path, source }).contract
   const claims = new Set<string>([path])
   if (contract) {
     for (const anchor of [...contract.code, ...contract.related]) claims.add(anchor.split('#')[0])

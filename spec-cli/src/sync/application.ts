@@ -22,6 +22,7 @@ import { claimFileMutex } from './file-mutex.js'
 import { composeControlledRequest, controlledDecisionIdentity, guardControlledRequestPath, prepareControlledDecision, readControlledDecision, prepareControlledRequest, renderControlledDecisionRaw } from './request-input.js'
 import type { CodeBehaviorAnalysis, SyncDecisionInput } from './writeback-types.js'
 import { freezeDeliveryRuntime } from './runtime-freeze.js'
+import { freezeHistoricalCoverage } from './historical-coverage.js'
 import { captureInputSnapshot, captureContinuityConfiguration, contentHash, identifyRawWorktree, identifyWorktree, readRawSource, objectGit, readEvidence, readObject, readPhysicalFingerprint, readTree, verifySnapshot, withReadonlySnapshotQuery, writeEvidence } from './snapshot.js'
 import { readEnabledRecord, registeredSources as enabledSources, sourceRegistrationLock, sourceRegistrationPath, sourceRegistryDirectory, proveSourceContinuity, writeEnabledRecord, writeRegistrationEvidence, readRegistrationEvidence, type EnabledRecord, type PreviousDevices, type SourceContinuityProof } from './source-registration.js'
 import { inspectTrustedRuntime, inspectTrustedRuntimeAsync } from './trusted-hooks.js'
@@ -363,6 +364,8 @@ export class SyncApplication {
       if ('failure' in exact) throw Object.assign(new SyncApplicationError(exact.failure.code, exact.failure.message), { syncFailure: exact.failure })
       const plan = await planner.build(nodeId, exact.selection, planningOptions)
       plan.agentWorkflow = 'native-worktree-v1'
+      const historicalCoverage = await freezeHistoricalCoverage(this.store, snapshot, plan.executionScope, discoverySelection)
+      if (historicalCoverage) plan.historicalCoverage = historicalCoverage
       return { plan, selection: exact.selection }
     })
     if (reuseObserved) this.observedPlans.set(cacheKey, { direction, inputId: snapshot.id, headsDigest, plan: structuredClone(frozen.plan), selection: frozen.selection })
