@@ -1337,7 +1337,7 @@ for (const gapMode of ['none', 'peer', 'task'] as const) test(`增量V1从完整
   const acceptedFiles = new Map(before.filter(entry => f.plan.readPaths.includes(entry.path)).map(entry => [entry.path, readObject(f.input.source.commonDir, entry.oid).toString('utf8')]))
   for (const change of elaboration.changes) acceptedFiles.set(change.path, change.source)
   const accepted = await readFrozenContracts(f.root, acceptedFiles), policy = { newNodeRawSources: new Map<string, string>(), verifications: [f.plan.verifications[0].definition] }
-  const complete = await continuationCoordinator.candidateContext(f.operation, generated.candidate!)
+  const complete = await continuationCoordinator.candidateContext(f.store, f.operation, generated.candidate!)
   assert.deepEqual(await continuationCoordinator.checkCandidateContractIntent(f.operation, generated.candidate!, accepted, complete, policy), [], '未改peer VERIFY不自动登记，也不因本轮未登记误拒')
   const req = specs[0].match(/^\| REQ-EXPORT-01 .*$/m)![0]
   const variants = [
@@ -1348,7 +1348,7 @@ for (const gapMode of ['none', 'peer', 'task'] as const) test(`增量V1从完整
   for (const variant of variants) {
     const entry = before.find(entry => entry.path === variant.path)!
     const candidate = freezeCandidate(f.input, { version: 'sync-files-v1', changes: [{ path: variant.path, content: variant.content, beforeDigest: entry.digest, beforeMode: entry.mode, mode: null }] }, { paths: [variant.path], contractIds: [], flowIds: [] })
-    const context = await continuationCoordinator.candidateContext(f.operation, candidate)
+    const context = await continuationCoordinator.candidateContext(f.store, f.operation, candidate)
     const findings = await continuationCoordinator.checkCandidateContractIntent(f.operation, candidate, accepted, context, policy)
     assert.ok(findings.some(finding => finding.code === variant.expected), JSON.stringify(findings))
     if (variant.content === null) assert.ok(context.findings.some(finding => finding.code === 'missing-requirement-flow' && finding.itemId === 'REQ-ROOT-CLI'), '真实缺失覆盖仍拒绝')

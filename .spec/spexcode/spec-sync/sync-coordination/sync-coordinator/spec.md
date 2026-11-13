@@ -17,6 +17,8 @@ related:
 
 ## expanded spec
 
+P1 全图 seal 与完整候选 V1 仅从原 planBlob 的 [[sync-historical-coverage]] 描述构造同一逐 ID 冷验。完整政策摘要、真实 input/composed/candidate 与原收据绑定后才保留历史 warning；不读当前资源头、扩大 ready/coveredScope 或将其记成本轮已执行验收。P1 局部只收到原业务输入。
+
 P1 输入只透传原 planBlob 已冻结的 contextVerifications，供 [[sync-partition-execution]] 的全图封口引用校验；局部模型和 V3 继续使用原 verifications 与 mandatoryTests。旧计划没有该字段时不读取当前 settings 补签。
 
 候选独审未通过后的资源结算使用当前 attempt 的一份已认证阶段索引。每个局部生成或独审按原 resultRef 和精确读集、基线绑定取原结论；同次收尾共用同一选择认证，各组之间交还事件循环。原生 RPC 故障仍核真实停止和资源结算，暂停仍可在写失败结论前中断。
