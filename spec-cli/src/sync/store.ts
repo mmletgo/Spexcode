@@ -59,6 +59,11 @@ const parseRecord = <T>(row: Record<string, unknown> | undefined): T | null => r
 const inputPayload = (input: InputSnapshot): Omit<InputSnapshot, 'capturedAtMs'> => ({ id: input.id, source: input.source, headCommit: input.headCommit, immutableTree: input.immutableTree, indexTree: input.indexTree, indexDigest: input.indexDigest, manifestBlob: input.manifestBlob, contentDigest: input.contentDigest })
 const revalidatable = (operation: SyncOperation): boolean => ['workspace_synced', 'awaiting_landing'].includes(operation.phase)
 type RevalidationProof = ReturnType<typeof proveUnadoptedDelivery>
+type NativeDispatchBinding = Pick<DispatchPlan, 'key' | 'purpose' | 'requestDigest'>
+type ObservedDispatchFence = {
+  fenceDigest: string; dataVersion: number; totalChanges: number; expiresAtMs: number; deadlineAtMs: number | null
+  dispatches: Map<string, NativeDispatchBinding>
+}
 const validateScope = (scope: SyncScope): void => {
   if (scope.paths.some(path => !path || path.startsWith('/') || path.includes('\\') || path.includes('\0') || path.split('/').some(part => !part || part === '.' || part === '..'))) fail('SYNC_SCOPE_INVALID', 'paths must be canonical relative repository paths')
 }
@@ -67,6 +72,7 @@ const validateScope = (scope: SyncScope): void => {
 export class SyncStore {
   private readonly now: () => number
   private readonly readBlob: (ref: BlobRef) => Buffer
+  private observedDispatchFence?: ObservedDispatchFence
   constructor(private readonly protocol: SessionProtocol, options: { now?: () => number; readBlob?: (ref: BlobRef) => Buffer } = {}) {
     this.now = options.now ?? Date.now
     this.readBlob = options.readBlob ?? (ref => {
@@ -721,7 +727,7 @@ export class SyncStore {
       attempt.publicationBase = clone(base); this.saveAttempt(tx, attempt); return attempt
     })
   }
-  reserveDispatch(fence: WriteFence, input: Pick<DispatchPlan, 'key' | 'purpose' | 'requestDigest'>): DispatchPlan {
+  reserveDispatch(fence: WriteFence, input: NativeDispatchBinding): DispatchPlan {
     return this.write(tx => {
       const { operation, attempt } = this.checkFence(tx, fence)
       const prior = attempt.dispatchPlans.find(plan => plan.key === input.key)
@@ -730,6 +736,26 @@ export class SyncStore {
       if (budget && this.family(tx, operation).calls >= budget.maxCalls || syncDeadlineExpired(operation.deadlineAtMs, this.now())) fail('SYNC_BUDGET_EXHAUSTED', 'native call budget or deadline exhausted')
       const plan: DispatchPlan = { ...clone(input), sessionCreateKey: `sync-call-${digest({ attemptId: attempt.id, key: input.key })}`, session: null }
       attempt.dispatchPlans.push(plan); operation.callsUsed++; this.saveAttempt(tx, attempt); this.saveOperation(tx, operation); return plan
+    })
+  }
+  /** 原生轮询只观察已预留请求。连接上的任一变化或外部提交都会重核完整 fence。 */
+  assertObservedDispatch(fence: WriteFence, input: NativeDispatchBinding, fresh = false): void {
+    const fenceDigest = digest(fence)
+    this.observedDispatchFence = this.write(tx => {
+      const version = tx.query('SELECT data_version AS version, total_changes() AS changes FROM pragma_data_version')[0]
+      const dataVersion = Number(version.version), totalChanges = Number(version.changes)
+      let observed = this.observedDispatchFence
+      if (fresh || !observed || observed.fenceDigest !== fenceDigest || observed.dataVersion !== dataVersion || observed.totalChanges !== totalChanges) {
+        const { operation, attempt } = this.checkFence(tx, fence)
+        observed = { fenceDigest, dataVersion, totalChanges, expiresAtMs: attempt.expiresAtMs, deadlineAtMs: operation.deadlineAtMs,
+          dispatches: new Map(attempt.dispatchPlans.map(plan => [plan.key, plan])) }
+      }
+      const now = this.now()
+      if (observed.expiresAtMs <= now || syncDeadlineExpired(observed.deadlineAtMs, now)) fail('SYNC_FENCE_EXPIRED', 'write authority is expired or controlled')
+      const dispatch = observed.dispatches.get(input.key)
+      if (!dispatch) fail('SYNC_DISPATCH_UNKNOWN', input.key)
+      if (dispatch.purpose !== input.purpose || dispatch.requestDigest !== input.requestDigest) fail('SYNC_DISPATCH_CONFLICT', input.key)
+      return observed
     })
   }
   bindSession(fence: WriteFence, dispatchKey: string, session: NativeSessionRef): SyncAttempt {

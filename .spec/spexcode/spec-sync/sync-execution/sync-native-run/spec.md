@@ -42,6 +42,8 @@ reserveDispatch 已提交而 resource 尚未登记的冷恢复窗口同样属于
 
 只观察精确预期session ID，不扫session树或造第二队列。published record创建载荷和固定结构化策略匹配时资源进入created，即使仍queued、thread/turn未知；nativeStarted仅表示实际turn实锚已出现，不把queued当原生执行。thread/turn出现后同phase CAS保存实锚，只有当前fence可bindSession。错误身份或摘要拒绝，已绑定身份不可退回或替换。
 
+等待原生执行时，轮询通过 [[sync-store]] 观察同一份已预留派发的写权。首次派发、绑定新会话身份和接收本轮成功结果前核当前完整 fence。暂停、过期、基线推进及原停止证据继续按各自门禁处理。
+
 暂停、取消、过期或新attempt替换时Abort精确调用，再通过正式取消入口与持久record核对nativeStopped。回执丢失可使用同精确身份的持久终态证明；普通错误、本地Promise结束或已发送interrupt都不证明停止，未知终态保留资源给恢复。
 
 成功结果必须完整匹配原生session/thread/turn、schema与实际output hash，先保存完整terminal证据再removed；removed仅表示该turn执行容量结算，原会话和worktree历史保留。精确同键重入复用已持久结果，核blob哈希和完整请求绑定后重放，不再派发；未结算资源重入既有同键结构化执行或精确取消，不重复创建原生turn。旧generation只能登记资源观测，不能重新取得候选/验证/apply写权。

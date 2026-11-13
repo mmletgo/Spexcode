@@ -34,7 +34,7 @@ export type GenerationInput = {
   verifications: readonly SyncCoordinatorPlan['verifications'][number]['definition'][]
   /** 已结算失败产物和诊断；修复上下文不是新的业务事实或通过证据。 */
   /** 仅引用同组已认证格式拒绝或Native成功但字段无效的原件；原JSON仍为未批准诊断，不进入业务候选。 */
-  reviewRepair?: { resultRef: import('./operation-types.js').BlobRef; nativePlanRef: import('./operation-types.js').BlobRef; checkpointRef: import('./operation-types.js').BlobRef }
+  reviewRepair?: { resultRef: import('./operation-types.js').BlobRef; nativePlanRef: import('./operation-types.js').BlobRef; checkpointRef: import('./operation-types.js').BlobRef; stoppedDraftRef?: import('./operation-types.js').BlobRef }
   repairContext?: { previousOutput: unknown; diagnostics: readonly { code: string; message: string }[] }
   analysis?: CodeBehaviorEvidence
   analysisEvidence?: readonly CodeBehaviorEvidence[]
@@ -46,6 +46,17 @@ export type GenerationInput = {
   signal?: AbortSignal
   model: string
   effort: 'high'
+}
+
+export type StoppedCandidateReviewDraft = {
+  version: 'candidate-review-stopped-draft-v1'
+  fromOperationId: string
+  fromAttemptId: string
+  sourceResultRef: import('./operation-types.js').BlobRef
+  nativePlanRef: import('./operation-types.js').BlobRef
+  checkpointRef: import('./operation-types.js').BlobRef
+  draft: import('./elaboration-types.js').ElaborationDraft
+  indexSha256: string
 }
 /** 独立语义发现均为阻断项；程序硬门禁另用 ContractFinding.severity。 */
 export type GenerationFinding = {

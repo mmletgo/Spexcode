@@ -230,8 +230,11 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
       resource = store.recordResourceCheckpoint(resource!.id, { ...identity, phase: next.phase, expectedCheckpointRef: resource!.checkpointRef, checkpointRef: ref })
       checkpoint = next
     }
-    const authority = (): boolean => {
-      try { store.reserveDispatch(fence, { key: request.requestKey, purpose: request.purpose, requestDigest }); return true }
+    const authority = (fresh = false): boolean => {
+      try {
+        store.assertObservedDispatch(fence, { key: request.requestKey, purpose: request.purpose, requestDigest }, fresh)
+        return true
+      }
       catch (error) { if (error instanceof SyncStoreError && error.code === 'SYNC_FENCE_EXPIRED') return false; throw error }
     }
     let boundSession = dispatch.session
@@ -311,7 +314,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
       if (checkpoint.status === 'completed' && checkpoint.result) { checkResult(checkpoint.result); settle('completed', { result: checkpoint.result }); return copy(checkpoint.result) }
       return stop()
     }
-    if (creationTermination() || controller.signal.aborted || !authority()) return stop()
+    if (creationTermination() || controller.signal.aborted || !authority(true)) return stop()
     save({ ...checkpoint, nativeCallRequested: true })
     nativePromise = Promise.resolve().then(() => runtime.run({ ...request, ...(request.frozenContext || request.worktree ? { sessionCreateKey: dispatch!.sessionCreateKey } : { requestKey: dispatch!.sessionCreateKey }), signal: controller.signal })).then(result => { outcome = { ok: true, result } }, error => { outcome = { ok: false, error } })
     for (;;) {
@@ -349,6 +352,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
           throw outcome.error
         }
         const record = observe(), state = record?.structuredExecution
+        if (!authority(true)) return stop()
         checkResult(outcome.result)
         if (state?.state !== 'completed' || state.threadId !== outcome.result.threadId || state.turnId !== outcome.result.turnId || state.resultDigest !== outcome.result.resultDigest || hash(state.output) !== outcome.result.resultDigest) throw new StructuredSessionError('stale_result', 'native result lacks matching durable exact-turn completion')
         if (request.worktree && hash(state.resultWorktree) !== hash(outcome.result.worktree)) throw new StructuredSessionError('stale_result', 'native worktree result differs from its durable immutable result')

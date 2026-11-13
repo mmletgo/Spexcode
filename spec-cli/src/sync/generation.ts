@@ -16,42 +16,45 @@ import type { StageDraftBinding } from './stage-worktree.js'
 import { isUtf8Text } from './composition.js'
 import type { CandidateRef } from './operation-types.js'
 import type { ElaborationSessionRequest, ElaborationSessionResult } from './elaboration-types.js'
-import type { GenerationInput, GenerationOptions, GenerationResult, GenerationReview } from './generation-types.js'
+import type { GenerationInput, GenerationOptions, GenerationResult, GenerationReview, StoppedCandidateReviewDraft } from './generation-types.js'
 import { priorContextInstructions, sameSnapshotSource } from './prior-context.js'
 import { contentHash, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot, visitObjectBatch } from './snapshot.js'
 import type { TreeEntry, TreeReadCache } from './snapshot.js'
 export type { GenerationFinding, GenerationInput, GenerationOptions, GenerationResult, GenerationReview } from './generation-types.js'
 
 const validateResponse = new Ajv({ allErrors: true, strict: true, allowUnionTypes: true }).compile(CANDIDATE_RESPONSE_SCHEMA)
+export type GenerationReadCache = { trees?: TreeReadCache; textByRepository: Map<string, Map<string, string | null>> }
 
-function textFiles(commonDir: string, entries: readonly TreeEntry[]): Map<string, string> {
-  const files = new Map<string, string>(), texts = new Map<string, string>()
+function textFiles(commonDir: string, entries: readonly TreeEntry[], cache?: GenerationReadCache): Map<string, string> {
+  const files = new Map<string, string>()
   const readable = entries.filter(entry => entry.mode !== '120000' && !isHostPrivatePath(entry.path))
-  visitObjectBatch(commonDir, readable.map(entry => entry.oid), (oid, bytes) => {
-    if (isUtf8Text(bytes)) texts.set(oid, bytes.toString('utf8'))
+  const texts = cache?.textByRepository.get(commonDir) ?? new Map<string, string | null>()
+  cache?.textByRepository.set(commonDir, texts)
+  visitObjectBatch(commonDir, readable.filter(entry => !texts.has(entry.oid)).map(entry => entry.oid), (oid, bytes) => {
+    texts.set(oid, isUtf8Text(bytes) ? bytes.toString('utf8') : null)
   })
   for (const entry of readable) {
     const text = texts.get(entry.oid)
-    if (text !== undefined) files.set(entry.path, text)
+    if (typeof text === 'string') files.set(entry.path, text)
   }
   return files
 }
 
-function frozenEntries(input: GenerationInput, treeCache?: TreeReadCache): TreeEntry[] {
-  let entries = verifySnapshot(input.snapshot, treeCache)
+function frozenEntries(input: GenerationInput, cache?: GenerationReadCache): TreeEntry[] {
+  let entries = verifySnapshot(input.snapshot, cache?.trees)
   if (input.composed) {
     if (input.composed.sourceInputId !== input.snapshot.id) throw new Error('组合输入不属于当前 snapshot')
-    entries = readTree(input.snapshot.source.commonDir, input.composed.tree, undefined, treeCache)
+    entries = readTree(input.snapshot.source.commonDir, input.composed.tree, undefined, cache?.trees)
     if (contentHash(JSON.stringify(entries)) !== input.composed.contentDigest || readEvidence(input.snapshot.source.commonDir, input.composed.manifestBlob).toString() !== JSON.stringify({ version: 1, entries })) throw new Error('组合输入 manifest/contentDigest 不匹配实际 tree')
   }
   if (JSON.stringify(input.manifest) !== JSON.stringify({ version: 1, entries })) throw new Error('冻结 manifest 不匹配实际输入 tree')
-  const actualFiles = textFiles(input.snapshot.source.commonDir, entries)
+  const actualFiles = textFiles(input.snapshot.source.commonDir, entries, cache)
   if ([...input.files].some(([path, source]) => isHostPrivatePath(path) || actualFiles.get(path) !== source)) throw new Error('模型读集合必须逐字匹配冻结 UTF-8 普通文件，且不能包含宿主凭据或运行依赖')
   const historicalOwners = new Set([...(input.retiredOwners ?? []).map(item => item.path), ...(input.nodeChanges ?? []).map(change => change.from.path)])
   const oldViews: { supplied: ReadonlyMap<string, string>; actualPaths: ReadonlySet<string>; objectPaths: ReadonlySet<string> }[] = [{ supplied: input.files, actualPaths: new Set(entries.map(entry => entry.path)), objectPaths: new Set() }]
   for (const prior of input.priorContext ?? []) {
     if (input.policy.version !== 'sync-coordinator-v2' || prior.snapshot.source.commonDir !== input.snapshot.source.commonDir || prior.role === 'source_before' && !sameSnapshotSource(prior.snapshot.source, input.snapshot.source)) throw new Error('历史上下文必须绑定显式v2同仓库真实快照')
-    const priorEntries = verifySnapshot(prior.snapshot, treeCache), actualEntries = new Map(priorEntries.map(entry => [entry.path, entry])), actual = textFiles(prior.snapshot.source.commonDir, priorEntries)
+    const priorEntries = verifySnapshot(prior.snapshot, cache?.trees), actualEntries = new Map(priorEntries.map(entry => [entry.path, entry])), actual = textFiles(prior.snapshot.source.commonDir, priorEntries, cache)
     if (new Set(prior.entries.map(entry => entry.path)).size !== prior.entries.length || prior.entries.some(entry => JSON.stringify(actualEntries.get(entry.path)) !== JSON.stringify(entry)) || [...prior.files.keys()].some(path => !prior.entries.some(entry => entry.path === path))) throw new Error('历史manifest的mode/digest与真实旧快照不匹配')
     for (const object of prior.objects) if (isHostPrivatePath(object.entry.path) || !prior.entries.some(entry => JSON.stringify(entry) === JSON.stringify(object.entry)) || object.encoding !== 'base64' || (object.entry.mode === '120000') !== (object.kind === 'symlink') || readObject(prior.snapshot.source.commonDir, object.entry.oid).toString('base64') !== object.content) throw new Error('历史binary/symlink对象不匹配真实旧字节')
     if ([...prior.files].some(([path, source]) => isHostPrivatePath(path) || actual.get(path) !== source)) throw new Error('历史正文与真实旧快照不匹配')
@@ -144,12 +147,12 @@ function generationRequest(input: GenerationInput, inputDigest: string, purpose:
 }
 
 /** 从实际候选构造唯一独审请求；历史校验只恢复旧requestKey，不改变其余输入。 */
-export function generationReviewRequest(input: GenerationInput, candidate: CandidateRef, reviewOnly = true, specWritePaths?: readonly string[], treeCache?: TreeReadCache) {
-  frozenEntries(input, treeCache)
+export function generationReviewRequest(input: GenerationInput, candidate: CandidateRef, reviewOnly = true, specWritePaths?: readonly string[], cache?: GenerationReadCache) {
+  frozenEntries(input, cache)
   const { inputDigest, context, partitionReading, priorRole } = freezeGenerationInput(input, !input.nativeWorktree)
   const changed = JSON.parse(readEvidence(input.snapshot.source.commonDir, candidate.actualDiffBlob).toString()) as { path: string; preDigest: string | null }[]
-  const candidateEntries = verifyCandidate(input.snapshot.source.commonDir, candidate, treeCache)
-  const candidateFiles = textFiles(input.snapshot.source.commonDir, candidateEntries)
+  const candidateEntries = verifyCandidate(input.snapshot.source.commonDir, candidate, cache?.trees)
+  const candidateFiles = textFiles(input.snapshot.source.commonDir, candidateEntries, cache)
   const reviewPaths = new Set([...input.files.keys(), ...(input.nativeWorktree ? input.contracts.map(contract => contract.path) : []), ...changed.filter(file => !reviewOnly || input.allowedScope.paths.some(path => file.path === path || file.path.startsWith(`${path}/`))).map(file => file.path)])
   const reviewBinding: CandidateReviewBinding = { inputId: input.snapshot.id, candidateDigest: candidate.digest, requiredIds: input.readyIds, actualIds: [...new Set([...(input.retiredIds ?? []), ...[...candidateFiles].filter(([path]) => reviewPaths.has(path) && !input.readonlyContractPaths?.includes(path) && path.startsWith('.spec/') && path.endsWith('/spec.md')).flatMap(([path, source]) => parseContract({ nodeId: path.split('/').at(-2)!, path, source }).contract?.items.map(item => item.id) ?? [])])], priorIds: input.contracts.flatMap(contract => contract.items.map(item => item.id)) }
   const coverageInstructions = input.recordUnverifiedCoverage ? '\n本轮明确授权记录缺少可运行测试的只读业务声明。逐项对照真实源码、可观察行为和冻结验证集合，核实已有 AC 的实际用例和命令，核实缺 AC 的声明是否确无真实绑定。已知实现缺陷、错绑或遗漏已知可运行验收仍要求 repair。checkedIds 表示本次实际独立审查的契约项，执行测试结果由 V3 单独记录。' : ''
@@ -187,6 +190,25 @@ export function generationReviewRequest(input: GenerationInput, candidate: Candi
     if (request.worktree) {
       const ownerDigest = input.reviewRepair.resultRef.sha256, path = `.spex-sync-drafts/${ownerDigest}.json`, schema = JSON.stringify(request.schema)
       draftBinding = { ownerDigest, sourceInputId: input.snapshot.id, schemaDigest: contentHash(schema), path }
+      if (input.reviewRepair.stoppedDraftRef) {
+        const material = JSON.parse(readEvidence(commonDir, input.reviewRepair.stoppedDraftRef).toString('utf8')) as StoppedCandidateReviewDraft
+        const previous = JSON.parse(readEvidence(commonDir, material.sourceResultRef).toString('utf8')) as GenerationResult
+        const stoppedPlan = JSON.parse(readEvidence(commonDir, material.nativePlanRef).toString('utf8')) as NativeRunPlan
+        const stopped = JSON.parse(readEvidence(commonDir, material.checkpointRef).toString('utf8')) as NativeRunCheckpoint
+        if (material.version !== 'candidate-review-stopped-draft-v1' || material.draft.sourceInputId !== input.snapshot.id
+          || previous.failure?.code !== 'cancellation_pending' || previous.review || previous.reviewOutput !== null || previous.candidate?.digest !== candidate.digest
+          || stoppedPlan.operationId !== material.fromOperationId || stoppedPlan.attemptId !== material.fromAttemptId || stoppedPlan.inputId !== input.snapshot.id
+          || stoppedPlan.request.purpose !== 'code_review' || stoppedPlan.request.inputDigest !== previous.inputDigest || stoppedPlan.request.requestKey !== previous.failure.requestKey
+          || stoppedPlan.expectedSessionId !== previous.failure.sessionId || stoppedPlan.requestDigest !== contentHash(JSON.stringify(stoppedPlan.request))
+          || !isDeepStrictEqual(stoppedPlan.request.worktree, material.draft.seed) || !isDeepStrictEqual(stoppedPlan.request.schema, request.schema)
+          || stopped.operationId !== material.fromOperationId || stopped.attemptId !== material.fromAttemptId || stopped.inputId !== input.snapshot.id
+          || stopped.requestDigest !== stoppedPlan.requestDigest || stopped.expectedSessionId !== stoppedPlan.expectedSessionId
+          || stopped.phase !== 'removed' || stopped.status !== 'cancelled' || stopped.stop?.nativeStopped !== true || stopped.result
+          || !/^[0-9a-f]{64}$/.test(material.indexSha256)) throw new StructuredSessionError('stale_result', 'stopped review draft does not match its original candidate and stop')
+        text = readStageDraft(commonDir, material.draft, draftBinding)
+        error = { code: previous.failure.code, message: previous.failure.message }
+        trace = { previous: trace, stoppedDraftRef: input.reviewRepair.stoppedDraftRef, approved: false }
+      }
       request.worktree = stageWorktree(commonDir, input.snapshot.headCommit, overlayStageTree(commonDir, candidate.tree, [
         { path, source: text },
         { path: path.replace(/\.json$/, '.schema.json'), source: schema },
@@ -195,7 +217,8 @@ export function generationReviewRequest(input: GenerationInput, candidate: Candi
       ]), 'edit')
       request.base = request.worktree.baseCommit
       request.prompt = request.prompt.replace('只读，不修改文件。', '').replace('不修改文件或执行候选。', '业务文件只读，不执行候选。')
-      request.prompt += `\n未批准的历史评审格式诊断：${prior.reviewOutput !== null ? '原Native成功返回，程序拒绝字段格式' : '原Native拒绝最终JSON格式'}。完整原回答在草稿文件=${path}；精确schema、原错误、原trace分别在同名前缀.schema.json/.errors.json/.trace.json。仅续改这一组对同一candidate的原评审，不从零重答，不将未批准发现作为业务事实。读取原稿及错误，规则位置须精确实际path#ID，说明文字保留在evidence/message；禁止仅剥括号伪装已完成语义校核。只允许修改指定草稿文件，源码、测试、Spec及其他sidecar只读；正常git add/commit并保持clean。最终返回与提交草稿完全相同的严格review JSON。程序重新核验后才可能进入原P1返修。`
+      const source = input.reviewRepair.stoppedDraftRef ? '上一轮已停止且正常提交的未批准续稿' : '完整原回答'
+      request.prompt += `\n未批准的历史评审格式诊断：${prior.reviewOutput !== null ? '原Native成功返回，程序拒绝字段格式' : '原Native拒绝最终JSON格式'}。${source}在草稿文件=${path}；精确schema、原错误、原trace分别在同名前缀.schema.json/.errors.json/.trace.json。仅续改这一组对同一candidate的原评审，不从零重答，不将未批准发现作为业务事实。读取原稿及错误，规则位置须精确实际path#ID，说明文字保留在evidence/message；禁止仅剥括号伪装已完成语义校核。只允许修改指定草稿文件，源码、测试、Spec及其他sidecar只读；正常git add/commit并保持clean。最终返回与提交草稿完全相同的严格review JSON。程序重新核验后才可能进入原P1返修。`
     } else request.prompt += `\n未批准的历史评审格式诊断：仅纠正同一候选的最终JSON；原回答不是accept或业务事实。原错误=${JSON.stringify(error)}。读取完整原final，沿已有检查继续本次独审；必要时依原候选纠正未批准判断，最终只返回符合schema的完整JSON。\n${text}\n精确schema:\n${JSON.stringify(request.schema)}`
   }
   return { request, binding: reviewBinding, candidateFiles, draftBinding }
@@ -218,7 +241,7 @@ export function generationBrief(input: GenerationInput) {
 }
 
 /** 单次冻结生成与独立语义审查；不修复循环、不运行候选、不交付。 */
-export async function runGeneration(supplied: GenerationInput, options: GenerationOptions, treeCache?: TreeReadCache): Promise<GenerationResult> {
+export async function runGeneration(supplied: GenerationInput, options: GenerationOptions, cache?: GenerationReadCache): Promise<GenerationResult> {
   // 在第一个 await 前复制全部业务与执行输入；仅取消信号保持原身份。
   const { signal, ...data } = supplied
   const input: GenerationInput = { ...structuredClone(data), signal }
@@ -252,7 +275,7 @@ export async function runGeneration(supplied: GenerationInput, options: Generati
     if (!input.readyIds.length || new Set(input.readyIds).size !== input.readyIds.length || new Set(input.blockedIds).size !== input.blockedIds.length || input.readyIds.some(id => input.blockedIds.includes(id) || !input.contracts.some(contract => contract.items.some(item => item.id === id)) && !input.retiredIds?.includes(id))) throw new Error('预定 readyIds 必须非空、唯一、属于细化契约且不被 blockedIds 阻断')
     for (const spec of input.elaboratedSpecs) if (!validateRepositoryPath(spec.path).startsWith('.spec/') || !spec.path.endsWith('/spec.md') || !spec.source.trim()) throw new Error('细化后的 desired Spec 必须为完整规范正文')
     if (new Set(input.elaboratedSpecs.map(spec => spec.path)).size !== input.elaboratedSpecs.length) throw new Error('desired Spec 路径不能重复')
-    frozenEntries(input, treeCache)
+    frozenEntries(input, cache)
     // 提示和绑定都只取已复制数据；不能把调用者后续编辑混入评审。
     const { inputDigest, context, partitionReading, priorRole } = freezeGenerationInput(input, !input.nativeWorktree)
     result.inputDigest = inputDigest
@@ -280,7 +303,7 @@ export async function runGeneration(supplied: GenerationInput, options: Generati
     cancelled()
     if (result.validationFindings.some(finding => finding.severity === 'error')) { result.status = 'repair'; return result }
     result.candidateValidated = true
-    const { request, binding: reviewBinding, candidateFiles, draftBinding } = generationReviewRequest(input, result.candidate, !!options.reviewCandidate, options.reviewSpecWritePaths, treeCache)
+    const { request, binding: reviewBinding, candidateFiles, draftBinding } = generationReviewRequest(input, result.candidate, !!options.reviewCandidate, options.reviewSpecWritePaths, cache)
     result.candidateFiles = candidateFiles
     stage = 'review_failed'
     const reviewOutput = await dispatch(request)

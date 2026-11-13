@@ -359,9 +359,11 @@ for (const historical of [false, true, 'tool-policy-only', 'configured-high'] as
 test('native intent precedes run, published queued session is created with unknown thread, result binds exact identity and replays', async t => {
   const f = await fixture()
   try {
-    let calls = 0, writes = 0, runningObservations = 0, finish: (value: StructuredSessionResult) => void = () => {}
+    let calls = 0, writes = 0, reservations = 0, runningObservations = 0, finish: (value: StructuredSessionResult) => void = () => {}
     const bind = f.store.bindSession.bind(f.store)
+    const reserve = f.store.reserveDispatch.bind(f.store)
     f.store.bindSession = (...args) => { writes++; return bind(...args) }
+    f.store.reserveDispatch = (...args) => { reservations++; return reserve(...args) }
     const readRecord = (id: string): NativeRunRecord | null => {
       const record = f.runtimeBase.readRecord(id)
       if (record?.structuredExecution?.state === 'running') runningObservations++
@@ -389,7 +391,8 @@ test('native intent precedes run, published queued session is created with unkno
     await waitUntil(() => runningObservations >= 8)
     const result = completed(record); finish(result)
     assert.deepEqual(await pending, result)
-    t.diagnostic(JSON.stringify({ runningObservations, bindings: writes }))
+    t.diagnostic(JSON.stringify({ runningObservations, bindings: writes, reservations }))
+    assert.equal(reservations, 1, '轮询仅观察已预留请求，不能重新进入派发预留')
     assert.equal(writes, 2, '只写已发布及真实thread/turn两次身份变化')
     assert.equal(f.resource().phase, 'removed')
     assert.deepEqual(f.checkpoint().result, result)

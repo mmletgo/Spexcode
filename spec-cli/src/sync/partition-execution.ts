@@ -14,10 +14,10 @@ import { elaborationTargetBindings, projectVerificationTable, withoutVerificatio
 import { actualTreeDiff, isHostPrivatePath, verifyCandidate } from './candidate.js'
 import type { CandidateChanges } from './candidate.js'
 import { freezeGenerationCandidate, freezeGenerationInput, generationBrief, generationStageTree, runGeneration } from './generation.js'
+import type { GenerationReadCache } from './generation.js'
 import type { GenerationInput, GenerationOptions, GenerationResult } from './generation-types.js'
 import type { BlobRef, ComposedInputRef } from './operation-types.js'
 import { contentHash, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot, writeEvidence } from './snapshot.js'
-import type { TreeReadCache } from './snapshot.js'
 import { isUtf8Text } from './composition.js'
 import { readFrozenContracts } from './frozen-contracts.js'
 import { projectSyncPartition, rawOnlyInterfaceSeedEvidence } from './partitioning.js'
@@ -30,8 +30,8 @@ type PartitionSealRepair = { prior: Omit<ElaborationResult, 'contracts' | 'graph
 export type PartitionCheckpoints = {
   load<T>(key: string): T | null
   historicalCoverage?(digest: string): HistoricalCoverageCheck
-  loadCandidateReviewRepair?(key: string, plan: SyncPartitionPlan, input: GenerationInput, candidate: NonNullable<GenerationResult['candidate']>): GenerationInput['reviewRepair'] | null
-  loadCompletedCandidateReview?(key: string, plan: SyncPartitionPlan, input: GenerationInput, candidate: NonNullable<GenerationResult['candidate']>, builders: readonly ElaborationTrace[], current?: Omit<GenerationResult, 'candidateFiles'>): Omit<GenerationResult, 'candidateFiles'> | null
+  loadCandidateReviewRepair?(key: string, plan: SyncPartitionPlan, input: GenerationInput, candidate: NonNullable<GenerationResult['candidate']>, cache: GenerationReadCache): Promise<GenerationInput['reviewRepair'] | null>
+  loadCompletedCandidateReview?(key: string, plan: SyncPartitionPlan, input: GenerationInput, candidate: NonNullable<GenerationResult['candidate']>, builders: readonly ElaborationTrace[], current: Omit<GenerationResult, 'candidateFiles'> | undefined, cache: GenerationReadCache): Omit<GenerationResult, 'candidateFiles'> | null
   elaborationDraftTagged?(key: string, result: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>): boolean
   loadBehaviorDraftMaterial?(key: string, planDigest: string, purpose: string, schemaDigest: string, inputDigest: string, request: CodeBehaviorMaterialRequest, existingDraft?: ElaborationDraft): ElaborationDraftMaterial | null | Promise<ElaborationDraftMaterial | null>
   loadBehaviorContinuation?(key: string, planDigest: string, inputDigest: string): CodeBehaviorContinuation | null
@@ -821,21 +821,21 @@ export async function generateSyncPartitions(input: GenerationInput, plan: SyncP
   base.candidateValidated = true
   const reviews = dispatch.reviews
   const settledReviewTraces = [...builders]
-  const reviewTreeCache: TreeReadCache = new Map()
+  const reviewCache: GenerationReadCache = { trees: new Map(), textByRepository: new Map() }
   const checked = await mapSyncPartitions(reviews, maxParallel, input.signal, async local => {
     const key = `partition:${local.id}:candidate-review`, saved = checkpoints.load<GenerationResult>(key)
     const baseInput = { ...local.input, requestKey: `${input.requestKey}:final:${local.id}` }
-    const repair = checkpoints.loadCandidateReviewRepair?.(key, plan, baseInput, candidate)
+    const repair = await checkpoints.loadCandidateReviewRepair?.(key, plan, baseInput, candidate, reviewCache)
     const reviewInput = repair ? { ...baseInput, reviewRepair: repair } : baseInput
     if (saved) {
       if (JSON.stringify(saved.candidate) !== JSON.stringify(candidate)) reject('分区独审绑定了另一候选')
-      const current = saved.review ? checkpoints.loadCompletedCandidateReview?.(key, plan, reviewInput, candidate, settledReviewTraces, saved) ?? saved : saved
+      const current = saved.review ? checkpoints.loadCompletedCandidateReview?.(key, plan, reviewInput, candidate, settledReviewTraces, saved, reviewCache) ?? saved : saved
       settledReviewTraces.push(...current.traces); return current
     }
-    const completed = checkpoints.loadCompletedCandidateReview?.(key, plan, reviewInput, candidate, settledReviewTraces)
+    const completed = checkpoints.loadCompletedCandidateReview?.(key, plan, reviewInput, candidate, settledReviewTraces, undefined, reviewCache)
     if (completed) { settledReviewTraces.push(...completed.traces); return completed }
     checkpoints.save(`${key}:input`, freezeGenerationInput(reviewInput).inputEvidence)
-    const result = await runGeneration(reviewInput, { ...options, beforeFreezeCandidate: undefined, reviewCandidate: candidate, reviewSpecWritePaths: dispatch.specWritePaths, builderTraces: builders, validateCandidate: async () => validationFindings }, reviewTreeCache)
+    const result = await runGeneration(reviewInput, { ...options, beforeFreezeCandidate: undefined, reviewCandidate: candidate, reviewSpecWritePaths: dispatch.specWritePaths, builderTraces: builders, validateCandidate: async () => validationFindings }, reviewCache)
     const { candidateFiles: _files, ...compact } = result
     settledReviewTraces.push(...compact.traces)
     checkpoints.save(key, compact)

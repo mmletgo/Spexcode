@@ -18,6 +18,8 @@ related:
 
 ## expanded spec
 
+候选独审因原生停止中断且已有同一组的格式返修输入时，仍沿原格式拒绝引用续审。原生资源正式结算后，可通过 [[archive]] 和 [[sync-stage-worktree]] 读取该组正常提交的同一临时 JSON。先核原请求、候选、停止身份、schema、保护文件与 Git 对象，再将精确草稿引用冻结到新请求。该稿尚未批准，独审仍须提交新结果并通过原 JSON、schema 和语义校验。冷重放读取已冻结引用；旧请求缺席字段保持原格式。
+
 当前native-worktree流程由[[sync-stage-worktree]]固定已审全局Spec overlay；分区builder自由读取完整repo，只修改其原授权范围，在私有工作树正常add/commit并保持clean。code_generate只返回严格简短summary JSON，候选变化从公开结果对应的真实seed→HEAD Git对象差量导入，前digest/mode取original composed，后内容/mode取真实结果；不消费summary中的伪补丁。readPaths/files及manifest投影只表达任务相关上下文与程序校验数据，既有文件未出现在files不再阻止读取或授权修改；原scope、host-private、UTF8普通文件、CAS、不可改oracle与契约演进门禁保持。P1已审Spec仍由程序加入唯一candidate，私有seed不是交付commit。独立code_review直接读取真实完整candidate tree，输入和缓存身份同时绑定实际可见tree、任务prompt与schema，保留builder独立session/thread及checkedIds义务。无nativeWorktree的直接单测及历史固定操作继续下文frozen JSON补丁接缝，不作为新生产默认。
 
 模型调用期限沿 [[structured-session-runtime]] 原样传递，明确 null 不装调用计时器；生成与独审、完整读取及各自业务门禁保持。
@@ -70,7 +72,7 @@ P2 接收操作固定 model 并传给生成与独立评审，effort 仍为 high�
 
 冻结正文按唯一 Git blob OID 批读并核验，再依原 manifest 顺序恢复各路径的完整 UTF-8 文本；二进制、链接及私有路径边界不变。Native 请求直接构造实际发送的工作树任务，不先生成随后丢弃的旧内联正文或中间 seed；最终 prompt、schema、完整输入摘要及冷重建请求保持逐字相同，非 Native 仍收到原完整投影。
 
-P2最终独审可显式传入本次候选阶段的树读取缓存，沿既有commonDir/OID接缝复用snapshot、composed、历史快照和candidate的完整已验证条目。每个owner仍逐次核完整manifest、CAS、输入身份、实际差量/范围及提供正文的逐字一致性，并重新批读源码与候选正文；缓存不进入GenerationInput、请求摘要、检查点或Native资格。运行与冷态请求重建共用同一可选接缝，未传缓存时保持逐调用读取，冷恢复使用新缓存。
+P2最终独审可在一次候选阶段或冷态认证批次中复用snapshot、composed、历史快照和candidate的已验证树条目，以及按仓库和Git OID索引的已验证正文。每次仍重建当前路径和文件模式投影，逐次核完整manifest、CAS、输入身份、实际差量/范围、提供正文的逐字一致性及各组Native原件。共享字节不重复解码，新OID首次使用仍批读并验证。缓存不进入GenerationInput、请求摘要、检查点或Native资格；新阶段和冷恢复从空缓存开始。
 
 生成或独审的 Native 失败值保留原 code/message 及真实 session/thread/turn、requestKey/inputDigest，供 [[sync-coordinator]] 复用 [[sync-native-run]] 的已结算 RPC 门禁；不以默认 repairable 或错误文本跳过停止证明。原业务生成、候选、独审和授权规则保持。
 
