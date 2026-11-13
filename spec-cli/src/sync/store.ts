@@ -995,6 +995,9 @@ export class SyncStore {
     return this.write(tx => { this.operation(tx, operationId); return tx.query('SELECT record_json FROM sync_attempts WHERE operation_id=? ORDER BY rowid', operationId).map(row => parseRecord<SyncAttempt>(row)!) })
   }
   readJournal(id: string): ApplyJournal { return this.write(tx => this.journal(tx, id)) }
+  readBaselinePair(id: string): BaselinePair {
+    return this.write(tx => parseRecord<BaselinePair>(tx.query('SELECT record_json FROM sync_baseline_pairs WHERE id=?', id)[0]) ?? fail('SYNC_BASELINE_PAIR_MISSING', id))
+  }
   listJournals(operationId: string): ApplyJournal[] {
     return this.write(tx => { this.operation(tx, operationId); return tx.query('SELECT record_json FROM sync_apply_journals WHERE operation_id=? ORDER BY rowid', operationId).map(row => parseRecord<ApplyJournal>(row)!) })
   }

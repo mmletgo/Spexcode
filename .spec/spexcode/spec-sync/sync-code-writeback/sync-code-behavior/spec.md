@@ -12,6 +12,8 @@ related:
 
 ## expanded spec
 
+[[sync-historical-coverage]] 的历史证明只属于可信程序计划；唯一 promptPlan 投影剥离它，模型分析与独审不取得历史未执行授权。原完整 policyDigest、局部责任范围和强制测试保持。
+
 loadMaterial可返回异步材料，派发前await既有停止材料认证与正式归档checkout的临时恢复/观察/回收；恢复不启动Native。空材料按原逻辑继续，原Git/JSON字节与errors/repairDiagnostics不变，不能把关闭目录变成清空原稿的理由；原真实性、schema、保护面和批准门保持。
 
 P0的精确ZCode `session/events` typed RPC已结算失败在原公开完成/idle/close/stop及完整正常Git单稿证据通过后，沿[[sync-coordinator]]既有git_draft材料接缝只续入原未批准bytes、原请求完整errors/repairDiagnostics和本次精确typed RPC错误；原诊断顺序保持，已有相同RPC错误不再追加；不以公开完成事件替代模型final、readyAnalysis、独审或候选批准，不进入物理草稿分支，不补写旧continuation/Native原件。原owner、阶段schema/上下文、来源排序及当前fence保护保持。

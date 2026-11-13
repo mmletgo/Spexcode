@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+可选 historicalCoverage 仅承载 [[sync-historical-coverage]] 的版本、inputId、摘要和精确 pair/receipt/verificationRef/contractIds 描述，沿整个 plan 参与 policyDigest。它不增加新表、运行范围或显式未执行覆盖许可，旧字段缺席保持严格语义。
+
 SyncCoordinatorOptions 可携可信 verificationTransport server 配置，与 VerificationPolicy 分离；正常与恢复入口原样传给每次独立 run adapter。verificationDriver 保留本地测试接缝，不能使旧 v1 checkpoint 随当前远端配置换主机。
 
 SyncCoordinatorPlanBody可选agentWorkflow:native-worktree-v1固定新工作流并参与完整policyDigest。新应用操作默认带该字段；历史缺席继续原frozen执行，不能由当前配置/重启猜为新协议。它只选择执行合同，不改变scope、partition、预算或业务授权。

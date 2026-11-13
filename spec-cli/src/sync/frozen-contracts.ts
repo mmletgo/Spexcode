@@ -4,6 +4,7 @@ import type { Contract, ContractCoverage, ContractFinding, ContractGraph, Verifi
 import { sameContractBusinessMeaning, contractBusinessProse } from './contract-evolution.js'
 import { validateFrozenAnchors } from './frozen-anchors.js'
 import { specRelationFindings } from '../lint.js'
+import type { HistoricalCoverageCheck } from './historical-coverage.js'
 
 export type FrozenContracts = {
   files: ReadonlyMap<string, string>
@@ -18,14 +19,16 @@ export type FrozenContracts = {
 export const isSyncSpecPath = (path: string): boolean => path.startsWith('.spec/') && path.endsWith('/spec.md') && !path.split('/').includes(PLUGIN_INSTANCE_ROOT)
 
 /** 使用现有节点身份与契约解析器读取固定文本；root 只表示来源，不读取它的工作文件。 */
-export async function readFrozenContracts(root: string, input: ReadonlyMap<string, string>, inventory?: ReadonlySet<string>, recordUnverifiedAcceptance?: (id: string) => boolean): Promise<FrozenContracts> {
+export async function readFrozenContracts(root: string, input: ReadonlyMap<string, string>, inventory?: ReadonlySet<string>, recordUnverifiedAcceptance?: (id: string) => boolean, historicalCoverage?: HistoricalCoverageCheck): Promise<FrozenContracts> {
   const files = new Map(input), paths = inventory && new Set(inventory)
   const sources = new Map([...files].filter(([path]) => isSyncSpecPath(path)))
   const nodes = await loadSpecs(root, { history: null, drift: null, snapshot: { tip: 'HEAD', files: sources } })
   const parsed = nodes.map(node => parseContract({ nodeId: node.id, path: node.path, source: sources.get(node.path)! }))
   const contracts = parsed.flatMap(result => result.contract ? [result.contract] : [])
   const graph = buildContractGraph(contracts)
-  const findings = [...parsed.flatMap(result => result.findings), ...validateContractGraph(graph, { mode: 'final', files, nodeIds: new Set(nodes.map(node => node.id)), recordUnverifiedAcceptance })]
+  const historical = historicalCoverage?.(graph, files)
+  const unexecuted = recordUnverifiedAcceptance || historical?.size ? (id: string) => Boolean(recordUnverifiedAcceptance?.(id) || historical?.has(id)) : undefined
+  const findings = [...parsed.flatMap(result => result.findings), ...validateContractGraph(graph, { mode: 'final', files, nodeIds: new Set(nodes.map(node => node.id)), recordUnverifiedAcceptance: unexecuted })]
   if (paths) {
     const directories = new Set([...paths].flatMap(path => path.split('/').slice(0, -1).map((_part, index, parts) => parts.slice(0, index + 1).join('/'))))
     const byId = new Map(nodes.map(node => [node.id, node]))

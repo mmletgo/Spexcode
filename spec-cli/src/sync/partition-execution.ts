@@ -23,10 +23,12 @@ import { projectSyncPartition, rawOnlyInterfaceSeedEvidence } from './partitioni
 import { historicalOwnerPaths, historicalRetiredIds, obligationPaths, projectPriorContext } from './prior-context.js'
 import type { RawOnlyInterfaceSeedDescendant, RawOnlyInterfaceSeedEvidence, SyncPartition, SyncPartitionPlan } from './partitioning.js'
 import type { CodeBehaviorAnalysis, CodeBehaviorEvidence } from './writeback-types.js'
+import type { HistoricalCoverageCheck } from './historical-coverage.js'
 
 type PartitionSealRepair = { prior: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>; repair: ReadonlySpecRepair; priorInput?: ElaborationInput; wholeFileSourcePaths?: string[] }
 export type PartitionCheckpoints = {
   load<T>(key: string): T | null
+  historicalCoverage?(digest: string): HistoricalCoverageCheck
   loadCandidateReviewRepair?(key: string, plan: SyncPartitionPlan, input: GenerationInput, candidate: NonNullable<GenerationResult['candidate']>): GenerationInput['reviewRepair'] | null
   loadAcceptedCandidateReview?(key: string, plan: SyncPartitionPlan, input: GenerationInput, candidate: NonNullable<GenerationResult['candidate']>, builders: readonly ElaborationTrace[], current?: Omit<GenerationResult, 'candidateFiles'>): Omit<GenerationResult, 'candidateFiles'> | null
   elaborationDraftTagged?(key: string, result: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>): boolean
@@ -404,6 +406,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
     const intent = seedTarget && seedTarget.nodeId !== input.intent.nodeId ? { nodeId: seedTarget.nodeId, rawSource: parseParts(seedTarget.source ?? '')?.rawSource ?? seedTarget.rawSource! } : input.intent
     const localInput: ElaborationInput = { ...input, requestKey: `${input.requestKey}:partition:${partition.id}`, intent, targets, context,
       contextVerifications: undefined,
+      historicalCoverageDigest: undefined,
       partitionBinding,
       files: new Map([...input.files ?? []].filter(([path]) => within(path, readPaths)).map(([path, source]) => [path, settledSources.get(path) ?? source])), analysis,
       validationScope: 'partition_local',
@@ -516,7 +519,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
   const candidateChanges = (projection?.changes ?? reviewedChanges).map(({ nodeId, path, beforeDigest, source }) => ({ nodeId, path, beforeDigest, source }))
   const changes = candidateChanges.map(change => ({ ...change, contentDigest: contentHash(change.source) }))
   const applicability = partitionApplicability(results)
-  const seal = sealPartitionedElaboration(sealInput, candidateChanges, applicability, results.flatMap(result => result.readonlySpecRepair?.kind === 'candidate_review' ? [result.readonlySpecRepair] : []), factBaselines)
+  const seal = sealPartitionedElaboration(sealInput, candidateChanges, applicability, results.flatMap(result => result.readonlySpecRepair?.kind === 'candidate_review' ? [result.readonlySpecRepair] : []), factBaselines, input.historicalCoverageDigest ? checkpoints.historicalCoverage?.(input.historicalCoverageDigest) : undefined)
   const readiness = seal.seal.passed ? projectElaborationFlowReadiness(seal.graph, seal.coverage) : { readyFlowIds: [], blockedFlows: [] }
   const gaps = seal.contracts.flatMap(contract => contract.items.filter((item): item is import('@spexcode/spec-core/contracts').Gap => item.kind === 'GAP'))
   const localStructurePassed = results.every(result => result.structurePassed)
