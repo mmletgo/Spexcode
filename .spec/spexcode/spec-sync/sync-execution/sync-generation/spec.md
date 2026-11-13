@@ -68,6 +68,8 @@ P2 接收操作固定 model 并传给生成与独立评审，effort 仍为 high�
 
 冻结输入及候选独审请求构造保留唯一接缝，供运行与严格历史accept来源校验共同复用。内部输入原件保留原键序及JSON省略的undefined槽，恢复Map后仍用原算法重算，不能因冷态序列化改变旧摘要或请求正文。旧requestKey只恢复原派发身份，其余raw/context/repairContext/model/schema/prompt不变且摘要逐字相等才具复用资格；不删除诊断字段或改写原摘要。
 
+冻结正文按唯一 Git blob OID 批读并核验，再依原 manifest 顺序恢复各路径的完整 UTF-8 文本；二进制、链接及私有路径边界不变。Native 请求直接构造实际发送的工作树任务，不先生成随后丢弃的旧内联正文或中间 seed；最终 prompt、schema、完整输入摘要及冷重建请求保持逐字相同，非 Native 仍收到原完整投影。
+
 生成或独审的 Native 失败值保留原 code/message 及真实 session/thread/turn、requestKey/inputDigest，供 [[sync-coordinator]] 复用 [[sync-native-run]] 的已结算 RPC 门禁；不以默认 repairable 或错误文本跳过停止证明。原业务生成、候选、独审和授权规则保持。
 
 reviewRepair仅引用协调器已认证的同组result/NativePlan/checkpoint，进入该独审的完整冻结摘要。它可来自原Native格式拒绝，也可来自Native已成功但程序字段格式拒绝的完整reviewOutput；两类终态、原JSON、resultDigest和trace均保持原样，不互相伪装。构造请求再次核原candidate、request/inputDigest及原final或成功输出的session/thread/turn/digest。当前续修和冷态原请求重建均显式沿用唯一dispatch派生的瞬态P2 Spec写范围；只读格式错误与可写owner的合法missing_fact混合时，不能把可写项重分类为只读绑定错误。该范围不加入GenerationInput或输入摘要。实际只读P1位置按[[sync-candidate-review]]核真实候选路径/ID及全图唯一affectedIds，格式稿续修须全部affectedIds同owner；不清洗括号、猜位置或以affectedIds替代主位置。
