@@ -208,12 +208,12 @@ export async function prepareSyncAdmission(input: InputSnapshot, supplied: SyncC
   if (options.baselineSelection && !executionScope) fail('execution_scope_missing', '精确基线接入必须冻结实际目标写入范围')
   const scope = executionScope ?? { paths: unique(plan.writePaths), contractIds: [], flowIds: [] }
   const view = await readInput(input, plan, options.previousBaselinePair, options.requestBlob, businessSelection, executionScope?.paths)
-  return { ...syncModelBinding(options.model), ingressKey: options.ingressKey, rootCauseId: options.rootCauseId, origin: options.origin, budget: options.budget, input, ...(options.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), ...(options.automaticSourceAdoption ? { automaticSourceAdoption: options.automaticSourceAdoption } : {}), ...(options.requestBlob ? { requestBlob: options.requestBlob } : {}), ...(options.retryOf ? { retryOf: options.retryOf } : {}), ...(options.baselineSelection ? { baselineSelection: options.baselineSelection } : {}), planBlob: freezeSyncPlanEvidence(input.source.commonDir, plan), scope, policyDigest: syncPlanDigest(plan), impactDigest: options.impactDigest ?? contentHash(canonical({ targets: plan.targets, ...(plan.executionScope ? { scope } : {}), writePaths: unique(plan.writePaths), readSetDigest: view.readSetDigest })), readSetDigest: view.readSetDigest, delivery: null, deliveryPlan: planPrivateDelivery(input, options.managedRoot, options.ingressKey), previousBaselinePair: options.previousBaselinePair ?? null }
+  return { ...syncModelBinding(options.model), ingressKey: options.ingressKey, rootCauseId: options.rootCauseId, origin: options.origin, budget: options.budget, input, ...(options.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), ...(options.automaticSourceAdoption ? { automaticSourceAdoption: options.automaticSourceAdoption } : {}), ...(options.requestBlob ? { requestBlob: options.requestBlob } : {}), ...(options.retryOf ? { retryOf: options.retryOf } : {}), ...(options.inheritRetryBudget ? { inheritRetryBudget: true } : {}), ...(options.baselineSelection ? { baselineSelection: options.baselineSelection } : {}), planBlob: freezeSyncPlanEvidence(input.source.commonDir, plan), scope, policyDigest: syncPlanDigest(plan), impactDigest: options.impactDigest ?? contentHash(canonical({ targets: plan.targets, ...(plan.executionScope ? { scope } : {}), writePaths: unique(plan.writePaths), readSetDigest: view.readSetDigest })), readSetDigest: view.readSetDigest, delivery: null, deliveryPlan: planPrivateDelivery(input, options.managedRoot, options.ingressKey), previousBaselinePair: options.previousBaselinePair ?? null }
 }
 
 type Stage = { version: 'sync-stage-v1'; operationId: string; attemptId: string; inputId: string; policyDigest: string; readSetDigest?: string; baselineSelectionRef?: BlobRef; guidanceContractVersion?: string; composedTree?: string; composedContentDigest?: string; stage: string; resultRef: BlobRef }
 const behaviorAnalysisStage = (name: string): boolean => name === 'analysis' || name.startsWith('partition:') && name.endsWith(':analysis')
-type FrozenAnalysisScope = { active: boolean; operationId: string; inputId: string; source: string; policyDigest: string; refs: Set<string>; candidateDigest?: string; readNativeRecord?: typeof readRecord; readIndex?: (attempt: SyncAttempt, owner?: SyncOperation) => SyncCheckpointStageView; selectionMatches?: Map<string, boolean> }
+type FrozenAnalysisScope = { active: boolean; operationId: string; inputId: string; source: string; policyDigest: string; refs: Set<string>; candidateDigest?: string; handoffParents?: Map<string, SyncOperation>; readNativeRecord?: typeof readRecord; readIndex?: (attempt: SyncAttempt, owner?: SyncOperation) => SyncCheckpointStageView; selectionMatches?: Map<string, boolean> }
 const frozenAnalysisScope = new AsyncLocalStorage<FrozenAnalysisScope>()
 function readStageCheckpoints(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, indexed = false): SyncCheckpointStageView {
   const scope = frozenAnalysisScope.getStore()
@@ -223,7 +223,7 @@ function behaviorGuidanceMatches(operation: SyncOperation, saved: Pick<Stage, 'g
   if (saved.guidanceContractVersion === CODE_BEHAVIOR_GUIDANCE_VERSION) return true
   const scope = frozenAnalysisScope.getStore()
   return saved.guidanceContractVersion === LEGACY_CODE_BEHAVIOR_GUIDANCE_VERSION && !!scope?.active && !!scope.candidateDigest
-    && scope.operationId === operation.id && scope.inputId === operation.input.id && scope.source === canonical(operation.input.source) && scope.policyDigest === operation.policyDigest && scope.refs.has(saved.resultRef.sha256)
+    && (scope.operationId === operation.id || [...scope.handoffParents?.values() ?? []].some(parent => parent.id === operation.id)) && scope.inputId === operation.input.id && scope.source === canonical(operation.input.source) && scope.policyDigest === operation.policyDigest && scope.refs.has(saved.resultRef.sha256)
 }
 type SavedElaboration = Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>
 type SavedGeneration = Omit<GenerationResult, 'candidateFiles'> & { p2SpecWritePaths?: string[] }
@@ -318,6 +318,33 @@ function retryDraftSources(store: SyncStore, operation: SyncOperation, attemptNu
 function settledApprovalSource(store: SyncStore, source: SyncOperation): boolean {
   if (source.phase !== 'superseded') return ['failed', 'budget_exhausted', 'cancelled'].includes(source.phase) && store.readRetryEligibility(source.id).eligible
   return store.isSupersededOperationSettled(source.id)
+}
+
+/** 显式候选交接只承接直接父操作；冷恢复仍核原冻结范围、预算族及正式结算。 */
+function reviewHandoffParent(store: SyncStore, operation: SyncOperation): SyncOperation | null {
+  if (!operation.inheritRetryBudget) return null
+  const cache = frozenAnalysisScope.getStore()?.handoffParents
+  const cached = cache?.get(operation.id)
+  if (cached) return cached
+  const parent = operation.retryOf ? store.readOperation(operation.retryOf) : null
+  const receipt = store.findIngressReceipt(operation.ingressKey), initialScope = operation.contractScopeExpansions?.[0]
+  const selection = store.readBusinessBaselineSelection(operation.id)
+  const reject = (): never => fail('review_handoff_binding', '候选换模型交接缺少同源直接父操作、精确冻结授权、原预算族或正式结算')
+  if (!parent || receipt?.operationId !== operation.id || !receipt.inheritRetryBudget || !receipt.baselineSelection || !selection || !settledApprovalSource(store, parent) || syncModel(parent) === syncModel(operation)
+    || canonical(parent.input) !== canonical(operation.input) || parent.origin !== operation.origin || parent.policyDigest !== operation.policyDigest
+    || parent.planBlob?.sha256 !== operation.planBlob?.sha256 || !initialScope && parent.readSetDigest !== operation.readSetDigest || parent.impactDigest !== operation.impactDigest
+    || (initialScope ? !(['paths', 'contractIds', 'flowIds'] as const).every(field => parent.scope[field].every(value => operation.scope[field].includes(value))) : canonical(parent.scope) !== canonical(operation.scope))
+    || canonical(store.readBusinessBaselineSelection(parent.id)) !== canonical(receipt.baselineSelection)
+    || selection.digest !== receipt.baselineSelection.digest && (!initialScope || !extendsWithUninitializedResources(receipt.baselineSelection, selection))
+    || initialScope && initialScope.previousBaselineSelectionDigest !== receipt.baselineSelection?.digest
+    || (parent.requestBlob?.sha256 ?? null) !== (operation.requestBlob?.sha256 ?? null) || (parent.previousBaselinePair?.id ?? null) !== (operation.previousBaselinePair?.id ?? null)
+    || parent.deliveryPlan.baseCommit !== operation.deliveryPlan.baseCommit || parent.recordUnverifiedCoverage !== operation.recordUnverifiedCoverage || parent.automaticSourceAdoption !== operation.automaticSourceAdoption
+    || parent.delivery || canonical(parent.budget) !== canonical(operation.budget) || parent.deadlineAtMs !== operation.deadlineAtMs
+    || !parent.dispatchAnchor || operation.dispatchAnchor?.budgetRootOperationId !== parent.dispatchAnchor.budgetRootOperationId
+    || store.hasVerificationOrJournal(parent.id)) return reject()
+  const active = frozenAnalysisScope.getStore()
+  if (active?.active) { active.handoffParents ??= new Map(); active.handoffParents.set(operation.id, parent) }
+  return parent
 }
 
 /** 返修接续只读原派发的输入，历史生成结果没有新的批准权。 */
@@ -718,7 +745,7 @@ function readonlyReviewFindings(result: SavedGeneration, changes: SavedElaborati
 type AcceptedReviewProvenance = { fromOperationId: string; fromAttemptId: string; resultRef: BlobRef; inputRef: BlobRef }
 function acceptedReviewInput(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string, resultRef: BlobRef, checkpoints?: SyncCheckpointStageView): GenerationInput | null {
   const provenance = partitionStage<AcceptedReviewProvenance>(store, operation, attempt, `${key}:provenance`, undefined, checkpoints)?.result
-  if (provenance?.fromOperationId !== operation.id || provenance.resultRef.sha256 !== resultRef.sha256 || !provenance.inputRef) return null
+  if (!provenance || provenance.fromOperationId !== operation.id && provenance.fromOperationId !== reviewHandoffParent(store, operation)?.id || provenance.resultRef.sha256 !== resultRef.sha256 || !provenance.inputRef) return null
   const value = JSON.parse(readEvidence(operation.input.source.commonDir, provenance.inputRef).toString()) as ReturnType<typeof freezeGenerationInput>['inputEvidence']
   const requestKey = `sync:${attempt.id}:generation:final:${key.slice('partition:'.length, -':candidate-review'.length)}`
   if (value.requestKey !== requestKey || value.snapshot.id !== operation.input.id || value.policy.digest !== operation.policyDigest) return null
@@ -849,7 +876,13 @@ function generationBuilderSource(store: SyncStore, operation: SyncOperation, ori
 }
 
 /** 同候选协议续审可承接合法repair原件；结论与批准资格始终分开。 */
-function completedCandidateReviewSource(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string, candidate: CandidateRef, plan: SyncPartitionPlan, input: GenerationInput, readIndex?: (source: SyncAttempt) => SyncCheckpointStageView, retainRepair = false): { result: SavedGeneration; resultRef: BlobRef; attempt: SyncAttempt } | null {
+function completedCandidateReviewSource(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string, candidate: CandidateRef, plan: SyncPartitionPlan, input: GenerationInput, readIndex?: (source: SyncAttempt) => SyncCheckpointStageView, retainRepair = false): { result: SavedGeneration; resultRef: BlobRef; attempt: SyncAttempt; operation: SyncOperation } | null {
+  if (input.model !== syncModel(operation)) return null
+  if (attempt.operationId !== operation.id) {
+    const parent = reviewHandoffParent(store, operation)
+    if (parent?.id !== attempt.operationId) return null
+    operation = parent; input = { ...input, model: syncModel(parent) }
+  }
   const indexes = new Map<string, SyncCheckpointStageView>()
   readIndex ??= source => { let index = indexes.get(source.id); if (!index) { index = readSyncCheckpointStageIndex(store, operation, source); indexes.set(source.id, index) } return index }
   const selected = operation.baselineSelection
@@ -870,7 +903,14 @@ function completedCandidateReviewSource(store: SyncStore, operation: SyncOperati
       const carried = acceptedReviewInput(store, operation, origin, key, source.resultRef, checkpoints)
       if (!provenance || !carried || freezeGenerationInput({ ...carried, requestKey: input.requestKey }).inputDigest !== freezeGenerationInput(input).inputDigest) return null
       const prior = store.readAttempt(provenance.fromAttemptId)
-      if (prior.operationId !== operation.id || prior.number >= origin.number) return null
+      if (prior.operationId !== provenance.fromOperationId) return null
+      if (prior.operationId === operation.id) {
+        if (prior.number >= origin.number) return null
+      } else {
+        const parent = reviewHandoffParent(store, operation)
+        if (provenance.fromOperationId !== parent?.id || prior.operationId !== parent.id) return null
+        operation = parent; input = { ...input, model: syncModel(parent) }
+      }
       origin = prior
       checkpoints = readIndex?.(origin)
       const previous = partitionStage<SavedGeneration>(store, operation, origin, key, undefined, checkpoints)
@@ -884,7 +924,7 @@ function completedCandidateReviewSource(store: SyncStore, operation: SyncOperati
     const native = completedNativeStageResult(store, operation, origin, expected.request, trace, result.reviewOutput, candidate.digest, checkpoints)
     if (!native) return null
     verifyGenerationReviewDraft(operation.input.source.commonDir, expected.request, native, expected.draftBinding)
-    return { ...source, attempt: origin }
+    return { ...source, attempt: origin, operation }
   }
   return null
 }
@@ -896,6 +936,13 @@ export function acceptedCandidateReviewSource(store: SyncStore, operation: SyncO
 
 /** 格式续审沿原正式Native失败取诊断；完整业务输入及原请求必须仍可逐字重建。 */
 export function failedCandidateReviewSource(store: SyncStore, operation: SyncOperation, origin: SyncAttempt, key: string, candidate: CandidateRef, plan: SyncPartitionPlan, input?: GenerationInput, readIndex?: (source: SyncAttempt) => SyncCheckpointStageView, readNativeRecord?: typeof readRecord): GenerationInput['reviewRepair'] | null {
+  if (input && input.model !== syncModel(operation)) return null
+  if (origin.operationId !== operation.id) {
+    const parent = reviewHandoffParent(store, operation)
+    if (parent?.id !== origin.operationId) return null
+    operation = parent
+    if (input) input = { ...input, model: syncModel(parent) }
+  }
   const checkpointsAtEntry = readIndex?.(origin) ?? readSyncCheckpointStageIndex(store, operation, origin)
   readIndex ??= source => source.id === origin.id ? checkpointsAtEntry : readSyncCheckpointStageIndex(store, operation, source)
   const checkpoints = readIndex?.(origin), source = partitionStage<SavedGeneration>(store, operation, origin, key, undefined, checkpoints), result = source?.result
@@ -1140,6 +1187,25 @@ function reviewedReadonlyLocalSource(store: SyncStore, operation: SyncOperation,
   if (round.traces.length !== 2 || !generationTrace || !reviewTrace || generationTrace.sessionId === reviewTrace.sessionId || generationTrace.threadId === reviewTrace.threadId || generationTrace.resultDigest !== contentHash(JSON.stringify(round.output)) || reviewTrace.resultDigest !== contentHash(JSON.stringify(round.reviewOutput))) return reject('原owner生成/独审身份或输出摘要失配')
   const generated = elaborationGenerationSource(store, operation, sourceAttempt, round)
   if (!generated && afterAttemptNumber === 0) {
+    if (operation.inheritRetryBudget) {
+      let carrier = sourceAttempt
+      for (;;) {
+        const provenance = history.read<{ fromOperationId: string; fromAttemptId: string; resultRef: BlobRef }>(carrier, `${key}:provenance`)
+        if (!provenance || provenance.resultRef.sha256 !== resultRef.sha256) break
+        const previous = store.readAttempt(provenance.fromAttemptId)
+        if (previous.operationId === operation.id) {
+          if (provenance.fromOperationId !== operation.id || previous.number >= carrier.number || !['failed', 'superseded', 'settled'].includes(previous.status)
+            || !readonlyLocalSource(store, operation, previous, key, resultRef, aggregateRef, history)) return reject('交接P1的同操作引用不属于严格更早的原local')
+          carrier = previous; continue
+        }
+        const parent = reviewHandoffParent(store, operation)
+        if (provenance.fromOperationId !== parent?.id || previous.operationId !== parent.id || !['failed', 'superseded', 'settled'].includes(previous.status)) return reject('交接P1没有已结算的直接父操作来源')
+        const original = stage<SavedElaboration>(store, parent, previous, 'elaboration')
+        if (!original || !elaborationComposedBinding(store, parent, previous, original, sourceAttempt.composedInput!)
+          || !original.partitionEvidence?.some(member => member.partitionId === prior.partitionBinding?.partitionId && member.resultRef.sha256 === resultRef.sha256)) return reject('交接P1原local不属于原组合及完整批准')
+        return reviewedReadonlyLocalSource(store, parent, previous, key, resultRef, writeEvidence(operation.input.source.commonDir, original))
+      }
+    }
     let mismatch = '原owner缺少原Native生成身份'
     const inherited = inheritedReadonlyLocal(store, operation, sourceAttempt, key, source, round, history, message => { mismatch = message })
     if (inherited) return { result: prior, owner: store.readOperation(inherited.ownerId), approvalAttempt: inherited.approvalAttempt }
@@ -1337,6 +1403,13 @@ function* approvedBehaviorPartitionAuthentication(store: SyncStore, operation: S
   if (!basis || (frozenLegacy ? basis.guidanceContractVersion !== LEGACY_CODE_BEHAVIOR_GUIDANCE_VERSION || whole.guidanceContractVersion !== undefined : !behaviorGuidanceMatches(operation, basis))) return reject('原P0 whole缺少精确原指导、读集及基线wrapper')
   const p0 = store.readAttempt(basis.attemptId), commonDir = operation.input.source.commonDir
   if (p0.number > attempt.number || p0.composedInput?.contentDigest !== whole.composedDigest) return reject('原P0实际attempt不是同组合输入的更早来源')
+  const inherited = stage<{ fromOperationId?: string; fromAttemptId: string; analysisRef: BlobRef }>(store, operation, p0, 'analysis-provenance', 'evidence', readIndex(p0))
+  if (inherited?.fromOperationId && inherited.fromOperationId !== operation.id) {
+    const parent = reviewHandoffParent(store, operation), previous = store.readAttempt(inherited.fromAttemptId)
+    if (parent?.id !== inherited.fromOperationId || previous.operationId !== parent.id || inherited.analysisRef.sha256 !== evidence.ref.sha256
+      || !['failed', 'superseded', 'settled'].includes(previous.status) || previous.composedInput?.contentDigest !== whole.composedDigest) return reject('原P0全图引用缺少精确直接父候选来源')
+    return yield* approvedBehaviorPartitionAuthentication(store, parent, previous, plan, evidence, owners, { ...options, readIndex })
+  }
   const selection = basis.baselineSelectionRef ? JSON.parse(readEvidence(commonDir, basis.baselineSelectionRef).toString('utf8')) as FrozenBaselineSelection : undefined
   const source = withCheckpointStageBasis(operation, whole.readSetDigest, selection)
   const checkpoints = readIndex
@@ -1415,7 +1488,7 @@ function authenticatedMixedElaborationCoverage(store: SyncStore, operation: Sync
 type FrozenCandidateAnalysis = { operationId: string; sourceAttemptId: string; candidateDigest: string; analysisRef: BlobRef; analysisRefs: string[] }
 
 /** 同operation原冻结候选专用冷验；沿原正式生产者核证，不补指导或启动模型。 */
-export async function authenticateFrozenCandidateAnalysis(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, options: { renew?: () => Promise<void>; readNativeRecord?: typeof readRecord } = {}): Promise<FrozenCandidateAnalysis | null> {
+export async function authenticateFrozenCandidateAnalysis(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, options: { renew?: () => Promise<void>; readNativeRecord?: typeof readRecord; allGuidance?: true } = {}): Promise<FrozenCandidateAnalysis | null> {
   const scope: FrozenAnalysisScope = { active: true, operationId: operation.id, inputId: operation.input.id, source: canonical(operation.input.source), policyDigest: operation.policyDigest, refs: new Set(), readNativeRecord: options.readNativeRecord ?? readRecord, selectionMatches: new Map() }
   return frozenAnalysisScope.run(scope, () => withReadonlySnapshotQuery(async () => {
     try {
@@ -1429,7 +1502,7 @@ export async function authenticateFrozenCandidateAnalysis(store: SyncStore, oper
       const checkpoints = readIndex(attempt), commonDir = operation.input.source.commonDir
       const generation = partitionStage<SavedGeneration>(store, operation, attempt, 'generation', undefined, checkpoints)?.result
       const whole = stage<CodeBehaviorAnalysis>(store, operation, attempt, 'analysis', 'evidence', checkpoints)
-      if (!generation?.candidate || !whole || whole.guidanceContractVersion === CODE_BEHAVIOR_GUIDANCE_VERSION) return null
+      if (!generation?.candidate || !whole || !options.allGuidance && whole.guidanceContractVersion === CODE_BEHAVIOR_GUIDANCE_VERSION) return null
       const reject = (message: string): never => fail('frozen_candidate_analysis_binding', message)
       if (attempt.operationId !== operation.id || !(attempt.status === 'superseded' && attempt.failure === null || ['failed', 'superseded'].includes(attempt.status) && attempt.failure?.kind === 'repairable')
         || !operation.planBlob || operation.planBlob.sha256 !== operation.policyDigest || !attempt.composedInput) reject('旧P0恢复只接受同operation正式已结算的原候选')
@@ -1451,7 +1524,7 @@ export async function authenticateFrozenCandidateAnalysis(store: SyncStore, oper
       if (composed.sourceInputId !== operation.input.id || contentHash(JSON.stringify(manifest)) !== composed.contentDigest
         || readEvidence(commonDir, composed.manifestBlob).toString('utf8') !== JSON.stringify({ version: 1, entries: manifest })) reject('原组合输入的Git清单与摘要失配')
       const renew = options.renew ?? yieldToControl
-      const p0 = approvedBehaviorPartitionAuthentication(store, operation, attempt, plan!, evidence, whole.partitionEvidence!.map(owner => ({ partitionId: owner.partitionId, analysisRef: owner.analysisRef, wholeAnalysisRef: evidence.ref })), { frozenLegacy: true, readIndex })
+      const p0 = approvedBehaviorPartitionAuthentication(store, operation, attempt, plan!, evidence, whole.partitionEvidence!.map(owner => ({ partitionId: owner.partitionId, analysisRef: owner.analysisRef, wholeAnalysisRef: evidence.ref })), { frozenLegacy: whole.guidanceContractVersion !== CODE_BEHAVIOR_GUIDANCE_VERSION, readIndex })
       for (let step = p0.next(); ; step = p0.next()) {
         if (step.done) { if (!step.value) reject('原P0各owner分析、Git草稿或独审身份失配'); break }
         await renew()
@@ -1763,7 +1836,7 @@ async function verificationRetrySource(store: SyncStore, operation: SyncOperatio
 /** 唯一应用编排入口；副作用恢复优先于新生成，四层真实证据通过后才发布。 */
 export async function runSyncOperation(store: SyncStore, operationId: string, supplied: SyncCoordinatorOptions): Promise<SyncCoordinatorResult> {
   const operation = store.readOperation(operationId)
-  const scope: FrozenAnalysisScope = { active: true, operationId, inputId: operation.input.id, source: canonical(operation.input.source), policyDigest: operation.policyDigest, refs: new Set() }
+  const scope: FrozenAnalysisScope = { active: true, operationId, inputId: operation.input.id, source: canonical(operation.input.source), policyDigest: operation.policyDigest, refs: new Set(), ...(operation.inheritRetryBudget ? { readNativeRecord: readRecord } : {}) }
   return frozenAnalysisScope.run(scope, async () => {
     try { return await runSyncOperationInScope(store, operationId, supplied) }
     finally { scope.active = false; scope.refs.clear() }
@@ -1980,6 +2053,14 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         if (signal.aborted) fail('cancelled', '只读恢复认证已停止')
         store.renewLease(fence!, leaseMs)
       }
+      const handoffParent = reviewHandoffParent(store, operation)
+      if (handoffParent) {
+        const prior = store.listAttempts(handoffParent.id).reverse().find(prior => ['failed', 'superseded'].includes(prior.status) && stage<SavedGeneration>(store, handoffParent, prior, 'generation')?.candidate)
+        const proof = prior && await authenticateFrozenCandidateAnalysis(store, handoffParent, prior, { renew: renewReadonlyRecovery, allGuidance: true })
+        if (!proof) fail('review_handoff_binding', '显式模型交接没有可认证的原完整P0/P1及未完成P2候选，不能从P0重新开始')
+        legacy.candidateDigest = proof.candidateDigest
+        for (const ref of proof.analysisRefs) legacy.refs.add(ref)
+      }
       if (options.plan.version === 'sync-coordinator-v2' && options.plan.direction === 'code_to_spec') {
         for (const prior of store.listAttempts(operation.id).filter(prior => prior.number < attempt!.number && ['failed', 'superseded'].includes(prior.status)).reverse()) {
           if (!stage<SavedGeneration>(store, operation, prior, 'generation')) continue
@@ -2066,21 +2147,23 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
       }
       const budget = finiteSyncBudget(operation.budget)
       const callTimeoutMs = budget === null ? null : options.callTimeoutMs ?? Math.min(120_000, budget.timeoutMs)
-      let reviewContinuation: { attempt: SyncAttempt; plan: SyncPartitionPlan; generation: SavedGeneration; failedReviewKeys: string[]; elaboration?: ApprovedElaborationSource } | undefined
+      const reviewSources = store.listAttempts(operation.id).filter(prior => prior.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(prior.status)).reverse().map(prior => ({ owner: operation, prior }))
+        .concat(handoffParent ? store.listAttempts(handoffParent.id).filter(prior => ['failed', 'superseded', 'settled'].includes(prior.status)).reverse().map(prior => ({ owner: handoffParent, prior })) : [])
+      let reviewContinuation: { operation: SyncOperation; attempt: SyncAttempt; plan: SyncPartitionPlan; generation: SavedGeneration; failedReviewKeys: string[]; elaboration?: ApprovedElaborationSource } | undefined
       if (readonlyBase && !readonlyOwnerRepair && !refinement && options.plan.version === 'sync-coordinator-v2') {
-        for (const prior of store.listAttempts(operation.id).filter(prior => prior.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(prior.status)).reverse()) {
-          const checkpoints = readSyncCheckpointStageIndex(store, operation, prior)
-          const readIndex = (source: SyncAttempt): SyncCheckpointStageView => source.id === prior.id ? checkpoints : readSyncCheckpointStageIndex(store, operation, source)
-          const generation = partitionStage<SavedGeneration>(store, operation, prior, 'generation', undefined, checkpoints)?.result
+        for (const { owner, prior } of reviewSources) {
+          const checkpoints = readSyncCheckpointStageIndex(store, owner, prior)
+          const readIndex = (source: SyncAttempt): SyncCheckpointStageView => source.id === prior.id ? checkpoints : readSyncCheckpointStageIndex(store, source.operationId === owner.id ? owner : store.readOperation(source.operationId), source)
+          const generation = partitionStage<SavedGeneration>(store, owner, prior, 'generation', undefined, checkpoints)?.result
           if (!generation) continue
-          const approved = stage<SavedElaboration>(store, operation, prior, 'elaboration', 'automatic', checkpoints)
-          const originalPlan = reviewPlanStage(store, operation, prior, 'partition-plan', undefined, readIndex)?.result
-          const candidatePlan = reviewPlanStage(store, operation, prior, 'candidate-partition-plan', undefined, readIndex)?.result
+          const approved = stage<SavedElaboration>(store, owner, prior, 'elaboration', 'automatic', checkpoints)
+          const originalPlan = reviewPlanStage(store, owner, prior, 'partition-plan', undefined, readIndex)?.result
+          const candidatePlan = reviewPlanStage(store, owner, prior, 'candidate-partition-plan', undefined, readIndex)?.result
           const candidate = generation.candidate
-          if (!candidate || !generation.candidateValidated || generation.reviewPassed || generation.validationFindings.some(finding => finding.severity === 'error') || !approved || !elaborationComposedBinding(store, operation, prior, approved, view.composed, checkpoints) || !originalPlan || !candidatePlan || canonical(candidate.coveredScope.paths) !== canonical(operation.scope.paths)) break
+          if (!candidate || !generation.candidateValidated || generation.reviewPassed || generation.validationFindings.some(finding => finding.severity === 'error') || !approved || !elaborationComposedBinding(store, owner, prior, approved, view.composed, checkpoints) || !originalPlan || !candidatePlan || canonical(candidate.coveredScope.paths) !== canonical(operation.scope.paths)) break
           if (prior.status === 'superseded' && prior.failure === null) {
             const complete = await withReadonlySnapshotQuery(async () => {
-              const proof = candidateReviewAuthentication(store, operation, prior, generation, readIndex)
+              const proof = candidateReviewAuthentication(store, owner, prior, generation, readIndex)
               for (let step = proof.next(); ; step = proof.next()) {
                 if (step.done) return step.value
                 store.renewLease(fence!, leaseMs)
@@ -2092,30 +2175,31 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
             if (!complete) fail('review_source_binding', '失租约候选缺少完整required outcomes或精确结算原件，不能从汇总猜测续审资格')
           }
           const reviewKeys = checkpoints.json.map(({ value }) => value as Stage).filter(value => value.stage?.endsWith(':candidate-review')).map(value => value.stage)
-          const failedReviewKeys = reviewKeys.filter(key => failedCandidateReviewSource(store, operation, prior, key, candidate, candidatePlan, undefined, readIndex))
-          if (!failedReviewKeys.length || !reviewKeys.every(key => { const result = partitionStage<SavedGeneration>(store, operation, prior, key, undefined, checkpoints)?.result; return result?.review && ['accept', 'repair'].includes(result.review.verdict) && !result.failure || failedReviewKeys.includes(key) })) break
+          const failedReviewKeys = reviewKeys.filter(key => failedCandidateReviewSource(store, owner, prior, key, candidate, candidatePlan, undefined, readIndex))
+          if (!failedReviewKeys.length || !reviewKeys.every(key => { const result = partitionStage<SavedGeneration>(store, owner, prior, key, undefined, checkpoints)?.result; return result?.review && ['accept', 'repair'].includes(result.review.verdict) && !result.failure || failedReviewKeys.includes(key) })) break
           verifyCandidate(operation.input.source.commonDir, candidate)
           const approvedRef = writeEvidence(operation.input.source.commonDir, approved)
           let sourceElaboration: ApprovedElaborationSource | undefined
           if (approvedRef.sha256 !== readonlyBase.resultRef.sha256) {
-            if (!approved.structurePassed || !approved.reviewPassed || approved.failure || approved.status !== 'complete' || !approved.partitionSeal?.passed || !approved.partitionEvidence?.length
+            if (!approved.structurePassed || !approved.reviewPassed || approved.failure || !['complete', 'needs_input', 'conflict'].includes(approved.status) || !approved.partitionSeal?.passed || !approved.partitionEvidence?.length
               || !partitionedElaborationCoverageMatches(originalPlan.partitions.map(partition => partition.id), approved.partitionEvidence.map(member => member.partitionId), approved.analysisOnlyPartitions?.map(member => member.partitionId) ?? [])
-              || approved.analysisOnlyPartitions?.length && !authenticatedMixedElaborationCoverage(store, operation, prior, originalPlan, approved)) fail('review_source_binding', '原候选缺少生成当时的完整P1封口及分区批准')
-            const sourceHistory = readonlyElaborationHistory(store, operation, readIndex)
+              || approved.analysisOnlyPartitions?.length && !authenticatedMixedElaborationCoverage(store, owner, prior, originalPlan, approved)) fail('review_source_binding', '原候选缺少生成当时的完整P1封口及分区批准')
+            const sourceHistory = readonlyElaborationHistory(store, owner, readIndex)
             for (const member of approved.partitionEvidence) {
               store.renewLease(fence!, leaseMs); await yieldToControl(); store.renewLease(fence!, leaseMs)
-              const local = reviewedReadonlyLocal(store, operation, prior, `partition:${member.partitionId}:elaboration`, member.resultRef, approvedRef, 0, sourceHistory)
-              if (local.partitionBinding?.planDigest !== originalPlan.digest || !authenticatedApprovedElaboration(store, operation, prior, local, { allowDeferredImplementation: local.phase === undefined })) fail('review_source_binding', '原候选P1的Native生成、独审或完整冻结输入失配')
+              const source = reviewedReadonlyLocalSource(store, owner, prior, `partition:${member.partitionId}:elaboration`, member.resultRef, approvedRef, 0, sourceHistory), local = source.result
+              if (local.partitionBinding?.planDigest !== originalPlan.digest || !authenticatedApprovedElaboration(store, source.owner, source.approvalAttempt, local, { allowDeferredImplementation: local.phase === undefined })) fail('review_source_binding', '原候选P1的Native生成、独审或完整冻结输入失配')
               readStageDraft(operation.input.source.commonDir, local.rounds.at(-1)!.draft!, local.rounds.at(-1)!.draft!)
             }
-            sourceElaboration = { result: approved, resultRef: approvedRef, operationId: operation.id, attemptId: prior.id }
           }
-          reviewContinuation = { attempt: prior, plan: originalPlan, generation, failedReviewKeys, ...(sourceElaboration ? { elaboration: sourceElaboration } : {}) }
-          repairContext = stage<{ repairContext?: typeof repairContext }>(store, operation, prior, 'repair-input', 'automatic', checkpoints)?.repairContext
+          if (approvedRef.sha256 !== readonlyBase.resultRef.sha256 || owner.id !== operation.id) sourceElaboration = { result: approved, resultRef: approvedRef, operationId: owner.id, attemptId: prior.id }
+          reviewContinuation = { operation: owner, attempt: prior, plan: originalPlan, generation, failedReviewKeys, ...(sourceElaboration ? { elaboration: sourceElaboration } : {}) }
+          repairContext = stage<{ repairContext?: typeof repairContext }>(store, owner, prior, 'repair-input', 'automatic', checkpoints)?.repairContext
           saveStage(store, fence, 'repair-input', { ...repairInput, repairContext })
           break
         }
       }
+      if (handoffParent && !reviewContinuation && !store.listAttempts(operation.id).some(prior => stage<SavedGeneration>(store, operation, prior, 'generation')?.candidate)) fail('review_handoff_binding', '显式交接未认证原候选的可续审分区，不能重做P0/P1')
       const runner = options.runner ? injectedRunner(store, fence, options.runner) : createAttemptRunner(store, fence, { retireSettledWorktrees: true })
       const historicalStageIndexes = new Map<string, SyncCheckpointStageView>()
       const historyCheckpoints = (owner: SyncOperation, prior: SyncAttempt): SyncCheckpointStageView => {
@@ -2123,8 +2207,8 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         historicalStageIndexes.set(prior.id, checkpoints)
         return checkpoints
       }
-      const candidateHistoryCheckpoints = (prior: SyncAttempt): SyncCheckpointStageView => prior.operationId === operation.id && prior.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(prior.status)
-        ? historyCheckpoints(operation, prior) : readSyncCheckpointStageIndex(store, operation, prior)
+      const candidateHistoryCheckpoints = (prior: SyncAttempt): SyncCheckpointStageView => prior.id !== attempt!.id && ['failed', 'superseded', 'settled'].includes(prior.status)
+        ? historyCheckpoints(prior.operationId === operation.id ? operation : store.readOperation(prior.operationId), prior) : readSyncCheckpointStageIndex(store, operation, prior)
       let readonlySourceHistory: ReturnType<typeof readonlyElaborationHistory> | undefined
       const readonlySources = () => {
         if (!readonlySourceHistory) {
@@ -2136,16 +2220,18 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
       const readonlyAccepted = (key: string, binding: NonNullable<ElaborationResult['partitionBinding']>, inputDigest: string): SavedElaboration | null => {
         const base = reviewContinuation?.elaboration ?? readonlyBase
         if (!base || readonlyActiveOwners.some(owner => owner.key === key)) return null
+        if (base.operationId !== operation.id && reviewContinuation?.operation.id !== base.operationId) return null
         const approved = base.result
         const expected = approved.partitionEvidence?.find(item => item.partitionId === binding.partitionId)
         if (!expected) return null
-        const history = readonlySources()
-        for (const origin of history.attempts.filter(item => item.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(item.status)).reverse()) {
-          const source = readonlyLocalSource(store, operation, origin, key, expected.resultRef, base.resultRef, history)
+        const owner = base.operationId === operation.id ? operation : store.readOperation(base.operationId)
+        const history = owner.id === operation.id ? readonlySources() : readonlyElaborationHistory(store, owner, prior => historyCheckpoints(owner, prior))
+        for (const origin of history.attempts.filter(item => (owner.id !== operation.id || item.number < attempt!.number) && ['failed', 'superseded', 'settled'].includes(item.status)).reverse()) {
+          const source = readonlyLocalSource(store, owner, origin, key, expected.resultRef, base.resultRef, history)
           if (!source || !source.result.structurePassed || !source.result.reviewPassed || source.result.failure || canonical(source.result.partitionBinding) !== canonical(binding) || (source.result.gapRepair?.baseInputDigest ?? source.result.readonlySpecRepair?.baseInputDigest ?? source.result.inputDigest) !== inputDigest) continue
           if (source.result.rounds.at(-1)?.review?.verdict !== 'accept'
-            && (source.result.phase !== undefined || !authenticatedApprovedElaboration(store, operation, origin, source.result, { allowDeferredImplementation: true }))) continue
-          saveStage(store, fence!, `${key}:provenance`, { fromOperationId: operation.id, fromAttemptId: origin.id, resultRef: source.resultRef })
+            && (source.result.phase !== undefined || !authenticatedApprovedElaboration(store, owner, origin, source.result, { allowDeferredImplementation: true }))) continue
+          saveStage(store, fence!, `${key}:provenance`, { fromOperationId: owner.id, fromAttemptId: origin.id, resultRef: source.resultRef })
           partitionCheckpoints.save(key, source.result)
           return source.result
         }
@@ -2779,20 +2865,21 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
             const local = partitionStage<SavedGeneration>(store, operation, currentAttempt, key, undefined, currentCheckpoints)
             const carried = local && acceptedReviewInput(store, operation, currentAttempt, key, local.resultRef, currentCheckpoints)
             const origin = store.readAttempt(provenance.fromAttemptId), expected = replayInput(carried)
-            const source = carried && origin.number < currentAttempt.number && completedCandidateReviewSource(store, operation, origin, key, candidate, plan, expected, candidateHistoryCheckpoints, !!reviewContinuation)
+            const source = carried && origin.operationId === provenance.fromOperationId && (origin.operationId !== operation.id || origin.number < currentAttempt.number) && completedCandidateReviewSource(store, operation, origin, key, candidate, plan, expected, candidateHistoryCheckpoints, !!reviewContinuation)
             if (!carried || freezeGenerationInput(carried).inputDigest !== freezeGenerationInput(expected).inputDigest || !source || source.resultRef.sha256 !== provenance.resultRef.sha256 || canonical(source.result) !== canonical(current) || source.result.traces.some(trace => builders.some(builder => builder.sessionId === trace.sessionId || builder.threadId === trace.threadId))) fail('accepted_review_binding', '缓存独审原件缺少精确当前输入或原始请求/来源证明')
             return source.result
           }
-          if (reviewContinuation?.failedReviewKeys.includes(key)) return null
-          for (const prior of store.listAttempts(operation.id).filter(prior => prior.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(prior.status)).reverse()) {
-            const checkpoints = candidateHistoryCheckpoints(prior), saved = partitionStage<SavedGeneration>(store, operation, prior, key, undefined, checkpoints)
+          for (const { owner, prior } of reviewSources) {
+            if (reviewContinuation?.failedReviewKeys.includes(key) && owner.id === reviewContinuation.operation.id && prior.number <= reviewContinuation.attempt.number) return null
+            const checkpoints = candidateHistoryCheckpoints(prior), saved = partitionStage<SavedGeneration>(store, owner, prior, key, undefined, checkpoints)
             if (!saved) continue
-            const original = partitionStage<ReturnType<typeof freezeGenerationInput>['inputEvidence']>(store, operation, prior, `${key}:input`, undefined, checkpoints)?.result
-            const expected = replayInput(original ? restoreGenerationInput(original) : acceptedReviewInput(store, operation, prior, key, saved.resultRef, checkpoints))
+            const original = partitionStage<ReturnType<typeof freezeGenerationInput>['inputEvidence']>(store, owner, prior, `${key}:input`, undefined, checkpoints)?.result
+            const previous = original ? restoreGenerationInput(original) : acceptedReviewInput(store, owner, prior, key, saved.resultRef, checkpoints)
+            const expected = replayInput(previous && owner.id !== operation.id ? { ...previous, model } : previous)
             const source = completedCandidateReviewSource(store, operation, prior, key, candidate, plan, expected, candidateHistoryCheckpoints, !!reviewContinuation)
             if (reviewContinuation?.attempt.id === prior.id && saved.result.review && !source) fail('accepted_review_binding', '同候选续审的合法verdict原件不能按当前完整输入及Native身份认证')
             if (!source || source.result.traces.some(trace => builders.some(builder => builder.sessionId === trace.sessionId || builder.threadId === trace.threadId))) continue
-            saveStage(store, fence!, `${key}:provenance`, { fromOperationId: operation.id, fromAttemptId: source.attempt.id, resultRef: source.resultRef, inputRef: writeEvidence(operation.input.source.commonDir, freezeGenerationInput(expected).inputEvidence) })
+            saveStage(store, fence!, `${key}:provenance`, { fromOperationId: source.operation.id, fromAttemptId: source.attempt.id, resultRef: source.resultRef, inputRef: writeEvidence(operation.input.source.commonDir, freezeGenerationInput(expected).inputEvidence) })
             partitionCheckpoints.save(key, source.result)
             return source.result
           }
@@ -2801,13 +2888,14 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         loadCandidateReviewRepair: (key, plan, input, candidate) => {
           if (!reviewContinuation) return null
           const origin = reviewContinuation.attempt
+          const owner = reviewContinuation.operation
           const checkpoints = candidateHistoryCheckpoints(origin)
-          const saved = partitionStage<ReturnType<typeof freezeGenerationInput>['inputEvidence']>(store, operation, origin, `${key}:input`, undefined, checkpoints)?.result
-          const accepted = !saved && partitionStage<SavedGeneration>(store, operation, origin, key, undefined, checkpoints)
-          const previous = saved ? restoreGenerationInput(saved) : accepted ? acceptedReviewInput(store, operation, origin, key, accepted.resultRef, checkpoints) : null
+          const saved = partitionStage<ReturnType<typeof freezeGenerationInput>['inputEvidence']>(store, owner, origin, `${key}:input`, undefined, checkpoints)?.result
+          const accepted = !saved && partitionStage<SavedGeneration>(store, owner, origin, key, undefined, checkpoints)
+          const previous = saved ? restoreGenerationInput(saved) : accepted ? acceptedReviewInput(store, owner, origin, key, accepted.resultRef, checkpoints) : null
           if (previous?.reviewRepair) {
             const carried = { ...input, reviewRepair: previous.reviewRepair }
-            if (freezeGenerationInput({ ...previous, requestKey: input.requestKey }).inputDigest === freezeGenerationInput(carried).inputDigest && completedCandidateReviewSource(store, operation, origin, key, candidate, plan, carried, candidateHistoryCheckpoints, true)) return previous.reviewRepair
+            if (freezeGenerationInput({ ...previous, requestKey: input.requestKey, model }).inputDigest === freezeGenerationInput(carried).inputDigest && completedCandidateReviewSource(store, operation, origin, key, candidate, plan, carried, candidateHistoryCheckpoints, true)) return previous.reviewRepair
           }
           return failedCandidateReviewSource(store, operation, origin, key, candidate, plan, input, candidateHistoryCheckpoints)
         },
@@ -2983,7 +3071,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           partitionCheckpoints.save('partition-plan', partitions)
           if (!reviewContinuation.generation.fileWriterPlanRef) fail('review_source_binding', '原已验证候选缺少真实file-writer-plan引用')
           partitionCheckpoints.save('file-writer-plan', JSON.parse(readEvidence(operation.input.source.commonDir, reviewContinuation.generation.fileWriterPlanRef).toString()))
-          saveStage(store, fence, 'review-plan-provenance', { fromAttemptId: reviewContinuation.attempt.id, resultRef: writeEvidence(operation.input.source.commonDir, partitions) })
+          saveStage(store, fence, 'review-plan-provenance', { fromOperationId: reviewContinuation.operation.id, fromAttemptId: reviewContinuation.attempt.id, resultRef: writeEvidence(operation.input.source.commonDir, partitions) })
         }
         if (readonlyOwnerRepair) {
           const originalPlan = stage<SyncPartitionPlan>(store, operation, store.readAttempt(readonlyOwnerRepair.planAttemptId), 'partition-plan')
@@ -3091,6 +3179,15 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         const challenged = (value: CodeBehaviorAnalysis): boolean => postGateReview.some(diagnostic => [writeEvidence(operation.input.source.commonDir, value).sha256, ...value.partitionEvidence?.map(owner => owner.analysisRef.sha256) ?? []].includes(diagnostic.analysisRef.sha256))
         let approved = stage<CodeBehaviorAnalysis>(store, operation, attempt, 'analysis')
         if (approved && challenged(approved)) approved = null
+        if (!approved && reviewContinuation && reviewContinuation.operation.id !== operation.id) {
+          const parent = reviewContinuation.operation, prior = reviewContinuation.attempt
+          const original = stage<CodeBehaviorAnalysis>(store, parent, prior, 'analysis', 'evidence')
+          const binding = original && analysisStageBinding(store, parent, original)
+          if (!original?.reviewPassed || !binding || challenged(original) || original.composedDigest !== view.composed.contentDigest) fail('review_handoff_binding', '候选交接不能改写原P0或绕过新的业务质疑')
+          approved = original
+          saveStage(store, fence, 'analysis-provenance', { fromOperationId: parent.id, fromAttemptId: prior.id, analysisRef: writeEvidence(operation.input.source.commonDir, original), baselineSelectionRef: binding.baselineSelectionRef })
+          saveStage(store, fence, 'analysis', original, binding)
+        }
         if (!approved) for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number).reverse()) {
           store.renewLease(fence, leaseMs); await yieldToControl(); store.renewLease(fence, leaseMs)
           const previous = stage<CodeBehaviorAnalysis>(store, operation, store.readAttempt(prior.id), 'analysis')
@@ -3221,11 +3318,12 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         for (const member of source.result.partitionEvidence ?? []) {
           await yieldToControl(); assertMaterialFence()
           const key = `partition:${member.partitionId}:elaboration`
-          const local = reviewedReadonlyLocal(store, operation, origin, key, member.resultRef, source.resultRef, 0, history)
+          const approved = reviewedReadonlyLocalSource(store, operation, origin, key, member.resultRef, source.resultRef, 0, history), local = approved.result
           const round = local.rounds.at(-1)!, trace = round.traces.find(trace => trace.purpose === 'elaboration_review')!
-          const owner = history.attempts.find(prior => prior.number <= origin.number && prior.dispatchPlans.some(dispatch => canonical(dispatch.session) === canonical({ sessionId: trace.sessionId, threadId: trace.threadId, turnId: trace.turnId })))
+          const owners = approved.owner.id === operation.id ? history.attempts : store.listAttempts(approved.owner.id)
+          const owner = owners.find(prior => prior.number <= approved.approvalAttempt.number && prior.dispatchPlans.some(dispatch => canonical(dispatch.session) === canonical({ sessionId: trace.sessionId, threadId: trace.threadId, turnId: trace.turnId })))
           const dispatch = owner?.dispatchPlans.find(dispatch => dispatch.session?.sessionId === trace.sessionId)
-          const original = owner && dispatch ? authenticatedDraftResult(store, operation, owner, dispatch.key, trace.purpose) : null
+          const original = owner && dispatch ? authenticatedDraftResult(store, approved.owner, owner, dispatch.key, trace.purpose) : null
           if (!original?.result || original.result.resultDigest !== trace.resultDigest || canonical(original.result.output) !== canonical(round.reviewOutput)
             || !round.draft || !round.candidate || round.candidateDigest !== contentHash(JSON.stringify(round.candidate)) || local.candidateDigest !== round.candidateDigest
             || canonical(local.changes) !== canonical(round.candidate.changes.map(change => ({ ...change, contentDigest: contentHash(change.source) })))) fail('candidate_gap_review_binding', '候选GAP复核缺少原owner Git候选及独立审查认证')
@@ -3410,7 +3508,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
       const scopeIds = unique([...operation.scope.contractIds, ...retiredContracts, ...restoredResourceIds, ...ownedItems.filter(item => item.kind !== 'FLOW' && item.kind !== 'VERIFY').map(item => item.id)])
       const flowIds = unique([...operation.scope.flowIds, ...retiredFlows, ...ownedItems.filter(item => item.kind === 'FLOW').map(item => item.id)])
       const p1Evidence = writeEvidence(operation.input.source.commonDir, elaboration)
-      if (!attempt.candidate && !reviewContinuation) {
+      if (!attempt.candidate && (!reviewContinuation || reviewContinuation.operation.id !== operation.id)) {
         const writableReferences = p1WritableReferences(accepted.contracts, changedContractPaths, options.plan)
         const paths = operation.baselineSelection ? unique([...operation.scope.paths, ...elaboration.changes.map(change => change.path), ...(elaboration.nodeChanges ?? []).flatMap(change => change.action === 'retire' ? [change.from.path] : [change.from.path, change.to.path]), ...writableReferences]) : undefined
         if (paths?.some(path => !within(path, options.plan.writePaths) || options.plan.mandatoryTests.some(oracle => overlap(path, oracle.testPath)))) fail('p1_write_scope', '已审细化引用的新增写路径超出冻结授权或涉及外部 oracle')
@@ -3492,7 +3590,15 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
             await acquirePublication()
             try {
               const latest = store.readOperation(operation.id), currentAttempt = store.readAttempt(fence!.attemptId)
-              const base = assemblePublicationBase(store, latest, currentAttempt, view.composed, view.readPaths)
+              const inherited = operation.inheritRetryBudget && reviewContinuation
+              if (inherited && !inherited.attempt.publicationBase) fail('review_handoff_binding', '候选交接缺少原发布parent及完整来源原件')
+              const original = inherited ? verifyPublicationBase(store, inherited.operation, inherited.attempt, inherited.attempt.publicationBase!) : undefined
+              const base = assemblePublicationBase(store, latest, currentAttempt, view.composed, view.readPaths, original)
+              if (original) {
+                const { operationId: _currentOperation, attemptId: _currentAttempt, parentCommit: _currentMetadata, ...current } = verifyPublicationBase(store, latest, currentAttempt, base)
+                const { operationId: _originalOperation, attemptId: _originalAttempt, parentCommit: _originalMetadata, ...previous } = original
+                if (canonical(current) !== canonical(previous) || (original.version === 'sync-publication-base-v2' || original.parentCommit === operation.input.headCommit) && base.parentCommit !== original.parentCommit) fail('review_handoff_binding', '候选交接的原发布parent、tree或逐路径来源已变化')
+              }
               const bound = store.bindPublicationBase(fence!, base)
               saveStage(store, fence!, 'publication-base', base)
               return bound.publicationBase!.composed

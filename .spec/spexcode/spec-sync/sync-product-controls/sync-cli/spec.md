@@ -16,13 +16,15 @@ related:
 
 ## expanded spec
 
+`spex sync run` 可将 `--inherit-retry-budget` 与 `--retry-of`、`--model` 合用，向正式后端提交原候选续审交接。保留原预算族、已用调用与截止时间。普通的暂停和恢复沿原模型。
+
 `spex sync source-continuity <operation-id> --input-id <id> --revision <N> --enabled-digest <sha256> --old-common-dev <N> --old-root-dev <N> --old-git-dev <N>` 是 [[sync-source-registration]] 的正式offline入口，拒绝API路由和多余业务选项，缺值/错配非零退出。不调用HTTP或启动服务，成功输出真实proof引用与pause，重复登记不重复派发。文档要求停稳及先结算资源，v20配套备份/启用原件回滚；resume为后续明确控制。
 
 `spex sync settings|enable|status|run|verify|decide|show|pause|resume|cancel|recover` 通过 clientSyncRequest 调后端 [[sync-application]]，请求携带 cwd 项目的 targetTree，由后端持有 pipeline 生命周期。mutator 复用项目匹配 guard 和显式 API 路由；不可达或 HTTP 拒绝非零退出，不使用 cached/mock fallback。结果输出 JSON，queued、failed、GAP 及原树待落地不能用成功文案掩盖。
 
 run 接收 node-id 或 --node，--request-id 提供稳定键，缺省一次 UUID。--patch-file 是 UTF-8 JSON SpecBodyEdit，复用正文校验。status 支持 --node 和 1..200 的 --limit；show/cancel/recover 需要完整 operation ID，pause/resume 可省略ID控制物理来源。未知 flag/缺值拒绝。enable 可用 --config-digest 检查并发配置变化。help 明确手动 Spec/代码驱动、业务裁决与 Docker Node 验证，已启用来源由正式后端独立持续观察。
 
---retry-of 显式引用旧 operation ID，由共享服务检查 retryEligibility 后建立关联的新操作及新预算；不带此参数的重复输入不重置预算。不能与 --patch-file 同用，重试保留旧正文意图和 origin；CLI 不传固定 spec 覆盖旧 initial 来源。同重试 request-id 幂等，服务拒绝未结算资源或已变输入时非零退出。
+--retry-of 显式引用旧 operation ID，由共享服务检查 retryEligibility 后建立关联操作。普通显式重试使用新预算，候选续审交接沿用原预算族；重复输入沿既有操作。不能与 --patch-file 同用，重试保留旧正文意图和 origin；CLI 不传固定 spec 覆盖旧 initial 来源。同重试 request-id 幂等，服务拒绝未结算资源或已变输入时非零退出。
 
 recover 提交完整旧 operation ID 到同后端清理入口；保持原控制与预算，只结算已有资源/已开始日志，不等同 resume 或新预算重试。返回真实状态和尚未知资源的诊断，不把 HTTP 受理称为资源已释放。
 

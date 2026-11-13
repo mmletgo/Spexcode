@@ -37,7 +37,7 @@ import { isSyncSpecPath, readFrozenContracts } from './frozen-contracts.js'
 import { assertSourceAdoptionComplete, fastForwardSource, prepareSourceAdoption, settledReceipt, sourceAdoptionScopeCovers, sourceAdoptionMutexPath, type SourceAdoptionPlan } from './source-adoption.js'
 
 export type SyncScopeCoverage = { includedNodeIds: string[]; contextNodeIds: string[]; missingNodeIds: string[]; excludedNodeIds: string[]; totalNodeCount: number }
-export type SyncSubmitInput = { nodeId: string; requestId: string; origin?: 'spec' | 'initial' | 'code' | 'combined' | 'decision'; patch?: SpecBodyEdit; retryOf?: string; model?: string; committed?: boolean; recordUnverifiedCoverage?: true }
+export type SyncSubmitInput = { nodeId: string; requestId: string; origin?: 'spec' | 'initial' | 'code' | 'combined' | 'decision'; patch?: SpecBodyEdit; retryOf?: string; model?: string; committed?: boolean; recordUnverifiedCoverage?: true; inheritRetryBudget?: true }
 export type SyncRevertEligibility = { eligible: true } | { eligible: false; reason: { code: string; message: string } }
 export type SyncAdoptEligibility = { eligible: true } | { eligible: false; reason: { code: string; message: string } }
 export type SyncOperationDetail = { operation: SyncOperation; physicalControl: PhysicalControl; attempt: ReturnType<SyncStore['readAttempt']> | null; unexecutedContractIds?: string[]; journals: ReturnType<SyncStore['listJournals']>; stale: boolean; sourceSynced: boolean; canonicalSynced: boolean; adoptionEligibility: SyncAdoptEligibility; revertEligibility: SyncRevertEligibility; retryEligibility: ReturnType<SyncStore['readRetryEligibility']>; decisionEligibility: ReturnType<SyncStore['readDecisionEligibility']>; resources: ReturnType<SyncStore['listRecoverableResources']>[number]['resource'][]; decisionContext: { analysisRef: BlobRef; analysis: CodeBehaviorAnalysis } | null; executionAvailability: { status: 'ready' | 'recovery_required'; failure?: { code: string; message: string } } }
@@ -710,6 +710,7 @@ export class SyncApplication {
     if (!input || typeof input.nodeId !== 'string' || !input.nodeId.trim() || typeof input.requestId !== 'string' || !input.requestId.trim()) throw new SyncApplicationError('sync_request_invalid', '请求需要 nodeId 与稳定 requestId', 400)
     if (input.model !== undefined && (typeof input.model !== 'string' || !input.model || input.model !== input.model.trim())) throw new SyncApplicationError('sync_model_invalid', '模型需要非空精确 ID', 400)
     if (input.retryOf !== undefined && (typeof input.retryOf !== 'string' || !input.retryOf.trim())) throw new SyncApplicationError('sync_retry_invalid', '显式重试需要完整旧 operation ID', 400)
+    if (input.inheritRetryBudget !== undefined && (input.inheritRetryBudget !== true || !input.retryOf || !input.model)) throw new SyncApplicationError('sync_retry_budget_invalid', '候选续审交接需要明确的原 operation 与新模型', 400)
     if (input.retryOf && input.patch) throw new SyncApplicationError('sync_retry_changed', '显式重试沿用原正文意图；新的正文修改请发起新请求', 400)
     if (input.origin !== undefined && !['spec', 'initial', 'code', 'combined'].includes(input.origin) && !(input.retryOf && input.origin === 'decision')) throw new SyncApplicationError('sync_origin_unsupported', '输入来源必须为 spec、initial、code 或 combined', 400)
     if (input.committed !== undefined && typeof input.committed !== 'boolean' || input.committed && (input.origin !== 'initial' || input.retryOf || input.patch)) throw new SyncApplicationError('sync_committed_initial_invalid', '提交快照选项只用于无正文修改、无retryOf的initial新操作', 400)
@@ -739,6 +740,7 @@ export class SyncApplication {
       const prior = this.store.findOperationByIngressKey(ingressKey), ingress = this.store.findIngressReceipt(ingressKey)
       const automaticSourceAdoption = prior ? (ingress ?? prior).automaticSourceAdoption : retry ? retry.automaticSourceAdoption : this.automaticSourceAdoption(snapshot)
       if (prior && (ingress ?? prior).recordUnverifiedCoverage !== recordUnverifiedCoverage) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
+      if (prior && (ingress ?? prior).inheritRetryBudget !== input.inheritRetryBudget) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
       const priorInput = ingress?.input ?? prior?.input
       if (origin === 'initial' && !retry && priorInput && committed !== (priorInput.captureKind === 'commit')) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
       if (prior?.baselineSelection) {
@@ -749,6 +751,7 @@ export class SyncApplication {
       }
       const previousBaselinePair = prior ? (ingress ?? prior).previousBaselinePair : retry ? retry.previousBaselinePair : null
       const revalidation = retry && ['workspace_synced', 'awaiting_landing'].includes(retry.phase)
+      if (revalidation && input.inheritRetryBudget) throw new SyncApplicationError('sync_retry_budget_invalid', '候选续审交接只处理未交付候选', 400)
       if (revalidation && retry.recordUnverifiedCoverage !== recordUnverifiedCoverage) throw new SyncApplicationError('sync_retry_changed', '重验已交付的候选须保留原验收覆盖选择')
       const oldSelection = (ingress ?? prior)?.baselineSelection ?? (revalidation ? this.store.readRevalidationSelection(retry.id) : retry?.baselineSelection)
       const businessSelection = prior ? this.store.readBusinessBaselineSelection(prior.id) : retry ? this.store.readBusinessBaselineSelection(retry.id) : oldSelection
@@ -770,7 +773,7 @@ export class SyncApplication {
       const requested = input.model ?? (prior || retry ? syncModel(prior ?? retry!) : syncModel(settings, Boolean(plan.agentWorkflow)))
       const model = await resolveSyncModel(requested, Boolean(plan.agentWorkflow), prior ? syncModel(prior) : undefined)
       if (prior && (syncModel(prior) !== model || (ingress?.origin ?? prior.origin) !== origin || (prior.retryOf ?? null) !== (retry?.id ?? null) || (ingress?.input ?? prior.input).id !== snapshot.id || JSON.stringify((ingress?.input ?? prior.input).source) !== JSON.stringify(snapshot.source) || prior.policyDigest !== syncPlanDigest(plan) || ((ingress ?? prior).requestBlob?.sha256 ?? null) !== (requestBlob?.sha256 ?? null))) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
-      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: input.requestId, origin, ...syncModelBinding(model), ...(recordUnverifiedCoverage ? { recordUnverifiedCoverage } : {}), ...(retry ? { retryOf: retry.id, ...(retry.baselineSelection ? { executionScope: retry.scope, impactDigest: retry.impactDigest } : {}) } : {}), budget: revalidation ? retry.budget : settings.budget, managedRoot: this.managedRoot, ...(requestBlob ? { requestBlob } : {}), previousBaselinePair, ...(frozen ? { baselineSelection: frozen.selection } : {}), automaticSourceAdoption }, businessSelection)
+      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: input.requestId, origin, ...syncModelBinding(model), ...(input.inheritRetryBudget ? { inheritRetryBudget: true } : {}), ...(recordUnverifiedCoverage ? { recordUnverifiedCoverage } : {}), ...(retry ? { retryOf: retry.id, ...(retry.baselineSelection ? { executionScope: retry.scope, impactDigest: retry.impactDigest } : {}) } : {}), budget: retry && (revalidation || input.inheritRetryBudget) ? retry.budget : settings.budget, managedRoot: this.managedRoot, ...(requestBlob ? { requestBlob } : {}), previousBaselinePair, ...(frozen ? { baselineSelection: frozen.selection } : {}), automaticSourceAdoption }, businessSelection)
       if (prior) { admission.deliveryPlan = (ingress ?? prior).deliveryPlan; admission.budget = (ingress ?? prior).budget }
       this.prepareTools(admission.ingressKey, prior, model, plan.agentWorkflow)
       const operation = this.store.admitAndEnqueue(admission)

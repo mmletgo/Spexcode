@@ -1621,6 +1621,76 @@ test('explicit user retry receives a fresh operation and budget while automatic 
   } finally { f.cleanup() }
 })
 
+test('模型续审交接保原预算族、剩余调用、截止时间和原父操作证据', async () => {
+  const f = await fixture()
+  try {
+    const policy = f.put(readonlyCoveragePlan)
+    const selected = f.store.readBaselineSelection(source(), [{ kind: 'path', path: 'src/a.ts' }, { kind: 'contract', id: 'RULE-A' }]); assert.ok('selection' in selected)
+    const input: AdmitSyncInput = { ...f.admit(), baselineSelection: selected.selection, origin: 'initial', model: 'cursor:default', planBlob: policy, policyDigest: policy.sha256 }
+    const original = f.claim(input)
+    f.store.reserveDispatch(original.fence, { key: 'prior-review', purpose: 'code_review', requestDigest: 'prior-review-request' })
+    f.store.requestControl(original.operation.id, 'pause')
+    f.tick(100)
+    const child: AdmitSyncInput = {
+      ...input, retryOf: original.operation.id, inheritRetryBudget: true, model: 'grok:default',
+      ingressKey: 'review-model-handoff', rootCauseId: 'review-model-handoff',
+    }
+    assert.throws(() => f.store.admitAndEnqueue(child), /SYNC_RETRY_PHASE/)
+    const parent = f.store.requestControl(original.operation.id, 'cancel')
+    const oldAttempts = f.store.listAttempts(parent.id)
+    const legacy = f.claim({ ...f.admit(source('legacy')), origin: 'initial', model: 'cursor:default', planBlob: policy, policyDigest: policy.sha256 })
+    f.store.requestControl(legacy.operation.id, 'cancel')
+    assert.throws(() => f.store.admitAndEnqueue({ ...legacy.operation, retryOf: legacy.operation.id, model: 'grok:default', inheritRetryBudget: true, ingressKey: 'legacy-handoff', rootCauseId: 'legacy-handoff' }), /SYNC_RETRY_BUDGET_BINDING/)
+    assert.throws(() => f.store.admitAndEnqueue({ ...child, baselineSelection: undefined }), /SYNC_RETRY_BUDGET_BINDING/)
+    assert.throws(() => f.store.admitAndEnqueue({ ...child, budget: { ...child.budget, maxCalls: 20 } }), /SYNC_RETRY_BUDGET_BINDING/)
+    assert.throws(() => f.store.admitAndEnqueue({ ...child, model: parent.model }), /SYNC_RETRY_BUDGET_BINDING/)
+    const operation = f.store.admitAndEnqueue(child)
+    assert.equal(operation.model, 'grok:default')
+    assert.equal(operation.deadlineAtMs, parent.deadlineAtMs)
+    assert.equal(operation.dispatchAnchor?.budgetRootOperationId, parent.dispatchAnchor?.budgetRootOperationId)
+    assert.ok(operation.dispatchAnchor!.firstEnqueueSeq > parent.dispatchAnchor!.firstEnqueueSeq)
+    assert.deepEqual(f.store.readBudgetUsage(operation.id), { budgetRootOperationId: parent.id, callsUsed: 1, attemptsUsed: 1, repairFailures: 0 })
+    assert.equal(f.store.admitAndEnqueue(child).id, operation.id)
+    assert.equal(f.store.findIngressReceipt(child.ingressKey)?.inheritRetryBudget, true)
+    assert.throws(() => f.store.admitAndEnqueue({ ...child, inheritRetryBudget: undefined }), /SYNC_IDEMPOTENCY_CONFLICT/)
+    assert.throws(() => f.store.admitAndEnqueue({ ...child, ingressKey: 'ordinary-retry', rootCauseId: 'ordinary-retry', inheritRetryBudget: undefined }), /SYNC_RETRY_BUDGET_BINDING/)
+    const claim = f.claim(child)
+    for (const key of ['review-1', 'review-2', 'review-3']) f.store.reserveDispatch(claim.fence, { key, purpose: 'code_review', requestDigest: key })
+    assert.throws(() => f.store.reserveDispatch(claim.fence, { key: 'review-4', purpose: 'code_review', requestDigest: 'review-4' }), /SYNC_BUDGET_EXHAUSTED/)
+    assert.equal(f.store.readBudgetUsage(operation.id).callsUsed, 4)
+    assert.deepEqual(f.store.readOperation(parent.id), parent)
+    assert.deepEqual(f.store.listAttempts(parent.id), oldAttempts)
+  } finally { f.cleanup() }
+})
+
+test('模型续审交接仅在前一模型正式结算后沿原父候选使用下一模型', async () => {
+  const f = await fixture()
+  try {
+    const policy = f.put(readonlyCoveragePlan)
+    const selected = f.store.readBaselineSelection(source(), [{ kind: 'path', path: 'src/a.ts' }, { kind: 'contract', id: 'RULE-A' }]); assert.ok('selection' in selected)
+    const input: AdmitSyncInput = { ...f.admit(), baselineSelection: selected.selection, origin: 'initial', model: 'cursor:default', planBlob: policy, policyDigest: policy.sha256 }
+    const original = f.claim(input)
+    f.store.reserveDispatch(original.fence, { key: 'original-review', purpose: 'code_review', requestDigest: 'original-review' })
+    const parent = f.store.requestControl(original.operation.id, 'cancel')
+    assert.equal(f.store.hasVerificationOrJournal(parent.id), false)
+    const handoff: AdmitSyncInput = { ...input, retryOf: parent.id, inheritRetryBudget: true, model: 'grok:default', ingressKey: 'grok-review', rootCauseId: 'grok-review' }
+    const first = f.store.admitAndEnqueue(handoff)
+    const nextInput: AdmitSyncInput = { ...handoff, model: 'claude:default', ingressKey: 'claude-review', rootCauseId: 'claude-review' }
+    assert.throws(() => f.store.admitAndEnqueue(nextInput), /SYNC_RETRY_BUDGET_BINDING/)
+    const claim = f.claim(handoff)
+    f.store.reserveDispatch(claim.fence, { key: 'grok-review', purpose: 'code_review', requestDigest: 'grok-review' })
+    const settled = f.store.requestControl(first.id, 'cancel')
+    const next = f.store.admitAndEnqueue(nextInput)
+    assert.equal(next.model, 'claude:default')
+    assert.equal(next.retryOf, parent.id)
+    assert.equal(next.deadlineAtMs, parent.deadlineAtMs)
+    assert.equal(f.store.readBudgetUsage(next.id).callsUsed, 2)
+    assert.equal(f.store.admitAndEnqueue({ ...handoff, ingressKey: 'grok-review-alias', rootCauseId: 'grok-review-alias' }).id, first.id)
+    assert.deepEqual(f.store.readOperation(first.id), settled)
+    assert.deepEqual(f.store.readOperation(parent.id), parent)
+  } finally { f.cleanup() }
+})
+
 test('superseded结算资格要求本操作current与全部历史attempt终结，冷读不改记录', async () => {
   const f = await fixture()
   try {
@@ -1664,6 +1734,7 @@ test('superseded结算资格逐项拒绝活租约、历史未removed资源和未
   try {
     const ready = f.ready(), planned = f.put({ phase: 'planned' })
     const resource = f.store.planResource(ready.fence, { key: 'settlement-proof', kind: 'verification', payloadDigest: 'fixed-proof', inputId: ready.operation.input.id, candidateDigest: ready.candidate.digest, planBlob: planned, checkpointRef: planned })
+    assert.equal(f.store.hasVerificationOrJournal(ready.operation.id), true)
     const binding = { operationId: resource.operationId, attemptId: resource.attemptId, inputId: resource.plan.inputId, candidateDigest: resource.plan.candidateDigest }
     const terminal = f.put({ phase: 'terminal' }), removed = f.put({ phase: 'removed' })
     f.store.recordResourceCheckpoint(resource.id, { ...binding, phase: 'terminal', expectedCheckpointRef: planned, checkpointRef: terminal })
@@ -3139,7 +3210,7 @@ for (const prior of [34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44] as const) test(
   } finally { backup?.close(); f.cleanup() }
 })
 
-for (const prior of [46, 47, 48, 49, 51] as const) test(`从writer${prior}升级保留自动采纳索引及原件，旧writer拒绝且备份可回滚`, async () => {
+for (const prior of [46, 47, 48, 49, 51, 52] as const) test(`从writer${prior}升级保留自动采纳索引及原件，旧writer拒绝且备份可回滚`, async () => {
   assert.equal(SYNC_MIGRATIONS[prior]?.version, prior + 1, '新持久语义必须有独立 writer 围栏')
   const f = await fixture()
   let backup: ReturnType<typeof openProtocol> | undefined
