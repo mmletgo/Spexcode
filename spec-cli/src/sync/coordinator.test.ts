@@ -6628,6 +6628,184 @@ for (const [guidance, purpose] of [
   assert.deepEqual(readEvidence(commonDir, marker), markerBytes)
 })
 
+for (const precise of [false, true]) for (const mode of precise ? ['live', 'cold', 'review-live', 'review-cold', 'review-lineage', 'review-lineage-cold', 'review-lineage-native', 'review-identity', 'generation-request', 'missing-draft-ref'] as const : ['live', 'cold', 'business-repair'] as const) test(`P1 deferred implementation同operation仅续P2 precise=${precise} mode=${mode}`, async t => {
+  const lineage = mode.startsWith('review-lineage'), reviewAttempt = lineage ? 2 : 1
+  const reviewFailure = lineage || mode === 'review-live' || mode === 'review-cold', cold = mode === 'cold' || mode === 'review-cold' || mode === 'review-lineage-cold'
+  const raw = parseParts(original)!.rawSource
+  const f = await fixture(t, { maxAttempts: reviewAttempt + 1, maxCalls: lineage ? 18 : 12, maxRepairs: reviewAttempt, timeoutMs: 180_000 }, false, original, 'project', original, {
+    version: 'sync-coordinator-v2', direction: 'spec_to_code', agentWorkflow: 'native-worktree-v1', sourcePaths: ['src'],
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 },
+  }, precise ? { original: raw, replacement: raw + ' 重复完成必须保留首次结果。', intent: '明确原首次结果义务', testPath: 'tests/deferred.test.mjs' } : undefined, 'spec', 'claude:default', precise)
+  let store = f.store
+  const calls: { attempt: number; purpose: string }[] = [], records = new Map<string, NativeRunRecord>()
+  const commonDir = f.input.source.commonDir, originalBytes = new Map<string, Buffer>()
+  const stages = (attempt: SyncAttempt) => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(commonDir, ref).toString()) as { stage?: string; resultRef: BlobRef })
+  const local = (attempt: SyncAttempt) => stages(attempt).find(value => value.stage?.startsWith('partition:') && value.stage.endsWith(':elaboration'))!
+  const findResource = store.findResource.bind(store)
+  const listAttempts = store.listAttempts.bind(store)
+  let repeatHistoricalP1 = false
+  if (lineage) store.listAttempts = id => {
+    const attempts = listAttempts(id)
+    if (!repeatHistoricalP1 || attempts.length !== 2) return attempts
+    return attempts.map(attempt => attempt.number !== 1 ? attempt : {
+      ...attempt,
+      // 模拟旧恢复器未命中已审P1；恢复后仍保留原SQLite中的两份合法独审原件。
+      checkpointRefs: attempt.checkpointRefs.filter(ref => {
+        const stage = (JSON.parse(readEvidence(commonDir, ref).toString()) as { stage?: string }).stage
+        return stage !== 'elaboration' && !stage?.endsWith(':elaboration')
+      }),
+    })
+  }
+  f.options.runner = async request => {
+    const operation = store.readOperation(f.operation.id), attempt = store.readAttempt(operation.currentAttemptId!)
+    calls.push({ attempt: attempt.number, purpose: request.purpose })
+    if (request.purpose === 'code_review') {
+      assert.equal(reviewFailure, true)
+      if (attempt.number > reviewAttempt) {
+        assert.match(request.prompt, /完整原回答在草稿文件/)
+        const draftPath = /草稿文件=([^\s；]+)/.exec(request.prompt)![1]
+        assert.equal(f.git('show', `${request.worktree!.baseCommit}:${draftPath}`), 'read ETIMEDOUT')
+        throw Object.assign(new Error('fixture已到第二次P2独审，不运行Docker'), { code: 'unsupported' })
+      }
+      if (mode === 'review-lineage-native') {
+        const dispatch = attempt.dispatchPlans.find(item => item.purpose === 'elaboration_review')!, resource = findResource(attempt.id, dispatch.key)!
+        const checkpoint = JSON.parse(readEvidence(commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
+        const changed = { ...resource, checkpointRef: writeEvidence(commonDir, { ...checkpoint, result: { ...checkpoint.result!, threadId: 'foreign-source-p1-review' } }) }
+        store.findResource = (attemptId, key) => attemptId === attempt.id && key === dispatch.key ? changed : findResource(attemptId, key)
+      }
+      return rejectedReviewFixture(f, request, 'read ETIMEDOUT', '受控P2独审最终JSON失败')
+    }
+    if (request.purpose === 'code_generate') {
+      if (attempt.number > reviewAttempt) {
+        assert.equal(reviewFailure, false, '仅独审失败不能重新派发builder')
+        throw Object.assign(new Error('fixture已到第二次P2，不运行实现或Docker'), { code: 'unsupported' })
+      }
+      const approved = JSON.parse(readEvidence(commonDir, local(attempt).resultRef).toString()) as ElaborationResult
+      assert.equal(hasApprovedElaborationReview(approved), true)
+      for (const wrapper of stages(attempt).filter(value => value.stage === 'elaboration' || value.stage?.endsWith(':elaboration'))) originalBytes.set(wrapper.resultRef.sha256, readEvidence(commonDir, wrapper.resultRef))
+      if (lineage && attempt.number === 1) {
+        repeatHistoricalP1 = true
+        throw new StructuredSessionError('structured_output_format_invalid', '旧轮builder失败后重复细化产生另一合法P1')
+      }
+      repeatHistoricalP1 = false
+      if (mode === 'missing-draft-ref') {
+        const draft = approved.rounds.at(-1)!.draft!
+        f.git('update-ref', '-d', `refs/spex-sync/drafts/${draft.ownerDigest}/${draft.resultCommit}`)
+      }
+      if (mode === 'review-identity' || mode === 'generation-request') {
+        const purpose = mode === 'review-identity' ? 'elaboration_review' : 'elaboration_generate'
+        const dispatch = attempt.dispatchPlans.find(item => item.purpose === purpose)!, resource = findResource(attempt.id, dispatch.key)!
+        const plan = JSON.parse(readEvidence(commonDir, resource.plan.planBlob).toString()) as NativeRunPlan
+        const checkpoint = JSON.parse(readEvidence(commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
+        const changed = mode === 'review-identity'
+          ? { ...resource, checkpointRef: writeEvidence(commonDir, { ...checkpoint, result: { ...checkpoint.result!, threadId: 'foreign-review-thread' } }) }
+          : { ...resource, plan: { ...resource.plan, planBlob: writeEvidence(commonDir, { ...plan, request: { ...plan.request, model: 'claude:foreign-model' } }) } }
+        store.findResource = (attemptId, key) => attemptId === attempt.id && key === dispatch.key ? changed : findResource(attemptId, key)
+      }
+      if (!reviewFailure) throw new StructuredSessionError('structured_output_format_invalid', '受控P2最终JSON失败，沿原预算重试')
+    }
+    let output: unknown
+    if (request.purpose.startsWith('code_behavior_')) {
+      const { task, pendingAnalysis } = readCodeBehaviorContext(request, commonDir)
+      const paths = task.requiredChangedPaths as string[]
+      output = pendingAnalysis
+        ? { inputDigest: request.inputDigest, analysisDigest: pendingAnalysis.analysisDigest, verdict: 'accept', checkedPaths: paths, checkedChangeIds: pendingAnalysis.analysis.changes.map(item => item.id), findings: [] }
+        : { changes: paths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保留原导出义务', previousBehavior: '导出行为保持', sourceBehavior: '内部注释变化', deliveryBehavior: '导出行为保持', evidence: path, counterexample: '注释不改变业务' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    } else if (request.purpose === 'elaboration_generate') {
+      output = lineage && attempt.number === reviewAttempt
+        ? adaptElaborationNativeOutput(request, rows(original.replace('适用域：内存任务', '已核对的适用域：内存任务')))
+        : { version: 'elaboration-target-rows-v3', changes: [], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: false, basis: '完整原业务契约保持', affectedIds: [] })) }
+    } else if (request.purpose === 'code_generate') {
+      output = { summary: '真实源码提交保留原业务义务' }
+    } else {
+      assert.equal(request.purpose, 'elaboration_review')
+      output = { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ code: mode === 'business-repair' ? 'business-repair' : 'implementation-review', kind: 'repair', affectedIds: ['RULE-EXPORT-05'], message: '实现仍需按已确定业务义务修正', evidence: 'src/export.js#ExportService：冻结实现须保首次结果，重复完成不能替换它。', decision: '只修原授权实现，保留业务正文及只读测试' }] }
+    }
+    const writing = request.worktree!.mode === 'edit', workspace = join(f.parent, `deferred-p1-${calls.length}`)
+    if (!writing) f.git('worktree', 'add', '--detach', workspace, request.worktree!.baseCommit)
+    let worktree: ReturnType<typeof nativeWorktreeResult>
+    if (request.purpose === 'code_generate') {
+      f.git('worktree', 'add', '--detach', workspace, request.worktree!.baseCommit)
+      writeFileSync(join(workspace, 'src/export.js'), readFileSync(join(workspace, 'src/export.js'), 'utf8') + '\n// exact deferred implementation candidate\n')
+      execFileSync('git', ['-C', workspace, 'add', 'src/export.js'], { stdio: 'pipe' })
+      execFileSync('git', ['-C', workspace, 'commit', '-m', 'normal native builder result'], { stdio: 'pipe' })
+      worktree = nativeWorktreeResult(workspace, request.worktree!)
+    } else worktree = writing ? committedDraftFixture(f, request, output, workspace) : nativeWorktreeResult(workspace, request.worktree!)
+    const receipt = writing ? { summary: '真实Git草稿已正常提交' } : output
+    const fence = { operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }
+    return createAttemptRunner(store, fence, { pollMs: 2, runtime: {
+      readRecord: id => records.get(id) ?? null, cancel: async () => { throw new Error('fixture不得控制真实进程') },
+      run: async native => {
+        const sessionId = sessionIdForCreateKey(native.sessionCreateKey!), identity = { threadId: `deferred-p1-${sessionId}`, turnId: 'turn' }, execution = structuredExecutionPolicy(native), resultDigest = contentHash(JSON.stringify(receipt))
+        records.set(sessionId, { session: sessionId, status: 'awaiting', harnessSessionId: identity.threadId, createRequestId: contentHash(native.sessionCreateKey!), createPayloadHash: contentHash(JSON.stringify({ prompt: nativeWorktreePrompt(native.prompt, native.worktree!), parent: null, launcher: null, base: native.base, structuredExecution: execution })), structuredExecution: { ...execution, ...identity, state: 'completed', output: receipt, resultDigest, resultWorktree: worktree } })
+        return { sessionId, ...identity, output: receipt, resultDigest, worktree }
+      },
+    } })(request)
+  }
+  if (cold) {
+    const claim = store.claimAttempt.bind(store), claimQueued = store.claimQueuedAttempt.bind(store)
+    const restart = () => { if (store.listAttempts(f.operation.id).some(attempt => attempt.number === reviewAttempt && attempt.failure)) throw Object.assign(new Error('fixture在已持久失败和下一次claim之间冷重启'), { code: 'SYNC_LEASE_CONFLICT' }) }
+    store.claimAttempt = input => { restart(); return claim(input) }
+    store.claimQueuedAttempt = input => { restart(); return claimQueued(input) }
+  }
+  let result = await runSyncOperation(store, f.operation.id, f.options)
+  if (cold) {
+    assert.equal(result.status, 'busy', JSON.stringify(result.failure))
+    assert.equal(store.listAttempts(f.operation.id).length, reviewAttempt)
+    assert.equal(store.listAttempts(f.operation.id).at(-1)!.failure?.code, 'structured_output_format_invalid')
+    f.closeForRestart()
+    const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
+    store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) }); f.store = store; f.useStore(store)
+    result = await runSyncOperation(store, f.operation.id, f.options)
+  }
+  const attempts = store.listAttempts(f.operation.id), first = attempts[reviewAttempt - 1], second = attempts[reviewAttempt]
+  const firstLocal = local(first), approved = JSON.parse(readEvidence(commonDir, firstLocal.resultRef).toString()) as ElaborationResult
+  const later = calls.filter(call => call.attempt === reviewAttempt + 1).map(call => call.purpose)
+  t.diagnostic(JSON.stringify({ precise, mode, calls, failure: result.failure, firstP1: firstLocal.resultRef, firstP1Failure: approved.failure, firstFindings: approved.rounds.at(-1)?.findings.filter(finding => finding.severity === 'error'), secondP1: second && local(second)?.resultRef }))
+  if (mode !== 'business-repair') assert.equal(approved.reviewPassed, true, '反例也必须先形成合法deferred P1，再改变其原件')
+  if (mode === 'review-lineage-native') {
+    assert.deepEqual(later, [], '当前候选的原P1认证失败，不能回退旧P1或重派模型')
+    assert.equal(result.failure?.code, 'review_source_binding')
+  } else if (mode === 'live' || mode === 'cold' || reviewFailure) {
+    assert.deepEqual(later, [reviewFailure ? 'code_review' : 'code_generate'], '同一已审deferred P1只重派失败的P2阶段')
+    assert.deepEqual(local(second).resultRef, firstLocal.resultRef)
+    const provenance = stages(second).find(value => value.stage === firstLocal.stage + ':provenance')!
+    assert.deepEqual(JSON.parse(readEvidence(commonDir, provenance.resultRef).toString()), { fromOperationId: f.operation.id, fromAttemptId: first.id, resultRef: firstLocal.resultRef })
+    assert.equal(approved.reviewPassed, true); assert.equal(approved.rounds.at(-1)!.review!.verdict, 'repair')
+    assert.equal(hasApprovedElaborationReview(approved), true)
+    assert.equal(first.failure!.code, 'structured_output_format_invalid')
+    assert.equal(result.failure?.code, 'unsupported')
+    if (reviewFailure) {
+      const generation = (attempt: SyncAttempt) => JSON.parse(readEvidence(commonDir, stages(attempt).find(value => value.stage === 'generation')!.resultRef).toString()) as import('./generation-types.js').GenerationResult
+      const before = generation(first), after = generation(second)
+      assert.equal(before.candidateValidated, true)
+      assert.deepEqual(after.candidate, before.candidate)
+      assert.deepEqual(after.traces.filter(trace => trace.purpose === 'code_generate'), before.traces.filter(trace => trace.purpose === 'code_generate'))
+      assert.equal(calls.filter(call => call.purpose === 'code_generate').length, reviewAttempt)
+      if (lineage) {
+        const originalP1 = JSON.parse(readEvidence(commonDir, local(attempts[0]).resultRef).toString()) as ElaborationResult
+        assert.equal(originalP1.inputDigest, approved.inputDigest)
+        assert.notEqual(originalP1.candidateDigest, approved.candidateDigest)
+        assert.notDeepEqual(local(second).resultRef, local(attempts[0]).resultRef, '候选续审沿生成当时的原P1，不回退首个批准正文')
+      }
+    }
+  } else if (mode === 'business-repair') {
+    assert.equal(hasApprovedElaborationReview(approved), false)
+    assert.equal(approved.reviewPassed, false)
+    assert.deepEqual(later, ['elaboration_generate', 'elaboration_review'])
+    assert.equal(calls.some(call => call.purpose === 'code_generate'), false)
+  } else if (mode === 'missing-draft-ref') {
+    assert.equal(later.includes('code_generate'), false, '缺少原Git保活证明不能复用批准')
+  } else {
+    assert.notDeepEqual(second && local(second)?.resultRef, firstLocal.resultRef, '原Native独审或生成请求失配不能复制旧批准')
+    assert.ok(!later.includes('code_generate') || later.includes('elaboration_generate') && later.includes('elaboration_review'), '新P2必须先有新的完整P1')
+  }
+  for (const [sha256, bytes] of originalBytes) assert.deepEqual(readEvidence(commonDir, { sha256 }), bytes)
+  assert.equal(store.listJournals(f.operation.id).length, 0)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+  assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+})
+
 for (const missingRef of [false, true]) test(`Native whole已审draft接受缓存重核实际Git，missingRef=${missingRef}`, async t => {
   const f = await fixture(t, { maxAttempts: 2, maxCalls: 8, maxRepairs: 1, timeoutMs: 120_000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, 'spec', 'claude:MiniMax-M3.1-Flash')
   const calls: string[] = []
