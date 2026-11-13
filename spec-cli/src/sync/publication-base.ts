@@ -1,17 +1,19 @@
-import type { ComposedInputRef, PublicationBase, PublicationHeads, SyncAttempt, SyncOperation } from './operation-types.js'
+import type { BaselinePair, ComposedInputRef, PublicationBase, PublicationHeads, SyncAttempt, SyncOperation } from './operation-types.js'
 import type { SyncStore } from './store.js'
-import { contentHash, objectGit, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot, writeEvidence, writeTree } from './snapshot.js'
+import { contentHash, identifyWorktree, objectGit, readEvidence, readObject, readTree, sourceGit, validateRepositoryPath, verifySnapshot, writeEvidence, writeTree } from './snapshot.js'
 import type { TreeEntry } from './snapshot.js'
 import { isUtf8Text } from './composition.js'
 import { ownedObligationPaths } from './prior-context.js'
+import { isSourceCommitAncestor, settledReceipt } from './source-adoption.js'
 
+type PublicationParentSource = { kind: 'source-head'; headCommit: string } | { kind: 'settled-delivery'; headCommit: string; receiptId: string }
 export type PublicationProvenance = {
-  version: 'sync-publication-base-v1'; operationId: string; attemptId: string; sourceInputId: string
+  operationId: string; attemptId: string; sourceInputId: string
   originalComposed: ComposedInputRef; readSetDigest: string; readPaths: string[]; writePaths: string[]
   heads: PublicationHeads
   paths: { path: string; pairId: string; receiptId: string; delivered: TreeEntry | null; selected: TreeEntry | null; cause: 'settled_delivery' | 'current_head' }[]
   parentCommit: string; parentTree: string; parentManifestBlob: PublicationBase['parentManifestBlob']; composed: ComposedInputRef
-}
+} & ({ version: 'sync-publication-base-v1' } | { version: 'sync-publication-base-v2'; parentSource: PublicationParentSource })
 const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
 const within = (path: string, paths: readonly string[]): boolean => paths.some(parent => path === parent || path.startsWith(`${parent}/`))
 const canonical = (paths: readonly string[]): string[] => [...new Set(paths.map(validateRepositoryPath))].sort()
@@ -71,11 +73,55 @@ function publicationImage(operation: SyncOperation, composed: ComposedInputRef, 
   return { parent, candidate: [...image.values()], paths }
 }
 
+function exactDeliveryPairs(heads: PublicationHeads, parentTree: string): Map<string, BaselinePair> {
+  const pairs = new Map<string, BaselinePair>()
+  for (const binding of heads.selection.bindings) if ('bytePair' in binding && binding.bytePair?.verifiedDelivery.immutableTree === parentTree) pairs.set(binding.bytePair.receiptId, binding.bytePair)
+  return pairs
+}
+
+function verifyDeliveryParent(store: SyncStore, operation: SyncOperation, pair: BaselinePair): string {
+  if (!pair.receiptId.startsWith('receipt-')) throw new Error('SYNC_PUBLICATION_BASE_BINDING: publication parent lacks a receipt identity')
+  const journal = store.readJournal(pair.receiptId.slice('receipt-'.length)), previous = store.readOperation(journal.operationId)
+  const { receipt } = settledReceipt(store, previous, journal)
+  if (previous.id === operation.id && journal.attemptId === operation.currentAttemptId || !same(previous.input.source, operation.input.source) || receipt.id !== pair.receiptId || !same(previous.input, pair.sourceInput) || !same(receipt.deliverySnapshot, pair.verifiedDelivery) || !same(journal.plan.coveredScope, pair.coveredScope)) throw new Error('SYNC_PUBLICATION_BASE_BINDING: parent receipt differs from its source frontier')
+  return receipt.actualCommit!
+}
+
+function sourceHasNoChanges(root: string): boolean {
+  return !sourceGit(root, ['--no-optional-locks', 'status', '--porcelain=v1', '--untracked-files=all']).length
+}
+
+function selectPublicationParent(store: SyncStore, operation: SyncOperation, heads: PublicationHeads, parentTree: string, inputTree: string): { commit: string; source: PublicationParentSource } | null {
+  const { canonicalRoot, commonDir } = operation.input.source
+  const headCommit = sourceGit(canonicalRoot, ['rev-parse', 'HEAD']).toString().trim()
+  if (!isSourceCommitAncestor(commonDir, operation.input.headCommit, headCommit)) return null
+  if (headCommit !== operation.input.headCommit && objectGit(commonDir, ['rev-parse', `${headCommit}^{tree}`]).toString().trim() === parentTree &&
+    sourceHasNoChanges(canonicalRoot)) return { commit: headCommit, source: { kind: 'source-head', headCommit } }
+  if (parentTree === inputTree && headCommit === operation.input.headCommit) return null
+  for (const [receiptId, pair] of exactDeliveryPairs(heads, parentTree)) {
+    if (!isSourceCommitAncestor(commonDir, headCommit, pair.verifiedDelivery.headCommit)) continue
+    return { commit: verifyDeliveryParent(store, operation, pair), source: { kind: 'settled-delivery', headCommit, receiptId } }
+  }
+  return null
+}
+
+/** 首次绑定重核来源；冷恢复只读已经冻结的 parent 和原因果。 */
+export function assertPublicationParentCurrent(operation: SyncOperation, provenance: PublicationProvenance): void {
+  if (provenance.version === 'sync-publication-base-v1') return
+  const source = operation.input.source
+  const head = sourceGit(source.canonicalRoot, ['rev-parse', 'HEAD']).toString().trim()
+  if (!same(identifyWorktree(source.canonicalRoot), source) || !isSourceCommitAncestor(source.commonDir, operation.input.headCommit, head) ||
+    !isSourceCommitAncestor(source.commonDir, head, provenance.parentCommit) ||
+    provenance.parentSource.kind === 'source-head' && (head !== provenance.parentCommit || !sourceHasNoChanges(source.canonicalRoot))) {
+    throw new Error('SYNC_PUBLICATION_BASE_BINDING: source changed before binding the actual parent')
+  }
+}
+
 /** 只在来源发布锁内调用；恢复使用已冻结记录，不重新读取最新 frontier。 */
-export function assemblePublicationBase(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, viewComposed: ComposedInputRef, readPaths: readonly string[]): PublicationBase {
+export function assemblePublicationBase(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, viewComposed: ComposedInputRef, readPaths: readonly string[], original?: PublicationProvenance): PublicationBase {
   const reads = canonical(readPaths)
   if (attempt.publicationBase) {
-    const evidence = verifyPublicationBase(operation, attempt, attempt.publicationBase)
+    const evidence = verifyPublicationBase(store, operation, attempt, attempt.publicationBase)
     if (!same(reads, evidence.readPaths) || !same(viewComposed, evidence.originalComposed)) throw new Error('SYNC_PUBLICATION_BASE_BINDING: restored publication input differs from frozen evidence')
     return attempt.publicationBase
   }
@@ -87,8 +133,11 @@ export function assemblePublicationBase(store: SyncStore, operation: SyncOperati
   const entries = readTree(commonDir, tree), parentManifestBlob = writeEvidence(commonDir, { version: 1, entries: readTree(commonDir, parentTree) })
   const composed = { ...viewComposed, tree, manifestBlob: writeEvidence(commonDir, { version: 1, entries }), contentDigest: contentHash(JSON.stringify(entries)) }
   const headTree = objectGit(commonDir, ['rev-parse', `${operation.input.headCommit}^{tree}`]).toString().trim()
-  const parentCommit = parentTree === headTree ? operation.input.headCommit : objectGit(commonDir, ['-c', 'user.name=SpexCode input', '-c', 'user.email=publication-input@spexcode.invalid', 'commit-tree', parentTree, '-p', operation.input.headCommit], Buffer.from(`SpexCode frozen publication input\n\nOperation: ${operation.id}\nAttempt: ${attempt.id}\n`)).toString().trim()
-  const provenance: PublicationProvenance = { version: 'sync-publication-base-v1', operationId: operation.id, attemptId: attempt.id, sourceInputId: operation.input.id, originalComposed: viewComposed, readSetDigest: operation.readSetDigest, readPaths: reads, writePaths: writes, heads, paths: image.paths, parentCommit, parentTree, parentManifestBlob, composed }
+  const selected = original
+    ? original.version === 'sync-publication-base-v2' ? { commit: original.parentCommit, source: original.parentSource } : null
+    : selectPublicationParent(store, operation, heads, parentTree, headTree)
+  const parentCommit = selected?.commit ?? (parentTree === headTree ? operation.input.headCommit : objectGit(commonDir, ['-c', 'user.name=SpexCode input', '-c', 'user.email=publication-input@spexcode.invalid', 'commit-tree', parentTree, '-p', operation.input.headCommit], Buffer.from(`SpexCode frozen publication input\n\nOperation: ${operation.id}\nAttempt: ${attempt.id}\n`)).toString().trim())
+  const provenance: PublicationProvenance = { ...(selected ? { version: 'sync-publication-base-v2', parentSource: selected.source } as const : { version: 'sync-publication-base-v1' } as const), operationId: operation.id, attemptId: attempt.id, sourceInputId: operation.input.id, originalComposed: viewComposed, readSetDigest: operation.readSetDigest, readPaths: reads, writePaths: writes, heads, paths: image.paths, parentCommit, parentTree, parentManifestBlob, composed }
   const provenanceBlob = writeEvidence(commonDir, provenance)
   objectGit(commonDir, ['update-ref', `refs/spex-sync/publication-bases/${provenanceBlob.sha256}`, parentCommit])
   objectGit(commonDir, ['update-ref', `refs/spex-sync/publication-compositions/${provenanceBlob.sha256}`, tree])
@@ -96,17 +145,25 @@ export function assemblePublicationBase(store: SyncStore, operation: SyncOperati
 }
 
 /** 事务外核验全部实际 Git 对象、逐路径来源和完整读闭包，包括不存在路径。 */
-export function verifyPublicationBase(operation: SyncOperation, attempt: SyncAttempt, base: PublicationBase): PublicationProvenance {
+export function verifyPublicationBase(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, base: PublicationBase): PublicationProvenance {
   const commonDir = operation.input.source.commonDir, evidence = JSON.parse(readEvidence(commonDir, base.provenanceBlob).toString()) as PublicationProvenance
-  if (evidence.version !== 'sync-publication-base-v1' || evidence.operationId !== operation.id || evidence.attemptId !== attempt.id || evidence.sourceInputId !== operation.input.id || evidence.readSetDigest !== operation.readSetDigest || !attempt.composedInput || !same(evidence.originalComposed, attempt.composedInput) || !same(evidence.writePaths, canonical(operation.readyScope.paths)) || !same(evidence.readPaths, canonical(evidence.readPaths)) || !same({ parentCommit: evidence.parentCommit, parentTree: evidence.parentTree, parentManifestBlob: evidence.parentManifestBlob, composed: evidence.composed }, { parentCommit: base.parentCommit, parentTree: base.parentTree, parentManifestBlob: base.parentManifestBlob, composed: base.composed })) throw new Error('SYNC_PUBLICATION_BASE_BINDING: frozen identity or provenance differs')
+  if (!['sync-publication-base-v1', 'sync-publication-base-v2'].includes(evidence.version) || evidence.operationId !== operation.id || evidence.attemptId !== attempt.id || evidence.sourceInputId !== operation.input.id || evidence.readSetDigest !== operation.readSetDigest || !attempt.composedInput || !same(evidence.originalComposed, attempt.composedInput) || !same(evidence.writePaths, canonical(operation.readyScope.paths)) || !same(evidence.readPaths, canonical(evidence.readPaths)) || !same({ parentCommit: evidence.parentCommit, parentTree: evidence.parentTree, parentManifestBlob: evidence.parentManifestBlob, composed: evidence.composed }, { parentCommit: base.parentCommit, parentTree: base.parentTree, parentManifestBlob: base.parentManifestBlob, composed: base.composed })) throw new Error('SYNC_PUBLICATION_BASE_BINDING: frozen identity or provenance differs')
   const frontierPaths = evidence.heads.selection.bindings.flatMap(binding => binding.resource.kind === 'path' ? [binding.resource.path] : [])
   if (!same(evidence.readPaths, publicationReadPaths(operation, attempt.composedInput!, frontierPaths))) throw new Error('SYNC_PUBLICATION_BASE_BINDING: publication read closure differs from frozen plan and reviewed scope')
   const image = publicationImage(operation, attempt.composedInput, evidence.heads, evidence.readPaths, evidence.writePaths)
   if (!same(image.paths, evidence.paths) || writeTree(commonDir, image.parent) !== base.parentTree || writeTree(commonDir, image.candidate) !== base.composed.tree) throw new Error('SYNC_PUBLICATION_BASE_BINDING: actual publication images differ')
   const parentEntries = readTree(commonDir, base.parentTree)
   if (readEvidence(commonDir, base.parentManifestBlob).toString() !== JSON.stringify({ version: 1, entries: parentEntries }) || objectGit(commonDir, ['rev-parse', `${base.parentCommit}^{tree}`]).toString().trim() !== base.parentTree) throw new Error('SYNC_PUBLICATION_BASE_BINDING: actual parent differs')
-  const headTree = objectGit(commonDir, ['rev-parse', `${operation.input.headCommit}^{tree}`]).toString().trim()
-  if (base.parentCommit !== operation.input.headCommit && (base.parentTree === headTree || objectGit(commonDir, ['show', '-s', '--format=%P', base.parentCommit]).toString().trim() !== operation.input.headCommit)) throw new Error('SYNC_PUBLICATION_BASE_BINDING: metadata parent differs')
+  if (evidence.version === 'sync-publication-base-v2') {
+    const source = evidence.parentSource
+    if (!source || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(source.headCommit) || !isSourceCommitAncestor(commonDir, operation.input.headCommit, source.headCommit) || !isSourceCommitAncestor(commonDir, source.headCommit, base.parentCommit)) throw new Error('SYNC_PUBLICATION_BASE_BINDING: actual parent ancestry differs')
+    const pair = source.kind === 'settled-delivery' ? exactDeliveryPairs(evidence.heads, base.parentTree).get(source.receiptId) : undefined
+    const actual = source.kind === 'source-head' ? source.headCommit : pair && verifyDeliveryParent(store, operation, pair)
+    if (actual !== base.parentCommit) throw new Error('SYNC_PUBLICATION_BASE_BINDING: actual parent source differs')
+  } else {
+    const headTree = objectGit(commonDir, ['rev-parse', `${operation.input.headCommit}^{tree}`]).toString().trim()
+    if (base.parentCommit !== operation.input.headCommit && (base.parentTree === headTree || objectGit(commonDir, ['show', '-s', '--format=%P', base.parentCommit]).toString().trim() !== operation.input.headCommit)) throw new Error('SYNC_PUBLICATION_BASE_BINDING: metadata parent differs')
+  }
   composedEntries(commonDir, base.composed)
   const { tree: _tree, manifestBlob: _manifest, contentDigest: _content, ...originalIdentity } = attempt.composedInput
   const { tree: _baseTree, manifestBlob: _baseManifest, contentDigest: _baseContent, ...baseIdentity } = base.composed
