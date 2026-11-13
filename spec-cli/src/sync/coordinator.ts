@@ -1784,10 +1784,11 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           if (retrySource.attempt.publicationBase) {
             await acquirePublication()
             const currentAttempt = store.readAttempt(attempt.id)
-            const base = assemblePublicationBase(store, operation, currentAttempt, view.composed, view.readPaths)
-            const { operationId: _newOperation, attemptId: _newAttempt, parentCommit: _newMetadata, ...currentBase } = verifyPublicationBase(operation, currentAttempt, base)
-            const { operationId: _oldOperation, attemptId: _oldAttempt, parentCommit: _oldMetadata, ...originalBase } = verifyPublicationBase(source, retrySource.attempt, retrySource.attempt.publicationBase)
-            if (canonical(currentBase) !== canonical(originalBase)) fail('candidate_retry_binding', '原候选发布基树已变化，不能覆盖新发布')
+            const original = verifyPublicationBase(store, source, retrySource.attempt, retrySource.attempt.publicationBase)
+            const base = assemblePublicationBase(store, operation, currentAttempt, view.composed, view.readPaths, original)
+            const { operationId: _newOperation, attemptId: _newAttempt, parentCommit: _newMetadata, ...currentBase } = verifyPublicationBase(store, operation, currentAttempt, base)
+            const { operationId: _oldOperation, attemptId: _oldAttempt, parentCommit: _oldMetadata, ...originalBase } = original
+            if (canonical(currentBase) !== canonical(originalBase) || original.version === 'sync-publication-base-v2' && base.parentCommit !== original.parentCommit) fail('candidate_retry_binding', '原候选发布基树已变化，不能覆盖新发布')
             store.bindPublicationBase(fence, base)
           }
         }

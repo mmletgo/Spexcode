@@ -12,19 +12,25 @@ code:
 
 独立 A1 已交付但尚未被来源采纳时，B2 的完整交付必须保留 A1。A/B 可以在同一 HEAD 并行生成，发布顺序互换仍保留先发布版本；未消费的来源 dirty A2 不进入 B 的交付。本轮覆盖与历史资源头不能借此扩大。
 
+两个独立交付可以沿真实提交连续快进。先交付者尚未采纳时，后交付者也能在证明完整父树一致后继承其真实提交，随后原树可依次采纳两个结果。
+
 ## expanded spec
 
 发布锁由协调器按完整来源身份取得，仅串行冻结候选、独立审查、验证和真实发布；模型生成仍可并行。assemblePublicationBase 在锁内从 operation.input.headCommit 和 [[sync-store]] 同事务读取的完整同来源 path heads 形成父树，不使用全局 latest pair，也不读取 live dirty。每条继承证据绑定真实 pair、receipt、OID、mode 或删除。无关 legacy 未知路径只保留诊断并沿原 HEAD，不猜已交付对象、不阻塞其他已证明资源；原 selected 未知资源继续严格拒绝。
 
 逐路径比较当前冻结 HEAD、该 pair.sourceInput 对应 HEAD 和 verifiedDelivery 的实际对象。当前 HEAD 等于原 HEAD 时继承已结算 delivery；已等于 delivery 时保留；有真实新提交对象时保留当前 HEAD 并记录 current_head 原因。作者未消费 dirty 不作为闭包外发布输入。
 
-父树的写路径保留已结算/HEAD preimage；只读 read closure 从 original composed 原字节携入父树，包含配置、oracle、mode 与不存在路径，使它们不产生本轮 apply 差量。candidate composition 在父树上仅叠 original composed 读写闭包；原 composed、sourceInput、baseline selection、request、作者投影和行为分析身份均不替换。metadata commit-tree 与私有保活 ref 只固定输入对象，使用原 source HEAD 为唯一 parent，不是交付提交或 receipt；真正发布仍执行 [[sync-private-delivery]] 的可信普通 hooks。
+父树的写路径保留已结算/HEAD preimage；只读 read closure 从 original composed 原字节携入父树，包含配置、oracle、mode 与不存在路径，使它们不产生本轮 apply 差量。candidate composition 在父树上仅叠 original composed 读写闭包；原 composed、sourceInput、baseline selection、request、作者投影和行为分析身份均不替换。真正发布执行 [[sync-private-delivery]] 的可信普通 hooks。
+
+首次绑定发布父提交时，可使用完整 Git tree 与既定父树精确相同的当前干净来源 HEAD，或同来源 path frontier 上真实已结算交付的 actualCommit。实际 parent 必须位于原 input HEAD 与当前来源 HEAD 之后或等于当前来源 HEAD。同来源 receipt 复用 [[sync-source-adoption]] 的正式验证与 Git 绑定核验，逐项绑定原输入、delivery snapshot 与覆盖范围。没有匹配证据时，原 HEAD 或以它为唯一 parent 的 metadata commit 固定既定父树。父提交选择保留既有范围与配置、测试、未跟踪内容的保护。
 
 publication readPaths 必须精确等于可信 plan.readPaths、当前已审 operation.scope.paths 及 original composed 中实际 owned target 的只读义务闭包的去重排序并集；factory 和 verifier 都沿同一共享路径匹配器核该唯一集合。该闭包只取原冻结目标的 code/related、代码来源与 AC.test，不扩写权或从 current/WIP 正文取引用。不能添加无关路径把继承的已结算字节当作 readonly carry 恢复成 original composed，亦不能遗漏配置、oracle、absence 或已审 P1 新文件。缺失冻结计划不能猜读闭包。
 
 字面引用的不存在对象仍受保护；glob 匹配也核发布时实际冻结的 path frontier 清单，未读的新匹配成员不能成为闭包外继承。verifier 复核原 provenance 的 heads，不用 latest 替换已经冻结的发布输入。
 
 publication provenance 内容寻址绑定 operation/attempt、原输入与 readSet、original composed、完整读写路径、path frontier、诊断及实际 parent/候选组合对象。[[sync-store]] bindPublicationBase 在事务外重建实际对象，在事务内复核当前 fence、原 selection 与完整 frontier CAS；仅 generating 且无 candidate/verification 时可首次绑定，相同对象重入仍核当前完整 path frontier，已变化明确 stale，不能替换。候选冻结后和恢复只能使用该 parent，不重新读取 latest 更换树。冻结候选的模型 diff 基线为 publicationBase.composed；完整 apply 差量仍须严格属于本轮实际验证 scope，继承路径、readonly 与历史 ID 不取得本轮 journal 或头推进。
+
+实际父提交的 v2 provenance 额外冻结选用的 HEAD 或 receipt 以及当时来源 HEAD；冷核沿该原件复算来源及祖先关系。旧 v1 和已冻结重试按原语义核验，正式候选续验须保留既有 v2 父提交。writer45 沿既有停稳、资源结算和一致 SQLite online backup 路径追加版本围栏；回滚恢复升级前的 v44、相配证据及 Git refs。
 
 [[sync-publication-base-regression]] 的真实 Git/SQLite 回归覆盖 A1 后 B2、同 HEAD A/B 两种发布顺序、未消费 A2/source/index 保留、readonly config/oracle 当前字节与 absence、逐路径 head 不冒领、伪 parent/闭包/来源拒绝、全 head CAS、冻结后改 base 拒绝及已提交中断恢复原 parent。native 与 V1-V4 前置明确为受控测试证据，不能宣称真实模型或 Docker 已验收；实际 canonical hooks、Git tree/commit、SQLite journal/receipt 均真实运行。
 
