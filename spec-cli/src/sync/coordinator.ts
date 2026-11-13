@@ -2894,9 +2894,11 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           return draft && cacheDraft ? { ...draft, errors: [...draft.errors, ...cacheDraft.errors] } : draft
         } : undefined
         const maxParallel = options.plan.version === 'sync-coordinator-v2' ? options.plan.partitionPolicy.maxParallel : 1
-        const serialRetry = partitions && draftProtocol && maxParallel > 1 && attempt.number > 1 && store.listAttempts(operation.id).some(prior =>
-          prior.number < attempt!.number && prior.status === 'superseded' && prior.failure?.kind === 'repairable'
-          && (prior.failure.serialElaborationRetry || isNativeObservationFailure(prior.failure)))
+        const previousElaboration = partitions && draftProtocol && maxParallel > 1 && attempt.number > 1
+          ? store.listAttempts(operation.id).reverse().find(prior => prior.number < attempt!.number && prior.dispatchPlans.some(dispatch => dispatch.purpose.startsWith('elaboration_')))
+          : undefined
+        const serialRetry = previousElaboration?.status === 'superseded' && previousElaboration.failure?.kind === 'repairable'
+          && (previousElaboration.failure.serialElaborationRetry || isNativeObservationFailure(previousElaboration.failure))
         const result = partitions ? await elaborateSyncPartitions(elaborationInput, partitions, serialRetry ? 1 : maxParallel, partitionCheckpoints, runner, view.composed) : await elaborate(elaborationInput, { runner, draft: cacheDraft, loadDraft, loadDraftMaterial: draftProtocol ? (schemaDigest, request) => loadElaborationDraftMaterial('elaboration', undefined, schemaDigest, request) : undefined, seed: loadElaborationRepairSeed('elaboration', freezeElaborationInput(elaborationInput).inputDigest) ?? undefined, repairDiagnostics: loadElaborationRepairDiagnostics('elaboration', freezeElaborationInput(elaborationInput).inputDigest) ?? undefined })
         const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = result
         elaboration = compact; saveStage(store, fence, 'elaboration', compact, !operation.baselineSelection ? { readSetDigest: operation.readSetDigest } : undefined, { composedTree: view.composed.tree, composedContentDigest: view.composed.contentDigest })
