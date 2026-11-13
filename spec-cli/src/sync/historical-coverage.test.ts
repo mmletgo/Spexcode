@@ -462,7 +462,11 @@ test('历史覆盖相同owner增加旧ID不重复读取原件，55-owner同树�
 })
 
 test('真实应用与Docker新receipt不传播历史未执行覆盖，原pair、heads与旧报告保持', { skip: process.env.SPEX_DOCKER_VERIFICATION_TEST !== '1', timeout: 600000 }, async t => {
-  const initial = await fixture(t, true, undefined, { image: 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392' })
+  const evidenceRoot = process.env.SPEX_VERIFICATION_EVIDENCE_DIR
+  const initial = await fixture(t, true, undefined, {
+    image: 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392',
+    ...(evidenceRoot ? { parent: realpathSync(mkdtempSync(join(evidenceRoot, 'historical-joint-'))), preserve: true } : {}),
+  })
   retainHistoricalFrozenWorkflow(initial.application)
   const f = await independentCommit(initial), store = f.application.store, commonDir = f.next.input.source.commonDir
   const proof = f.plan.historicalCoverage!.proofs[0], pair = store.readBaselinePair(proof.pairId)
@@ -516,8 +520,10 @@ test('真实应用与Docker新receipt不传播历史未执行覆盖，原pair、
   const v1 = JSON.parse(readEvidence(commonDir, nextReport.layers.find(layer => layer.layer === 'V1')!.evidenceRefs[0]).toString('utf8')) as { findings: ContractFinding[] }
   const p1 = JSON.parse(readEvidence(commonDir, delivered.attempt!.verification!.evidenceRefs[0]).toString('utf8')) as Pick<ElaborationResult, 'partitionSeal'>
   const warning = v1.findings.find(finding => finding.code === 'acceptance-not-executed' && finding.itemId === unexecutedId)!
-  t.diagnostic(JSON.stringify({ originalReceipt: f.journal.receipt!.id, newReceipt: newReceipt.id, originalPair: pair.id, originalHeadsUnchanged: true, originalUnexecutedIds: f.report.unexecutedContractIds, currentUnexecutedIds: nextReport.unexecutedContractIds ?? null, currentTests: v3[0].evidence!.tests.map(item => item.testId), historicalWarning: warning, calls: calls.map(request => request.purpose) }))
+  const summary = { originalReceipt: f.journal.receipt!.id, newReceipt: newReceipt.id, originalPair: pair.id, originalHeadsUnchanged: true, originalUnexecutedIds: f.report.unexecutedContractIds, currentUnexecutedIds: nextReport.unexecutedContractIds ?? null, currentTests: v3[0].evidence!.tests.map(item => item.testId), historicalWarning: warning, calls: calls.map(request => request.purpose) }
+  t.diagnostic(JSON.stringify(summary))
   assert.ok(warning, '正式V1必须保留精确历史未执行warning')
   assert.equal(warning.severity, 'warning'); assert.match(warning.message, /历史上未执行/)
   assert.ok(p1.partitionSeal!.findings.some(finding => finding.code === 'acceptance-not-executed' && finding.itemId === unexecutedId && finding.message.includes('历史上未执行')))
+  if (evidenceRoot) writeFileSync(join(f.parent, 'joint-result.json'), JSON.stringify(summary, null, 2))
 })
