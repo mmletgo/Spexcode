@@ -1027,7 +1027,7 @@ async function exportApplicationFixture(t: test.TestContext, choice?: 'keep_inte
   const verify = contract.items.find(item => item.kind === 'VERIFY')!; assert.equal(verify.kind, 'VERIFY')
   const config: SyncSettings = { ...settings, nodeIds: ['export-contract'], sourcePaths: ['src'], testPaths: ['generated-tests'], readPaths: ['tests', 'package.json'], budget: { maxAttempts: 3, maxCalls: 16, maxRepairs: 2, timeoutMs: 300000 }, facts: [{ source: 'decision:EXPORT-POLICY', text: original }], mandatoryTests: [{ verificationId: verify.id, testPath: 'tests/export.test.mjs', testId: 'AC-EXPORT-03' }], verifications: [{ definition: { id: verify.id, command: verify.command, cwd: verify.cwd, timeoutMs: verify.timeoutMs }, environment: { ...settings.verifications[0].environment, image: 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392' } }] }
   if (independentNode) {
-    const other = original.replaceAll('export-contract', 'other-contract').replaceAll('EXPORT', 'OTHER').replaceAll('src/export.js', 'src/other.js').replaceAll('tests/export.test.mjs', 'tests/other.test.mjs')
+    const other = original.replaceAll('export-contract', 'other-contract').replaceAll('export-job', 'other-job').replaceAll('EXPORT', 'OTHER').replaceAll('src/export.js', 'src/other.js').replaceAll('tests/export.test.mjs', 'tests/other.test.mjs')
     mkdirSync(join(root, '.spec/project/other-contract'))
     writeFileSync(join(root, '.spec/project/other-contract/spec.md'), other)
     cpSync(join(root, 'src/export.js'), join(root, 'src/other.js'))
@@ -1144,7 +1144,7 @@ async function exportApplicationFixture(t: test.TestContext, choice?: 'keep_inte
           : { inputId: identity.inputId, candidateDigest: identity.candidate.digest, verdict: 'accept', checkedIds: frozen.readyIds, findings: [] }
       }
     }
-    if (otherNode && request.purpose === 'elaboration_generate') output = JSON.parse(JSON.stringify(output).replaceAll('EXPORT', 'OTHER').replaceAll('export-contract', 'other-contract').replaceAll('src/export.js', 'src/other.js').replaceAll('tests/export.test.mjs', 'tests/other.test.mjs')) as unknown
+    if (otherNode && request.purpose === 'elaboration_generate') output = JSON.parse(JSON.stringify(output).replaceAll('EXPORT', 'OTHER').replaceAll('export-contract', 'other-contract').replaceAll('export-job', 'other-job').replaceAll('src/export.js', 'src/other.js').replaceAll('tests/export.test.mjs', 'tests/other.test.mjs')) as unknown
     output = adaptElaborationNativeOutput(request, output)
     const dispatch = application.store.readAttempt(operation.currentAttemptId!).dispatchPlans.find(plan => plan.key === request.requestKey)!
     return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `independent-${request.requestKey}`, turnId: 'turn-1', output, resultDigest: contentHash(JSON.stringify(output)) }
@@ -1254,11 +1254,12 @@ for (const choice of ['keep_intent', 'adopt_behavior', 'new_rule'] as const) tes
 
 test('AC-APPLICATION-06 应用真实Docker及compiled hooks完整交付，completed重放沿原共同基线幂等', { skip: process.env.SPEX_DOCKER_VERIFICATION_TEST !== '1', timeout: 180000 }, async t => {
   const { temp, root, application, calls } = await exportApplicationFixture(t)
-  const before = await captureInputSnapshot(root), request = { nodeId: 'export-contract', requestId: 'complete-replay', origin: 'initial' as const }
+  const before = await captureInputSnapshot(root), request = { nodeId: 'export-contract', requestId: 'complete-replay', origin: 'spec' as const }
   const admitted = await application.submit(request); assert.ok(admitted.operation)
   const delivered = await application.wait(admitted.operation.id)
   assert.equal(delivered.operation.phase, 'workspace_synced', JSON.stringify({ failure: delivered.attempt?.failure, blockedReason: delivered.operation.blockedReason, journals: delivered.journals }))
   assert.ok(delivered.journals[0]?.receipt)
+  assert.notEqual(delivered.journals[0].receipt.actualCommit, before.headCommit)
   assert.equal(delivered.sourceSynced, false); assert.equal(delivered.stale, false)
   assert.match(readFileSync(join(delivered.operation.deliveryPlan.canonicalRoot, 'src/export.js'), 'utf8'), /application verified delivery/)
   assert.equal((await captureInputSnapshot(root)).id, before.id)

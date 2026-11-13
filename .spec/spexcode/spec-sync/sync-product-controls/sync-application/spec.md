@@ -16,6 +16,8 @@ related:
 
 已验证交付通过同一服务采纳到原工作树，资格和执行沿同一后端判据，不由界面复制安全判断。
 
+已启用的主分支在全部交付门槛通过后自动采纳。服务中断后从真实收据继续，用户可以在需要时显式采纳。
+
 ## expanded spec
 
 真正新接入可从同一冻结 input 的完整发现选择派生 [[sync-historical-coverage]]，内联原 planBlob 并参与政策摘要；复用原计划的重复请求及正式 retry 不重读 live heads 或补写历史资格。实际 executionScope、选择、验证登记与强制测试保持。
@@ -43,6 +45,8 @@ status 按节点及 bounded limit 查询，detail 返回 operation、当前 atte
 状态及详情查询对固定 runtime 仍逐项完整读取并核摘要，遍历期间有界让出事件循环，让实际执行器的子进程完成、取消及期限回调及时推进；不缓存或跳过检查，不把未完成检查显示成 ready。派发/恢复/采纳继续在原执行入口重新进行完整校验，不改变创建、调用或操作的既有预算与期限。
 
 派发使用 canonical protocol 中按 repositoryId 固定的真实地址，同仓库多个 source 工作树共享 FIFO，不同仓库共享 session DB 时互不堵塞。入口只唤醒当前仓库有效消息头，精确清理已停止的旧消息；同仓库来源由对应应用实例执行，禁止跨仓库 fallback。busy 返回真实 queued 状态，不自旋重试。前序结算后继续读取真实 FIFO；消息已耗尽时，从 canonical store 的 queued/run 状态恢复已出队暂停操作，不创建第二队列、不重置预算。wait 等待当前仓库实际运行中的前序和目标任务，外部互斥仍占用时诚实返回 queued 详情，不把它标为完成。
+
+新的初始同步、受控正文保存及代码、Spec 或混合提交从已启用主分支接入时冻结 `automaticSourceAdoption: canonical-source-v1`。重放、归并和正式重试沿原授权，历史无标记交付仍由用户显式采纳。协调器正常结算并释放发布锁后，请求既有观察器立即补偿，再推进后继 FIFO。启动与周期补偿先按实际 HEAD 查询符合 [[sync-store]] 门槛的直接后继，复用 [[sync-source-adoption]] 的锁内采纳并逐个重新采集 HEAD，再分析真实外部变化。回声沿已结算收据及实际基线消费，采纳不启动 Agent。暂停、脏树、未知资源、改变的授权和分叉均继续保留私有成果及既有资格诊断。查询详情和资源恢复保持原有只读及结算边界。
 
 显式 retryOf 由用户授权为同一冻结输入、节点、政策、来源和正文请求建立关联的新 operation 及新预算；省略 patch 继承原 requestBlob，省略 origin 继承原输入来源与裁决（若是原decision），沿旧 previousBaselinePair，不丢失未落地编辑。不能混入新 patch 或改节点、来源/政策，当前 source 已变应提交正常新输入。普通重复事件继续归并原 operation 及预算，同 retry requestId 精确幂等。detail.retryEligibility 复用 store 只读 phase、所有历史 resource/journal/live authority 门禁，并附当前输入/授权及固定 plan 诊断；failed、budget_exhausted、从未交付的 cancelled，以及下述经完整证明仍未采纳的 settled 私有交付可正式重试；GAP、冲突、active 或未知资源禁止借新预算重启。准入事务重新检查门禁，不以先前只读结果代替原子检查。
 

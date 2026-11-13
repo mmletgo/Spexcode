@@ -14,6 +14,12 @@ code:
 
 ## expanded spec
 
+writer46→47 使用隔离 SQLite 验证正常 online backup、仅追加程序语义 marker、旧 writer 写前拒绝与备份可由原迁移集合恢复。所有表行、完整 schema（含原自动采纳索引）和已有迁移字节保持；重复升级不重做备份。
+
+自动采纳政策回归覆盖新字段的 payload/规范语义/alias 冻结、无效来源拒绝、正式 retry 保原值，以及有/无标记的旧操作在同提交重复观察中不升权、不丢权、不新增消息。候选查询使用真实 SQLite 的结算记录，核完整来源、当前 settled attempt、全部 settled journal、完整 scope、精确父 HEAD、noop 排除和确定顺序；超过 500 条无关历史不漏候选，执行计划须命中父 HEAD 及 journal 索引。此测试只证明存储查询，真实 Git 采纳由 [[sync-source-adoption]] 验收。
+
+自动采纳索引迁移沿隔离库 online backup 核旧数据/registry 不变、索引与 marker 原子提交或整体回滚、旧 writer 拒绝及原备份可恢复。历史 marker 回归模拟旧 schema 时移除后续新增索引，并把这些索引的独立证明与旧 schema 不变断言分开。
+
 提交观察抢先接入后，真实 SQLite 同时覆盖按基线选择兼容归并和按语义摘要归并。被替换、仅收件且零领取的显式初始化允许新交付计划入队，保留冻结输入、全量范围、原预算和截止时间。旧 ingress、同 payload、已领取及过期输入保持原去重，后续等价请求复用新操作。
 
 writer34 至 writer44 升级到 writer45 的回归验证只追加无 DDL 的缺失 marker。备份可由各自原迁移集合读取，原 schema、操作、attempt 和已注册迁移字节保持。旧 writer 对升级后的库明确拒绝。

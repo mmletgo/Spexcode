@@ -232,6 +232,26 @@ export class SyncApplication {
   private ownsObservation(): boolean {
     return !!this.observerIdentity && this.store.readObserverHealth(this.physicalScope(this.observerIdentity.source))?.instanceId === this.observerIdentity.instanceId
   }
+  private automaticSourceAdoption(snapshot: InputSnapshot): SyncOperation['automaticSourceAdoption'] {
+    const entry = readTree(snapshot.source.commonDir, snapshot.immutableTree).find(file => file.path === '.spec/spexcode.json')
+    const project = JSON.parse(readObject(snapshot.source.commonDir, entry!.oid).toString('utf8')) as { mainBranch?: unknown }
+    const branch = typeof project.mainBranch === 'string' ? project.mainBranch.trim() || 'main' : 'main'
+    return snapshot.source.branch === `refs/heads/${branch}` && branch === (readConfig(this.root).mainBranch?.trim() || 'main') ? 'canonical-source-v1' : undefined
+  }
+  private async adoptReadySource(snapshot: InputSnapshot): Promise<InputSnapshot> {
+    if (this.stopped || !this.ownsObservation() || !this.automaticSourceAdoption(snapshot) || this.store.readPhysicalControl(this.physicalScope(snapshot.source)).control !== 'run') return snapshot
+    const operation = this.store.listAutomaticAdoptionCandidates(snapshot.source, snapshot.headCommit)[0]
+    if (!operation) return snapshot
+    try {
+      await this.adoptSource(operation.id, snapshot.headCommit)
+    } catch (error) {
+      if (!(error instanceof SyncApplicationError) || !['sync_adoption_source_dirty', 'sync_source_paused', 'sync_resources_unsettled', 'sync_adoption_busy', 'sync_automatic_adoption_changed', 'sync_source_changed'].includes(error.code)) throw error
+      return snapshot
+    }
+    const adopted = await captureInputSnapshot(this.root, { committed: true })
+    if (adopted.headCommit !== snapshot.headCommit) void this.observer?.scanNow()
+    return adopted
+  }
   private recordObserverHealth(health: SyncObserverHealth): void {
     this.observerHealth = health
     if (!this.observerIdentity) return
@@ -299,11 +319,17 @@ export class SyncApplication {
     if (!this.ownsObservation()) return
     const registered = JSON.parse(readFileSync(this.enabledPath, 'utf8')) as EnabledRecord
     if (readPhysicalFingerprint(this.root, registered.source.gitDir, registered.source.commonDir) !== registered.source.physicalFingerprint) throw new SyncApplicationError('sync_source_changed', '输入工作树被删除重建或仓库身份变化，请明确重新启用')
-    const snapshot = await captureInputSnapshot(this.root, { committed: true })
-    this.latestSnapshot = snapshot
-    this.latestObservation = this.store.readLatestObservation(snapshot.source)
+    const captured = await captureInputSnapshot(this.root, { committed: true })
+    this.latestSnapshot = captured
+    this.latestObservation = this.store.readLatestObservation(captured.source)
     if (!existsSync(this.enabledPath)) return
-    this.requireEnabled(snapshot)
+    this.requireEnabled(captured)
+    const snapshot = await this.adoptReadySource(captured)
+    if (snapshot !== captured) {
+      this.latestSnapshot = snapshot
+      this.latestObservation = this.store.readLatestObservation(snapshot.source)
+      this.requireEnabled(snapshot)
+    }
     const { settings } = readSyncSettings(snapshot), nodes = await this.frozenNodes(snapshot)
     const record = this.enabled(snapshot)!
     const currentRoots = settings.nodeIds ? nodes.filter(node => settings.nodeIds!.includes(node.id)) : this.selectRegisteredNodes(nodes, settings, snapshot)
@@ -454,7 +480,7 @@ export class SyncApplication {
         this.latestObservation = this.store.recordObservation(observation, { controlRevision: control.revision, selectionDigest: selection.digest }); return
       }
       const model = await resolveSyncModel(syncModel(settings, Boolean(plan.agentWorkflow)), Boolean(plan.agentWorkflow))
-      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: ingressKey, origin: observedOrigin, ...syncModelBinding(model), budget: settings.budget, managedRoot: this.managedRoot, baselineSelection: selection })
+      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: ingressKey, origin: observedOrigin, ...syncModelBinding(model), budget: settings.budget, managedRoot: this.managedRoot, baselineSelection: selection, automaticSourceAdoption: this.automaticSourceAdoption(snapshot) })
       if (!this.ownsObservation()) return
       this.prepareTools(ingressKey, this.store.findOperationByIngressKey(ingressKey), model, plan.agentWorkflow)
       const result = this.store.observeAndAdmit(observation, admission, { controlRevision: control.revision, selectionDigest: selection.digest })
@@ -511,13 +537,21 @@ export class SyncApplication {
     const current = available && (landing.sourceSynced || currentness)
     return { operation: landing.phase === operation.phase ? operation : { ...operation, phase: landing.phase }, physicalControl: this.store.readPhysicalControl(this.physicalScope(operation.input.source)), decisionContext: existsSync(operation.input.source.commonDir) ? this.decisionContext(operation) : null, attempt, ...(unexecutedContractIds ? { unexecutedContractIds } : {}), journals, resources, stale: !current, sourceSynced: landing.sourceSynced, canonicalSynced: landing.canonicalSynced, adoptionEligibility: await this.adoptionEligibility(operation, sourceSnapshot, execution), revertEligibility: await this.revertEligibility(operation, sourceSnapshot, journals, resources), retryEligibility: await this.retryEligibility(operation, currentSnapshot, currentness), decisionEligibility: this.store.readDecisionEligibility(operation.id), executionAvailability }
   }
-  private async adoptionPlan(operation: SyncOperation, snapshot: InputSnapshot, checkedInputs?: ExecutionInputs): Promise<SourceAdoptionPlan> {
+  private async adoptionPlan(operation: SyncOperation, snapshot: InputSnapshot, execution: ExecutionInputs, refresh?: () => Promise<InputSnapshot>): Promise<SourceAdoptionPlan> {
     try {
       assertSourceAdoptionComplete(operation)
       this.assertSource(operation)
       this.requireEnabled(snapshot, operation)
-      const { plan, tools } = checkedInputs ?? this.executionInputs(operation)
+      const { plan, tools } = execution
       await this.requireNodeAuthorized(snapshot, plan.intentNodeId)
+      if (refresh) {
+        const current = await refresh()
+        if (current.id !== snapshot.id) throw new SyncApplicationError('sync_source_changed', '采纳授权检查期间原来源内容、index 或 HEAD 已变化')
+        snapshot = current
+        const latest = this.store.readOperation(operation.id)
+        if (latest.revision !== operation.revision) throw new SyncApplicationError('sync_source_changed', '采纳检查期间原交付已变化')
+        this.requireEnabled(snapshot, latest)
+      }
       return prepareSourceAdoption(this.store, operation, snapshot, { tools, canonicalBranch: `refs/heads/${readConfig(this.root).mainBranch?.trim() || 'main'}`, readPaths: plan.readPaths })
     } catch (error) {
       if (error instanceof SyncApplicationError) throw error
@@ -534,21 +568,36 @@ export class SyncApplication {
   }
   /** 只采纳完整已验证提交；资格与详情共用，来源发布锁内再次核实真实 Git 状态。 */
   async adopt(operationId: string): Promise<SyncOperationDetail> {
+    await this.adoptSource(operationId)
+    const detail = await this.readOperation(operationId)
+    if (!detail.sourceSynced) throw new SyncApplicationError('sync_adoption_result_changed', 'Git 快进已执行，但当前工作文件、index 或读取闭包未保持已验证交付；请读取当前状态')
+    return detail
+  }
+  private async adoptSource(operationId: string, automaticParent?: string): Promise<void> {
     const operation = this.store.readOperation(operationId)
     assertSourceAdoptionComplete(operation)
-    await this.adoptionPlan(operation, await captureInputSnapshot(this.root))
     const path = sourceAdoptionMutexPath(this.artifactRoot, operation.input.source)
     mkdirSync(join(this.artifactRoot, '.publication-locks'), { recursive: true, mode: 0o700 })
     const mutex = claimFileMutex(path)
     if (!mutex) throw new SyncApplicationError('sync_adoption_busy', '同一来源正在发布或采纳，请稍后重试')
     try {
-      const current = this.store.readOperation(operationId), snapshot = await captureInputSnapshot(this.root)
-      const plan = await this.adoptionPlan(current, snapshot)
+      const current = this.store.readOperation(operationId)
+      const execution = await this.executionInputsAsync(current)
+      const snapshot = await captureInputSnapshot(this.root)
+      const plan = await this.adoptionPlan(current, snapshot, execution, () => captureInputSnapshot(this.root))
+      const canonicalBranch = `refs/heads/${readConfig(this.root).mainBranch?.trim() || 'main'}`
+      if (this.store.readPhysicalControl(this.physicalScope(snapshot.source)).control !== 'run') throw new SyncApplicationError('sync_source_paused', '原输入工作树已暂停写入，请先恢复')
+      if (automaticParent !== undefined) {
+        if (plan.alreadyAdopted) return
+        if (this.stopped || !this.ownsObservation() || snapshot.headCommit !== automaticParent || !this.automaticSourceAdoption(snapshot) ||
+          !this.store.listAutomaticAdoptionCandidates(snapshot.source, snapshot.headCommit).some(candidate => candidate.id === current.id && candidate.currentAttemptId === current.currentAttemptId)) {
+          throw new SyncApplicationError('sync_automatic_adoption_changed', '自动采纳的来源、真实父提交或原交付已变化，请重新观察')
+        }
+      }
       mutex.assertHeld()
       fastForwardSource(plan)
-      const detail = await this.readOperation(operationId)
-      if (!detail.sourceSynced) throw new SyncApplicationError('sync_adoption_result_changed', 'Git 快进已执行，但当前工作文件、index 或读取闭包未保持已验证交付；请读取当前状态')
-      return detail
+      const actual = await captureInputSnapshot(this.root)
+      if (!readSyncLandingStatus(current, actual, this.store.listJournals(operationId), { canonicalBranch, readPaths: execution.plan.readPaths }).sourceSynced) throw new SyncApplicationError('sync_adoption_result_changed', 'Git 快进已执行，但当前工作文件、index 或读取闭包未保持已验证交付；请读取当前状态')
     } finally { mutex.release() }
   }
   private async revertEligibility(operation: SyncOperation, snapshot: InputSnapshot, journals: SyncOperationDetail['journals'], resources: SyncOperationDetail['resources']): Promise<SyncRevertEligibility> {
@@ -688,6 +737,7 @@ export class SyncApplication {
     const mutex = await this.requestMutex(ingressKey, finiteSyncBudget(settings.budget)?.timeoutMs ?? 30000)
     try {
       const prior = this.store.findOperationByIngressKey(ingressKey), ingress = this.store.findIngressReceipt(ingressKey)
+      const automaticSourceAdoption = prior ? (ingress ?? prior).automaticSourceAdoption : retry ? retry.automaticSourceAdoption : this.automaticSourceAdoption(snapshot)
       if (prior && (ingress ?? prior).recordUnverifiedCoverage !== recordUnverifiedCoverage) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
       const priorInput = ingress?.input ?? prior?.input
       if (origin === 'initial' && !retry && priorInput && committed !== (priorInput.captureKind === 'commit')) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
@@ -720,7 +770,7 @@ export class SyncApplication {
       const requested = input.model ?? (prior || retry ? syncModel(prior ?? retry!) : syncModel(settings, Boolean(plan.agentWorkflow)))
       const model = await resolveSyncModel(requested, Boolean(plan.agentWorkflow), prior ? syncModel(prior) : undefined)
       if (prior && (syncModel(prior) !== model || (ingress?.origin ?? prior.origin) !== origin || (prior.retryOf ?? null) !== (retry?.id ?? null) || (ingress?.input ?? prior.input).id !== snapshot.id || JSON.stringify((ingress?.input ?? prior.input).source) !== JSON.stringify(snapshot.source) || prior.policyDigest !== syncPlanDigest(plan) || ((ingress ?? prior).requestBlob?.sha256 ?? null) !== (requestBlob?.sha256 ?? null))) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
-      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: input.requestId, origin, ...syncModelBinding(model), ...(recordUnverifiedCoverage ? { recordUnverifiedCoverage } : {}), ...(retry ? { retryOf: retry.id, ...(retry.baselineSelection ? { executionScope: retry.scope, impactDigest: retry.impactDigest } : {}) } : {}), budget: revalidation ? retry.budget : settings.budget, managedRoot: this.managedRoot, ...(requestBlob ? { requestBlob } : {}), previousBaselinePair, ...(frozen ? { baselineSelection: frozen.selection } : {}) }, businessSelection)
+      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: input.requestId, origin, ...syncModelBinding(model), ...(recordUnverifiedCoverage ? { recordUnverifiedCoverage } : {}), ...(retry ? { retryOf: retry.id, ...(retry.baselineSelection ? { executionScope: retry.scope, impactDigest: retry.impactDigest } : {}) } : {}), budget: revalidation ? retry.budget : settings.budget, managedRoot: this.managedRoot, ...(requestBlob ? { requestBlob } : {}), previousBaselinePair, ...(frozen ? { baselineSelection: frozen.selection } : {}), automaticSourceAdoption }, businessSelection)
       if (prior) { admission.deliveryPlan = (ingress ?? prior).deliveryPlan; admission.budget = (ingress ?? prior).budget }
       this.prepareTools(admission.ingressKey, prior, model, plan.agentWorkflow)
       const operation = this.store.admitAndEnqueue(admission)
@@ -909,7 +959,11 @@ export class SyncApplication {
     const finished = runSyncOperation(this.store, id, { plan, ...(recoveryOnly ? { recoveryOnly: true } : {}), readCurrentPlan: async () => {
       const current = await captureInputSnapshot(this.root, { committed: operation.input.captureKind === 'commit' }); this.requireEnabled(current, operation)
       return plan
-    }, managedRoot: this.managedRoot, artifactRoot: this.artifactRoot, tools, runner: this.options.runner, verificationDriver: this.options.verificationDriver, verificationTransport: this.options.verificationTransport, signal: controller.signal, callTimeoutMs: settings.callTimeoutMs }).then(result => { advance = !recoveryOnly && result.status !== 'busy' && result.operation.phase !== 'queued'; return result }).finally(() => {
+    }, managedRoot: this.managedRoot, artifactRoot: this.artifactRoot, tools, runner: this.options.runner, verificationDriver: this.options.verificationDriver, verificationTransport: this.options.verificationTransport, signal: controller.signal, callTimeoutMs: settings.callTimeoutMs }).then(async result => {
+      advance = !recoveryOnly && result.status !== 'busy' && result.operation.phase !== 'queued'
+      if (advance && result.status === 'workspace_synced' && result.receipt && result.operation.automaticSourceAdoption) await this.observer?.scanNow()
+      return result
+    }).finally(() => {
       this.running.delete(id)
       if (advance) {
         try { this.startNextDispatch() }

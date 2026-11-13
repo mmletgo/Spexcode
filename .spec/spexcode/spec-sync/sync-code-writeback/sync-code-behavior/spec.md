@@ -12,7 +12,7 @@ related:
 
 ## expanded spec
 
-[[sync-historical-coverage]] 的历史证明只属于可信程序计划；唯一 promptPlan 投影剥离它，模型分析与独审不取得历史未执行授权。原完整 policyDigest、局部责任范围和强制测试保持。
+P0 的唯一模型计划投影排除仅供全图封口的 contextVerifications 和 [[sync-historical-coverage]] 证明；局部分析和独审仍只接收本轮原 verifications 与 mandatoryTests，不取得历史未执行许可。完整可信计划继续参与 policyDigest，不删改 planBlob 或从实时配置补写旧缺席。
 
 loadMaterial可返回异步材料，派发前await既有停止材料认证与正式归档checkout的临时恢复/观察/回收；恢复不启动Native。空材料按原逻辑继续，原Git/JSON字节与errors/repairDiagnostics不变，不能把关闭目录变成清空原稿的理由；原真实性、schema、保护面和批准门保持。
 
