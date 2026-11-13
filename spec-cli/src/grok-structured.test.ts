@@ -15,7 +15,7 @@ const schema = { type: 'object', properties: { marker: { type: 'string' } }, req
 const finalText = '{"marker":"终态"}'
 const sha256 = (text: string): string => createHash('sha256').update(text).digest('hex')
 
-type Scenario = 'success' | 'wrong-session' | 'wrong-cwd' | 'missing-request' | 'duplicate-terminal' | 'missing-terminal' | 'wrong-format' | 'bad-schema' | 'hang' | 'read' | 'periodic' | 'split-settlement-window' | 'cancel-during-settlement'
+type Scenario = 'success' | 'wrong-session' | 'wrong-cwd' | 'missing-request' | 'duplicate-terminal' | 'missing-terminal' | 'wrong-format' | 'bad-schema' | 'hang' | 'read' | 'periodic' | 'split-settlement-window' | 'cancel-during-settlement' | 'inherited-stdout' | 'inherited-stdout-trailing' | 'unowned-stdout'
 
 function fixture(t: TestContext, scenario: Scenario, model = 'grok:default') {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'spex-grok-fixture-')))
@@ -86,6 +86,24 @@ if (scenario === 'split-settlement-window' || scenario === 'cancel-during-settle
   descendant.unref()
   setTimeout(finish, 400)
   setTimeout(() => {}, splitWindow ? 13000 : 900)
+} else if (scenario === 'unowned-stdout') {
+  const outside = dirname(dirname(cwd))
+  const childCode = "const fs=require('node:fs');fs.writeFileSync(process.argv[1],String(process.pid));setTimeout(()=>{},22000);process.on('SIGTERM',()=>process.exit(0))"
+  const descendant = spawn(process.execPath, ['-e', childCode, join(dirname(promptFile), 'descendant-ready')], { cwd: outside, detached: true, stdio: ['ignore', 'inherit', 'ignore'] })
+  descendant.unref()
+  finish()
+} else if (scenario === 'inherited-stdout' || scenario === 'inherited-stdout-trailing') {
+  const childCode = "const {writeFileSync}=require('node:fs');const keep=setTimeout(()=>{},19000);process.on('SIGTERM',()=>{" +
+    (scenario === 'inherited-stdout-trailing' ? "process.stdout.write('{\"type\":\"text\",\"data\":\"late\"}\\n');" : '') +
+    "clearTimeout(keep)});writeFileSync(process.argv[1],'ready')"
+  const ready = join(dirname(promptFile), 'descendant-ready')
+  const descendant = spawn(process.execPath, ['-e', childCode, ready], { stdio: ['ignore', 'inherit', 'ignore'] })
+  descendant.unref()
+  const poll = setInterval(() => {
+    if (!existsSync(ready)) return
+    clearInterval(poll)
+    setTimeout(finish, 600)
+  }, 20)
 } else if (scenario === 'periodic') {
   const poll = setInterval(() => {
     if (!existsSync(join(dirname(promptFile), 'fixture-release'))) return
@@ -218,6 +236,40 @@ test('Grok gives a closed successful terminal a full independent process settlem
       stopped = await stopGrokStructuredTurn(f.state(), 5_000)
     }
     assert.equal(stopped.nativeStopped, true)
+  }
+})
+
+test('Grok settles a natural exit while a recorded descendant still holds stdout', { timeout: 25_000 }, async t => {
+  const f = fixture(t, 'inherited-stdout')
+  const result = await f.run()
+  assert.equal(result.text, finalText)
+  const settlement = JSON.parse(readFileSync(join(f.sessionRoot, 'settlement.json'), 'utf8'))
+  assert.deepEqual(settlement.exit, { code: 0, signal: null })
+  assert.equal((await stopGrokStructuredTurn(f.state(), 5_000)).nativeStopped, true)
+})
+
+test('Grok still rejects data after the terminal when an owned descendant closes stdout', { timeout: 25_000 }, async t => {
+  const f = fixture(t, 'inherited-stdout-trailing')
+  await assert.rejects(f.run(), /invalid event or data after its terminal/)
+  assert.equal(existsSync(join(f.sessionRoot, 'result.json')), false)
+  assert.equal(existsSync(join(f.sessionRoot, 'settlement.json')), false)
+  assert.equal((await stopGrokStructuredTurn(f.state(), 5_000)).nativeStopped, true)
+})
+
+test('Grok withholds output if an unobserved detached process still holds stdout', { timeout: 25_000 }, async t => {
+  const f = fixture(t, 'unowned-stdout')
+  const ready = join(f.sessionRoot, 'descendant-ready')
+  const flight = assert.rejects(f.run(), { code: 'cancellation_pending', message: 'Grok native stdout EOF was not observed within the settlement window' })
+  await waitForFixture(ready)
+  const pid = Number(readFileSync(ready, 'utf8'))
+  assert.ok(Number.isSafeInteger(pid) && pid > 1)
+  try {
+    await flight
+    assert.equal(process.kill(pid, 0), true)
+    assert.equal(existsSync(join(f.sessionRoot, 'result.json')), false)
+    assert.equal(existsSync(join(f.sessionRoot, 'settlement.json')), false)
+  } finally {
+    try { process.kill(-pid, 'SIGTERM') } catch (error) { assert.equal((error as NodeJS.ErrnoException).code, 'ESRCH') }
   }
 })
 

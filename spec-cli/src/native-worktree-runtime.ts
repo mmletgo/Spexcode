@@ -176,7 +176,7 @@ function readProcessBaseline(root: string): NativeProcessRow[] {
 
 /** spawn 前冻结同 UID 基线；运行中仅把实际观察到的 Native 后代记为已拥有。 */
 export function sampleNativeWorktreeProcesses(plan: NativeOwnedPlan, deadline?: number): Promise<void> {
-  return observeSerially(plan, limit => sampleProcesses(plan, limit), deadline)
+  return observeSerially(plan, limit => sampleProcesses(plan, limit, false), deadline)
 }
 
 /** 周期观测失败可在同一轮内复查，启动和最终停止仍各自取得原始证明。 */
@@ -186,7 +186,7 @@ export function periodicNativeWorktreeSampler(plan: NativeOwnedPlan, stopping: (
     if (sampling || stopping()) return
     if (recovery && Date.now() >= recovery.deadline) { onFailure(recovery.error); return }
     sampling = true
-    void sampleNativeWorktreeProcesses(plan, recovery?.deadline).then(() => { recovery = undefined }, error => {
+    void observeSerially(plan, limit => sampleProcesses(plan, limit, true), recovery?.deadline).then(() => { recovery = undefined }, error => {
       if (stopping()) return
       if (error instanceof StructuredSessionError && error.code === 'cancellation_pending')
         recovery ??= { deadline: Date.now() + NATIVE_PROCESS_OBSERVATION_LIMIT_MS, error }
@@ -195,17 +195,18 @@ export function periodicNativeWorktreeSampler(plan: NativeOwnedPlan, stopping: (
   }
 }
 
-async function sampleProcesses(plan: NativeOwnedPlan, deadline: number): Promise<void> {
-  await captureOwnedProcesses(plan, deadline)
+async function sampleProcesses(plan: NativeOwnedPlan, deadline: number, periodic: boolean): Promise<void> {
+  const rows = await nativeProcessCensus(plan, deadline)
+  captureOwnedProcesses(plan, deadline, rows)
   if (plan.pid) {
-    const observation = await classifyOrphans(plan, deadline)
+    const observation = await classifyOrphans(plan, deadline, periodic ? rows : undefined)
     assertObservationDeadline(deadline)
     persistNativeOrphanObservation(plan, observation)
   }
 }
-async function captureOwnedProcesses(plan: NativeOwnedPlan, deadline: number): Promise<void> {
+function captureOwnedProcesses(plan: NativeOwnedPlan, deadline: number, rows: NativeProcessRow[]): void {
   if (plan.pid) readProcessBaseline(plan.root)
-  const path = join(plan.root, 'owned-processes.json'), rows = await nativeProcessCensus(plan, deadline)
+  const path = join(plan.root, 'owned-processes.json')
   assertObservationDeadline(deadline)
   if (!plan.pid) {
     const baseline: NativeProcessBaseline = process.platform === 'linux' ? { identityDomain: linuxProcessIdentityDomain, rows } : rows
@@ -261,9 +262,9 @@ async function nativeProcessWorkingDirectories(plan: NativeOwnedPlan, pids: numb
 export function classifyNativeWorktreeOrphans(plan: NativeOwnedPlan, deadline?: number): Promise<NativeOrphanObservation> {
   return observeSerially(plan, limit => classifyOrphans(plan, limit), deadline)
 }
-async function classifyOrphans(plan: NativeOwnedPlan, deadline: number): Promise<NativeOrphanObservation> {
+async function classifyOrphans(plan: NativeOwnedPlan, deadline: number, census?: NativeProcessRow[]): Promise<NativeOrphanObservation> {
   const baseline = new Map(readProcessBaseline(plan.root).map(row => [row.pid, row]))
-  const rows = await nativeProcessCensus(plan, deadline), current = new Map(rows.map(row => [row.pid, row]))
+  const rows = census ?? await nativeProcessCensus(plan, deadline), current = new Map(rows.map(row => [row.pid, row]))
   assertObservationDeadline(deadline)
   const owned = JSON.parse(readFileSync(join(plan.root, 'owned-processes.json'), 'utf8')) as ProcessIdentity[]
   const relatedPath = join(plan.root, 'task-related-processes.json')
@@ -316,15 +317,18 @@ export async function waitForNativeWorktreeProcessesStopped(plan: NativeOwnedPla
 async function processesStopped(plan: NativeOwnedPlan, terminate: boolean, deadline: number): Promise<boolean> {
   const path = join(plan.root, 'owned-processes.json')
   if (!plan.pid || !existsSync(path) || !existsSync(join(plan.root, 'process-baseline.json'))) return false
-  await captureOwnedProcesses(plan, deadline)
+  captureOwnedProcesses(plan, deadline, await nativeProcessCensus(plan, deadline))
   assertObservationDeadline(deadline)
   let stopped = detachedRuntimeIsGone(plan.pid, plan.receiptFile)
   const owned = JSON.parse(readFileSync(path, 'utf8')) as ProcessIdentity[]
   for (const identity of owned) {
+    assertObservationDeadline(deadline)
+    let livenessError: unknown
+    try { process.kill(identity.pid, 0) }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') continue; livenessError = error }
     const token = processStartToken(identity.pid)?.replace(/\s+/g, ' ')
     if (token && token !== identity.startToken) continue
-    try { process.kill(identity.pid, 0) }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') continue; throw error }
+    if (livenessError) throw livenessError
     stopped = false
     if (terminate && token === identity.startToken) {
       assertObservationDeadline(deadline)
