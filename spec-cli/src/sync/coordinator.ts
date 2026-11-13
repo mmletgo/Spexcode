@@ -20,7 +20,7 @@ import { elaborate, hasApprovedElaborationReview, elaborationGapRepairFindings, 
 import { outputErrors } from './elaboration-schema.js'
 import type { ElaborationGapReviewCheckpoint, ElaborationGapReviewEvidence, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ElaborationTrace, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ReadonlySpecRepair } from './elaboration-types.js'
 import { claimFileMutex } from './file-mutex.js'
-import { authenticateNativeFailure, authenticateNativeRejectedFinal, composedBeforeNullExpansionMatches, readSyncCheckpoints, readSyncCheckpointStageIndex, retryOperationLineage, syncCheckpointArtifacts, withCheckpointStageBasis } from './checkpoint-evidence.js'
+import { authenticateNativeFailure, authenticateNativeRejectedFinal, composedBeforeNullExpansionMatches, findReviewHandoffParent, readSyncCheckpoints, readSyncCheckpointStageIndex, retryOperationLineage, settledApprovalSource, syncCheckpointArtifacts, withCheckpointStageBasis } from './checkpoint-evidence.js'
 import type { SyncCheckpointStageView } from './checkpoint-evidence.js'
 import type { FileMutex } from './file-mutex.js'
 import { checkGenerationContractIntent, isSyncSpecPath, readFrozenContracts } from './frozen-contracts.js'
@@ -315,34 +315,13 @@ function retryDraftSources(store: SyncStore, operation: SyncOperation, attemptNu
   }
   return sources
 }
-function settledApprovalSource(store: SyncStore, source: SyncOperation): boolean {
-  if (source.phase !== 'superseded') return ['failed', 'budget_exhausted', 'cancelled'].includes(source.phase) && store.readRetryEligibility(source.id).eligible
-  return store.isSupersededOperationSettled(source.id)
-}
-
-/** 显式候选交接只承接直接父操作；冷恢复仍核原冻结范围、预算族及正式结算。 */
 function reviewHandoffParent(store: SyncStore, operation: SyncOperation): SyncOperation | null {
   if (!operation.inheritRetryBudget) return null
-  const cache = frozenAnalysisScope.getStore()?.handoffParents
-  const cached = cache?.get(operation.id)
-  if (cached) return cached
-  const parent = operation.retryOf ? store.readOperation(operation.retryOf) : null
-  const receipt = store.findIngressReceipt(operation.ingressKey), initialScope = operation.contractScopeExpansions?.[0]
-  const selection = store.readBusinessBaselineSelection(operation.id)
-  const reject = (): never => fail('review_handoff_binding', '候选换模型交接缺少同源直接父操作、精确冻结授权、原预算族或正式结算')
-  if (!parent || receipt?.operationId !== operation.id || !receipt.inheritRetryBudget || !receipt.baselineSelection || !selection || !settledApprovalSource(store, parent) || syncModel(parent) === syncModel(operation)
-    || canonical(parent.input) !== canonical(operation.input) || parent.origin !== operation.origin || parent.policyDigest !== operation.policyDigest
-    || parent.planBlob?.sha256 !== operation.planBlob?.sha256 || !initialScope && parent.readSetDigest !== operation.readSetDigest || parent.impactDigest !== operation.impactDigest
-    || (initialScope ? !(['paths', 'contractIds', 'flowIds'] as const).every(field => parent.scope[field].every(value => operation.scope[field].includes(value))) : canonical(parent.scope) !== canonical(operation.scope))
-    || canonical(store.readBusinessBaselineSelection(parent.id)) !== canonical(receipt.baselineSelection)
-    || selection.digest !== receipt.baselineSelection.digest && (!initialScope || !extendsWithUninitializedResources(receipt.baselineSelection, selection))
-    || initialScope && initialScope.previousBaselineSelectionDigest !== receipt.baselineSelection?.digest
-    || (parent.requestBlob?.sha256 ?? null) !== (operation.requestBlob?.sha256 ?? null) || (parent.previousBaselinePair?.id ?? null) !== (operation.previousBaselinePair?.id ?? null)
-    || parent.deliveryPlan.baseCommit !== operation.deliveryPlan.baseCommit || parent.recordUnverifiedCoverage !== operation.recordUnverifiedCoverage || parent.automaticSourceAdoption !== operation.automaticSourceAdoption
-    || parent.delivery || canonical(parent.budget) !== canonical(operation.budget) || parent.deadlineAtMs !== operation.deadlineAtMs
-    || !parent.dispatchAnchor || operation.dispatchAnchor?.budgetRootOperationId !== parent.dispatchAnchor.budgetRootOperationId
-    || store.hasVerificationOrJournal(parent.id)) return reject()
   const active = frozenAnalysisScope.getStore()
+  const cached = active?.handoffParents?.get(operation.id)
+  if (cached) return cached
+  const parent = findReviewHandoffParent(store, operation)
+  if (!parent) fail('review_handoff_binding', '候选换模型交接缺少同源直接父操作、精确冻结授权、原预算族或正式结算')
   if (active?.active) { active.handoffParents ??= new Map(); active.handoffParents.set(operation.id, parent) }
   return parent
 }
