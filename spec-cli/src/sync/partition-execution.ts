@@ -404,6 +404,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
     const seedTarget = interfaceSeed ? targets[0] : undefined
     const intent = seedTarget && seedTarget.nodeId !== input.intent.nodeId ? { nodeId: seedTarget.nodeId, rawSource: parseParts(seedTarget.source ?? '')?.rawSource ?? seedTarget.rawSource! } : input.intent
     const localInput: ElaborationInput = { ...input, requestKey: `${input.requestKey}:partition:${partition.id}`, intent, targets, context,
+      contextVerifications: undefined,
       partitionBinding,
       files: new Map([...input.files ?? []].filter(([path]) => within(path, readPaths)).map(([path, source]) => [path, settledSources.get(path) ?? source])), analysis,
       validationScope: 'partition_local',

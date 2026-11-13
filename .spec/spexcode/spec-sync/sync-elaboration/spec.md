@@ -9,6 +9,7 @@ code:
   - spec-cli/src/sync/elaboration.ts#elaborationScopeErrors
   - spec-cli/src/sync/elaboration.ts#elaborationReviewScopeErrors
   - spec-cli/src/sync/elaboration.ts#freezeElaborationInput
+  - spec-cli/src/sync/elaboration.ts#sealPartitionedElaboration
   - spec-cli/src/sync/elaboration.ts#projectElaborationFlowReadiness
   - spec-cli/src/sync/elaboration.ts#verifyElaborationDraftCache
   - spec-cli/src/sync/elaboration.ts#partitionSealRepairContext
@@ -24,6 +25,8 @@ related:
 从用户原意生成可完成主流程、适用状态事件处置、规则和验收；无法确认的重要业务政策成为 GAP，只阻塞依赖分支。
 
 ## expanded spec
+
+完整分区封口将可信 contextVerifications 与本轮 verifications 合并后冻结，逐项校验完整候选中未选 owner 的既有 AC/VERIFY 引用。局部生成和独审保持原登记，不据此增加可写目标、业务义务或实际验收运行；重复、错误与未知定义继续拒绝，旧输入缺席不补入。
 
 只读 V1 引用返修先以原批准正文合并 Agent 草稿。结构化诊断只允许替换命中的治理或 related 引用及指定业务项的 code 来源，保持原引用角色和符号粒度。缺失的具体 related 文件只能改为冻结树中的具体文件。其余元数据、原意、说明、业务表、稳定 ID、适用性、测试引用和可信命令保持，越权差量在派发独审前拒绝。派发可把同一原引用的重复诊断按实际受影响 ID 归并，原失败原件保持，仍须重新独审与完整 V1。
 

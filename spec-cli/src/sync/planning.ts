@@ -214,6 +214,7 @@ async function buildPlan(snapshot: InputSnapshot, nodeId: string, baseline: Base
   const activeVerificationIds = new Set([...impacts.flatMap(item => item.verifyIds), ...graphs.flatMap(graph => [...graph.items.values()].filter(item => item.kind === 'VERIFY' && (selected.has(item.nodeId) || readIds.has(item.id))).map(item => item.id))])
   const contextVerificationIds = new Set(graphs.flatMap(graph => [...graph.items.values()].filter(item => item.kind === 'VERIFY' && coveredPath(item.path, [...specReadPaths, ...settings.readPaths])).map(item => item.id)))
   const verifications = settings.verifications.filter(item => !ownedVerificationIds.has(item.definition.id) || activeVerificationIds.has(item.definition.id) || contextVerificationIds.has(item.definition.id))
+  const contextVerifications = settings.verifications.filter(item => !verifications.includes(item)).map(item => item.definition)
   const mandatoryTests = settings.mandatoryTests.filter(item => !ownedVerificationIds.has(item.verificationId) || activeVerificationIds.has(item.verificationId))
   const discoveryOwnerFiles = (options.discoverySelection?.bindings ?? []).flatMap(binding => {
     if (!('bytePair' in binding) || !binding.bytePair || !isSyncSpecPath(binding.resource.path)) return []
@@ -230,7 +231,7 @@ async function buildPlan(snapshot: InputSnapshot, nodeId: string, baseline: Base
     readPaths: [...new Set([...specReadPaths, ...declaredReadPaths, ...ownedReadPaths, '.spec/spexcode.json', ...settings.readPaths, ...settings.testPaths, ...codePaths, ...discoveryPaths, ...impact.testPaths, ...mandatoryTests.map(test => test.testPath)])].sort(),
     writePaths: [...new Set([...targets.map(target => target.path), ...targets.map(target => posix.dirname(target.path)), ...priorTargets.map(target => target.path), ...writable])].sort(),
     sourcePaths: [...settings.sourcePaths].sort(),
-    facts: [...settings.facts, ...decisionFacts], decisionAuthorities: decisionRefs.map(ref => readDecisionAuthority(snapshot.source.commonDir, ref)), decisionRefs, retiredIds, verifications, mandatoryTests,
+    facts: [...settings.facts, ...decisionFacts], decisionAuthorities: decisionRefs.map(ref => readDecisionAuthority(snapshot.source.commonDir, ref)), decisionRefs, retiredIds, verifications, ...(contextVerifications.length ? { contextVerifications } : {}), mandatoryTests,
   }
 }
 

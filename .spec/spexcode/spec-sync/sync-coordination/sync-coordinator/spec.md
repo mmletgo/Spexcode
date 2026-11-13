@@ -17,6 +17,8 @@ related:
 
 ## expanded spec
 
+P1 输入只透传原 planBlob 已冻结的 contextVerifications，供 [[sync-partition-execution]] 的全图封口引用校验；局部模型和 V3 继续使用原 verifications 与 mandatoryTests。旧计划没有该字段时不读取当前 settings 补签。
+
 P0 后置回审先按实际受影响的冻结 owner 及 `refactor_business_meaning_changed` 发现筛选原轮。普通 P1 结构、测试绑定或审查诊断留在 P1。跨操作重验命中的 Git 草稿用原已认证 Native 任务的完整 targets 计算 owner，包括 P0 已审后才加入的规格叶，继续核原 schema、真实 Git 对象及保活引用。
 
 Grok Build 的派发、候选和独审沿现有原生工作树编排。续用 Grok 格式拒绝前核对同一原生会话和 request ID。已停的只读复审在原候选下继续。

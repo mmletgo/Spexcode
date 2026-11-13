@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+v47 只追加 SELECT 1 writer marker，保护 [[sync-coordinator-types]] 的 contextVerifications 完整封口语义。升级先停稳 v46 writer、正式结算资源并 online backup；既有自动采纳索引、迁移 checksum 和历史计划/记录原字节保持。旧 writer 在写入或派发前拒绝。回滚先停稳新 writer，再恢复一致 v46 备份及配套证据和 Git 引用，不删 marker 或改签旧计划。
+
 v46 以原组件事务登记自动主来源采纳政策，并为已结算 publication parent、来源原 delivery parent 与按 operation/attempt 读取 journal 增加表达式及复合索引。v1–v45 的迁移、checksum 和历史 JSON 保持。升级前正式停稳旧 writer、结算资源并做 online backup。索引与 marker 同事务，失败整体回滚，旧 writer 拒绝新代。回滚停稳新版后恢复一致 v45 备份及对应证据和 Git 引用。
 
 v45 追加 SELECT 1 writer marker，保护 [[sync-publication-base]] 绑定真实来源 HEAD 或正式交付 receipt 的 v2 父提交证据。升级先正式停稳 v44 writer、结算资源并在线备份，历史发布基树、候选及原迁移保持原字节。回滚恢复一致的 v44 备份和配套证据及 Git 引用。
