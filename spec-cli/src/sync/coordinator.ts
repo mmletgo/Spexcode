@@ -213,11 +213,11 @@ export async function prepareSyncAdmission(input: InputSnapshot, supplied: SyncC
 
 type Stage = { version: 'sync-stage-v1'; operationId: string; attemptId: string; inputId: string; policyDigest: string; readSetDigest?: string; baselineSelectionRef?: BlobRef; guidanceContractVersion?: string; composedTree?: string; composedContentDigest?: string; stage: string; resultRef: BlobRef }
 const behaviorAnalysisStage = (name: string): boolean => name === 'analysis' || name.startsWith('partition:') && name.endsWith(':analysis')
-type FrozenAnalysisScope = { active: boolean; operationId: string; inputId: string; source: string; policyDigest: string; refs: Set<string>; candidateDigest?: string; readNativeRecord?: typeof readRecord; readIndex?: (attempt: SyncAttempt) => SyncCheckpointStageView }
+type FrozenAnalysisScope = { active: boolean; operationId: string; inputId: string; source: string; policyDigest: string; refs: Set<string>; candidateDigest?: string; readNativeRecord?: typeof readRecord; readIndex?: (attempt: SyncAttempt, owner?: SyncOperation) => SyncCheckpointStageView; selectionMatches?: Map<string, boolean>; settlement?: { leased: Set<string>; recoverable: Set<string> } }
 const frozenAnalysisScope = new AsyncLocalStorage<FrozenAnalysisScope>()
-function readStageCheckpoints(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt): SyncCheckpointStageView {
+function readStageCheckpoints(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, indexed = false): SyncCheckpointStageView {
   const scope = frozenAnalysisScope.getStore()
-  return scope?.active && scope.operationId === operation.id && scope.readIndex ? scope.readIndex(attempt) : readSyncCheckpoints(store, operation, attempt)
+  return scope?.active && scope.readIndex ? scope.readIndex(attempt, operation) : indexed ? readSyncCheckpointStageIndex(store, operation, attempt) : readSyncCheckpoints(store, operation, attempt)
 }
 function behaviorGuidanceMatches(operation: SyncOperation, saved: Pick<Stage, 'guidanceContractVersion' | 'resultRef'>): boolean {
   if (saved.guidanceContractVersion === CODE_BEHAVIOR_GUIDANCE_VERSION) return true
@@ -230,12 +230,17 @@ type SavedGeneration = Omit<GenerationResult, 'candidateFiles'> & { p2SpecWriteP
 function stageSelectionMatches(store: SyncStore, operation: SyncOperation, saved: Stage, businessSelection?: FrozenBaselineSelection): boolean {
   if (!operation.baselineSelection) return true
   if (!saved.baselineSelectionRef || !saved.readSetDigest) return false
+  const scope = frozenAnalysisScope.getStore(), cache = scope?.active ? scope.selectionMatches : undefined
+  const key = cache && JSON.stringify([operation.id, operation.input.id, operation.readSetDigest, operation.baselineSelection.digest, saved.readSetDigest, saved.baselineSelectionRef.sha256, businessSelection?.digest])
+  if (key && cache!.has(key)) return cache!.get(key)!
   const selected = JSON.parse(readEvidence(operation.input.source.commonDir, saved.baselineSelectionRef).toString('utf8')) as FrozenBaselineSelection
   verifyBaselineSelection(operation.input, selected)
   const business = businessSelection ?? store.readBusinessBaselineSelection(operation.id)!
-  return selected.digest === business.digest
+  const matches = selected.digest === business.digest
     ? saved.readSetDigest === operation.readSetDigest
     : extendsWithUninitializedResources(selected, business)
+  if (key) cache!.set(key, matches)
+  return matches
 }
 /** P1扩域与续审共用已审映射投影；related/source不产生实现写权。 */
 function p1WritableReferences(contracts: readonly Contract[], changedPaths: ReadonlySet<string>, plan: SyncCoordinatorPlan): string[] {
@@ -312,11 +317,16 @@ function retryDraftSources(store: SyncStore, operation: SyncOperation, attemptNu
 }
 function settledApprovalSource(store: SyncStore, source: SyncOperation): boolean {
   if (source.phase !== 'superseded') return ['failed', 'budget_exhausted', 'cancelled'].includes(source.phase) && store.readRetryEligibility(source.id).eligible
+  const scope = frozenAnalysisScope.getStore()
+  const settlement = scope?.active && scope.readIndex ? scope.settlement ??= {
+    leased: new Set(store.sourceContinuityState(source.input.source.commonDir).leasedOperationIds),
+    recoverable: new Set(store.listRecoverableResources().map(item => item.operation.id)),
+  } : undefined
   // 正式重试的更早祖先可被新准入替代，原已结算的独审证据仍有来源。
   return !!source.currentAttemptId
     && store.listAttempts(source.id).every(attempt => ['failed', 'superseded', 'settled'].includes(attempt.status))
-    && !store.sourceContinuityState(source.input.source.commonDir).leasedOperationIds.includes(source.id)
-    && !store.listRecoverableResources().some(item => item.operation.id === source.id)
+    && !(settlement ? settlement.leased.has(source.id) : store.sourceContinuityState(source.input.source.commonDir).leasedOperationIds.includes(source.id))
+    && !(settlement ? settlement.recoverable.has(source.id) : store.listRecoverableResources().some(item => item.operation.id === source.id))
     && store.listJournals(source.id).every(journal => journal.status === 'settled')
 }
 
@@ -567,9 +577,10 @@ function authenticatedApprovedElaboration(store: SyncStore, owner: SyncOperation
 }
 
 /** 复制的局部批准只能沿同一原件回到实际Native派发。 */
-function elaborationDraftGenerationSource(store: SyncStore, owner: SyncOperation, prior: SyncAttempt, key: string, source: { result: SavedElaboration; resultRef: BlobRef }, round: ElaborationResult['rounds'][number], sources: ReturnType<typeof retryDraftSources>, readCheckpoints: (owner: SyncOperation, prior: SyncAttempt) => SyncCheckpointStageView, basis?: { selection: FrozenBaselineSelection; recomposed: boolean }) {
+type ApprovedElaborationOrigin = NonNullable<ReturnType<typeof elaborationGenerationSource>> & { ownerId: string; approvalAttempt: SyncAttempt }
+function elaborationDraftGenerationSource(store: SyncStore, owner: SyncOperation, prior: SyncAttempt, key: string, source: { result: SavedElaboration; resultRef: BlobRef }, round: ElaborationResult['rounds'][number], sources: ReturnType<typeof retryDraftSources>, readCheckpoints: (owner: SyncOperation, prior: SyncAttempt) => SyncCheckpointStageView, basis?: { selection: FrozenBaselineSelection; recomposed: boolean; rebase?: (owner: SyncOperation, attempt: SyncAttempt, source: NonNullable<ReturnType<typeof readonlyLocalSource>>) => ApprovedElaborationOrigin | null }): ApprovedElaborationOrigin | null {
   const direct = elaborationGenerationSource(store, owner, prior, round)
-  if (direct) return { ...direct, ownerId: owner.id }
+  if (direct) return { ...direct, ownerId: owner.id, approvalAttempt: prior }
   const { result, resultRef } = source, binding = result.partitionBinding
   if (!binding || key !== 'partition:' + binding.partitionId + ':elaboration' || !result.structurePassed || !result.reviewPassed || result.failure || round !== result.rounds.at(-1)) return null
   let index = sources.findIndex(item => item.owner.id === owner.id && item.prior.id === prior.id)
@@ -583,6 +594,19 @@ function elaborationDraftGenerationSource(store: SyncStore, owner: SyncOperation
     const expandedSource = recomposed && origin.prior.id === prior.id
     const composed = origin.prior.composedInput
     const matches = expandedSource || (recomposed ? composedBeforeNullExpansionMatches(composed, composition, selected) : canonical(composed) === canonical(composition))
+    if (!saved && basis?.rebase && origin.owner.id === owner.id && origin.prior.number < prior.number) {
+      const local = stage<SavedElaboration>(store, origin.owner, origin.prior, key, 'evidence', checkpoints)
+      const wrapper = checkpoints.json.map(({ value }) => value as Stage).find(value => value.stage === key && value.resultRef?.sha256 === resultRef.sha256)
+      const originalPlan = stage<SyncPartitionPlan>(store, origin.owner, origin.prior, 'partition-plan', 'evidence', checkpoints)
+      if (local && wrapper?.readSetDigest && wrapper.baselineSelectionRef && contentHash(JSON.stringify(local)) === resultRef.sha256
+        && originalPlan?.digest === binding.planDigest && (!planRef || contentHash(JSON.stringify(originalPlan)) === planRef)) {
+        const originalSelection = JSON.parse(readEvidence(owner.input.source.commonDir, wrapper.baselineSelectionRef).toString('utf8')) as FrozenBaselineSelection
+        if ((wrapper.readSetDigest !== origin.owner.readSetDigest || originalSelection.digest !== basis.selection.digest)
+          && (canonical(composed) === canonical(composition) || composedBeforeNullExpansionMatches(composed, composition, originalSelection.digest))) {
+          return basis.rebase(origin.owner, origin.prior, { result: local, resultRef, wrapper })
+        }
+      }
+    }
     if (plan?.result.digest !== binding.planDigest || planRef && plan.resultRef.sha256 !== planRef || saved?.resultRef.sha256 !== resultRef.sha256
       || !matches || !expandedSource && origin.prior.baselineSelectionDigest !== selected
       || origin.owner.id !== owner.id && !settledApprovalSource(store, origin.owner)) return null
@@ -592,7 +616,7 @@ function elaborationDraftGenerationSource(store: SyncStore, owner: SyncOperation
     if (!provenance) {
       if (!authenticatedApprovedElaboration(store, origin.owner, origin.prior, result, true)) return null
       const generation = elaborationGenerationSource(store, origin.owner, origin.prior, round)
-      return generation && { ...generation, ownerId: origin.owner.id }
+      return generation && { ...generation, ownerId: origin.owner.id, approvalAttempt: origin.prior }
     }
     const next = sources.findIndex(item => item.owner.id === provenance.result.fromOperationId && item.prior.id === provenance.result.fromAttemptId)
     if (provenance.result.resultRef.sha256 !== resultRef.sha256 || next <= index) return null
@@ -617,7 +641,7 @@ function readonlyElaborationHistory(store: SyncStore, operation: SyncOperation, 
   const attempts = store.listAttempts(operation.id), commonDir = operation.input.source.commonDir
   const indexes = new Map<string, SyncCheckpointStageView>(), selections = new Map<string, boolean>()
   const checkpoints = (attempt: SyncAttempt, owner = operation): SyncCheckpointStageView => {
-    if (!indexes.has(attempt.id)) indexes.set(attempt.id, owner.id === operation.id ? readIndex(attempt) : readSyncCheckpointStageIndex(store, owner, attempt))
+    if (!indexes.has(attempt.id)) indexes.set(attempt.id, owner.id === operation.id ? readIndex(attempt) : readStageCheckpoints(store, owner, attempt, true))
     return indexes.get(attempt.id)!
   }
   const retrySources = new Map<string, ReturnType<typeof retryDraftSources>>()
@@ -1084,44 +1108,60 @@ function refinementGeneration(store: SyncStore, operation: SyncOperation, attemp
   return previous
 }
 
-function inheritedReadonlyLocal(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string, source: NonNullable<ReturnType<typeof readonlyLocalSource>>, round: ElaborationResult['rounds'][number], history: ReturnType<typeof readonlyElaborationHistory>): boolean {
+function inheritedReadonlyLocal(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string, source: NonNullable<ReturnType<typeof readonlyLocalSource>>, round: ElaborationResult['rounds'][number], history: ReturnType<typeof readonlyElaborationHistory>, onMismatch?: (message: string) => void): ReturnType<typeof elaborationDraftGenerationSource> {
+  const reject = (message: string): null => { onMismatch?.(message); return null }
   const { wrapper } = source, commonDir = operation.input.source.commonDir
-  if (!operation.retryOf || !operation.baselineSelection || !wrapper.baselineSelectionRef || !wrapper.readSetDigest) return false
+  if (!operation.retryOf || !operation.baselineSelection || !wrapper.baselineSelectionRef || !wrapper.readSetDigest) return reject('原owner缺少正式retryOf或原selection/readSet')
   const selection = JSON.parse(readEvidence(commonDir, wrapper.baselineSelectionRef).toString('utf8')) as FrozenBaselineSelection
   const composed = attempt.composedInput
-  if (!composed || composed.baselineSelectionDigest !== attempt.baselineSelectionDigest) return false
+  if (!composed || composed.baselineSelectionDigest !== attempt.baselineSelectionDigest) return reject('原owner组合输入与attempt选择不同')
   const recomposed = attempt.baselineSelectionDigest !== selection.digest
   let scope = operation.scope
   if (selection.digest !== operation.baselineSelection.digest) {
-    if (operation.planBlob?.sha256 !== operation.policyDigest) return false
+    if (operation.planBlob?.sha256 !== operation.policyDigest) return reject('原owner冻结政策摘要不同')
     const plan = JSON.parse(readEvidence(commonDir, operation.planBlob).toString('utf8')) as SyncCoordinatorPlan
     const expansion = operation.contractScopeExpansions?.find(item => item.previousBaselineSelectionDigest === selection.digest && item.baselineSelectionDigest === operation.baselineSelection!.digest)
     if (!plan.executionScope || !expansion || !extendsWithUninitializedResources(selection, operation.baselineSelection)
-      || canonical(expansion.paths) !== canonical(scope.paths) || canonical(expansion.contractIds) !== canonical(scope.contractIds) || canonical(expansion.flowIds) !== canonical(scope.flowIds)) return false
+      || canonical(expansion.paths) !== canonical(scope.paths) || canonical(expansion.contractIds) !== canonical(scope.contractIds) || canonical(expansion.flowIds) !== canonical(scope.flowIds)) return reject('原owner的null扩域与当前授权范围不一致')
     if (recomposed) {
       const approved = history.read<SavedElaboration>(attempt, 'elaboration')
       if (attempt.baselineSelectionDigest !== operation.baselineSelection.digest || !approved?.structurePassed || !approved.reviewPassed || approved.failure
         || writeEvidence(commonDir, approved).sha256 !== expansion.evidenceRef.sha256
         || !approved.partitionEvidence?.some(owner => owner.partitionId === source.result.partitionBinding?.partitionId && owner.resultRef.sha256 === source.resultRef.sha256)
-        || !elaborationComposedBinding(store, operation, attempt, approved, composed, history.checkpoints(attempt))) return false
+        || !elaborationComposedBinding(store, operation, attempt, approved, composed, history.checkpoints(attempt))) return reject('原owner没有同一次P1批准的组合扩域证明')
     }
     scope = { paths: unique(plan.executionScope.paths), contractIds: unique(plan.executionScope.contractIds), flowIds: unique(plan.executionScope.flowIds) }
-  } else if (recomposed) return false
+  } else if (recomposed) return reject('原owner组合元数据与原选择不一致')
   const basis = { ...withCheckpointStageBasis(operation, wrapper.readSetDigest, selection), scope }
   const sources = history.inheritedSources(basis, attempt, selection)
-  return !!elaborationDraftGenerationSource(store, basis, attempt, key, source, round, sources, (owner, prior) => history.checkpoints(prior, owner), { selection, recomposed })
+  return elaborationDraftGenerationSource(store, basis, attempt, key, source, round, sources, (owner, prior) => history.checkpoints(prior, owner), {
+    selection, recomposed,
+    rebase: (owner, prior, original) => inheritedReadonlyLocal(store, store.readOperation(owner.id), prior, key, original, original.result.rounds.at(-1)!, history, onMismatch),
+  }) ?? reject('原owner正式来源链或原Native生成/独审未通过')
 }
 
-export function reviewedReadonlyLocal(store: SyncStore, operation: SyncOperation, sourceAttempt: SyncAttempt, key: string, resultRef: BlobRef, aggregateRef: BlobRef, afterAttemptNumber = 0, history = readonlyElaborationHistory(store, operation)): SavedElaboration {
+function reviewedReadonlyLocalSource(store: SyncStore, operation: SyncOperation, sourceAttempt: SyncAttempt, key: string, resultRef: BlobRef, aggregateRef: BlobRef, afterAttemptNumber = 0, history = readonlyElaborationHistory(store, operation)): { result: SavedElaboration; owner: SyncOperation; approvalAttempt: SyncAttempt } {
   const source = readonlyLocalSource(store, operation, sourceAttempt, key, resultRef, aggregateRef, history)
   const prior = source?.result, round = prior?.rounds.at(-1)
   const generationTrace = round?.traces.find(trace => trace.purpose === 'elaboration_generate'), reviewTrace = round?.traces.find(trace => trace.purpose === 'elaboration_review')
-  const reject = (): never => fail('readonly_spec_repair_binding', '只读V1 owner原件、完整输入或独审派发绑定失配')
-  if (!source || !prior || !round || source.resultRef.sha256 !== resultRef.sha256 || !prior.structurePassed || !prior.reviewPassed || prior.failure || !hasApprovedElaborationReview(prior) || round.review!.inputDigest !== prior.inputDigest || round.review!.candidateDigest !== prior.candidateDigest || round.traces.length !== 2 || !generationTrace || !reviewTrace || generationTrace.sessionId === reviewTrace.sessionId || generationTrace.threadId === reviewTrace.threadId || generationTrace.resultDigest !== contentHash(JSON.stringify(round.output)) || reviewTrace.resultDigest !== contentHash(JSON.stringify(round.reviewOutput))) return reject()
+  const reject = (message: string): never => fail('readonly_spec_repair_binding', `${key}: ${message}`)
+  if (!source || !prior || !round || source.resultRef.sha256 !== resultRef.sha256) return reject('原owner缺少精确local结果或批准轮')
+  if (!prior.structurePassed || !prior.reviewPassed || prior.failure || !hasApprovedElaborationReview(prior) || round.review!.inputDigest !== prior.inputDigest || round.review!.candidateDigest !== prior.candidateDigest) return reject('原owner独审未批准同一完整输入及候选')
+  if (round.traces.length !== 2 || !generationTrace || !reviewTrace || generationTrace.sessionId === reviewTrace.sessionId || generationTrace.threadId === reviewTrace.threadId || generationTrace.resultDigest !== contentHash(JSON.stringify(round.output)) || reviewTrace.resultDigest !== contentHash(JSON.stringify(round.reviewOutput))) return reject('原owner生成/独审身份或输出摘要失配')
   const generated = elaborationGenerationSource(store, operation, sourceAttempt, round)
-  if (!generated && afterAttemptNumber === 0 && inheritedReadonlyLocal(store, operation, sourceAttempt, key, source, round, history)) return prior
-  if (!generated || !history.attempts.some(attempt => attempt.number > afterAttemptNumber && attempt.dispatchPlans.some(dispatch => dispatch.purpose === reviewTrace.purpose && dispatch.session?.sessionId === reviewTrace.sessionId && dispatch.session.threadId === reviewTrace.threadId && dispatch.session.turnId === reviewTrace.turnId) && history.checkpoints(attempt).json.some(({ value }) => (value as Stage).stage === key && (value as Stage).resultRef?.sha256 === resultRef.sha256))) return reject()
-  return prior
+  if (!generated && afterAttemptNumber === 0) {
+    let mismatch = '原owner缺少原Native生成身份'
+    const inherited = inheritedReadonlyLocal(store, operation, sourceAttempt, key, source, round, history, message => { mismatch = message })
+    if (inherited) return { result: prior, owner: store.readOperation(inherited.ownerId), approvalAttempt: inherited.approvalAttempt }
+    return reject(mismatch)
+  }
+  if (!generated) return reject('当前诊断之后没有该owner的新生成')
+  if (!history.attempts.some(attempt => attempt.number > afterAttemptNumber && attempt.dispatchPlans.some(dispatch => dispatch.purpose === reviewTrace.purpose && dispatch.session?.sessionId === reviewTrace.sessionId && dispatch.session.threadId === reviewTrace.threadId && dispatch.session.turnId === reviewTrace.turnId) && history.checkpoints(attempt).json.some(({ value }) => (value as Stage).stage === key && (value as Stage).resultRef?.sha256 === resultRef.sha256))) return reject('原owner完整批准没有对应真实独审dispatch')
+  return { result: prior, owner: operation, approvalAttempt: sourceAttempt }
+}
+
+export function reviewedReadonlyLocal(store: SyncStore, operation: SyncOperation, sourceAttempt: SyncAttempt, key: string, resultRef: BlobRef, aggregateRef: BlobRef, afterAttemptNumber = 0, history = readonlyElaborationHistory(store, operation)): SavedElaboration {
+  return reviewedReadonlyLocalSource(store, operation, sourceAttempt, key, resultRef, aggregateRef, afterAttemptNumber, history).result
 }
 
 type ApprovedElaborationSource = { result: SavedElaboration; attemptId: string; operationId: string; resultRef: BlobRef }
@@ -1272,32 +1312,30 @@ function authenticateApprovedBehaviorPartition(store: SyncStore, source: SyncOpe
 
 /** 同一判据逐owner核原冻结计划、P0与真实独审；旧指导仅供完整冻结候选认证。 */
 function* approvedBehaviorPartitionAuthentication(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, plan: SyncPartitionPlan, evidence: CodeBehaviorEvidence, owners: readonly AnalysisOnlyPartitionEvidence[], options?: { frozenLegacy?: boolean; readIndex?: (attempt: SyncAttempt) => SyncCheckpointStageView }): Generator<void, boolean> {
+  const frozenLegacy = options?.frozenLegacy || behaviorGuidanceMatches(operation, { guidanceContractVersion: LEGACY_CODE_BEHAVIOR_GUIDANCE_VERSION, resultRef: evidence.ref })
   const reject = (message: string): false => {
-    if (options?.frozenLegacy) fail('frozen_candidate_analysis_binding', message)
+    if (frozenLegacy) fail('frozen_candidate_analysis_binding', message)
     return false
   }
   const history = new Map<string, SyncCheckpointStageView>()
   const readIndex = (origin: SyncAttempt): SyncCheckpointStageView => {
-    const cached = history.get(origin.id) ?? (options?.readIndex ? options.readIndex(origin) : readStageCheckpoints(store, operation, origin))
+    const cached = history.get(origin.id) ?? (options?.readIndex ? options.readIndex(origin) : readStageCheckpoints(store, origin.operationId === operation.id ? operation : store.readOperation(origin.operationId), origin, true))
     history.set(origin.id, cached)
     return cached
   }
-  const usage = options?.frozenLegacy ? 'evidence' : 'automatic'
+  const usage = frozenLegacy ? 'evidence' : 'automatic'
   const whole = stage<CodeBehaviorAnalysis>(store, operation, attempt, 'analysis', usage, readIndex(attempt))
   if (!whole || contentHash(JSON.stringify(whole)) !== evidence.ref.sha256 || whole.inputId !== operation.input.id || whole.policyDigest !== operation.policyDigest || whole.composedDigest !== attempt.composedInput?.contentDigest) return reject('原P0 whole与本候选输入、政策或组合树失配')
   const basis = analysisStageBinding(store, operation, whole, readIndex)
-  if (!basis || (options?.frozenLegacy ? basis.guidanceContractVersion !== LEGACY_CODE_BEHAVIOR_GUIDANCE_VERSION || whole.guidanceContractVersion !== undefined : !behaviorGuidanceMatches(operation, basis))) return reject('原P0 whole缺少精确原指导、读集及基线wrapper')
+  if (!basis || (frozenLegacy ? basis.guidanceContractVersion !== LEGACY_CODE_BEHAVIOR_GUIDANCE_VERSION || whole.guidanceContractVersion !== undefined : !behaviorGuidanceMatches(operation, basis))) return reject('原P0 whole缺少精确原指导、读集及基线wrapper')
   const p0 = store.readAttempt(basis.attemptId), commonDir = operation.input.source.commonDir
   if (p0.number > attempt.number || p0.composedInput?.contentDigest !== whole.composedDigest) return reject('原P0实际attempt不是同组合输入的更早来源')
   const selection = basis.baselineSelectionRef ? JSON.parse(readEvidence(commonDir, basis.baselineSelectionRef).toString('utf8')) as FrozenBaselineSelection : undefined
   const source = withCheckpointStageBasis(operation, whole.readSetDigest, selection)
-  const checkpoints = (origin: SyncAttempt): SyncCheckpointStageView => {
-    const cached = history.get(origin.id) ?? (origin.operationId === operation.id ? readIndex(origin) : readSyncCheckpointStageIndex(store, store.readOperation(origin.operationId), origin))
-    history.set(origin.id, cached)
-    return cached
-  }
+  const checkpoints = readIndex
   const planDigest = contentHash(JSON.stringify(plan))
-  let ancestors: Map<string, SyncOperation> | undefined
+  let ancestors: SyncOperation[] | undefined
+  const settledAncestors = new Set<string>()
   for (const owner of owners) {
     const member = whole.partitionEvidence?.find(item => item.partitionId === owner.partitionId), key = `partition:${owner.partitionId}:analysis`
     if (!member || member.analysisRef.sha256 !== owner.analysisRef.sha256 || owner.wholeAnalysisRef.sha256 !== evidence.ref.sha256 || contentHash(JSON.stringify(member.analysis)) !== member.analysisRef.sha256) return reject(`原P0 owner未绑定精确whole/local摘要: ${owner.partitionId}`)
@@ -1307,24 +1345,33 @@ function* approvedBehaviorPartitionAuthentication(store: SyncStore, operation: S
       const oldPlan = partitionStage<SyncPartitionPlan>(store, ownerOperation, origin, 'partition-plan', selection, original)
       const local = partitionStage<CodeBehaviorAnalysis>(store, ownerOperation, origin, key, selection, original, undefined, usage)
       if (oldPlan?.resultRef.sha256 !== planDigest || local?.resultRef.sha256 !== owner.analysisRef.sha256 || origin.composedInput?.contentDigest !== whole.composedDigest) return reject(`原P0 owner的计划、local或组合输入失配: ${owner.partitionId}`)
-      if (options?.frozenLegacy) {
+      if (frozenLegacy) {
         const wrapper = original.json.map(({ value }) => value as Stage).find(value => value.stage === key && value.resultRef?.sha256 === owner.analysisRef.sha256)
-        const protocol = stage<{ version: string; contextTransport?: CodeBehaviorContextTransport }>(store, ownerOperation, origin, 'behavior-draft-protocol', 'evidence', original)
-        if (wrapper?.guidanceContractVersion !== LEGACY_CODE_BEHAVIOR_GUIDANCE_VERSION || local.result.guidanceContractVersion !== undefined || protocol?.version !== 'code-behavior-draft-v1' || protocol.contextTransport !== 'git-json-v4'
+        if (wrapper?.guidanceContractVersion !== LEGACY_CODE_BEHAVIOR_GUIDANCE_VERSION || local.result.guidanceContractVersion !== undefined
           || local.result.inputId !== operation.input.id || local.result.policyDigest !== operation.policyDigest || local.result.readSetDigest !== whole.readSetDigest || local.result.composedDigest !== whole.composedDigest) return reject(`原P0 owner缺少原v4/v7及完整冻结输入: ${owner.partitionId}`)
       }
       const provenance = stage<{ fromOperationId: string; fromAttemptId: string; resultRef: BlobRef }>(store, ownerOperation, origin, `${key}:provenance`, 'automatic', original)
-      if (!provenance) break
+      if (!provenance) {
+        const protocol = frozenLegacy && stage<{ version: string; contextTransport?: CodeBehaviorContextTransport }>(store, ownerOperation, origin, 'behavior-draft-protocol', 'evidence', original)
+        if (frozenLegacy && (!protocol || protocol.version !== 'code-behavior-draft-v1' || protocol.contextTransport !== 'git-json-v4')) return reject(`原P0 owner真实生产者缺少原v4协议: ${owner.partitionId}`)
+        break
+      }
       if (provenance.resultRef.sha256 !== owner.analysisRef.sha256) return reject(`原P0 owner provenance改变local摘要: ${owner.partitionId}`)
       const previous = store.readAttempt(provenance.fromAttemptId)
       if (previous.operationId !== provenance.fromOperationId || !['failed', 'superseded', 'settled'].includes(previous.status)) return reject(`原P0 owner provenance未正式结算: ${owner.partitionId}`)
       if (previous.operationId === ownerOperation.id) {
         if (previous.number >= origin.number) return reject(`原P0 owner provenance不是严格更早来源: ${owner.partitionId}`)
       } else {
-        if (options?.frozenLegacy || ownerOperation.id !== operation.id) return reject(`原P0 owner不能跨operation继承旧指导: ${owner.partitionId}`)
-        ancestors ??= new Map([...retryOperationLineage(store, operation)].filter(candidate => candidate.id !== operation.id && settledApprovalSource(store, candidate)).map(candidate => [candidate.id, candidate]))
-        const ancestor = ancestors.get(previous.operationId)
-        if (!ancestor) return false
+        ancestors ??= [...retryOperationLineage(store, operation)]
+        const currentPosition = ancestors.findIndex(candidate => candidate.id === ownerOperation.id), previousPosition = ancestors.findIndex(candidate => candidate.id === previous.operationId)
+        if (currentPosition < 0 || previousPosition <= currentPosition) return reject(`原P0 owner没有严格更早的正式retryOf来源: ${owner.partitionId}`)
+        for (const ancestor of ancestors.slice(currentPosition + 1, previousPosition + 1)) {
+          if (settledAncestors.has(ancestor.id)) continue
+          if (!settledApprovalSource(store, ancestor) || frozenLegacy && (canonical(ancestor.input) !== canonical(operation.input) || ancestor.planBlob?.sha256 !== operation.planBlob?.sha256)) return reject(`原P0 owner正式祖先未结算或冻结身份已改变: ${owner.partitionId}`)
+          settledAncestors.add(ancestor.id)
+          yield
+        }
+        const ancestor = ancestors[previousPosition]
         ownerOperation = withCheckpointStageBasis(ancestor, whole.readSetDigest, selection)
       }
       origin = previous
@@ -1360,14 +1407,14 @@ function authenticatedMixedElaborationCoverage(store: SyncStore, operation: Sync
 
 type FrozenCandidateAnalysis = { operationId: string; sourceAttemptId: string; candidateDigest: string; analysisRef: BlobRef; analysisRefs: string[] }
 
-/** 同operation原冻结候选专用冷验；不补指导、不继承跨操作批准，也不启动模型。 */
+/** 同operation原冻结候选专用冷验；沿原正式生产者核证，不补指导或启动模型。 */
 export async function authenticateFrozenCandidateAnalysis(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, options: { renew?: () => Promise<void>; readNativeRecord?: typeof readRecord } = {}): Promise<FrozenCandidateAnalysis | null> {
-  const scope: FrozenAnalysisScope = { active: true, operationId: operation.id, inputId: operation.input.id, source: canonical(operation.input.source), policyDigest: operation.policyDigest, refs: new Set(), readNativeRecord: options.readNativeRecord ?? readRecord }
+  const scope: FrozenAnalysisScope = { active: true, operationId: operation.id, inputId: operation.input.id, source: canonical(operation.input.source), policyDigest: operation.policyDigest, refs: new Set(), readNativeRecord: options.readNativeRecord ?? readRecord, selectionMatches: new Map() }
   return frozenAnalysisScope.run(scope, () => withReadonlySnapshotQuery(async () => {
     try {
       const indexes = new Map<string, SyncCheckpointStageView>()
-      const readIndex = (origin: SyncAttempt): SyncCheckpointStageView => {
-        const index = indexes.get(origin.id) ?? readSyncCheckpointStageIndex(store, operation, origin, scope.readNativeRecord)
+      const readIndex = (origin: SyncAttempt, owner = origin.operationId === operation.id ? operation : store.readOperation(origin.operationId)): SyncCheckpointStageView => {
+        const index = indexes.get(origin.id) ?? readSyncCheckpointStageIndex(store, owner, origin, scope.readNativeRecord)
         indexes.set(origin.id, index)
         return index
       }
@@ -1410,17 +1457,11 @@ export async function authenticateFrozenCandidateAnalysis(store: SyncStore, oper
       const history = readonlyElaborationHistory(store, operation, readIndex), aggregateRef = { sha256: contentHash(JSON.stringify(p1)) }
       for (const member of p1!.partitionEvidence!) {
         const key = `partition:${member.partitionId}:elaboration`
-        const local = reviewedReadonlyLocal(store, operation, attempt, key, member.resultRef, aggregateRef, 0, history), round = local.rounds.at(-1)!
-        const trace = round.traces.find(trace => trace.purpose === 'elaboration_review')!
-        const origin = history.attempts.find(origin => origin.number <= attempt.number && origin.dispatchPlans.some(dispatch => dispatch.purpose === trace.purpose && canonical(dispatch.session) === canonical({ sessionId: trace.sessionId, threadId: trace.threadId, turnId: trace.turnId })))
-        const dispatch = origin?.dispatchPlans.find(dispatch => dispatch.purpose === trace.purpose && dispatch.session?.sessionId === trace.sessionId)
-        const reviewed = origin && dispatch ? authenticatedDraftResult(store, operation, origin, dispatch.key, trace.purpose) : null
+        const source = reviewedReadonlyLocalSource(store, operation, attempt, key, member.resultRef, aggregateRef, 0, history), local = source.result, round = local.rounds.at(-1)!
         if (!round.draft || !round.candidate || round.candidateDigest !== contentHash(JSON.stringify(round.candidate)) || round.candidate.inputDigest !== local.inputDigest || local.candidateDigest !== round.candidateDigest
           || canonical(local.changes) !== canonical(round.candidate.changes.map(change => ({ ...change, contentDigest: contentHash(change.source) })))
           || local.partitionBinding?.planDigest !== plan!.digest || local.partitionBinding.analysisRef?.sha256 !== evidence.ref.sha256
-          || !reviewed?.result || reviewed.result.resultDigest !== trace.resultDigest || canonical(reviewed.result.output) !== canonical(round.reviewOutput)
-          || canonical(round.review) !== canonical({ ...(round.reviewOutput as object), inputDigest: local.inputDigest, candidateDigest: local.candidateDigest })
-          || ELABORATION_BOUNDARIES.some(boundary => !round.review!.checkedBoundaries.includes(boundary))) reject('原P1生成、Git候选或完整独审不匹配')
+          || !authenticatedApprovedElaboration(store, source.owner, source.approvalAttempt, local)) reject(`原P1生成、Git候选或完整独审不匹配: ${member.partitionId}`)
         readStageDraft(commonDir, round.draft!, round.draft!)
         await renew()
       }
@@ -1430,7 +1471,7 @@ export async function authenticateFrozenCandidateAnalysis(store: SyncStore, oper
         await renew()
       }
       return { operationId: operation.id, sourceAttemptId: attempt.id, candidateDigest: candidate.digest, analysisRef: evidence.ref, analysisRefs: [...scope.refs] }
-    } finally { scope.active = false; scope.refs.clear(); delete scope.readIndex }
+    } finally { scope.active = false; scope.refs.clear(); scope.selectionMatches?.clear(); delete scope.readIndex; delete scope.settlement }
   }))
 }
 

@@ -18,7 +18,7 @@ related:
 
 混合候选的冷验计数检查同一真实冻结 Git 树只完整读取一次。原候选、已拒稿及全部独审结论保持完整认证。
 
-旧候选回归用真实历史程序自然产生 git-json-v4 / v7：四组 P0、三个真实 P1 与一个仅分析 owner、合法 repair / accept / 格式失败三组 P2。原轮尚无正式 attempt.candidate，经 SQLite 冷开及 canonical Native/Git 冷验，只新增原格式独审，再仅重派命中 P1；原 v7、全部旧 CAS 和 source/index 不变。逐 owner 控制机会、缺 P0 原件、Native 输出身份漂移、跨 operation、缺 P2 outcome、未结算资源及 scope 退出后的普通 v8 门均有反例。该隔离场景在 V3 前硬停，不把受控 Native 输出冒充真实模型或最终交付证据。
+旧候选回归用真实历史程序自然产生 git-json-v4 / v7：四组 P0、三个真实 P1 与一个仅分析 owner、合法 repair / accept / 格式失败三组 P2。原轮尚无正式 attempt.candidate，经 SQLite 冷开及 canonical Native/Git 冷验，只新增原格式独审，再仅重派命中 P1；原 v7、全部旧 CAS 和 source/index 不变。另经两次真实正式retry与显式换模型继承原P0及已审P1，保部分P1后的原范围；SQLite冷续同样只补格式审查再返命中owner。逐 owner及祖先控制机会、缺 P0 原件、Native 输出身份/原生产者模型漂移、无retryOf的跨 operation、活祖先租约、缺null扩域证据、缺 P2 outcome、未结算资源及 scope 退出后的普通 v8 门均有反例。该隔离场景在 V3 前硬停，不把受控 Native 输出冒充真实模型或最终交付证据。
 
 P2 混合失败使用真实 Git/Native 资源记录与 SQLite 冷开：普通 repair 排首、后组 contract-omission、另一组格式失败和一个 accept 同轮结算。冷续只重派原格式稿，保相同 candidate、合法 repair/accept 的原 resultRef；之后只回相应 P1 owner，保未命中原件与旧 CAS。覆盖完整 aggregate 后失租约的 superseded/null、零调用中间 attempt、缺 required outcome 及资源未 removed；不得补旧失败或收据。权限回归另在同 owner 核 ordinary 白名单与 omission 的已接受字段保护，不以并集扩权。
 
