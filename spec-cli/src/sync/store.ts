@@ -6,7 +6,7 @@ import { applyComponentMigrations, type ProtocolTransaction, type SessionProtoco
 import { controlledDecisionIdentity, readControlledDecision, readControlledRequest } from './request-input.js'
 import { readHistoryRequest } from './history-input.js'
 import { assertPublicationParentCurrent, verifyPublicationBase } from './publication-base.js'
-import { selectedRetiredIds } from './composition.js'
+import { baselineSelectionDigest, selectedRetiredIds } from './composition.js'
 import { proveUnadoptedDelivery } from './source-adoption.js'
 import type { SyncCoordinatorPlan } from './coordinator-types.js'
 import type { PublicationBase, PublicationHeads } from './operation-types.js'
@@ -178,7 +178,7 @@ export class SyncStore {
       bindings.push(resource.kind === 'path' ? { resource, bytePair: pair } : { resource, intentPair: pair })
     }
     const body = { version: 'sync-baseline-selection-v1' as const, source: clone(source), bindings }
-    return { selection: { ...body, digest: digest(body) } }
+    return { selection: { ...body, digest: baselineSelectionDigest(body) } }
   }
   readBaselineSelection(source: WorktreeIdentity, exactResources: BaselineResource[]): BaselineSelectionResult {
     validateScope({ paths: exactResources.flatMap(resource => resource.kind === 'path' ? [resource.path] : []), contractIds: [], flowIds: [] })
@@ -194,7 +194,7 @@ export class SyncStore {
       bindings.push({ resource: { kind: 'path', path }, bytePair: pair })
     }
     const body = { version: 'sync-baseline-selection-v1' as const, source: clone(source), bindings }
-    return { selection: { ...body, digest: digest(body) }, unknownPaths }
+    return { selection: { ...body, digest: baselineSelectionDigest(body) }, unknownPaths }
   }
   readPublicationHeads(source: WorktreeIdentity): PublicationHeads { return this.write(tx => this.publicationHeads(tx, source)) }
   private assertPublicationCurrent(tx: ProtocolTransaction, operation: SyncOperation, attempt: SyncAttempt, heads: PublicationHeads): void {
@@ -232,7 +232,7 @@ export class SyncStore {
     if (resources.some(resource => !selectedKeys.has(resourceKey(resource)))) fail('SYNC_BASELINE_STALE', 'selection must explicitly bind every operation write resource')
     const current = this.baselineSelection(tx, source, selected)
     if ('failure' in current) fail(current.failure.code, current.failure.message)
-    if (digest(selection.source) !== digest(source) || selection.digest !== digest({ version: selection.version, source: selection.source, bindings: selection.bindings }) || current.selection.digest !== selection.digest) fail('SYNC_BASELINE_STALE', 'exact baseline frontier changed or selection is incomplete')
+    if (digest(selection.source) !== digest(source) || selection.digest !== baselineSelectionDigest(selection) || current.selection.digest !== selection.digest) fail('SYNC_BASELINE_STALE', 'exact baseline frontier changed or selection is incomplete')
   }
   private compatibleSelection(tx: ProtocolTransaction, operation: SyncOperation, incoming: FrozenBaselineSelection): boolean {
     if (!operation.baselineSelection || identityKey(incoming.source) !== identityKey(operation.input.source)) return false
@@ -282,7 +282,7 @@ export class SyncStore {
     const selected = { ...operation.baselineSelection, bindings: operation.baselineSelection.bindings.filter(binding => originalKeys.has(resourceKey(binding.resource))) }
     if (revalidatable(parent) && !this.revalidationSelection(tx, parent, selected) || !revalidatable(parent) && selected.bindings.some(binding => !parent.baselineSelection!.bindings.some(prior => digest(prior) === digest(binding)))) fail('SYNC_RETRY_BINDING', '重验业务选择与原父交付不匹配')
     const body = { version: business.version, source: business.source, bindings: operation.baselineSelection.bindings.map(binding => business.bindings.find(prior => resourceKey(prior.resource) === resourceKey(binding.resource)) ?? binding) }
-    return { ...body, digest: digest(body) }
+    return { ...body, digest: baselineSelectionDigest(body) }
   }
   readBusinessBaselineSelection(operationId: string): FrozenBaselineSelection | undefined { return this.write(tx => this.businessSelection(tx, this.operation(tx, operationId))) }
   ackDispatch(repositoryId: string, expectedMessageId: string): SyncOperation {
