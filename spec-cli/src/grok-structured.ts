@@ -260,7 +260,12 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
   for (const key of sessionIdentityEnvVars()) delete env[key]
   const child = spawn('/bin/sh', ['-c', 'IFS= read -r ready && [ "$ready" = start ] || exit 1; exec "$@"', 'spex-grok-launch', launch.command, ...launch.args, ...args], { cwd: worktreePath, env, detached: true, stdio: ['pipe', 'pipe', 'ignore'] })
   let exitObserved = false
-  const exited = new Promise<Exit>(resolve => child.once('exit', (code, signal) => { exitObserved = true; armStop(); resolve({ code, signal }) }))
+  const exited = new Promise<Exit & { observedAt: number }>(resolve => child.once('exit', (code, signal) => {
+    const observedAt = Date.now()
+    exitObserved = true
+    armStop()
+    resolve({ code, signal, observedAt })
+  }))
   let processFailed = false
   child.stdin.once('error', () => { processFailed = true })
   let owned: OwnedLaunch | undefined
@@ -302,6 +307,7 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
     abort()
     void callbacks.onTimeout?.().catch(error => { timeoutFailure = error })
   })
+  let exitWindowFailure: StructuredSessionError | undefined
   let stopped = false
   try {
     if (!child.pid) throw pending('Grok launch PID is unavailable')
@@ -343,8 +349,14 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
         }
         return exited
       }), expiry])
-      if (!ended) throw pending('Grok native exit or terminal remains unproven')
-      exit = ended
+      if (!ended || terminal?.stopReason === 'end_turn' && ended.observedAt >= deadline!) {
+        if (terminal?.stopReason === 'end_turn' && !timedOut && !callbacks.signal?.aborted && !observerFailure) {
+          exitWindowFailure = new StructuredSessionError('failed', 'Grok native exit was not observed before the settlement deadline')
+          throw exitWindowFailure
+        }
+        throw pending('Grok native exit or terminal remains unproven')
+      }
+      exit = { code: ended.code, signal: ended.signal }
     } finally { clearTimeout(reapTimer) }
     armStop()
     clearTimeout(stopTimer)
@@ -372,10 +384,30 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
   } catch (error) {
     if (!stopped) {
       abort()
-      const exit = await Promise.race([exited, expiry])
-      stopped = !!exit && !!owned && await waitForStop(owned, deadline!, true)
+      if (owned && exitWindowFailure && error === exitWindowFailure) {
+        const cleanupDeadline = Date.now() + STOP_MS
+        stopped = await waitForStop(owned, cleanupDeadline, true)
+        if (stopped && !child.stdout.readableEnded) {
+          let markEof!: (ended: boolean) => void
+          const eof = new Promise<boolean>(resolve => { markEof = resolve })
+          const onEnd = (): void => markEof(Date.now() < cleanupDeadline)
+          const cleanupTimer = setTimeout(() => markEof(false), Math.max(0, cleanupDeadline - Date.now()))
+          child.stdout.once('end', onEnd)
+          try {
+            child.stdout.resume()
+            stopped = await eof
+          } finally {
+            clearTimeout(cleanupTimer)
+            child.stdout.off('end', onEnd)
+          }
+        }
+      } else {
+        const exit = await Promise.race([exited, expiry])
+        stopped = !!exit && !!owned && await waitForStop(owned, deadline!, true)
+      }
     }
     if (!stopped) throw Object.assign(pending(`Grok native stop remains unproven (${stopPhase})`), { cause: error })
+    if (exitWindowFailure && error === exitWindowFailure && (callbacks.signal?.aborted || timedOut || existsSync(join(root, 'cancel.json')))) throw cancelled(timedOut)
     throw error
   } finally {
     clearTimeout(timer); clearTimeout(stopTimer); clearInterval(census)
