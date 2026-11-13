@@ -49,7 +49,7 @@ ZCode停止材料回归复用真实Git/私有SQLite及正式adapter.stop/资源�
 
 P0 历史 ZCode 结果未发布的回归使用真实 Git、私有 SQLite 和正式停止与归档。原 Native 已成功封存、正式观察到失败、最终结算为 cancelled 时，下一 attempt 跳过该来源并用无旧稿的 seed 派发。封存被改、exit 缺失或未曾正式观察失败时不得派发。原归档引用、Native 字节、原 attempt 和资源保持。尚未结算的 RPC 资源应返回 recovery_required，等待结算并保持后续派发为零。新 P0 的停止材料引用保原状态码与来源引用。损坏的旧终态 JSON 仍明确拒绝，正式失败摘要不携解析原文。
 
-新 P0 冷恢复回归校验失败诊断正文缺席于 Git context、Native 请求、continuation 与失败证据。业务返修通过真实原审查的 Git 引用读取拒因，经过中断与承接副本仍须指向原派发。原 JSON、已校验分析与兄弟批准来源保持。
+新 P0 冷恢复回归校验失败诊断正文缺席于 Git context、Native 请求、continuation 与失败证据。业务返修通过真实原审查的 Git 引用读取拒因，经过中断与承接副本仍须指向原派发。正式 retryOf 的祖先以 unsupported 结束、没有分区失败正文时，同样核对原 owner、完整输入、审核范围与原生身份，拒绝被篡改的审查。原 JSON、已校验分析与兄弟批准来源保持。
 
 新 attempt 在真实 Git 和隔离 SQLite 首次冻结 git-json-v5，分析自检新增未变化只读验收来源的定位。已有 git-json-v2/v3/v4 检查点与预留记录保持原对象、原选择及对应自检范围。v1、缺席与未知传输的回归保持。
 

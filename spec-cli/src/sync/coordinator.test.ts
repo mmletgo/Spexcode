@@ -7947,8 +7947,14 @@ for (const tamper of ['none', 'review-identity', 'analysis-digest', 'owner'] as 
       const entry = readTree(f.input.source.commonDir, seed.tree).find(entry => entry.path === path)
       assert.ok(entry, '跨attempt原分析Git稿必须进入新seed')
       assert.equal(readObject(f.input.source.commonDir, entry.oid).toString(), analysisText)
-      const errors = readCodeBehaviorContext(request, f.input.source.commonDir).errors
-      assert.ok(errors.some(error => error.code === 'behavior_review_failed' && JSON.stringify(JSON.parse(error.message).review.findings) === JSON.stringify(finding)), '父unsupported且无partitionFailures仍须携完整原review findings，不只复制分析稿')
+      const context = readCodeBehaviorContext(request, f.input.source.commonDir)
+      assert.deepEqual(context.errors, [])
+      assert.deepEqual(context.repairDiagnostics, [])
+      for (const item of finding) assert.ok(!request.prompt.includes(item.message))
+      const originalReview = /用 git show ([a-f0-9]+):(\.spex-sync-drafts\/[a-f0-9]+\.json) 读取本区最近一次真实业务独审/.exec(request.prompt)
+      assert.ok(originalReview, '父unsupported且无partitionFailures仍须引用原Git独审')
+      const original = execFileSync('git', ['-C', f.root, 'show', `${originalReview[1]}:${originalReview[2]}`], { encoding: 'utf8' })
+      assert.deepEqual(JSON.parse(original).findings, finding)
       newPrompt = request.prompt
       throw Object.assign(new Error('fixture已核新analyze seed和完整prompt，停止于模型调用边界'), { code: 'unsupported' })
     }
