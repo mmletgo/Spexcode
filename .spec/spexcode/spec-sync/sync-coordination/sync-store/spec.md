@@ -36,6 +36,8 @@ P3冻结恢复只允许未来业务ID扩展；P4已审P1可同时登记真实精
 
 另一细化证据扩展完整 ID 集合时，只把 operation.scope 尚未登记的新 ID 加入 readyScope；已有 blocked ID 不因重新登记/取得租约自动变为 ready，blockedScope 原样保留，完整业务分区由后续 startGeneration 决定。
 
+租约领取及扩域幂等重放在当前事务按精确键检查已持有成员，成员查找工作量随请求键和持有租约数线性增长，不为每个键重扫全部租约。领取只索引同时匹配当前 token 与 attempt 的键，缺失或别的持有人不算已取得；重叠冲突、期限、applying、未移除资源、generation 和旧 fence 的判断保持，索引不跨事务保存。
+
 freezeCandidate 核对实际 diff blob 的文件范围，recordVerification 绑定输入与候选及真实 coveredScope。beginApply 核对控制、fence、完整目标物理身份与复核快照、共同 baseline、候选/验证/真实 target→candidate manifest diff，先提交 journal 才允许文件副作用。effectKey 同 payload 幂等，不同 payload 拒绝。recordApplyStep 保存写入单元进度，recordReceipt 保存真实 tree/commit/交付快照证据；没有实际副作用的回调不能成为 Git 完成证明。
 
 settleApply 原子保存 receipt、journal 结算、sourceInput+verifiedDelivery 成对 baseline 和真实 deliveredScope。部分交付只推进 coveredScope；根仍 needs_input/conflicted。源及交付物理身份不同的外部输入基线不得套到发布交付树后续编辑，交付树另建自己的 source=delivery 成对基线。pause/cancel 在 applying 只记请求并进入等待边界状态，写入单元完成登记结算后停；取消保留实际 receipt，不等于回滚。未结算副作用、过期 attempt 与未派发操作通过 listRecoverable 查询；pinnedBlobRefs 保护冻结输入、候选、证据、checkpoint 与基线引用。
