@@ -1985,14 +1985,15 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
       if (!operation.planBlob) fail('plan_missing', '旧操作没有完整可信计划证据，不能猜测或借用另一份政策恢复')
       const legacy = frozenAnalysisScope.getStore()!
       legacy.refs.clear(); delete legacy.candidateDigest
+      const renewReadonlyRecovery = async (): Promise<void> => {
+        store.renewLease(fence!, leaseMs); await yieldToControl()
+        if (signal.aborted) fail('cancelled', '只读恢复认证已停止')
+        store.renewLease(fence!, leaseMs)
+      }
       if (options.plan.version === 'sync-coordinator-v2' && options.plan.direction === 'code_to_spec') {
         for (const prior of store.listAttempts(operation.id).filter(prior => prior.number < attempt!.number && ['failed', 'superseded'].includes(prior.status)).reverse()) {
           if (!stage<SavedGeneration>(store, operation, prior, 'generation')) continue
-          const proof = await authenticateFrozenCandidateAnalysis(store, operation, prior, { renew: async () => {
-            store.renewLease(fence!, leaseMs); await yieldToControl()
-            if (signal.aborted) fail('cancelled', '原冻结候选认证已停止')
-            store.renewLease(fence!, leaseMs)
-          } })
+          const proof = await authenticateFrozenCandidateAnalysis(store, operation, prior, { renew: renewReadonlyRecovery })
           if (proof) { legacy.candidateDigest = proof.candidateDigest; for (const ref of proof.analysisRefs) legacy.refs.add(ref) }
           break
         }
@@ -2004,7 +2005,9 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
       readonlyBase = null; readonlyActiveOwners = []
       if (options.plan.version === 'sync-coordinator-v2') {
         readonlyBase = latestApprovedElaboration(store, operation, attempt.number + 1)
+        await renewReadonlyRecovery()
         const pending = pendingReadonlyRepair(store, operation, attempt, readonlyBase)
+        await renewReadonlyRecovery()
         const original = frozenReadonlyRepair?.readonlyOwnerRepair
         if (original && pending && canonical(readonlyRepairOriginalShape(pending.repair, original)) !== canonical(original)) fail('readonly_spec_repair_binding', '本attempt已冻结只读诊断与当前来源不一致，不能重签原请求')
         readonlyOwnerRepair = original && pending ? original : pending?.repair

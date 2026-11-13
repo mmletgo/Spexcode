@@ -9093,7 +9093,7 @@ for (const mode of ['repair', 'repair-restart', 'repair-complete-restart', 'nati
   assert.equal(f.store.listJournals(admitted.id).length, 0)
 })
 
-for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', 'omission-drop'] as const) for (const boundary of gapMode === 'none' ? ['failed', 'superseded-zero-call', 'legacy-v4', 'legacy-v4-retry'] as const : gapMode === 'pending' ? ['failed', 'superseded-zero-call'] as const : ['failed'] as const) test(`${gapMode === 'none' ? '' : gapMode === 'pending' ? 'P1 GAP保持期间，' : `P1 GAP已审基线 ${gapMode}，`}P2混合普通修复、契约遗漏与格式失败经SQLite冷续只补原评审再回精确owner ${boundary}`, { timeout: 180000 }, async t => {
+for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', 'omission-drop'] as const) for (const boundary of gapMode === 'none' ? ['failed', 'superseded-zero-call', 'legacy-v4', 'legacy-v4-retry'] as const : gapMode === 'pending' ? ['failed', 'superseded-zero-call', 'legacy-v4'] as const : ['failed'] as const) test(`${gapMode === 'none' ? '' : gapMode === 'pending' ? 'P1 GAP保持期间，' : `P1 GAP已审基线 ${gapMode}，`}P2混合普通修复、契约遗漏与格式失败经SQLite冷续只补原评审再回精确owner ${boundary}`, { timeout: 180000 }, async t => {
   const withGap = gapMode !== 'none', repairGap = withGap && gapMode !== 'pending', factBaseline = gapMode.startsWith('fact'), rejectedGap = gapMode.endsWith('rollback') || gapMode.endsWith('drop')
   const legacy = boundary.startsWith('legacy-v4'), legacyRetry = boundary === 'legacy-v4-retry', analysisOnlyPath = 'tests/independent-smoke.test.mjs'
   const protocolAttempt = boundary === 'failed' ? 2 : 3, ownerAttempt = protocolAttempt + 1
@@ -9180,7 +9180,7 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
       assert.equal(aggregate.partitionSeal!.passed, true)
       if (attempt.number > 1) {
         assert.equal(attempt.number, ownerAttempt)
-        assert.notDeepEqual(task.aggregateRef, gapReviews[0].aggregateRef, '实际owner新独审和strict seal之后才能复核新并集')
+        assert.notDeepEqual(task.aggregateRef, legacy ? originalStages.find(stage => stage.stage === 'elaboration')!.resultRef : gapReviews[0].aggregateRef, '实际owner新独审和strict seal之后才能复核新并集')
         assert.deepEqual(calls.filter(item => item.attempt === ownerAttempt && item.purpose === 'elaboration_generate').map(item => item.nodeId).sort(), [...roles.values()].filter(role => role.kind === 'ordinary' || role.kind === 'omission').map(role => role.definition.nodeId).sort())
       }
       output = { verdict: repairGap && attempt.number === ownerAttempt ? 'repair' : 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: repairGap && attempt.number === ownerAttempt ? [{ code: 'caller_owns_retry', kind: 'repair', affectedIds: [gapId], message: '最新已审事实已能回答候选GAP', evidence: 'RULE-EXPORT-05 与 src/export.js#ExportService 的既有重试职责', decision: '仅移除该候选GAP，保持最新已批准事实和全部业务行' }] : [] }
@@ -9273,7 +9273,7 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
   }
   producingAncestors = false
   const produced = await historicalRun(store, f.operation.id, f.options)
-  if (withGap) {
+  if (withGap && !legacy) {
     // 控制前置仅模拟旧producer尚无可选GAP复核stage；实际P1/P2、Native与所有CAS字节保持。
     const original = store.listAttempts(f.operation.id)[0], historical = { ...original, checkpointRefs: original.checkpointRefs.filter(ref => read<{ stage?: string }>(ref).stage !== 'elaboration-gap-review') }
     assert.equal(original.checkpointRefs.length - historical.checkpointRefs.length, 1)
@@ -9287,6 +9287,7 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
     assert.equal(read<{ guidanceContractVersion?: string }>(p0.resultRef).guidanceContractVersion, undefined)
     const p1 = read<ElaborationResult>(originalStages.find(stage => stage.stage === 'elaboration')!.resultRef)
     assert.equal(p1.partitionEvidence?.length, 3); assert.equal(p1.analysisOnlyPartitions?.length, 1)
+    assert.equal(p1.status, withGap ? 'needs_input' : 'complete')
     assert.equal(first.candidate, null, '原P2收齐混合独审时尚未执行正式freezeCandidate')
     let renewals = 0
     const callsBeforeAuthentication = calls.length
@@ -9362,7 +9363,7 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
   assert.deepEqual(calls.filter(call => call.attempt === ownerAttempt && call.purpose === 'elaboration_generate').map(call => call.nodeId).sort(), [...roles.values()].filter(role => role.kind === 'ordinary' || role.kind === 'omission').map(role => role.definition.nodeId).sort())
   const attempts = store.listAttempts(f.operation.id), second = stages(attempts.find(attempt => attempt.number === protocolAttempt)!), third = stages(attempts.find(attempt => attempt.number === ownerAttempt)!)
   if (withGap) {
-    assert.deepEqual(gapReviews.map(item => item.attempt), [1, ownerAttempt])
+    assert.deepEqual(gapReviews.map(item => item.attempt), legacy ? [ownerAttempt] : [1, ownerAttempt])
     const original = read<ElaborationResult>(originalStages.find(stage => stage.stage === 'elaboration')!.resultRef)
     for (const stage of [...second, ...third].filter(stage => stage.stage === 'elaboration')) {
       const current = read<ElaborationResult>(stage.resultRef)
