@@ -140,7 +140,7 @@ test('scope结束或抛错后，普通读取与继承的异步任务都必须重
   writeFileSync(objectPath, original)
 
   let lateRead!: Promise<{ error?: unknown }>
-  await assert.rejects(withReadonlySnapshotQuery(() => {
+  await assert.rejects(withReadonlySnapshotQuery(async () => {
     readTree(snapshot.source.commonDir, snapshot.immutableTree)
     lateRead = new Promise(resolve => setImmediate(() => {
       try { readTree(snapshot.source.commonDir, snapshot.immutableTree); resolve({}) }

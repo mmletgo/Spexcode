@@ -649,3 +649,73 @@ test('历史V4及缺席的prose诊断不授事实权，完整请求与原摘要�
   assert.equal(readonlyFactRepairIds({ ...frozen, phase: 'interface_seed' }, frozen.targets[0]).size, 0)
   assert.deepEqual(frozen, original)
 })
+const mixedOwnerRepairInput = (): ElaborationInput => {
+  const frozen = factRepairInput(), repair = frozen.readonlySpecRepair!
+  const finding = { kind: 'repair', affectedIds: ['RULE-EXPORT-02'], ruleLocation: `contract-omission:${primaryPath}#RULE-EXPORT-02`, codeLocation: 'src/export.js#ExportService', evidence: '原raw支持的边界与固定源码/断言仍须在同owner核对', counterexample: '已有规则的细节遗漏不能改写该规则', message: '只在原意与当前许可内补齐遗漏，不授普通事实字段以外的改义权' }
+  repair.kind = 'contract_omission'
+  repair.findings.push({ code: 'candidate-review-contract-omission', severity: 'error', nodeId: 'export-contract', path: primaryPath, itemId: 'RULE-EXPORT-02', relatedIds: finding.affectedIds, message: JSON.stringify(finding) })
+  frozen.refinement = { candidateDigest: repair.candidateDigest, diagnostics: [{ code: 'contract_boundary_omission', message: JSON.stringify(finding) }] }
+  frozen.maxRepairs = 0
+  return frozen
+}
+
+test('同owner混合omission不扩大ordinary事实白名单，P0未影响范围仍保持', async () => {
+  const frozen = mixedOwnerRepairInput(); frozen.mode = 'preserve_business'
+  const before = structuredClone(frozen), node = factRepairNode(frozen)
+  assert.deepEqual([...readonlyFactRepairIds(frozen, frozen.targets[0])], ['RULE-EXPORT-01'])
+  const fake = runner(request => build(request, [node]))
+  const result = await elaborate(frozen, { runner: fake.run })
+  assert.equal(result.status, 'complete', JSON.stringify(result.rounds.flatMap(round => round.findings)))
+  assert.deepEqual(fake.calls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review'])
+  const changed = structuredClone(node), other = primary.items.find(item => item.id === 'RULE-EXPORT-02')!
+  assert.equal(other.kind, 'RULE')
+  changed.tables.RULE.push({ id: other.id, scope: other.scope, constraint: other.constraint, basis: 'omission的relatedIds不能变成ordinary白名单', authority: other.authority, source: `${other.source.kind}:${other.source.ref}`, 'depends-on': other.dependsOn })
+  assert.ok(elaborationScopeErrors(frozen, bindElaborationTargets(frozen, { version: 'elaboration-target-rows-v3', changes: [changed], applicability: [] })).length)
+  const newRule = structuredClone(node)
+  newRule.tables.RULE.push({ ...newRule.tables.RULE[0], id: 'RULE-EXPORT-UNAUTHORIZED-NEW' })
+  assert.ok(elaborationScopeErrors(frozen, bindElaborationTargets(frozen, { version: 'elaboration-target-rows-v3', changes: [newRule], applicability: [] })).length, 'refinement诊断不能把未变P0变为当前改义授权')
+  const global = { ...frozen, readonlySpecRepair: undefined }
+  const seal = sealPartitionedElaboration(global, result.changes, result.rounds.at(-1)!.candidate!.applicability, [frozen.readonlySpecRepair!])
+  assert.equal(seal.seal.passed, true, JSON.stringify(seal.seal.findings))
+  assert.deepEqual(frozen, before)
+})
+
+test('同owner遗漏沿既有reelaborate新增验收，原approved业务列与绑定逐项保持', async () => {
+  const frozen = mixedOwnerRepairInput(); frozen.analysis = undefined; frozen.mode = 'reelaborate'
+  const ac = primary.items.find(item => item.kind === 'AC')!
+  assert.equal(ac.kind, 'AC')
+  const acceptance = { id: 'AC-EXPORT-OMISSION', covers: [...ac.covers], preconditions: ac.preconditions, action: ac.action, assertion: ac.assertion, source: `${ac.source.kind}:${ac.source.ref}`, test: ac.test, command: ac.command, 'depends-on': [...ac.dependsOn] }
+  const node = unchangedOwner(frozen, 0); node.tables.AC = [acceptance]
+  const fake = runner(request => build(request, [node])), result = await elaborate(frozen, { runner: fake.run })
+  assert.equal(result.status, 'complete', JSON.stringify(result.rounds.flatMap(round => round.findings)))
+  const updated = parseContract(result.changes[0]).contract!
+  assert.equal(updated.items.length, primary.items.length + 1)
+  for (const item of primary.items) assert.deepEqual({ ...updated.items.find(next => next.id === item.id), line: undefined }, { ...item, line: undefined }, item.id)
+  assert.equal(updated.rawSource, primary.rawSource)
+  for (const [kind, column, value] of [['REQ', 'goal', '改变原需求'], ['RULE', 'constraint', '改变原规则'], ['RULE', 'basis', '没有ordinary事实资格'], ['AC', 'assertion', '降低已有断言'], ['AC', 'test', 'tests/export.test.mjs#AC-EXPORT-02'], ['VERIFY', 'timeout-ms', 5000]] as const) {
+    const item = primary.items.find(item => item.kind === kind)!, changed = structuredClone(node)
+    const row = Object.fromEntries(CONTRACT_COLUMNS[kind].map(key => {
+      const field = key === 'depends-on' ? 'dependsOn' : key === 'timeout-ms' ? 'timeoutMs' : key
+      return [key, key === 'source' && item.kind !== 'VERIFY' ? `${item.source.kind}:${item.source.ref}` : (item as unknown as Record<string, ContractCell>)[field]]
+    }))
+    row[column] = value; changed.tables[kind].push(row)
+    const rejected = await elaborate(frozen, { runner: runner(request => build(request, [changed])).run })
+    assert.equal(rejected.reviewPassed, false, `${kind}.${column}`)
+    assert.ok(rejected.rounds.flatMap(round => round.findings).some(finding => finding.code === 'refinement_accepted_columns_changed'), `${kind}.${column}`)
+  }
+})
+
+test('owner遗漏的marker、既有ID与专用refinement必须同源，普通finding不能改标扩权', async () => {
+  const frozen = mixedOwnerRepairInput()
+  for (const mutation of ['missing-refinement', 'ordinary-as-omission', 'wrong-id', 'wrong-candidate'] as const) {
+    const changed = structuredClone(frozen)
+    if (mutation === 'missing-refinement') delete changed.refinement
+    else if (mutation === 'wrong-candidate') changed.refinement!.candidateDigest = 'f'.repeat(64)
+    else {
+      const issue = changed.readonlySpecRepair!.findings[1], finding = JSON.parse(issue.message) as { ruleLocation: string }
+      finding.ruleLocation = mutation === 'ordinary-as-omission' ? `${primaryPath}#RULE-EXPORT-02` : `contract-omission:${primaryPath}#RULE-UNKNOWN-01`
+      issue.message = JSON.stringify(finding); changed.refinement!.diagnostics = [{ code: 'contract_boundary_omission', message: issue.message }]
+    }
+    await assert.rejects(() => elaborate(changed, { runner: async () => assert.fail('错误遗漏身份不得派发') }), /owner遗漏/, mutation)
+  }
+})

@@ -26,6 +26,12 @@ related:
 
 ## expanded spec
 
+同一已审候选的 owner 契约遗漏复用只读返修容器，以 contract_omission 区分普通 candidate_review 事实诊断。只从已认证的专用 marker、同 owner 既有 ID 和原候选派生局部 refinement；保留其原已审正文、raw、稳定身份及 REQ/RULE/AC/VERIFY 全部列与测试/来源绑定。现有 reelaborate、P0 影响范围和原意支持仍决定能否新增细节；refinement 不把未变化 P0 或普通事实诊断变成业务变更授权。不适用的差量继续明确拒绝。
+
+同 owner 同时含普通事实与遗漏时，两类资格分别检查。普通事实只消费 candidate-review-repair 的 typed relatedIds；遗漏发现的 relatedIds 不进入事实白名单。原 V5 资格、description/prose/命中 RULE.basis 范围保持；遗漏不能改既有政策或验收，普通事实不能增删业务行。局部独审、冷缓存及最终全图 seal 继续复验，不能用两个范围的并集放开整个 owner。
+
+同一次全图封口先按原证据核局部事实与遗漏的可编辑范围，再按各 ID 的历史验证资格核验完整图。历史未执行资格不扩大当前 owner 的返修权限。
+
 完整 seal 在已经构建的唯一契约图上消费 [[sync-historical-coverage]] 冷验通过的 ID，仅改变原 missing-acceptance 的未执行资格，其他结构与演进门保持。历史资格摘要参与完整输入绑定，但不进入生成或独审模型任务，局部验证不取得该豁免。
 
 完整分区封口将可信 contextVerifications 与本轮 verifications 合并后冻结，逐项校验完整候选中未选 owner 的既有 AC/VERIFY 引用。局部生成和独审保持原登记，不据此增加可写目标、业务义务或实际验收运行；重复、错误与未知定义继续拒绝，旧输入缺席不补入。

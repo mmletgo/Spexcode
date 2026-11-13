@@ -66,7 +66,7 @@ export function targetHasCurrentChanges(input: ElaborationInput, target: Elabora
 /** 只消费已认证独审的结构化affected IDs；外owner仅作证据，未知或缺席绑定不授事实修正权。 */
 export function readonlyFactRepairIds(input: ElaborationInput, target: ElaborationTarget, repair: ReadonlySpecRepair | undefined = input.readonlySpecRepair): Set<string> {
   const ids = new Set<string>()
-  if (input.generationGuidance !== ELABORATION_GENERATION_GUIDANCE || input.phase === 'interface_seed' || repair?.kind !== 'candidate_review' || !repair.reviewEvidence?.length || input.implementationWritePaths?.length !== 0 || !input.analysis || !target.source || targetHasCurrentChanges(input, target)) return ids
+  if (input.generationGuidance !== ELABORATION_GENERATION_GUIDANCE || input.phase === 'interface_seed' || !repair || !['candidate_review', 'contract_omission'].includes(repair.kind ?? '') || !repair.reviewEvidence?.length || input.implementationWritePaths?.length !== 0 || !input.analysis || !target.source || targetHasCurrentChanges(input, target)) return ids
   const items = [...input.targets, ...input.context ?? []].flatMap(source => source.source ? parseContract({ ...source, source: source.source }).contract?.items ?? [] : [])
   for (const finding of repair.findings) {
     if (finding.nodeId !== target.nodeId || finding.path !== target.path || finding.code !== 'candidate-review-repair' || finding.severity !== 'error') continue

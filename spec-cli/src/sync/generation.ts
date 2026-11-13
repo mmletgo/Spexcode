@@ -1,8 +1,8 @@
 import { Ajv } from 'ajv'
 import { isDeepStrictEqual } from 'node:util'
-import { candidateReviewError, candidateReviewLocationError, candidateReviewSchema, CANDIDATE_REVIEW_INSTRUCTIONS } from './candidate-review.js'
+import { candidateReviewError, candidateReviewLocationError, candidateReviewSchema, contractOmissionBound, CANDIDATE_REVIEW_INSTRUCTIONS } from './candidate-review.js'
 import type { CandidateReviewBinding } from './candidate-review.js'
-export { GENERATION_REVIEW_SCHEMA } from './candidate-review.js'
+export { contractOmissionBound, GENERATION_REVIEW_SCHEMA } from './candidate-review.js'
 import type { Contract } from '@spexcode/spec-core/contracts'
 import { parseContract } from '@spexcode/spec-core/contracts'
 import { relationClaimsPath } from '@spexcode/spec-core'
@@ -16,7 +16,7 @@ import type { StageDraftBinding } from './stage-worktree.js'
 import { isUtf8Text } from './composition.js'
 import type { CandidateRef } from './operation-types.js'
 import type { ElaborationSessionRequest, ElaborationSessionResult } from './elaboration-types.js'
-import type { GenerationFinding, GenerationInput, GenerationOptions, GenerationResult, GenerationReview } from './generation-types.js'
+import type { GenerationInput, GenerationOptions, GenerationResult, GenerationReview } from './generation-types.js'
 import { priorContextInstructions, sameSnapshotSource } from './prior-context.js'
 import { contentHash, readEvidence, readObject, readTree, validateRepositoryPath, verifySnapshot, visitObjectBatch } from './snapshot.js'
 import type { TreeEntry, TreeReadCache } from './snapshot.js'
@@ -79,11 +79,6 @@ function frozenEntries(input: GenerationInput, treeCache?: TreeReadCache): TreeE
   }
   for (const path of required) if (!input.nativeWorktree && actualFiles.has(path) && !input.files.has(path)) throw new Error(`模型读集合缺少契约引用的完整来源/验收文件: ${path}`)
   return entries
-}
-
-export function contractOmissionBound(finding: GenerationFinding, contracts: readonly Contract[]): boolean {
-  const [path, id, extra] = finding.ruleLocation.slice('contract-omission:'.length).split('#')
-  return finding.kind === 'repair' && finding.ruleLocation.startsWith('contract-omission:') && extra === undefined && finding.affectedIds.includes(id) && contracts.some(contract => contract.path === path && contract.items.some(item => item.id === id))
 }
 
 export function reviewError(input: GenerationInput, review: GenerationReview, binding: CandidateReviewBinding, candidateContracts?: readonly Contract[], specWritePaths?: readonly string[]): string | null {

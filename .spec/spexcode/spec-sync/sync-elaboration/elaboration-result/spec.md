@@ -13,6 +13,8 @@ code:
 
 ## expanded spec
 
+ReadonlySpecRepair 的 contract_omission 使用已有 generationRef、acceptedRef、reviewEvidence、candidateDigest 和 owner findings，不另存一份诊断正文。它与 candidate_review 共用原件承接，但其局部 refinement 仅由精确遗漏 finding 派生；普通事实资格继续按自身 typed IDs 检查。该新增持久判别值须由独立 writer 围栏保护，发布前停稳、结算并备份，旧字段缺席与历史原件不追补。
+
 可选 historicalCoverageDigest 只绑定 [[sync-historical-coverage]] 的程序证明，进入完整封口 inputDigest；局部投影和模型任务移除它。实际证明原件仍由原 planBlob 与协调器持有，不复制进 ElaborationInput 或旧结果，也不表示历史测试已在本轮执行。
 
 P1生成指导保留V1–V4原值，并以ac-test-flow-review-verify-fact-repair-v5作为新阶段缺省。只有V5完整叶candidate_review返修可取得[[sync-elaboration]]的窄事实资格；该资格进入当前返修业务摘要，不改历史摘要，也不让无repair的兄弟批准失效。readonlySpecRepair本身不新增能力字段，旧缺席或旧指导不追补。新持久语义由[[sync-migrations]]的writer33围栏保护。

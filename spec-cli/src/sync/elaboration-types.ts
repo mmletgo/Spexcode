@@ -17,7 +17,7 @@ export type ElaborationBoundary = typeof ELABORATION_BOUNDARIES[number]
 export type ElaborationTarget = { nodeId: string; path: string; source: string | null; sourceDigest: string | null; rawSource?: string }
 export type ElaborationFact = { source: string; text: string }
 /** 真实全候选V1、独审或分区seal失败；历史已审候选仅作诊断，不是业务拒绝seed或新授权。 */
-export type ReadonlySpecRepair = { kind?: 'candidate_review' | 'partition_seal'; reviewEvidence?: { partitionId: string; resultRef: BlobRef }[]; baseInputDigest: string; candidateDigest: string; generationRef: BlobRef; acceptedRef: BlobRef; changes: ElaborationResult['changes']; applicability?: Applicability[]; wholeFileSourcePaths?: string[]; output: unknown; review: ElaborationReview | null; findings: ContractFinding[] }
+export type ReadonlySpecRepair = { kind?: 'candidate_review' | 'contract_omission' | 'partition_seal'; reviewEvidence?: { partitionId: string; resultRef: BlobRef }[]; baseInputDigest: string; candidateDigest: string; generationRef: BlobRef; acceptedRef: BlobRef; changes: ElaborationResult['changes']; applicability?: Applicability[]; wholeFileSourcePaths?: string[]; output: unknown; review: ElaborationReview | null; findings: ContractFinding[] }
 export type ElaborationPhase = 'interface_seed' | 'partitioned_final'
 export type ElaborationPartitionBinding = { planDigest: string; partitionId: string; analysisRef?: BlobRef; interfaceSeed?: RawOnlyInterfaceSeedEvidence }
 export type AnalysisOnlyPartitionEvidence = { partitionId: string; analysisRef: BlobRef; wholeAnalysisRef: BlobRef }
