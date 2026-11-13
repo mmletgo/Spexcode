@@ -1,7 +1,7 @@
 import { Ajv } from 'ajv'
 import type { Contract } from '@spexcode/spec-core/contracts'
 import type { ElaborationRunner, ElaborationSessionRequest, ElaborationTrace } from './elaboration-types.js'
-import type { GenerationReview } from './generation-types.js'
+import type { GenerationFinding, GenerationReview } from './generation-types.js'
 import { contentHash } from './snapshot.js'
 
 const string = { type: 'string', minLength: 1 }
@@ -22,6 +22,12 @@ export type CandidateReviewBinding = {
   requiredIds: readonly string[]
   actualIds: readonly string[]
   priorIds: readonly string[]
+}
+
+/** 遗漏只指向同一已审契约中的既有身份，不由诊断文字派生授权。 */
+export function contractOmissionBound(finding: GenerationFinding, contracts: readonly Contract[]): boolean {
+  const [path, id, extra] = finding.ruleLocation.slice('contract-omission:'.length).split('#')
+  return finding.kind === 'repair' && finding.ruleLocation.startsWith('contract-omission:') && extra === undefined && finding.affectedIds.includes(id) && contracts.some(contract => contract.path === path && contract.items.some(item => item.id === id))
 }
 
 /** 原生输出面使用同一冻结身份及可审项；实际覆盖和语义仍由独审与消费者核验。 */
