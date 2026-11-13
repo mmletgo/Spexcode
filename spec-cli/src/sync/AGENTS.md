@@ -25,6 +25,7 @@
 - 执行器单测：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/verification-executor.test.ts`；真实 Linux/arm64 Docker 验收：先准备测试中冻结的镜像，再 `SPEX_DOCKER_VERIFICATION_TEST=1 npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/verification-executor.docker.test.ts`。`SPEX_VERIFICATION_EVIDENCE_DIR` 可指定已存在的外部证据目录；未设置时用系统临时目录，不把运行证据写入源码。
 
 - 持久协调使用 `operation-types.ts` 共享身份，原source/composed/candidate分离；所有写入走store动作门禁及既有protocol事务，native/Git/FS副作用放事务外。
+- writer49 保护观察覆盖投影；旧观察在 SQL 内按原选择投影，保留原 JSON、选择摘要和证据引用。升级停稳并结算旧 writer，回滚恢复一致 v48 在线备份及配套证据和 Git refs。
 - `sync resources recover` 仅结算显式 operation/input 的既有 owned 资源；普通 `sync recover` 还可回放 journal。资源清理不授予来源连续性，来源不匹配仍不得 resume/adopt。
 - 普通协调器逐任务回收已完成或精确停止且clean的Native工作树，正式close保branch/archive/record与原结果/错误；removed不代表物理删除。已归档失败稿经原认证临时restore→严格观察→复用物理回收段，保原archive/Native，零launch/wake；仅回收registry内本次created场地。dirty/未知停止保留，pending不改业务结果或烧新调用。
 - 存储验证：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/store.test.ts packages/session-protocol/src/adopter-seams.test.ts`。
@@ -48,7 +49,7 @@
 
 - v22登记owner Git草稿续修与已证停止RPC故障的显式准入。草稿只存Git对象身份，不借raw权限；旧缺席字段不追补，已接受候选仍须原绑定。只有现有停止协议确证并结算资源后，运行中的有效fence才能续修，用户暂停/取消和未知停止不自动重启。 缺final的typed格式失败可独立保Git；旧无witness及安全暂停稿只在新有效attempt按原request/owner/seed/schema、完整source/tests对象及正式stop/removed观察最新正常Git，旧record/checkpoint不补签，普通暂停不赋格式码。 明确已停CLI错误终态只授未批准Git材料，不借格式或success角色；可选native-protocol.jsonl只记安全元数据，冷验不追补。
 
-- 新P0首次冻结git-json-v5，沿v4分析覆盖与独审路径自检。分析只读自检以正式判据定位当前非`user:raw`验收更新中的未变化只读来源。续修同一JSON，诊断只输出给当次会话，持久失败保持状态。v1–v4、缺席字段和saved/reserved按原绑定恢复，业务摘要与批准复用保持。writer44只追加SELECT1，升级先停稳结算并online backup，回滚恢复一致v43库及evidence/Git refs。
+- 新P0首次冻结git-json-v6，沿v5自检并冻结原plan.direction；分析和独审共用authorChanges及原Git对象的当前作者意图规则，旧实现未跟上明确新raw不构成独立冲突，真实独立冲突与只读code_to_spec保持。分析只读自检以正式判据定位当前非`user:raw`验收更新中的未变化只读来源。续修同一JSON，诊断只输出给当次会话，持久失败保持状态。v1–v5、缺席字段和saved/reserved按原绑定恢复；新v6指导重新分析和独审，同版JSON续稿保持；wrapper沿原analysis指导，不按当前writer补签。writer48保护此协议，升级停稳旧writer、结算资源及租约并online backup，回滚恢复一致v47库和原证据/Git refs。writer44只追加SELECT1，升级先停稳结算并online backup，回滚恢复一致v43库及evidence/Git refs。
 
 - writer38保护提交快照初始化的接入：被替换且从未领取时，新显式请求用新交付计划入队，继承原预算、截止时间及队列锚。旧请求身份、已有领取和自动观察去重保持。升级先停稳结算并 online backup，回滚恢复一致 v37 库及证据和 Git refs。
 

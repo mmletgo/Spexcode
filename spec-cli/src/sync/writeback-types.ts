@@ -27,6 +27,7 @@ export type CodeBehaviorFinding = {
 }
 export type CodeBehaviorAnalysis = {
   version: 'code-behavior-v1'; inputId: string; baselinePairId: string | null; baselineSelectionDigest?: string
+  guidanceContractVersion?: 'code-behavior-guidance-v8'
   composedDigest: string; readSetDigest: string; policyDigest: string; inputDigest: string
   decisionAuthorities?: SyncDecisionAuthority[]
   decision?: { requestRef: BlobRef; analysisRef: BlobRef; findingIds: string[] }

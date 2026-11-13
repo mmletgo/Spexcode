@@ -10,7 +10,7 @@ import type { Contract, ContractFinding } from '@spexcode/spec-core/contracts'
 import { candidateReviewError, candidateReviewLocationError } from './candidate-review.js'
 import { actualTreeDiff, exportCandidate, isHostPrivatePath, verifyCandidate } from './candidate.js'
 import type { CodeBehaviorContinuation, CodeBehaviorMaterialRequest, CodeBehaviorPostGateReview } from './code-behavior.js'
-import { analyzeCodeBehavior, authoredContractChanges, CODE_BEHAVIOR_FAILURE_STATUS, CODE_BEHAVIOR_GUIDANCE_VERSION, codeBehaviorReviewSchema, codeBehaviorContinuationStatus, codeBehaviorDraftStatus, deriveBehaviorAuthorization, isCodeBehaviorContextTransport, readCodeBehaviorContext, type CodeBehaviorContextTransport, type CodeBehaviorReviewReference } from './code-behavior.js'
+import { analyzeCodeBehavior, authoredContractChanges, CODE_BEHAVIOR_FAILURE_STATUS, CODE_BEHAVIOR_GUIDANCE_VERSION, LEGACY_CODE_BEHAVIOR_GUIDANCE_VERSION, codeBehaviorReviewSchema, codeBehaviorContinuationStatus, codeBehaviorDraftStatus, deriveBehaviorAuthorization, isCodeBehaviorContextTransport, readCodeBehaviorContext, type CodeBehaviorContextTransport, type CodeBehaviorReviewReference } from './code-behavior.js'
 import type { CodeBehaviorAnalysis, CodeBehaviorEvidence, SyncDecisionInput } from './writeback-types.js'
 import { adoptedDeliveryPaths, baselineResourceKey, extendsWithUninitializedResources, isUtf8Text, readCompositionEvidence, selectedRetiredIds, verifyBaselineSelection } from './composition.js'
 import { readHistoryRequest, readReceiptHistoryRestorations } from './history-input.js'
@@ -1129,7 +1129,7 @@ function saveStage(store: SyncStore, fence: WriteFence, name: string, value: unk
   const resultRef = writeEvidence(commonDir, value)
   const artifacts = syncCheckpointArtifacts(value, resultRef)
   const bindings = basis ? { readSetDigest: basis.readSetDigest, baselineSelectionRef: basis.baselineSelectionRef } : operation.baselineSelection ? { readSetDigest: operation.readSetDigest, baselineSelectionRef: writeEvidence(commonDir, store.readBusinessBaselineSelection(operation.id)) } : {}
-  const guidance = behaviorAnalysisStage(name) && (value as CodeBehaviorAnalysis).reviewPassed === true ? { guidanceContractVersion: CODE_BEHAVIOR_GUIDANCE_VERSION } : {}
+  const guidance = behaviorAnalysisStage(name) && (value as CodeBehaviorAnalysis).reviewPassed === true ? { guidanceContractVersion: (value as CodeBehaviorAnalysis).guidanceContractVersion ?? LEGACY_CODE_BEHAVIOR_GUIDANCE_VERSION } : {}
   if (bindings.baselineSelectionRef) artifacts.push({ kind: 'json', ref: bindings.baselineSelectionRef })
   store.checkpoint(fence, { ...writeEvidence(commonDir, { version: 'sync-stage-v1', operationId: operation.id, attemptId: fence.attemptId, inputId: operation.input.id, policyDigest: operation.policyDigest, ...bindings, ...guidance, ...composition, stage: name, resultRef } satisfies Stage), artifacts })
   return resultRef
@@ -2201,6 +2201,8 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       let sealRepairSource: ReturnType<typeof findSealRepairSource> | undefined
       const loadSealRepairSource = () => sealRepairSource ??= findSealRepairSource()
       let p0StatusOnly = false
+      let behaviorDraftSources: ReturnType<typeof retryDraftSources> | undefined
+      const readBehaviorDraftSources = () => behaviorDraftSources ??= retryDraftSources(store, operation, attempt!.number)
       const storedPartitionFailure = ({ error: _error, ...item }: PartitionAnalysisFailure) => p0StatusOnly ? { ...item, message: CODE_BEHAVIOR_FAILURE_STATUS } : item
       const loadBehaviorDraftMaterial = async (key: string, purpose: string, schemaDigest: string, inputDigest: string, request: CodeBehaviorMaterialRequest, planDigest?: string, existingDraft?: ElaborationDraft): Promise<ElaborationDraftMaterial | null> => {
         const commonDir = operation.input.source.commonDir
@@ -2220,7 +2222,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           return { source, errors: frozen.committedDraft.errors, sourceKind: 'git_draft' }
         }
         const allowCommitted = purpose === 'code_behavior_analyze' && !attempt!.dispatchPlans.some(dispatch => dispatch.key === `sync:${attempt!.id}:analysis${suffix}:${purpose}`)
-        const sources = retryDraftSources(store, operation, attempt!.number)
+        const sources = readBehaviorDraftSources()
         const existingIndex = existingDraft ? sources.findIndex(({ owner, prior }) => {
           const saved = partitionStage<CodeBehaviorContinuation>(store, owner, prior, `${key}:continuation`)?.result.drafts[purpose as keyof CodeBehaviorContinuation['drafts']]
           return !!saved && canonical(p0StatusOnly ? codeBehaviorDraftStatus(saved) : saved) === canonical(p0StatusOnly ? codeBehaviorDraftStatus(existingDraft) : existingDraft)
@@ -2373,28 +2375,40 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
       }
       const loadBehaviorReviewFeedback = (key: string, inputDigest: string, planDigest?: string): CodeBehaviorReviewReference | null => {
         assertMaterialFence()
-        const priorAttempts = store.listAttempts(operation.id).filter(prior => prior.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(prior.status))
-        for (const prior of priorAttempts.reverse()) {
-          const source = partitionStage<CodeBehaviorContinuation>(store, operation, prior, `${key}:continuation`)
-          if (!source || source.result.inputDigest !== inputDigest || planDigest && partitionStage<SyncPartitionPlan>(store, operation, prior, 'partition-plan')?.result.digest !== planDigest) continue
+        const sources = readBehaviorDraftSources()
+        for (const { owner, prior } of sources) {
+          if (canonical(prior.composedInput) !== canonical(view.composed)) continue
+          const checkpoints = historyCheckpoints(owner, prior)
+          const source = partitionStage<CodeBehaviorContinuation>(store, owner, prior, `${key}:continuation`, undefined, checkpoints)
+          if (!source || source.result.inputDigest !== inputDigest || planDigest && partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan', undefined, checkpoints)?.result.digest !== planDigest) continue
           const review = source.result.reviewResult, draft = source.result.drafts.code_behavior_review
           if (!review || !draft) continue
           const { trace } = review
           if (!prior.dispatchPlans.some(dispatch => dispatch.purpose === trace.purpose && dispatch.session?.sessionId === trace.sessionId && dispatch.session.threadId === trace.threadId && dispatch.session.turnId === trace.turnId)) {
-            const provenance = stage<{ fromOperationId: string; fromAttemptId: string; resultRef: BlobRef }>(store, operation, prior, `${key}:continuation-provenance`)
-            const origin = provenance && priorAttempts.find(candidate => candidate.id === provenance.fromAttemptId && candidate.number < prior.number)
-            const original = origin && partitionStage<CodeBehaviorContinuation>(store, operation, origin, `${key}:continuation`)
+            const provenance = stage<{ fromOperationId: string; fromAttemptId: string; resultRef: BlobRef }>(store, owner, prior, `${key}:continuation-provenance`, 'automatic', checkpoints)
+            const origin = provenance && sources.find(candidate => candidate.owner.id === owner.id && candidate.prior.id === provenance.fromAttemptId && candidate.prior.number < prior.number)?.prior
+            const original = origin && partitionStage<CodeBehaviorContinuation>(store, owner, origin, `${key}:continuation`, undefined, historyCheckpoints(owner, origin))
             const originalDraft = original?.result.drafts.code_behavior_review
-            if (!provenance || provenance.fromOperationId !== operation.id || !original || original.resultRef.sha256 !== provenance.resultRef.sha256
+            if (!provenance || provenance.fromOperationId !== owner.id || !original || original.resultRef.sha256 !== provenance.resultRef.sha256
               || original.result.inputDigest !== inputDigest || canonical(original.result.reviewResult) !== canonical(review)
               || !originalDraft || canonical(codeBehaviorDraftStatus(originalDraft)) !== canonical(codeBehaviorDraftStatus(draft))) fail('behavior_review_material_binding', '业务续修缺少原独审continuation来源')
             continue
           }
-          if (trace.purpose !== 'code_behavior_review' || !behaviorTraceBinding(store, operation, prior, key, trace)) fail('behavior_review_material_binding', '业务续修缺少原独审Native/Git身份')
+          if (trace.purpose !== 'code_behavior_review' || !behaviorTraceBinding(store, owner, prior, key, trace, undefined, item => historyCheckpoints(owner, item))) fail('behavior_review_material_binding', '业务续修缺少原独审Native/Git身份')
           if (source.result.readyAnalysis) return null
-          const output = JSON.parse(readObject(operation.input.source.commonDir, draft.oid).toString()) as { verdict: string; findings: unknown[] }
-          if (output.verdict === 'repair' && output.findings.length) return { commit: draft.resultCommit, path: draft.path }
-          return null
+          const commonDir = owner.input.source.commonDir
+          const output = JSON.parse(readObject(commonDir, draft.oid).toString()) as { verdict: string; findings: unknown[]; checkedPaths: string[]; checkedChangeIds: string[] }
+          if (output.verdict !== 'repair' || !output.findings.length) return null
+          const request = JSON.parse(readEvidence(commonDir, review.requestRef).toString()) as ElaborationSessionRequest
+          const { pendingAnalysis, task } = readCodeBehaviorContext(request, commonDir)
+          if (!pendingAnalysis || request.inputDigest !== inputDigest || pendingAnalysis.analysis.inputDigest !== inputDigest
+            || pendingAnalysis.analysisDigest !== contentHash(JSON.stringify(pendingAnalysis.analysis))
+            || outputErrors(output, codeBehaviorReviewSchema(inputDigest, pendingAnalysis.analysisDigest)).length
+            || (task.requiredChangedPaths as string[]).some(path => !output.checkedPaths.includes(path))
+            || new Set(output.checkedPaths).size !== output.checkedPaths.length
+            || canonical(unique(output.checkedChangeIds)) !== canonical(unique(pendingAnalysis.analysis.changes.map(change => change.id)))
+            || output.checkedChangeIds.length !== pendingAnalysis.analysis.changes.length) fail('behavior_review_material_binding', '业务续修未绑定原完整分析、schema或独审范围')
+          return { commit: draft.resultCommit, path: draft.path }
         }
         return null
       }
@@ -2783,7 +2797,7 @@ export async function runSyncOperation(store: SyncStore, operationId: string, su
           let behaviorProtocol = stage<{ version: 'code-behavior-draft-v1'; contextTransport?: CodeBehaviorContextTransport }>(store, operation, attempt, 'behavior-draft-protocol')
           if (behaviorProtocol && Object.hasOwn(behaviorProtocol, 'contextTransport') && !isCodeBehaviorContextTransport(behaviorProtocol.contextTransport)) fail('behavior_context_transport_unsupported', '持久P0 contextTransport字段存在但不受支持；仅字段缺席允许legacy运输')
           if (!behaviorProtocol && options.plan.agentWorkflow && !attempt.dispatchPlans.some(dispatch => dispatch.purpose.startsWith('code_behavior_'))) {
-            behaviorProtocol = { version: 'code-behavior-draft-v1', contextTransport: 'git-json-v5' }
+            behaviorProtocol = { version: 'code-behavior-draft-v1', contextTransport: 'git-json-v6' }
             saveStage(store, fence, 'behavior-draft-protocol', behaviorProtocol)
           }
           p0StatusOnly = behaviorProtocol?.contextTransport !== undefined && behaviorProtocol.contextTransport !== 'git-json-v1'

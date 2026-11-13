@@ -49,9 +49,9 @@ ZCode停止材料回归复用真实Git/私有SQLite及正式adapter.stop/资源�
 
 P0 历史 ZCode 结果未发布的回归使用真实 Git、私有 SQLite 和正式停止与归档。原 Native 已成功封存、正式观察到失败、最终结算为 cancelled 时，下一 attempt 跳过该来源并用无旧稿的 seed 派发。封存被改、exit 缺失或未曾正式观察失败时不得派发。原归档引用、Native 字节、原 attempt 和资源保持。尚未结算的 RPC 资源应返回 recovery_required，等待结算并保持后续派发为零。新 P0 的停止材料引用保原状态码与来源引用。损坏的旧终态 JSON 仍明确拒绝，正式失败摘要不携解析原文。
 
-新 P0 冷恢复回归校验失败诊断正文缺席于 Git context、Native 请求、continuation 与失败证据。业务返修通过真实原审查的 Git 引用读取拒因，经过中断与承接副本仍须指向原派发。原 JSON、已校验分析与兄弟批准来源保持。
+新 P0 冷恢复回归校验失败诊断正文缺席于 Git context、Native 请求、continuation 与失败证据。业务返修通过真实原审查的 Git 引用读取拒因，经过中断与承接副本仍须指向原派发。正式 retryOf 的祖先以 unsupported 结束、没有分区失败正文时，同样核对原 owner、完整输入、审核范围与原生身份，拒绝被篡改的审查。原 JSON、已校验分析与兄弟批准来源保持。
 
-新 attempt 在真实 Git 和隔离 SQLite 首次冻结 git-json-v5，分析自检新增未变化只读验收来源的定位。已有 git-json-v2/v3/v4 检查点与预留记录保持原对象、原选择及对应自检范围。v1、缺席与未知传输的回归保持。
+新 attempt 在真实 Git 和隔离 SQLite 首次冻结 git-json-v6，保留 v5 分析自检对未变化只读验收来源的定位，并向分析与独审传递相同的当前作者意图规则；真实 v2 计划方向进入 Native task，旧计划无方向时为 null。已有 git-json-v2/v3/v4/v5 检查点与预留记录保持原对象、原选择及对应自检范围，不补 direction 或新指导。v1、缺席与未知传输的回归保持。另以真实旧 v5 和新 v6 正常 Git 生成/独审，先复现旧结果被当前 writer 错贴 v8，再核已审 wrapper 只能标原指导：v5 原 analysis 字段缺席且 wrapper v7，v6 明确 v8；原 P1 派发和结果内容摘要继续绑定。
 
 P0 context运输回归在真实Git/私有SQLite核首次冻结协议、已冻结git-json-v1/v2保持原样、已有checkpoint缺席字段继续legacy，以及reserved原plan与checkpoint原bytes不改。字段存在但null、空串或未知版本在派发前明确unsupported，零runner/零dispatch。旧Native原final迁入下一精确draft，context/schema按各自角色只读；legacy→file、file→file的正式retryOf、后置分类回审、续审及完整业务finding沿同一原件认证，P1任务消费者保持原协议。模型、权限、source/tests/index、业务摘要与独审门保持；受控Native接缝不冒称真实模型或EPIPE修复。
 
@@ -79,7 +79,7 @@ code→Spec的分区AC提案引用未变只读父规则时，完整原proposal�
 
 有限与unlimited对照回归沿分析/细化/生成及各自独审核对真实派发timeout值，null仅由unlimited冻结预算派生；不改变租约、资源、VERIFY或交付门。
 
-同operation局部多轮的真实Git/SQLite回归先复现已accept分析区和叶P1在兄弟失败后被重复派发，再证明下一attempt仅运行失败区；原ref/review/traces、预算/绝对deadline、source/index及零journal保持，SQLite重启和正式pause→resume后旧fence仍拒写。readSet/input/未审/foreign/ref污染拒绝承接，局部并集仍通过新的严格seal。并行分析回归保存所有在途失败及原proposal/review诊断，checkpoint绑定错误也保primary且不能借空失败列表取得有限修复权；确定性runner仅证明机制，不声称真实Native、Docker或完整交付通过。
+同operation局部多轮的真实Git/SQLite回归先复现已accept分析区和叶P1在兄弟失败后被重复派发，再证明下一attempt仅运行失败区；原ref/review/traces、预算/绝对deadline、source/index及零journal保持，SQLite重启和正式pause→resume后旧fence仍拒写。readSet/input/未审/foreign/ref污染拒绝承接，局部并集仍通过新的严格seal。并行分析回归核全部在途结算、原生失败身份与兄弟独审续修。新P0检查点和新请求不复制历史错误正文，旧运输沿原合同；checkpoint绑定错误仍保primary且不能借空失败列表取得有限修复权。确定性runner仅证明机制，不声称真实Native、Docker或完整交付通过。
 
 正式 retryOf 的局部 P0 回归先使首分区通过独审、兄弟失败且旧 whole 缺席，关闭重开 SQLite 后换模型重试。原分区零重派，旧 trace、Git 和 resultRef 保留，新的批准来自当前模型；来源记录和未完成侧的校验保持。第二代重试经原已替代祖先取得批准，P0 零重派；混合仅分析分区扩域及冷恢复仍验原 ref，伪造来源在 P1 前拒绝。更换模型的 V3 前置失败保留已批准 P0，后续生成与独审按新模型正常执行。
 
@@ -193,7 +193,7 @@ v2生命周期集成回归让旧Spec的`related: [src/helpers/**/*.js]`命中全
 
 unlimited回归用确定性独立模型接缝完成三attempt P1独审及v2两处调用预检，再经真实Docker、正常固定CLI hooks/Git交付；真实commit后结算中断，SQLite重启沿原journal恢复同receipt，无额外模型或commit，期限保持null、用量/source/index与最终验证保持。有限完整交付对照仍核精确alias自己的admission重放，不把原operation预算替换为alias请求身份。该证据不冒充真实Native语义通过。
 
-A7形状的真实Git/SQLite回归先保存独审accept但含无IDcoverage_gap的aggregate，经正式pause/resume后证明旧指导aggregate/local checkpoint（包括v5 whole与local accept）不能在v6下直接复用，必须实际新分析+独审后进入P1，旧failure/ref/输入/预算与失效fence保持。同指导已审aggregate/local仍可零额外Native承接；真正未知继续阻塞。完整applying/receipt恢复不因自动分析指导更新重做生成，旧不可变decision来源仍沿原ref验证。
+A7形状的真实Git/SQLite回归使用native-worktree-v1与真实冻结的旧git-json-v5或当前git-json-v6，经正常Git JSON提交和独立审查保存含无IDcoverage_gap的aggregate。历史对照首轮保旧v5/指导v7，恢复的新attempt真实冻结v6/指导v8，不能只改wrapper制造指导变化却借同输入readyAnalysis跳过新生成。正式pause/resume后，旧指导aggregate/local checkpoint（包括v5 whole与local accept）不能在当前v8指导下直接复用，必须实际新分析+独审后进入P1；旧failure/ref/输入/预算与失效fence保持。同指导对照必须核真实请求运输及程序analysis/wrapper均自然绑定v8，禁止把legacy/v7夹具的wrapper手改为全局版本冒充同指导；其aggregate/local仍零额外Native承接并继续按unbound_behavior_finding阻塞无ID发现，不能免审放行P1。完整applying/receipt恢复不因自动分析指导更新重做生成，旧不可变decision来源仍沿原ref验证。
 
 只读全候选V1有效而真实normalized code_review repair的Git/SQLite定向回归先复现零owner调用重复独审，再证明裸Spec路径及正式contract:引用都按实际candidate ID/path回到唯一P1 owner；单区/多区连续修复、兄弟P1拒绝后承接本轮已新独审owner、正式pause/run空generation结算后的精确原repairContext桥均保原ref/failure/预算。其余分区缓存、source/tests的Git对象及index保持，code_generate为零，全图seal/V1及新独审重跑；外来review或无实际owner定位拒绝。新叶错误AC证据表述可按原source=null和raw/facts纠正，既有作者AC不得无授权降义、缺readonly oracle不得靠重写测试通过，本轮稳定ID不得删除或改类。机制接缝在Docker前停止，不宣称真实模型或产品交付。
 
