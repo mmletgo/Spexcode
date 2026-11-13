@@ -164,7 +164,7 @@ initial与spec共享P2入口。旧无planBlob operation先claim持久unsupported
 
 复用带历史拒稿诊断的已审局部结果时，原resultRef和批准保持逐字一致。旧拒稿沿原操作认证及投影，遵循 [[sync-checkpoint-evidence]]。
 
-跨attempt批准、仅分析分区认证、P0分类返修及P1历史草稿与封口来源共用紧凑检查点索引。当前轮内每份原历史完整核验一次，常驻查询只保根wrapper和拒稿SHA，选定结果按原resultRef加载。P1草稿逐来源查找和封口按历史轮次、局部原件分段交还事件循环，让步后重核当前fence。并行owner共享同一次封口来源核验，使用结果前再重核fence。原Native身份、停止期限和正式资源结算仍按原策略核验。
+跨attempt批准、仅分析分区认证、P0分类返修、P1历史草稿与封口来源及最终候选独审共用紧凑检查点索引。当前轮内每份原历史完整核验一次，常驻查询只保根wrapper和拒稿SHA，选定结果按原resultRef加载。候选独审跨owner复用同一operation内较早终结attempt的视图，不缓存匹配结论；scope、readSet或selection变化后仍按当前绑定核原输入、候选、计划和Native请求。缺少本组评审stage时不再读取其评审输入或搜索接受链；有原件时完整认证保持。当前可变attempt每次重新读取，新attempt不继承前轮索引。P1草稿逐来源查找和封口按历史轮次、局部原件分段交还事件循环，让步后重核当前fence。并行owner共享同一次封口来源核验，使用结果前再重核fence。原Native身份、停止期限和正式资源结算仍按原策略核验。
 
 P4 显式重试按原 operation 已审扩展后的 scope 及最终 selection 重组同一 readSet，复用原 impactDigest；冻结 planBlob 和 policyDigest 不被扩展结果改写。原严格接入事务仍拒绝缺失路径、改变义务或不匹配的读取/选择，不能以重试丢弃已批准的实现范围。
 
