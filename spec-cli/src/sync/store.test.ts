@@ -2871,3 +2871,31 @@ for (const prior of [34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44] as const) test(
     assert.deepEqual(read(backup), before)
   } finally { backup?.close(); f.cleanup() }
 })
+
+for (const prior of [46] as const) test(`从writer${prior}升级保留自动采纳索引及原件，旧writer拒绝且备份可回滚`, async () => {
+  assert.equal(SYNC_MIGRATIONS[prior]?.version, prior + 1, '新程序计划语义必须有独立 writer 围栏')
+  const f = await fixture()
+  let backup: ReturnType<typeof openProtocol> | undefined
+  try {
+    const claimed = f.claim(), versions = SYNC_MIGRATIONS.slice(0, prior)
+    f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version>?', SYNC_COMPONENT, prior))
+    const read = (protocol: typeof f.protocol) => protocol.withTransaction(tx => ({
+      schema: tx.query('SELECT * FROM sqlite_master ORDER BY type,name'),
+      rows: Object.fromEntries(tx.query("SELECT name FROM sqlite_master WHERE type='table' AND name!='schema_migrations' ORDER BY name").map(row => [String(row.name), tx.query(`SELECT * FROM "${String(row.name)}"`)])),
+      registry: tx.query('SELECT * FROM schema_migrations WHERE component!=? OR version<=? ORDER BY component,version', SYNC_COMPONENT, prior),
+    }))
+    const before = read(f.protocol), backupPath = join(f.root, `v${prior}-before-program-context.backup`)
+    const originalBackup = f.protocol.backupTo.bind(f.protocol); let backups = 0
+    f.protocol.backupTo = async destination => { backups++; await originalBackup(destination) }
+    for (const { sql } of SYNC_MIGRATIONS.slice(prior)) assert.match(sql, /^SELECT 1;/)
+    assert.equal(await migrateSyncStore(f.protocol, { backupPath }), SYNC_MIGRATIONS.length)
+    assert.deepEqual(read(f.protocol), before)
+    assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, versions), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
+    assert.deepEqual(f.store.readAttempt(claimed.attempt.id), claimed.attempt)
+    backup = openProtocol(backupPath)
+    assert.equal(applyComponentMigrations(backup, SYNC_COMPONENT, versions), prior)
+    assert.deepEqual(read(backup), before)
+    assert.equal(await migrateSyncStore(f.protocol), SYNC_MIGRATIONS.length)
+    assert.equal(backups, 1)
+  } finally { backup?.close(); f.cleanup() }
+})
