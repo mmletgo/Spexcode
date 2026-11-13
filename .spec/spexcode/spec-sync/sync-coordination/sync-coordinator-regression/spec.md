@@ -16,6 +16,8 @@ related:
 
 ## expanded spec
 
+正式模型交接回归使用真实 Git、隔离 SQLite 与受控 Native 原件，先保存混合 accept、合法 repair 及格式失败的候选，再以直接父 `retryOf`、原预算族和新模型接入。现代与旧 git-json-v4/v7 两种原 P0 均保原 resultRef、原请求与调用账本，只补失败独审后进入精确 P1 owner。新独审完成但 aggregate 尚未保存时正式暂停，SQLite 冷重启沿同一 resultRef 零调用补齐聚合，并核原 publication parentCommit/tree。原 P1 为 needs_input 时逐值保留 GAP；候选、Native 或 required outcome 缺证时零新 P0/P1 派发并明确拒绝。该证据只证明编排与来源认证，不冒称真实模型、V3 或正式交付完成。
+
 混合候选的冷验计数检查同一真实冻结 Git 树只完整读取一次。原候选、已拒稿及全部独审结论保持完整认证。
 
 旧候选回归用真实历史程序自然产生 git-json-v4 / v7：四组 P0、三个真实 P1 与一个仅分析 owner、合法 repair / accept / 格式失败三组 P2。原轮尚无正式 attempt.candidate，经 SQLite 冷开及 canonical Native/Git 冷验，只新增原格式独审，再仅重派命中 P1；原 v7、全部旧 CAS 和 source/index 不变。另经两次真实正式retry与显式换模型继承原P0及已审P1，保部分P1后的原范围；SQLite冷续同样只补格式审查再返命中owner。逐 owner及祖先控制机会、缺 P0 原件、Native 输出身份/原生产者模型漂移、无retryOf的跨 operation、祖先结算拒绝、缺null扩域证据、缺 P2 outcome、未结算资源及 scope 退出后的普通 v8 门均有反例。旧producer另自然保留needs_input的P1与缺席GAP复核阶段，冷续须保持格式审查、owner返修、新并集GAP复核的先后。该隔离场景在 V3 前硬停，不把受控 Native 输出冒充真实模型或最终交付证据。
