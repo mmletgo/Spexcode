@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { createRequire, syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { parseContract } from '@spexcode/spec-core/contracts'
 import type { Acceptance, ContractFinding } from '@spexcode/spec-core/contracts'
-import { CANDIDATE_RESPONSE_SCHEMA, verifyCandidate } from './candidate.js'
+import { CANDIDATE_RESPONSE_SCHEMA, freezeCandidate, verifyCandidate } from './candidate.js'
 import type { CandidateChanges } from './candidate.js'
 import type { ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import { GENERATION_REVIEW_SCHEMA, freezeGenerationInput, generationReviewRequest, restoreGenerationInput, reviewError, runGeneration } from './generation.js'
@@ -75,6 +76,61 @@ test('超过2MiB的真实冻结测试全文仍到达生成和独审，保留首�
   }
   assert.equal(result.candidateFiles!.get('tests/export.test.mjs'), assertions)
   assert.notEqual(result.traces[0].threadId, result.traces[1].threadId)
+})
+
+test('原生候选独审批读冻结正文，不构造未发送的内联投影，冷重建保持完整请求', async t => {
+  const source = await input(t)
+  mkdirSync(join(source.root, 'src/unprojected'))
+  for (let index = 0; index < 64; index++) writeFileSync(join(source.root, `src/unprojected/${index}.txt`), `frozen unprojected ${index}\n`)
+  writeFileSync(join(source.root, 'src/unprojected/duplicate.txt'), 'frozen unprojected 63\n')
+  writeFileSync(join(source.root, 'src/unprojected/binary.dat'), Buffer.from([0, 255, 0]))
+  symlinkSync('../export.js', join(source.root, 'src/unprojected/link'))
+  execFileSync('git', ['-C', source.root, 'add', '.'])
+  execFileSync('git', ['-C', source.root, 'commit', '-qm', 'frozen review corpus'])
+  source.snapshot = await captureInputSnapshot(source.root)
+  source.manifest = { version: 1, entries: readTree(source.snapshot.source.commonDir, source.snapshot.immutableTree) }
+  source.nativeWorktree = true; source.model = 'claude:fixture'
+  source.allowedScope.paths = ['src/export.js']
+  const candidate = freezeCandidate(source.snapshot, changes(source), source.allowedScope)
+  const childProcess = createRequire(import.meta.url)('node:child_process') as typeof import('node:child_process')
+  const originalExec = childProcess.execFileSync, originalStringify = JSON.stringify
+  const gitCalls: string[][] = [], requests: ElaborationSessionRequest[] = []
+  let inlineProjections = 0
+  childProcess.execFileSync = ((...args: Parameters<typeof execFileSync>) => {
+    if (args[0] === 'git') gitCalls.push(args[1] as string[])
+    return Reflect.apply(originalExec, childProcess, args)
+  }) as typeof execFileSync
+  JSON.stringify = ((...args: Parameters<typeof JSON.stringify>) => {
+    const value: unknown = args[0]
+    if (value && typeof value === 'object' && Object.hasOwn(value, 'manifestProjection')) inlineProjections++
+    return Reflect.apply(originalStringify, JSON, args)
+  }) as typeof JSON.stringify
+  syncBuiltinESMExports()
+  let result: Awaited<ReturnType<typeof runGeneration>>
+  try {
+    result = await runGeneration(source, { reviewCandidate: candidate, validateCandidate: valid, runner: async request => {
+      requests.push(request)
+      const output = { inputId: source.snapshot.id, candidateDigest: candidate.digest, verdict: 'accept', checkedIds: source.readyIds, findings: [] }
+      return { sessionId: 'review-only', threadId: 'review-only-thread', turnId: 'review-only-turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+    } })
+  } finally {
+    childProcess.execFileSync = originalExec; JSON.stringify = originalStringify; syncBuiltinESMExports()
+  }
+  assert.equal(result.status, 'reviewed', JSON.stringify(result.failure))
+  assert.equal(requests.length, 1)
+  assert.equal(requests[0].purpose, 'code_review')
+  assert.equal(result.candidateFiles!.get('src/unprojected/63.txt'), 'frozen unprojected 63\n')
+  assert.equal(result.candidateFiles!.get('src/unprojected/duplicate.txt'), 'frozen unprojected 63\n')
+  assert.equal(result.candidateFiles!.has('src/unprojected/binary.dat'), false)
+  assert.equal(result.candidateFiles!.has('src/unprojected/link'), false)
+  assert.equal(requests[0].worktree!.tree, candidate.tree)
+  const frozen = freezeGenerationInput(source)
+  const restored = restoreGenerationInput(JSON.parse(JSON.stringify(frozen.inputEvidence)))
+  assert.deepEqual(generationReviewRequest(restored, candidate).request, requests[0])
+  assert.equal(requests[0].inputDigest, frozen.inputDigest)
+  const perBlobReads = gitCalls.filter(args => args[args.indexOf('cat-file') + 1] === 'blob').length
+  t.diagnostic(JSON.stringify({ files: source.manifest.entries.length, perBlobReads, inlineProjections }))
+  assert.deepEqual({ perBlobReads, inlineProjections }, { perBlobReads: 0, inlineProjections: 0 })
 })
 
 test('原生严格响应schema显式类型和required属性完整，不能仅以本地Ajv接受自证', () => {
