@@ -18,6 +18,8 @@ code:
 
 回归 [[sync-input-composition]]、[[sync-code-behavior]]、[[sync-controlled-request]] 及 [[sync-application-planning]] 的精确资源行为。夹具保存真实 source/交付 worktree、Git提交/blob/mode，成对基线经真实store admission→generation→verification→journal→receipt→settlement动作建立，禁止手写SQLite伪造权威。验证四层和行为分析runner明确fake，不把这些单测称为真实native产品验收。
 
+原 v1 完整 canonical JSON 作为分段摘要的独立参考，覆盖数值键、Unicode 与代理码元转义、CRLF/BOM、数组顺序、null 与字段缺席、共享和独立 pair 对象。用正文及覆盖读取次数证明共享 pair 不随 binding 重复准备，并计真实 Git 读树次数证明同 ID 同正文的快照只认证一次。负例保同 ID 异正文、异来源、重复资源、目录边界与 ID 类别覆盖拒绝；成功后破坏或移除原证据，下一调用必须拒绝，恢复原字节才通过。
+
 大小写混合路径的真实 Git 树经组合后，必须能够重读并核对 manifest/contentDigest，且保留各文件的原始字节。
 
 核心三场景：A pair只消费A，B byte pair接续A1+B1且only消费B；新A2保持B1，pairID不同不等于业务冲突。B.source夹带未消费A2而next source没有继续编辑时，对比legacy全latest漏作者残差的失败证据，再证明精确intent head仍强制完整A2整合。普通ff接受真实receipt commit/blob/mode后回声无作者变化，后续A编辑仍能识别。
