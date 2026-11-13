@@ -7002,39 +7002,70 @@ for (const defect of ['none', 'recording-continuation', 'recording-continuation-
 
 test('Coordinator 合法file-writer新增源码测试null扩域后仅续原候选评审', async t => {
   const raw = original.split('## expanded spec')[0].replace(/^code:\n(?:  -.*\n)+/m, '').replace('contract-schema: sync-v1\n', '')
-  const f = await fixture(t, { mode: 'unlimited' }, false, raw, 'project', original, { version: 'sync-coordinator-v2', direction: 'spec_to_code', writePaths: ['.spec', 'src', 'tests/planned-new.test.mjs'], sourcePaths: ['src'], partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, commitTrigger: { before: null, paths: [contractPath] } }, undefined, 'spec', undefined, true)
+  const f = await fixture(t, { mode: 'unlimited' }, false, raw, 'project', original, { version: 'sync-coordinator-v2', agentWorkflow: 'native-worktree-v1', direction: 'spec_to_code', writePaths: ['.spec', 'src', 'tests/planned-new.test.mjs'], sourcePaths: ['src'], partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, commitTrigger: { before: null, paths: [contractPath] } }, undefined, 'spec', 'claude:default', true)
   const newSource = 'src/planned-new.js', newTest = 'tests/planned-new.test.mjs', calls: { attempt: number; purpose: string }[] = []
-  f.transform((output, request) => {
+  f.options.runner = async request => {
+    f.calls.push(request)
     const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!)
     calls.push({ attempt: attempt.number, purpose: request.purpose })
-    if (request.purpose === 'code_behavior_analyze') for (const change of (output as { changes: { affectedIds: string[]; ruleIds: string[] }[] }).changes) { change.affectedIds = []; change.ruleIds = [] }
-    if (request.purpose === 'elaboration_generate') for (const change of (output as GeneratedElaboration).changes) { change.code = []; for (const rows of Object.values(change.tables)) for (const row of rows) if (typeof row.source === 'string' && row.source.startsWith('code:')) row.source = 'derived:REQ-EXPORT-01' }
-    if (request.purpose === 'implementation_plan') return { version: 'sync-implementation-plan-v1', paths: [newSource, newTest] }
-    if (request.purpose === 'code_generate') {
+    let output: unknown, witness: ReturnType<typeof nativeWorktreeResult> | undefined
+    if (request.purpose === 'code_behavior_analyze') {
+      const { task } = readCodeBehaviorContext(request, f.input.source.commonDir)
+      output = { changes: (task.requiredChangedPaths as string[]).map(path => ({ kind: 'refactor', paths: [path], affectedIds: [], ruleIds: [], originalIntent: '遵守导出明确原意', previousBehavior: '导出任务结果不变', sourceBehavior: '内部实现文字编辑，导出结果不变', deliveryBehavior: '共同已验证语义不变', evidence: `冻结源码/断言 ${path}`, counterexample: '重复COMPLETE保首次结果，未改变此断言' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    } else if (request.purpose === 'code_behavior_review') {
+      const { task, pendingAnalysis } = readCodeBehaviorContext(request, f.input.source.commonDir)
+      output = { inputDigest: request.inputDigest, analysisDigest: pendingAnalysis!.analysisDigest, verdict: 'accept', checkedPaths: task.requiredChangedPaths, checkedChangeIds: pendingAnalysis!.analysis.changes.map(change => change.id), findings: [] }
+    } else if (request.purpose === 'elaboration_generate') {
+      const generated = rows(original)
+      for (const change of generated.changes) { change.code = []; for (const rows of Object.values(change.tables)) for (const row of rows) if (typeof row.source === 'string' && row.source.startsWith('code:')) row.source = 'derived:REQ-EXPORT-01' }
+      output = adaptElaborationNativeOutput(request, generated)
+    } else if (request.purpose === 'elaboration_review') output = { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+    else if (request.purpose === 'implementation_plan') output = { version: 'sync-implementation-plan-v1', paths: [newSource, newTest] }
+    else if (request.purpose === 'code_generate') {
       assert.equal(attempt.number, 1, '合法file-writer扩域后不能重新规划/生成')
-      const frozen = promptInput(request), spec = frozen.elaboratedSpecs[0], before = frozen.manifest.entries.find(entry => entry.path === spec.path)!
-      const source = spec.source.replace(/^code:.*\n(?:  -.*\n)*/m, '').replace(/^contract-schema:.*$/m, `contract-schema: sync-v1\ncode:\n  - ${newSource}#ExportService\nrelated:\n  - ${newTest}`)
-      return { version: 'sync-files-v1', changes: [{ path: newSource, beforeDigest: null, beforeMode: null, mode: '100644', content: readFileSync(join(f.root, 'src/export.js'), 'utf8') }, { path: newTest, beforeDigest: null, beforeMode: null, mode: '100644', content: readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('../src/export.js', '../src/planned-new.js') }, { path: spec.path, beforeDigest: before.digest, beforeMode: before.mode, mode: null, content: source }] }
-    }
-    if (request.purpose === 'code_review') {
+      const task = nativeTask(request, f.input.source.commonDir) as { allowedScope: { paths: string[] } }
+      assert.ok(task.allowedScope.paths.includes(newSource)); assert.ok(task.allowedScope.paths.includes(newTest))
+      const scratch = join(f.parent, `planned-native-${calls.length}`), seed = request.worktree!
+      f.git('worktree', 'add', '--detach', scratch, seed.baseCommit)
+      const spec = readFileSync(join(scratch, contractPath), 'utf8')
+      const source = spec.replace(/^code:.*\n(?:  -.*\n)*/m, '').replace(/^contract-schema:.*$/m, `contract-schema: sync-v1\ncode:\n  - ${newSource}#ExportService\nrelated:\n  - ${newTest}`)
+      writeFileSync(join(scratch, newSource), readFileSync(join(scratch, 'src/export.js'), 'utf8'))
+      writeFileSync(join(scratch, newTest), readFileSync(join(scratch, 'tests/export.test.mjs'), 'utf8').replaceAll('../src/export.js', '../src/planned-new.js'))
+      writeFileSync(join(scratch, contractPath), source)
+      execFileSync('git', ['-C', scratch, 'add', newSource, newTest, contractPath], { stdio: 'pipe' })
+      execFileSync('git', ['-C', scratch, 'commit', '-m', 'real file-writer source and test'], { stdio: 'pipe' })
+      output = { summary: '正常提交已规划的新源码、测试及必要映射' }; witness = nativeWorktreeResult(scratch, seed)
+    } else if (request.purpose === 'code_review') {
+      const binding = JSON.parse(request.prompt.split('候选绑定:\n')[1].split('\n')[0]) as { inputId: string; candidateDigest: string; requiredIds: string[] }
+      output = { inputId: binding.inputId, candidateDigest: binding.candidateDigest, verdict: 'accept', checkedIds: binding.requiredIds, findings: [] }
       if (attempt.number === 1) return rejectedReviewFixture(f, request, '原评审完整回答：\n' + JSON.stringify(output))
       throw Object.assign(new Error('合法路径扩域后已只续独审，Docker前停止'), { code: 'unsupported' })
+    } else assert.fail(request.purpose)
+    if (request.purpose.startsWith('code_behavior_') || request.purpose === 'elaboration_generate') {
+      witness = committedDraftFixture(f, request, output, join(f.parent, `planned-draft-${calls.length}`))
+      output = { summary: '正常提交本阶段的真实JSON草稿' }
     }
-    return output
-  })
+    const dispatch = attempt.dispatchPlans.find(item => item.key === request.requestKey)!
+    return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `planned-${request.requestKey}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)), ...(witness ? { worktree: witness } : {}) }
+  }
   const claim = f.store.claimQueuedAttempt.bind(f.store)
   f.store.claimQueuedAttempt = input => { if (f.store.listAttempts(f.operation.id).length >= 2) throw new Error('fixture禁止无关重生成热循环'); return claim(input) }
   const result = await runSyncOperation(f.store, f.operation.id, f.options)
   assert.deepEqual([1, 2].map(number => calls.filter(call => call.attempt === number && call.purpose === 'code_review').length), [1, 1], JSON.stringify({ failure: result.failure, calls }))
-  assert.equal(calls.filter(call => call.purpose === 'implementation_plan').length, 1); assert.equal(calls.filter(call => call.purpose === 'code_generate').length, 1)
+  assert.deepEqual(calls.filter(call => call.attempt === 2).map(call => call.purpose), ['code_review'], '续审不重派P0/P1、文件规划或builder')
+  for (const purpose of ['code_behavior_analyze', 'code_behavior_review', 'elaboration_generate', 'elaboration_review', 'implementation_plan', 'code_generate']) assert.equal(calls.filter(call => call.purpose === purpose).length, 1, purpose)
   assert.ok(result.operation.scope.paths.includes(newSource)); assert.ok(result.operation.scope.paths.includes(newTest))
   const attempts = f.store.listAttempts(f.operation.id), stages = attempts.map(attempt => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())))
   const generated = stages.map(values => JSON.parse(readEvidence(f.input.source.commonDir, values.find(value => value.stage === 'generation').resultRef).toString()))
   assert.deepEqual(generated[1].candidate, generated[0].candidate)
+  assert.ok(generated.every(value => value.candidateValidated))
   const writerRef = generated[0].fileWriterPlanRef
+  assert.deepEqual(generated[1].fileWriterPlanRef, writerRef)
   assert.ok(result.operation.contractScopeExpansions!.some(expansion => expansion.evidenceRef.sha256 === writerRef.sha256 && expansion.paths!.includes(newSource) && expansion.paths!.includes(newTest)))
   assert.equal(readTree(f.input.source.commonDir, f.input.immutableTree).some(entry => [newSource, newTest].includes(entry.path)), false)
   assert.equal(f.store.listJournals(f.operation.id).length, 0); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+  assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes); assert.equal(f.git('rev-parse', 'HEAD'), f.input.headCommit)
+  assert.equal(existsSync(join(f.root, newSource)), false); assert.equal(existsSync(join(f.root, newTest)), false)
 })
 
 test('Coordinator 已有code且P1新增managed AC.test的null路径只续原评审', async t => {
