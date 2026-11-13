@@ -18,6 +18,8 @@ related:
 
 P2 混合失败使用真实 Git/Native 资源记录与 SQLite 冷开：普通 repair 排首、后组 contract-omission、另一组格式失败和一个 accept 同轮结算。冷续只重派原格式稿，保相同 candidate、合法 repair/accept 的原 resultRef；之后只回相应 P1 owner，保未命中原件与旧 CAS。覆盖完整 aggregate 后失租约的 superseded/null、零调用中间 attempt、缺 required outcome 及资源未 removed；不得补旧失败或收据。权限回归另在同 owner 核 ordinary 白名单与 omission 的已接受字段保护，不以并集扩权。
 
+当前协议的只读候选续审回归通过真实 Git 草稿取得 P0 v8 和 P1 原件。有限预算、多个格式拒稿、独审缓存和锚点返修均从各阶段的冻结输入与精确 Git seed 检查。冻结上下文旧运输另由历史请求验证。
+
 多 owner 候选独审失败回归从全局 generation 保存到失败结算统计阶段读取。每轮局部结论只共用一份索引，完整历史对象克隆为零，继续核原预算、格式续审范围和旧审批。
 
 正式重试回归核对普通 P1 结构诊断不会阻断已审 P0 原件复用。P1 实际使用旧稿时继续校验原 owner、schema 和 Git 引用。 两次正式重试复用的局部批准须可作为只读 V1 返修基线冷验，删除重试关系或当作当前诊断后的新独审均拒绝。
