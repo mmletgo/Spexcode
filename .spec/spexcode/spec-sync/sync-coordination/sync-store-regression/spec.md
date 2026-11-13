@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+观察存储回归以已结算 pair 建立同一 selection 的新旧两种记录，验证旧行原字节、GC引用、消费顺序、去重条件和前端覆盖保持。新记录只存业务覆盖投影及原摘要，完整 selection 继续由受权准入与收据使用。
+
 自动采纳政策回归覆盖新字段的 payload/规范语义/alias 冻结、无效来源拒绝、正式 retry 保原值，以及有/无标记的旧操作在同提交重复观察中不升权、不丢权、不新增消息。候选查询使用真实 SQLite 的结算记录，核完整来源、当前 settled attempt、全部 settled journal、完整 scope、精确父 HEAD、noop 排除和确定顺序；超过 500 条无关历史不漏候选，执行计划须命中父 HEAD 及 journal 索引。此测试只证明存储查询，真实 Git 采纳由 [[sync-source-adoption]] 验收。
 
 自动采纳索引迁移沿隔离库 online backup 核旧数据/registry 不变、索引与 marker 原子提交或整体回滚、旧 writer 拒绝及原备份可恢复。历史 marker 回归模拟旧 schema 时移除后续新增索引，并把这些索引的独立证明与旧 schema 不变断言分开。

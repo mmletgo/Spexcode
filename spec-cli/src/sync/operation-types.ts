@@ -134,7 +134,8 @@ export type SyncIngressReceipt = Pick<AdmitSyncInput, 'model' | 'recordUnverifie
 
 export type ClaimQueuedAttemptInput = ClaimAttemptInput & { expectedRevision: number; continuation?: true }
 export type SyncObservationInput = { input: InputSnapshot; configRef: BlobRef; selection: FrozenBaselineSelection | null; latestDifferenceDigest: string; failure?: SyncFailure }
-export type SyncObservation = SyncObservationInput & { id: string; controlRevision: number; selectionDigest: string | null; observedAtMs: number; operationId: string | null; outcome: 'observed' | 'admitted' | 'coalesced' | 'duplicate' | 'blocked'; reason: SyncFailure | null }
+export type SyncObservationBaseline = { resourceCount: number; pathResources: string[]; missingResources: string[] }
+export type SyncObservation = Omit<SyncObservationInput, 'selection'> & { baseline: SyncObservationBaseline | null; id: string; controlRevision: number; selectionDigest: string | null; observedAtMs: number; operationId: string | null; outcome: 'observed' | 'admitted' | 'coalesced' | 'duplicate' | 'blocked'; reason: SyncFailure | null }
 export type ObserveAndAdmitResult = { outcome: 'admitted' | 'coalesced' | 'duplicate'; operation: SyncOperation; observation: SyncObservation } | { outcome: 'blocked'; observation: SyncObservation; reason: SyncFailure }
 
 export type SyncObserverHealth = { scope: PhysicalScope; instanceId: string; processId: number; startedAtMs: number; updatedAtMs: number; status: 'starting' | 'watching' | 'degraded' | 'stopped'; failure?: SyncFailure }
