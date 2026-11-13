@@ -16,6 +16,10 @@ code:
 
 观察存储回归以已结算 pair 建立同一 selection 的新旧两种记录，验证旧行原字节、GC引用、消费顺序、去重条件和前端覆盖保持。新记录只存业务覆盖投影及原摘要，完整 selection 继续由受权准入与收据使用。
 
+writer48→49 使用同一 SQLite 迁移回归，额外保留旧内联格式的观察原行。升级后经正式观察读取等价投影，冷读不改旧行；旧 writer 拒绝升级库，备份保留旧观察的原字段。
+
+writer47→48 复用真实 SQLite marker 回归：完整旧表行、schema、自动采纳索引与 v1–v47 registry 保持，模拟 marker 事务内失败后最高版本仍为 47。正常升级只做一次 online backup，重复升级幂等，旧 47 迁移集合对新库拒绝；备份可按原 47 集合恢复且与升级前逐值相同。不操作生产库或删除真实 marker。
+
 writer46→47 使用隔离 SQLite 验证正常 online backup、仅追加程序语义 marker、旧 writer 写前拒绝与备份可由原迁移集合恢复。所有表行、完整 schema（含原自动采纳索引）和已有迁移字节保持；重复升级不重做备份。
 
 自动采纳政策回归覆盖新字段的 payload/规范语义/alias 冻结、无效来源拒绝、正式 retry 保原值，以及有/无标记的旧操作在同提交重复观察中不升权、不丢权、不新增消息。候选查询使用真实 SQLite 的结算记录，核完整来源、当前 settled attempt、全部 settled journal、完整 scope、精确父 HEAD、noop 排除和确定顺序；超过 500 条无关历史不漏候选，执行计划须命中父 HEAD 及 journal 索引。此测试只证明存储查询，真实 Git 采纳由 [[sync-source-adoption]] 验收。

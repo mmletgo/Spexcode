@@ -5028,26 +5028,43 @@ test('v2最终预算只列真实实现派发，纯父接口不产生虚构生成
 
 for (const mode of ['historical-aggregate', 'historical-v2-aggregate', 'historical-v3-aggregate', 'historical-v5-aggregate', 'historical-v5-local', 'current-aggregate', 'current-local', 'same-guidance', 'same-guidance-local'] as const) test(`v2指导缓存 ${mode} 正式pause恢复不把旧accept无ID gap直接复用`, async t => {
   const rawOnly = original.slice(0, original.indexOf('## expanded spec')).replace('contract-schema: sync-v1\n', '')
-  const f = await fixture(t, { maxAttempts: 3, maxCalls: 20, maxRepairs: 2, timeoutMs: 120000 }, false, rawOnly, 'project', original, { version: 'sync-coordinator-v2', direction: 'code_to_spec', partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, sourcePaths: ['src'], commitTrigger: { before: null, paths: ['src/export.js'] } }, undefined, 'code')
+  const f = await fixture(t, { maxAttempts: 3, maxCalls: 20, maxRepairs: 2, timeoutMs: 120000 }, false, rawOnly, 'project', original, { version: 'sync-coordinator-v2', direction: 'code_to_spec', agentWorkflow: 'native-worktree-v1', partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, sourcePaths: ['src'], commitTrigger: { before: null, paths: ['src/export.js'] } }, undefined, 'code', 'claude:default')
   const same = mode.startsWith('same-guidance'), checkpoint = f.store.checkpoint.bind(f.store)
+  if (!same) {
+    const claimed = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30000, expectedMessageId: f.operation.dispatchMessageId })
+    const protocol = { version: 'code-behavior-draft-v1', contextTransport: 'git-json-v5' }, resultRef = writeEvidence(f.input.source.commonDir, protocol)
+    f.store.checkpoint(claimed.fence, { ...writeEvidence(f.input.source.commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: claimed.attempt.id, inputId: f.input.id, policyDigest: f.operation.policyDigest, stage: 'behavior-draft-protocol', resultRef }), artifacts: syncCheckpointArtifacts(protocol, resultRef) })
+  }
   f.store.checkpoint = (fence, ref) => {
     const value = JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())
     if (f.store.readAttempt(fence.attemptId).number === 1 && value.version === 'sync-stage-v1' && (value.stage === 'analysis' || value.stage?.endsWith(':analysis'))) {
       if (mode.startsWith('historical-')) value.guidanceContractVersion = mode.includes('v5') ? 'code-behavior-guidance-v5' : mode === 'historical-v3-aggregate' ? 'code-behavior-guidance-v3' : mode === 'historical-v2-aggregate' ? 'code-behavior-guidance-v2' : 'code-behavior-guidance-v1'
-      else if (mode === 'same-guidance' || mode === 'same-guidance-local' && value.stage !== 'analysis') value.guidanceContractVersion = CODE_BEHAVIOR_GUIDANCE_VERSION
+      else if (mode === 'same-guidance' || mode === 'same-guidance-local' && value.stage !== 'analysis') {
+        assert.equal(value.guidanceContractVersion, CODE_BEHAVIOR_GUIDANCE_VERSION, '同指导必须由真实v6请求生成，不能给旧fixture补签全局版本')
+        assert.equal(JSON.parse(readEvidence(f.input.source.commonDir, value.resultRef).toString()).guidanceContractVersion, CODE_BEHAVIOR_GUIDANCE_VERSION)
+      }
       else delete value.guidanceContractVersion
       ref = writeEvidence(f.input.source.commonDir, value)
     }
     return checkpoint(fence, ref)
   }
-  f.transform((output, request) => {
-    if (request.purpose === 'code_behavior_analyze') {
-      const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!)
-      return { ...(output as object), changes: (output as { changes: { paths: string[] }[] }).changes.map(change => ({ ...change, kind: attempt.number === 1 && change.paths.some(path => path.startsWith('src/')) ? 'coverage_gap' : 'refactor', affectedIds: [], ruleIds: [], evidence: '实现与原意相符，仅尚无待生成的规格叶', counterexample: '未生成规格叶不应成为业务事实未知' })) }
-    }
+  f.options.runner = async request => {
+    f.calls.push(request)
     if (request.purpose === 'elaboration_generate') throw Object.assign(new Error('新指导已进入P1，机制回归在细化正文前停止'), { code: 'unsupported' })
-    return output
-  })
+    assert.ok(request.worktree)
+    const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!)
+    const currentGuidance = same || attempt.number > 1
+    const descriptor = JSON.parse(request.prompt.split('\n任务:\n')[1].split('\n草稿文件=')[0])
+    assert.equal(descriptor.contextTransport, currentGuidance ? 'git-json-v6' : 'git-json-v5')
+    const context = readCodeBehaviorContext(request, f.input.source.commonDir), paths = context.task.requiredChangedPaths as string[], pending = context.pendingAnalysis
+    if (pending) assert.equal(pending.analysis.guidanceContractVersion, currentGuidance ? CODE_BEHAVIOR_GUIDANCE_VERSION : undefined)
+    const output = pending
+      ? { inputDigest: request.inputDigest, analysisDigest: pending.analysisDigest, verdict: 'accept', checkedPaths: paths, checkedChangeIds: pending.analysis.changes.map(change => change.id), findings: [] }
+      : { changes: paths.map(path => ({ kind: attempt.number === 1 && path.startsWith('src/') ? 'coverage_gap' : 'refactor', paths: [path], affectedIds: [], ruleIds: [], originalIntent: '遵守导出明确原意', previousBehavior: '导出任务结果不变', sourceBehavior: '内部实现文字编辑，导出结果不变', deliveryBehavior: '共同已验证语义不变', evidence: '实现与原意相符，仅尚无待生成的规格叶', counterexample: '未生成规格叶不应成为业务事实未知' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    const worktree = committedDraftFixture(f, request, output, join(f.parent, `guidance-cache-${f.calls.length}`))
+    const dispatch = attempt.dispatchPlans.find(item => item.key === request.requestKey)!, receipt = { summary: '真实同指导缓存与无ID发现阻断回归' }
+    return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `guidance-cache-${request.requestKey}`, turnId: 'turn', output: receipt, resultDigest: contentHash(JSON.stringify(receipt)), worktree }
+  }
   const first = await runSyncOperation(f.store, f.operation.id, f.options)
   assert.equal(first.status, 'needs_input', JSON.stringify(f.store.listAttempts(f.operation.id).map(attempt => attempt.failure))); assert.equal(first.failure!.code, 'unbound_behavior_finding')
   assert.deepEqual(readCurrentSyncAnalysis(f.store, first.operation)!.ref, first.failure!.evidenceRefs[0], '旧指导已审原件仍可显示并作为明确choice来源，不能当自动cache')
@@ -5211,7 +5228,8 @@ for (const mode of ['analysis-live', 'analysis-two-accepted', 'analysis-restart'
       if (attempt.number === 2 && partition === 'export' && request.purpose === 'code_behavior_analyze') {
         const path = /草稿文件=([^\s；]+)/.exec(request.prompt)![1]
         assert(!readTree(f.input.source.commonDir, request.worktree!.tree).some(entry => entry.path === path), '无稿的旧transport失败不能产生草稿')
-        assert.deepEqual(context.errors, [{ code: transportCode, message: transportMessage }])
+        assert.deepEqual(context.errors, [], '新请求不复制原传输故障的诊断正文')
+        assert.deepEqual(context.repairDiagnostics, [])
       }
       const fence = { operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }
       return createAttemptRunner(store, fence, { pollMs: 2, runtime: {
@@ -5295,12 +5313,17 @@ for (const mode of ['analysis-live', 'analysis-two-accepted', 'analysis-restart'
       assert.equal(first.failure?.kind, 'repairable')
       assert.ok(first.dispatchPlans.every(dispatch => store.findResource(first.id, dispatch.key)?.phase === 'removed'))
       const failures = JSON.parse(readEvidence(f.input.source.commonDir, firstStages.find(value => value.stage === 'partition:analysis-failures').resultRef).toString()).failures as { code: string; message: string }[]
-      assert.ok(failures.some(item => item.code === transportCode && item.message === transportMessage))
-      const business = failures.find(item => item.code === 'behavior_review_failed' || item.code === 'behavior_analysis_invalid')!
-      assert.ok(business)
+      assert.ok(failures.some(item => item.code === transportCode))
+      assert.ok(failures.some(item => item.code === 'behavior_review_failed' || item.code === 'behavior_analysis_invalid'))
+      assert.ok(failures.every(item => item.message === 'P0 行为校验未通过'), '新P0分区检查点只保存失败状态')
       const resumed = transportCalls.filter(call => call.attempt === 2)
       assert.deepEqual(resumed.map(call => `${call.partition}:${call.purpose}`).sort(), ['export:code_behavior_analyze', 'export:code_behavior_review', 'import:code_behavior_review'])
-      assert.ok(resumed.filter(call => call.partition === 'import').every(call => call.context.repairDiagnostics.some(issue => JSON.stringify(issue) === JSON.stringify(business))))
+      const originalReview = transportCalls.find(call => call.attempt === 1 && call.partition === 'import' && call.purpose === 'code_behavior_review')!
+      const resumedReview = resumed.find(call => call.partition === 'import')!
+      assert.ok(originalReview.context.pendingAnalysis)
+      assert.deepEqual(resumedReview.context.pendingAnalysis, originalReview.context.pendingAnalysis, '兄弟传输故障后仅续审原分析')
+      assert.deepEqual(resumedReview.context.errors, [])
+      assert.deepEqual(resumedReview.context.repairDiagnostics, [])
       const secondStages = stages(attempts[1])
       assert.deepEqual(secondStages.find(stage => stage.stage === accepted.stage).resultRef, accepted.resultRef)
       assert.ok(secondStages.some(stage => stage.stage === `${accepted.stage}:provenance`))
@@ -7941,8 +7964,14 @@ for (const tamper of ['none', 'review-identity', 'analysis-digest', 'owner'] as 
       const entry = readTree(f.input.source.commonDir, seed.tree).find(entry => entry.path === path)
       assert.ok(entry, '跨attempt原分析Git稿必须进入新seed')
       assert.equal(readObject(f.input.source.commonDir, entry.oid).toString(), analysisText)
-      const errors = readCodeBehaviorContext(request, f.input.source.commonDir).errors
-      assert.ok(errors.some(error => error.code === 'behavior_review_failed' && JSON.stringify(JSON.parse(error.message).review.findings) === JSON.stringify(finding)), '父unsupported且无partitionFailures仍须携完整原review findings，不只复制分析稿')
+      const context = readCodeBehaviorContext(request, f.input.source.commonDir)
+      assert.deepEqual(context.errors, [])
+      assert.deepEqual(context.repairDiagnostics, [])
+      for (const item of finding) assert.ok(!request.prompt.includes(item.message))
+      const originalReview = /用 git show ([a-f0-9]+):(\.spex-sync-drafts\/[a-f0-9]+\.json) 读取本区最近一次真实业务独审/.exec(request.prompt)
+      assert.ok(originalReview, '父unsupported且无partitionFailures仍须引用原Git独审')
+      const original = execFileSync('git', ['-C', f.root, 'show', `${originalReview[1]}:${originalReview[2]}`], { encoding: 'utf8' })
+      assert.deepEqual(JSON.parse(original).findings, finding)
       newPrompt = request.prompt
       throw Object.assign(new Error('fixture已核新analyze seed和完整prompt，停止于模型调用边界'), { code: 'unsupported' })
     }
@@ -8292,14 +8321,41 @@ test('未采纳settled重验重新派发P0/P1并续原Git稿，坏candidate不�
   assert.notEqual(result.receipt!.actualTree, first.receipt!.actualTree)
 })
 
-for (const frozen of ['new', 'v1', 'v2-reserved', 'v3-reserved', 'v4-reserved', 'legacy-checkpoint', 'reserved', 'null', 'empty', 'future'] as const) test(`P0 context传输只在首次冻结选择，${frozen}保留旧字段缺席与请求绑定`, async t => {
+for (const transport of ['git-json-v5', 'git-json-v6'] as const) test(`P0已审wrapper只标真实生成指导，不能把历史运输贴成新批准 ${transport}`, async t => {
+  const f = await fixture(t, { maxAttempts: 1, maxCalls: 8, maxRepairs: 0, timeoutMs: 120_000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, 'code', 'claude:default')
+  const claimed = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30_000, expectedMessageId: f.operation.dispatchMessageId })
+  const protocol = { version: 'code-behavior-draft-v1', contextTransport: transport }, resultRef = writeEvidence(f.input.source.commonDir, protocol)
+  f.store.checkpoint(claimed.fence, { ...writeEvidence(f.input.source.commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: claimed.attempt.id, inputId: f.input.id, policyDigest: f.operation.policyDigest, stage: 'behavior-draft-protocol', resultRef }), artifacts: syncCheckpointArtifacts(protocol, resultRef) })
+  const purposes: string[] = []
+  f.options.runner = async request => {
+    purposes.push(request.purpose)
+    if (!request.purpose.startsWith('code_behavior_')) throw Object.assign(new Error('fixture止于已审P0之后'), { code: 'unsupported' })
+    const context = readCodeBehaviorContext(request, f.input.source.commonDir), paths = context.task.requiredChangedPaths as string[], pending = context.pendingAnalysis
+    const output = pending
+      ? { inputDigest: request.inputDigest, analysisDigest: pending.analysisDigest, verdict: 'accept', checkedPaths: paths, checkedChangeIds: pending.analysis.changes.map(change => change.id), findings: [] }
+      : { changes: paths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保原导出结果', previousBehavior: '原结果', sourceBehavior: '仅源码注释变化', deliveryBehavior: '无新增业务', evidence: path, counterexample: '重复完成仍保首次结果' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    const worktree = committedDraftFixture(f, request, output, join(f.parent, `guidance-${purposes.length}`))
+    const dispatch = f.store.readAttempt(claimed.attempt.id).dispatchPlans.find(item => item.key === request.requestKey)!
+    const receipt = { summary: '生成指导身份回归' }
+    return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `guidance-${request.purpose}`, turnId: 'turn', output: receipt, resultDigest: contentHash(JSON.stringify(receipt)), worktree }
+  }
+  await runSyncOperation(f.store, f.operation.id, f.options)
+  assert.deepEqual(purposes, ['code_behavior_analyze', 'code_behavior_review', 'elaboration_generate'])
+  const wrapper = readSyncCheckpoints(f.store, f.store.readOperation(f.operation.id), f.store.readAttempt(claimed.attempt.id)).json.map(({ value }) => value as { stage?: string; resultRef: { sha256: string }; guidanceContractVersion?: string }).find(value => value.stage === 'analysis')!
+  const analysis = JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString()) as { reviewPassed: boolean; guidanceContractVersion?: string }
+  assert.equal(analysis.reviewPassed, true)
+  assert.equal(wrapper.guidanceContractVersion, transport === 'git-json-v6' ? 'code-behavior-guidance-v8' : 'code-behavior-guidance-v7', 'wrapper必须从原analysis取指导，不能按当前writer版本补签')
+  assert.equal(analysis.guidanceContractVersion, transport === 'git-json-v6' ? 'code-behavior-guidance-v8' : undefined, '旧analysis字段缺席保持')
+})
+
+for (const frozen of ['new', 'v1', 'v2-reserved', 'v3-reserved', 'v4-reserved', 'v5-reserved', 'legacy-checkpoint', 'reserved', 'null', 'empty', 'future'] as const) test(`P0 context传输只在首次冻结选择，${frozen}保留旧字段缺席与请求绑定`, async t => {
   const f = await fixture(t, { maxAttempts: 1, maxCalls: 8, maxRepairs: 0, timeoutMs: 120_000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, 'code', 'claude:default')
   const claim = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30_000, expectedMessageId: f.operation.dispatchMessageId })
   let originalProtocol: { ref: { sha256: string }; bytes: Buffer } | undefined
   const rejectsTransport = ['null', 'empty', 'future'].includes(frozen)
-  const expectedTransport = frozen === 'new' ? 'git-json-v5' : frozen === 'v1' ? 'git-json-v1' : frozen === 'v2-reserved' ? 'git-json-v2' : frozen === 'v3-reserved' ? 'git-json-v3' : frozen === 'v4-reserved' ? 'git-json-v4' : undefined
+  const expectedTransport = frozen === 'new' ? 'git-json-v6' : frozen === 'v1' ? 'git-json-v1' : frozen === 'v2-reserved' ? 'git-json-v2' : frozen === 'v3-reserved' ? 'git-json-v3' : frozen === 'v4-reserved' ? 'git-json-v4' : frozen === 'v5-reserved' ? 'git-json-v5' : undefined
   const protocolValue = { version: 'code-behavior-draft-v1', ...(expectedTransport ? { contextTransport: expectedTransport } : rejectsTransport ? { contextTransport: frozen === 'null' ? null : frozen === 'empty' ? '' : 'git-json-future' } : {}) }
-  if (frozen === 'legacy-checkpoint' || frozen === 'v1' || frozen === 'v2-reserved' || frozen === 'v3-reserved' || frozen === 'v4-reserved' || rejectsTransport) {
+  if (frozen === 'legacy-checkpoint' || frozen === 'v1' || frozen === 'v2-reserved' || frozen === 'v3-reserved' || frozen === 'v4-reserved' || frozen === 'v5-reserved' || rejectsTransport) {
     const value = protocolValue, resultRef = writeEvidence(f.input.source.commonDir, value)
     const ref = writeEvidence(f.input.source.commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: claim.attempt.id, inputId: f.input.id, policyDigest: f.operation.policyDigest, stage: 'behavior-draft-protocol', resultRef })
     f.store.checkpoint(claim.fence, { ...ref, artifacts: syncCheckpointArtifacts(value, resultRef) })
@@ -8312,8 +8368,10 @@ for (const frozen of ['new', 'v1', 'v2-reserved', 'v3-reserved', 'v4-reserved', 
     captured = true
     const task = JSON.parse(request.prompt.split('\n任务:\n')[1].split('\n草稿文件=')[0])
     assert.equal(task.contextTransport, expectedTransport)
-    assert.equal(request.prompt.includes('SPEX_P0_COVERAGE'), frozen === 'new' || frozen === 'v3-reserved' || frozen === 'v4-reserved')
-    assert.equal(request.prompt.includes('invalidAcceptanceBasis'), frozen === 'new')
+    assert.equal(request.prompt.includes('SPEX_P0_COVERAGE'), frozen === 'new' || frozen === 'v3-reserved' || frozen === 'v4-reserved' || frozen === 'v5-reserved')
+    assert.equal(request.prompt.includes('invalidAcceptanceBasis'), frozen === 'new' || frozen === 'v5-reserved')
+    assert.equal(request.prompt.includes('当前作者意图：'), frozen === 'new')
+    assert.equal(readCodeBehaviorContext(request, f.input.source.commonDir).task.direction, frozen === 'new' ? null : undefined)
     assert.equal(request.worktree!.mode, frozen === 'reserved' ? 'read' : 'edit')
     const contexts = readTree(f.input.source.commonDir, request.worktree!.tree).filter(entry => entry.path.endsWith('.context.json'))
     assert.equal(contexts.length, expectedTransport ? 1 : 0)
