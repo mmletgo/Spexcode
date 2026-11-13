@@ -17,6 +17,8 @@ type SyncCoordinatorPlanBody = {
   executionScope?: SyncScope
   facts: readonly ElaborationFact[]
   verifications: readonly RegisteredVerification[]
+  /** 全图封口保留未选 owner 的可信定义，不增加本轮验证运行。 */
+  contextVerifications?: readonly RegisteredVerification['definition'][]
   mandatoryTests: readonly { verificationId: string; testPath: string; testId: string }[]
   authorizedChanges?: readonly AuthorizedContractChange[]
   retiredIds?: readonly string[]

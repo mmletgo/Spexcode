@@ -26,6 +26,8 @@ SyncCoordinatorPlan 是普通可内容寻址 JSON；version、intentNodeId、tar
 
 mandatoryTests 是额外已有独立测试义务，包含 verificationId/testPath/testId；文件不能与模型 writePaths 重叠，必须在冻结读集合，不能由模型改 oracle 自免。未来 ready AC 由可信契约图计算，完整流程使用 readyFlowIds。verification definitions 明确进入 P1 verifications 字段，不能当待裁决业务 facts。
 
+可选 contextVerifications 只保存未选 owner 的可信 VERIFY 定义，参与 plan 的 canonical policyDigest，供全图封口校验既有声明。它不含执行环境，不进入 V3 计划或 mandatoryTests；旧缺席和摘要保持，不通过当前配置升级旧计划。沿既有内容寻址 JSON 保存，不新增表结构；上线须以 writer 围栏阻止旧实现接受同一计划摘要却忽略该字段。回退前先结算使用新字段的活动操作并恢复配套备份，不删改已冻结计划或 marker。
+
 prepareSyncAdmission 返回既有 AdmitSyncInput；runSyncOperation 的 options 提供固定计划、再次读取当前可信计划、source 外预建0700的 managedRoot/artifactRoot及固定可信 tools。可注入模型 runner 或 Docker driver 仅作为明确测试接缝，生产默认既有原生执行。返回操作真实状态/receipt/typed failure，不以本地 Promise 成功代表交付。
 
 SyncAdmissionOptions可带retryOf，新用户显式重试身份透传admission；冻结input/request/policy与旧已接受契约义务不变，仅经store真实eligibility核验后授权新执行预算。

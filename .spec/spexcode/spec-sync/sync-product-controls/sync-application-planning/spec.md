@@ -48,6 +48,8 @@ mandatoryTests即使由contractImpact引用也只读；executionScope仅纳入�
 
 版本化配置可登记多个独立节点政策。执行mandatory仅保当前目标、实际impact及真实依赖VERIFY的政策；已知独立owner的无关mandatory不因共享配置被送入本次候选。verification定义另保实际readonly Spec上下文中的VERIFY，满足候选逐项严格登记，但该只读登记不授独立节点write/coverage或触发全仓oracle执行。当前、旧交付及保护图的真实owner并集决定范围，当前输入删owner/VERIFY不能规避旧命令及退役oracle。无任何真实owner的预登记定义和mandatory继续保留供纯raw细化/严格gate暴露缺口；schema及命令校验先于范围筛选，不能静默过滤坏政策。
 
+程序全图封口会读取未选 owner 的既有声明。新计划把未进入本轮 verifications 的可信定义另存为 contextVerifications，只含 id、command、cwd 和 timeoutMs，随原 policyDigest 冻结；它只补全图引用校验，不增加局部模型上下文、mandatoryTests、V3 运行或任何写入范围。旧 planBlob 缺席时保持原登记，不从实时配置补入。
+
 历史 retiredIds 仍保留审计；规划当前禁用身份时逐 ID 采用其真实当前 intent head。其它旧 path pair 的累计退休集合不能把已由新完整验证交付恢复的当前 ID 再次标为退役；无该 ID head 的历史记录仍保守保留。
 
 已存在的node tombstone沿原contract资源head保存；当前精确规划保留实际读取节点的已知该head，不造新node资源协议。已审恢复的node身份由原Spec路径与scope覆盖；generation/review readyIds仍只包含实际契约图业务ID，不伪标恢复node为退役业务义务。
