@@ -159,6 +159,8 @@ freezeElaborationInput为生成、独审及同operation局部interface_seed承�
 
 readonlySpecRepair独立于P2独审refinement，绑定真实全候选V1错误及已接受局部原件；只作为技术锚点失败诊断进入对应owner冻结输入。历史JSON/review不是新事实或授权，raw、业务义务及稳定ID保持，允许修正实际冻结代码的定位选择器，不能修改只读代码或测试。新候选继续结构校验、全量独审及最终seal/V1；历史accepted结果不会被改成失败seed。
 
+原attempt冻结引用返修提示为 `actionable-v1` 时，生成侧省略历史诊断列表中严重程度为 warning 的 `acceptance-not-executed` 和 `semantic-review-required`。同名错误、其它诊断、当前引用问题和原独审继续交给对应阶段。已认证的历史草稿保留原字节，验收覆盖记录继续由全图及执行层计算。
+
 其candidate_review分支绑定真实独立code_review的具体repair及候选内契约定位，历史生成JSON只作诊断和稳定ID对照，保持原冻结作者source/raw/facts及授权；不得把尚未交付的生成候选提升为作者政策。新叶可按原意和实际代码/测试纠正错误的Spec证据表述，既有作者AC/VERIFY仍受原演进授权硬门，不得改只读源码/tests或降减原raw义务。缺事实或冲突仍按原门阻断。
 
 totalTimeoutMs显式null表示本次P1没有总时间期限，省略仍沿既有有限默认；每次调用timeoutMs仍为有限正整数。无总deadline不创建总期计时器，不将null参与减法；每attempt原maxCalls/maxRepairs机制及生成/独审角色保持，取消与未停稳原生资源仍按原失败门禁。
