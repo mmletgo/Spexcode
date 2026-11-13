@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createRequire, syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { deflateSync } from 'node:zlib'
 import { parseContract } from '@spexcode/spec-core/contracts'
 import type { Acceptance, ContractFinding } from '@spexcode/spec-core/contracts'
 import { CANDIDATE_RESPONSE_SCHEMA, freezeCandidate, verifyCandidate } from './candidate.js'
@@ -17,6 +18,7 @@ import { nativeWorktreeResult } from '../native-worktree-runtime.js'
 import { nativeWorktreePrompt } from '../native-worktree-runtime.js'
 import type { GenerationInput, GenerationReview } from './generation-types.js'
 import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence, writeObject, writeTree } from './snapshot.js'
+import type { TreeReadCache } from './snapshot.js'
 
 const contractPath = '.spec/export/export-contract/spec.md'
 async function input(t: test.TestContext, largeContext = false): Promise<GenerationInput> {
@@ -131,6 +133,61 @@ test('原生候选独审批读冻结正文，不构造未发送的内联投影�
   const perBlobReads = gitCalls.filter(args => args[args.indexOf('cat-file') + 1] === 'blob').length
   t.diagnostic(JSON.stringify({ files: source.manifest.entries.length, perBlobReads, inlineProjections }))
   assert.deepEqual({ perBlobReads, inlineProjections }, { perBlobReads: 0, inlineProjections: 0 })
+})
+
+for (const native of [false, true]) test(`P2显式阶段树缓存只复用Git条目，完整请求与冷热拒绝保持 native=${native}`, async t => {
+  const source = await input(t), commonDir = source.snapshot.source.commonDir
+  const context = Buffer.from('已冻结组合上下文\n'), entry = { path: 'src/composed-context.txt', mode: '100644' as const, oid: writeObject(commonDir, context), digest: contentHash(context) }
+  const tree = writeTree(commonDir, [...source.manifest.entries, entry]), entries = readTree(commonDir, tree)
+  source.composed = { sourceInputId: source.snapshot.id, previousBaselinePairId: null, tree, manifestBlob: writeEvidence(commonDir, { version: 1, entries }), contentDigest: contentHash(JSON.stringify(entries)) }
+  source.manifest = { version: 1, entries }
+  if (native) { source.nativeWorktree = true; source.model = 'claude:fixture' }
+  const candidate = freezeCandidate(source.snapshot, changes(source) as CandidateChanges, source.allowedScope, source.composed)
+  const inputs = Array.from({ length: 4 }, (_, index) => ({ ...source, requestKey: `${source.requestKey}:review-${index}` }))
+  const expected = inputs.map(input => generationReviewRequest(input, candidate, true, []).request)
+  const cache: TreeReadCache = new Map(), treeReads: string[] = []
+  const childProcess = createRequire(import.meta.url)('node:child_process') as typeof import('node:child_process'), exec = childProcess.execFileSync
+  childProcess.execFileSync = ((...args: Parameters<typeof execFileSync>) => {
+    const command = args[1] as string[]
+    if (args[0] === 'git' && command.includes('ls-tree') && command.includes('-rlz')) treeReads.push(command.at(-1)!)
+    return Reflect.apply(exec, childProcess, args)
+  }) as typeof execFileSync
+  syncBuiltinESMExports()
+  try {
+    for (const [index, input] of inputs.entries()) {
+      const result = await runGeneration(input, { reviewCandidate: candidate, reviewSpecWritePaths: [], validateCandidate: valid, runner: async request => {
+        assert.deepEqual(request, expected[index], '显式缓存不进入完整请求或改变prompt/schema/seed')
+        const output = { inputId: source.snapshot.id, candidateDigest: candidate.digest, verdict: 'accept', checkedIds: source.readyIds, findings: [] }
+        return { sessionId: `review-${index}`, threadId: `thread-${index}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+      } }, cache)
+      assert.equal(result.status, 'reviewed', JSON.stringify(result.failure))
+      assert.equal(result.inputDigest, expected[index].inputDigest)
+      assert.equal(result.candidateFiles!.get('src/export.js'), `${source.files.get('src/export.js')}\n// actual candidate implementation\n`)
+    }
+  } finally { childProcess.execFileSync = exec; syncBuiltinESMExports() }
+  const trees = new Set([source.snapshot.immutableTree, source.composed.tree, candidate.tree])
+  t.diagnostic(JSON.stringify({ requests: inputs.length, distinctTrees: trees.size, fullTreeReads: treeReads.length, native }))
+  assert.deepEqual(new Set(treeReads), trees)
+  assert.equal(treeReads.length, trees.size, '同一P2阶段每棵完整Git树只读一次')
+  const first = inputs[0]
+  assert.throws(() => generationReviewRequest({ ...first, files: new Map(first.files).set('src/export.js', '外来正文') }, candidate, true, [], cache), /模型读集合必须逐字匹配/)
+  assert.throws(() => generationReviewRequest({ ...first, manifest: { version: 1, entries: [] } }, candidate, true, [], cache), /冻结 manifest 不匹配/)
+  assert.throws(() => generationReviewRequest(first, { ...candidate, digest: '0'.repeat(64) }, true, [], cache), /候选摘要\/manifest 不匹配/)
+  for (const ref of [source.snapshot.manifestBlob, candidate.actualDiffBlob]) {
+    const path = join(commonDir, 'spexcode/evidence', ref.sha256), bytes = readFileSync(path)
+    writeFileSync(path, '{"tampered":true}')
+    try { assert.throws(() => generationReviewRequest(first, candidate, true, [], cache), /证据摘要不匹配/, '树命中不能缓存CAS验证结论') }
+    finally { writeFileSync(path, bytes) }
+  }
+  const changed = verifyCandidate(commonDir, candidate).find(entry => entry.path === 'src/export.js')!
+  const path = join(commonDir, 'objects', changed.oid.slice(0, 2), changed.oid.slice(2)), bytes = readFileSync(path), altered = Buffer.from('损坏候选Git正文\n')
+  chmodSync(path, 0o600); writeFileSync(path, deflateSync(Buffer.concat([Buffer.from(`blob ${altered.length}\0`), altered])))
+  try {
+    assert.throws(() => generationReviewRequest(first, candidate, true, [], cache), /OID 不匹配/, '命中树条目仍重新读取实际候选正文')
+    assert.throws(() => generationReviewRequest(first, candidate, true, [], new Map()), /OID 不匹配/, '冷恢复不能复用旧阶段的树证据')
+  } finally { writeFileSync(path, bytes); chmodSync(path, 0o444) }
+  const restored = restoreGenerationInput(JSON.parse(JSON.stringify(freezeGenerationInput(first).inputEvidence)))
+  assert.deepEqual(generationReviewRequest(restored, candidate, true, [], new Map()).request, expected[0])
 })
 
 test('原生严格响应schema显式类型和required属性完整，不能仅以本地Ajv接受自证', () => {
