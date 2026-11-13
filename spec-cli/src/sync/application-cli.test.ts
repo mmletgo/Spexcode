@@ -105,6 +105,12 @@ test('AC-SYNC-CLI-02 CLI run/status/control 走相同持久服务HTTP且保留�
     const coverage = await cli(['sync', 'run', 'demo', '--retry-of', 'op-1', '--record-unverified-coverage', '--request-id', 'coverage-1', '--api', api])
     assert.equal(coverage.code, 0, coverage.stderr)
     assert.deepEqual(requests[14], { method: 'POST', url: '/api/sync/run', body: { targetTree: workspace.replace(/\/$/, ''), nodeId: 'demo', requestId: 'coverage-1', retryOf: 'op-1', recordUnverifiedCoverage: true } })
+    const handoff = await cli(['sync', 'run', 'demo', '--retry-of', 'op-1', '--model', 'grok:default', '--inherit-retry-budget', '--request-id', 'handoff-1', '--api', api])
+    assert.equal(handoff.code, 0, handoff.stderr)
+    assert.deepEqual(requests[15], { method: 'POST', url: '/api/sync/run', body: { targetTree: workspace.replace(/\/$/, ''), nodeId: 'demo', requestId: 'handoff-1', retryOf: 'op-1', model: 'grok:default', inheritRetryBudget: true } })
+    const missingModel = await cli(['sync', 'run', 'demo', '--retry-of', 'op-1', '--inherit-retry-budget', '--api', api])
+    assert.equal(missingModel.code, 1); assert.match(missingModel.stderr, /--inherit-retry-budget/)
+    assert.equal(requests.length, 16)
   } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())) }
 })
 test('sync run和verify传递--model，resume/recover不接受模型切换', async () => {

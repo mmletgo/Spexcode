@@ -432,7 +432,7 @@ consumes the token after it.`,
     body: `Usage: spex sync settings
        spex sync enable [--config-digest <sha256>]
        spex sync status [--node <node-id>] [--limit N] [--json]
-       spex sync run <node-id> [--request-id <id>] [--patch-file <json>] [--retry-of <operation-id>] [--origin spec|initial|code|combined] [--committed] [--model <model-id>] [--record-unverified-coverage]
+       spex sync run <node-id> [--request-id <id>] [--patch-file <json>] [--retry-of <operation-id>] [--origin spec|initial|code|combined] [--committed] [--model <model-id>] [--record-unverified-coverage] [--inherit-retry-budget]
        spex sync decide <operation-id> --input-id <id> --analysis <sha256> --findings <id,...> --choice keep_intent|adopt_behavior|new_rule [--rule <text>] [--request-id <id>]
        spex sync show <operation-id>
        spex sync pause|resume
@@ -462,6 +462,7 @@ resume 继续原操作，--retry-of 建立关联新操作；三个入口各自�
 手动 --model 优先于项目 sync.model。省略模型时，同 request/retry 继承原选择；新原生操作依次读取项目设置、宿主 CLI 功能组，缺省沿用 Claude Code。换模型使用 --retry-of --model。模型固定于 operation 和独审请求，resume/recover 沿用原选择。
 --model llm-manager 或 sync.model=llm-manager 在新原生操作准入时解析已登记的宿主 CLI 功能组。cursor:default 沿用本机 Cursor CLI 配置。
 --retry-of 显式重试可重试的失败操作，保留原正文意图并关联旧结果；不能同时传 --patch-file。
+--inherit-retry-budget 与 --retry-of、--model 合用，交接已结算、尚未验证交付的代码→Spec 候选，保留原预算族与截止时间。
 只有显式重试建立新操作和新预算，普通重复请求继续归并。未结算资源或已变输入拒绝重试。
 show/status 展示真实失败、GAP、过期和交付工作树；workspace_synced 不代表原输入树已落地。
 启用的主来源完成新同步并结算验证后，服务会在干净原工作树上按真实收据自动采纳。

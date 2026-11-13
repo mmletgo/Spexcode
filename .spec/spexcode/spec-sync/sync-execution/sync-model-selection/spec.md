@@ -16,6 +16,8 @@ code:
 
 ## expanded spec
 
+已结算的原生代码→Spec 候选可用显式 retryOf、新模型和原预算继承继续独审。原结论按实际派发模型和原件认证，需补的独审以新模型和新请求执行。交接依照 [[sync-coordinator]] 的同候选资格，原来源、业务范围和验收条件保持。
+
 新 native-worktree 操作在没有显式选择、项目模型或宿主选路时固定请求选择 `claude:default`，由 Claude CLI 原生配置决定实际模型，执行时不传 `--model`。显式 `claude:<模型或别名>`、`zcode:<provider>/<模型>` 原样交给对应 CLI，`zcode:default` 使用其原生默认值；模型和 CLI 版本没有产品允许名册，实际协议或模型不可用时报告原生错误，不自动换执行器。新请求冻结 `nativeConfiguration: cli-config-v1`；每轮实际 CLI 与模型信息由适配器独立记录和校验，不把默认或别名强行当成实际模型。DEFAULT_SYNC_MODEL 与旧缺字段 sol 身份不变，同 request 及省略 retry 继续继承已持久请求选择，不热改历史。新工具描述 v3 绑定请求选择与 agentWorkflow；旧 v1/v2 按原协议恢复。
 
 `zcode:<provider-id>/<model-id>` 明确选择 [[zcode-structured-runtime]]，用户选择交给原生 SDK 解析，实际 provider 与 model 绑定当轮结果。它与 Claude 共用以下 admission/retryOf 规则，请求选择变化不改原业务意图和验收门槛。

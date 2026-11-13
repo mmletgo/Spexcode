@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+模型交接的 CLI 回归检查真实 HTTP 请求同时携原操作、新模型和预算继承授权。缺少显式模型的命令在发送前报错。
+
 AC-APPLICATION-STOPPED-04 以真实 Git 元数据身份替换复现同 canonicalRoot、不同 repositoryId 的历史 queued 操作和未结算资源共存；当前来源 stopWriter 成功暂停，只返回当前仓库诊断及其真实未结算资源，旧操作、attempt、资源与物理控制逐值保持。使用隔离 SQLite 与受控 runner，不声称真实 Native 执行或生产恢复完成。
 
 资源专用入口用真实隔离Git的.git替换复现repoId变化，先确认正常read/recover/cancel/resume仍404，再证明只结算原operation/input的精确Native资源。错误input/foreign root拒绝，缺失/错配计划及停止未知保持未结算；pending journal原样保留，原operation/attempt.failure、输出/发现原件逐字不变，业务claim/dispatch/生成/交付方法均零调用。测试只证明正式资源接缝，不冒称真实Native停止。

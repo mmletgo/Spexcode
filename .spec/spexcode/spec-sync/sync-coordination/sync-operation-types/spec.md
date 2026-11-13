@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+模型交接在正式 `retryOf` 的 operation 和 ingress receipt 保存 `inheritRetryBudget: true`。新 operation 固定自己的模型和派发身份，沿 dispatchAnchor 的原预算根累计使用并保持原 deadlineAtMs。原 operation 与其派发、候选和证据保留。
+
 本节点治理共享 TypeScript 数据协议，完整范围遵循 [[sync-coordination]]。工作树身份包含仓库、commonDir、canonicalRoot、gitDir、分支及删除重建可区分的物理指纹。冻结输入保存 HEAD、不可变 tree、index tree/digest、文件 manifest blob 与内容摘要；采集时间仅为元数据，稳定 ID 不包含采集时间。
 
 operation 保存不可变输入和 previousBaselinePair、generation/revision、根因及接入键、政策/影响/读集合摘要、8.2 全部阶段、控制与预算、真实 paths/contractIds/flowIds 范围、ready/blocked/delivered 范围及交付目标。attempt 独立保存稳定派发与 session 创建键、原生会话引用、完整 manifest 与实际 diff blob 候选、验证、checkpoint blob 与明确失败类型。fence 绑定 operation、attempt、generation、源物理身份与 lease token。
