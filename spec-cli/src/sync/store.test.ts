@@ -1368,6 +1368,66 @@ test('scope expansion is canonical/idempotent, retains admission identity and bu
   } finally { f.cleanup() }
 })
 
+test('large scope lease membership remains linear for acquisition and idempotent expansion', async t => {
+  const f = await fixture()
+  try {
+    const covered = { paths: ['src/a.ts'], contractIds: Array.from({ length: 256 }, (_, index) => `RULE-${index}`), flowIds: ['FLOW-A'] }
+    const baseline = f.store.readBaselineSelection(source(), [...covered.paths.map(path => ({ kind: 'path' as const, path })), ...covered.contractIds.map(id => ({ kind: 'contract' as const, id })), ...covered.flowIds.map(id => ({ kind: 'flow' as const, id }))])
+    assert.ok('selection' in baseline)
+    const claimed = f.claim({ ...f.admit(source(), 'large-membership', covered), baselineSelection: baseline.selection })
+    const leases = f.protocol.withTransaction(tx => tx.query('SELECT * FROM sync_leases ORDER BY resource_key'))
+    const transaction = f.protocol.withTransaction.bind(f.protocol)
+    let keyReads = 0
+    f.protocol.withTransaction = body => transaction(tx => body({
+      ...tx,
+      query: (sql, ...params) => {
+        const rows = tx.query(sql, ...params)
+        return sql.includes('FROM sync_leases') ? rows.map(row => ({ ...row, get resource_key() { keyReads++; return row.resource_key } })) : rows
+      },
+    }))
+    const evidence = f.put({ reviewed: 'large-scope' })
+    const expanded = f.store.expandContractScope(claimed.fence, covered, evidence)
+    const acquisitionReads = keyReads
+    keyReads = 0
+    assert.deepEqual(f.store.expandContractScope(claimed.fence, covered, evidence), expanded)
+    const replayReads = keyReads
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT * FROM sync_leases ORDER BY resource_key')).map(row => ({ ...row })), leases.map(row => ({ ...row })))
+    t.diagnostic(JSON.stringify({ leases: leases.length, acquisitionReads, replayReads }))
+    assert.ok(acquisitionReads <= leases.length * 4, `acquisition read ${acquisitionReads} keys for ${leases.length} leases`)
+    assert.ok(replayReads <= leases.length * 4, `replay read ${replayReads} keys for ${leases.length} leases`)
+  } finally { f.cleanup() }
+})
+
+test('lease membership reacquires an expired foreign owner instead of treating its key as owned', async () => {
+  const f = await fixture()
+  try {
+    const first = f.claim()
+    f.tick(1001)
+    const next = f.claim(f.admit(source('other'), 'expired-foreign-owner', scope('src/other.ts', 'RULE-A')))
+    assert.equal(f.store.assertWriteFence(next.fence).attempt.id, next.attempt.id)
+    const shared = f.protocol.withTransaction(tx => tx.query('SELECT token,attempt_id,generation FROM sync_leases WHERE resource_key=?', 'contract:RULE-A'))[0]
+    assert.equal(shared.token, next.fence.leaseToken); assert.equal(shared.attempt_id, next.attempt.id); assert.equal(shared.generation, 2)
+    assert.throws(() => f.store.assertWriteFence(first.fence), /SYNC_FENCE_EXPIRED/)
+  } finally { f.cleanup() }
+})
+
+for (const defect of ['missing', 'foreign-owner'] as const) test(`idempotent scope expansion refuses changed lease membership (${defect})`, async () => {
+  const f = await fixture()
+  try {
+    const claimed = f.claim(), ids = { contractIds: ['RULE-A', 'REQ-A'], flowIds: [] }, evidence = f.put({ reviewed: true })
+    const expanded = f.store.expandContractScope(claimed.fence, ids, evidence)
+    if (defect === 'missing') f.protocol.withTransaction(tx => tx.exec('DELETE FROM sync_leases WHERE token=? AND resource_key=?', claimed.fence.leaseToken, 'contract:REQ-A'))
+    else {
+      const other = f.claim(f.admit(source('other'), 'foreign-owner', scope('src/other.ts', 'RULE-OTHER')))
+      f.protocol.withTransaction(tx => tx.exec('UPDATE sync_leases SET token=?,operation_id=?,attempt_id=? WHERE token=? AND resource_key=?', other.fence.leaseToken, other.operation.id, other.attempt.id, claimed.fence.leaseToken, 'contract:REQ-A'))
+    }
+    const leases = f.protocol.withTransaction(tx => tx.query('SELECT * FROM sync_leases ORDER BY resource_key'))
+    assert.throws(() => f.store.expandContractScope(claimed.fence, ids, evidence), /SYNC_FENCE_EXPIRED/)
+    assert.deepEqual(f.store.readOperation(claimed.operation.id), expanded)
+    assert.deepEqual(f.protocol.withTransaction(tx => tx.query('SELECT * FROM sync_leases ORDER BY resource_key')), leases)
+  } finally { f.cleanup() }
+})
+
 test('two SQLite handles atomically acquire new ID resources; conflicting set rolls back every new lease and preserves held path', async () => {
   const f = await fixture(), secondProtocol = openProtocol(f.path), second = new SyncStore(secondProtocol, f.options)
   try {

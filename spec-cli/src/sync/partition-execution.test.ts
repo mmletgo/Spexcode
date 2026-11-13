@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process'
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { createRequire, syncBuiltinESMExports } from 'node:module'
 import { mintIds } from '@spexcode/spec-core'
 import { parseContract } from '@spexcode/spec-core/contracts'
 import type { Acceptance, Contract } from '@spexcode/spec-core/contracts'
@@ -26,7 +27,7 @@ import type { CodeBehaviorInput } from './code-behavior.js'
 import type { CodeBehaviorAnalysis } from './writeback-types.js'
 import type { BaselinePair } from './operation-types.js'
 import { composeInputSnapshots } from './composition.js'
-import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence } from './snapshot.js'
+import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence, writeObject, writeTree } from './snapshot.js'
 import { buildSyncApplicationPlan } from './planning.js'
 import { verifyCandidate } from './candidate.js'
 import { nativeWorktreeResult } from '../native-worktree-runtime.js'
@@ -810,7 +811,20 @@ test('mixed只读owner权限投影沿真实P2 dispatch，纯父只读而三个le
 
 test('分区生成同时在途，每区只收到本区完整正文；分区和跨边独审绑定唯一最终candidate', async t => {
   const { input, plan, checkpoints } = await fixture(t), runtime = native()
-  const result = await generateSyncPartitions(input, plan, 2, false, { runner: runtime.runner, validateCandidate: async () => [] }, checkpoints)
+  const commonDir = input.snapshot.source.commonDir, context = Buffer.from('冻结组合上下文\n')
+  const tree = writeTree(commonDir, [...input.manifest.entries, { path: 'src/composed-context.txt', mode: '100644', oid: writeObject(commonDir, context), digest: contentHash(context) }]), entries = readTree(commonDir, tree)
+  input.composed = { sourceInputId: input.snapshot.id, previousBaselinePairId: null, tree, manifestBlob: writeEvidence(commonDir, { version: 1, entries }), contentDigest: contentHash(JSON.stringify(entries)) }
+  input.manifest = { version: 1, entries }
+  const childProcess = createRequire(import.meta.url)('node:child_process') as typeof import('node:child_process'), exec = childProcess.execFileSync, treeReads: string[] = []
+  let reviewing = false, result: GenerationResult
+  childProcess.execFileSync = ((...args: Parameters<typeof execFileSync>) => {
+    const command = args[1] as string[]
+    if (reviewing && args[0] === 'git' && command.includes('ls-tree') && command.includes('-rlz')) treeReads.push(command.at(-1)!)
+    return Reflect.apply(exec, childProcess, args)
+  }) as typeof execFileSync
+  syncBuiltinESMExports()
+  try { result = await generateSyncPartitions(input, plan, 2, false, { runner: runtime.runner, validateCandidate: async () => { reviewing = true; return [] } }, checkpoints) }
+  finally { childProcess.execFileSync = exec; syncBuiltinESMExports() }
   assert.equal(result.status, 'reviewed', JSON.stringify(result.failure))
   assert.equal(runtime.peak(), 2)
   assert.equal(runtime.calls.filter(call => call.purpose === 'code_generate').length, 3)
@@ -818,6 +832,10 @@ test('分区生成同时在途，每区只收到本区完整正文；分区和�
   assert.equal(result.review, null, '不得伪造全仓模型review')
   assert.equal(result.partitionEvidence!.length, 4)
   assert.ok(result.partitionEvidence!.every(item => item.candidateDigest === result.candidate!.digest))
+  const trees = new Set([input.snapshot.immutableTree, input.composed.tree, result.candidate!.tree])
+  t.diagnostic(JSON.stringify({ reviews: result.partitionEvidence!.length, distinctTrees: trees.size, fullTreeReads: treeReads.length }))
+  assert.deepEqual(new Set(treeReads), trees)
+  assert.equal(treeReads.length, trees.size, 'P2的局部与跨边独审共享同一次候选阶段的完整树读取')
   for (const request of runtime.calls.filter(call => call.purpose === 'code_generate')) {
     const context = JSON.parse(request.prompt.split('冻结完整输入:\n')[1]) as { files: [string, string][] }
     assert.equal(context.files.filter(([path]) => path.startsWith('src/')).length, 1)
