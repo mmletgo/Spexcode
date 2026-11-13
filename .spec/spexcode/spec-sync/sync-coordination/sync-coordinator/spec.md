@@ -48,7 +48,7 @@ P1生成的ZCode `session/events` 精确超时也可沿上述已提交材料准�
 
 上述观察只从通过原请求和停止身份认证的 ZCode Native root 派生原树槽供 [[content-filter]] 字节核验。共用 filter root 指针不能代替原身份。无可认证树槽时仍要求物理字节匹配 Git 对象。
 
-P0 只在本次 attempt 尚无阶段检查点和 code_behavior saved/reserved 派发时冻结 git-json-v5。已冻结的 git-json-v1/v2/v3/v4、缺席字段及原请求保持精确恢复，未知传输在派发前拒绝。新运输沿 v2 正文和失败状态策略以及 [[sync-code-behavior]] 的只读自检，并在分析自检定位非 user:raw 验收变更的未变化只读来源。业务摘要、原草稿及已批准来源保持。真实草稿、审查结果、source/tests 保护及资源结算仍依原门核验。
+P0 只在本次 attempt 尚无阶段检查点和 code_behavior saved/reserved 派发时冻结 git-json-v6。已冻结的 git-json-v1/v2/v3/v4/v5、缺席字段及原请求保持精确恢复，未知传输在派发前拒绝。新运输沿 v2 正文和失败状态策略以及 [[sync-code-behavior]] 的只读自检，并在分析自检定位非 user:raw 验收变更的未变化只读来源；新 v6 另冻结真实方向并向分析和独审共享作者当前意图规则。新指导重新分析与独审，旧请求、原草稿及原批准对象保持。真实草稿、审查结果、source/tests 保护及资源结算仍依原门核验。
 
 显式 retryOf 只沿正式已结算祖先复用通过独审的局部 P0。冻结来源、输入、原意、计划、读集、业务基线、组合及局部 schema 和范围均一致时，认证原分析与独审、Git 原件和旧模型绑定，保存来源和原 resultRef。新操作只派发未批准分区，允许选择不同模型。原 attempt、调用、草稿及独审不补签。更早祖先因新准入被替代时，仍须重新核对已终结 attempt、活租约、资源和 journal 的结算。当前重新装配完整 P0；P1 仅分析资格及候选续验回到原操作复验该批准，全部当前封口和验证继续执行。
 

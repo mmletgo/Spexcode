@@ -12,6 +12,10 @@ related:
 
 ## expanded spec
 
+产品入口夹具从真实 Todo 已提交 HEAD 使用 no-local 隔离克隆，并创建独立 SQLite；通过 SyncApplication.submit 的正式受控正文编辑冻结四空格→两空格请求，正常 Git 草稿生成与独立审核后到达 P1 派发。注入 runner 仅证明请求、阶段和原件门禁，在 P1 派发时主动停止；副本无旧基线的只读根分区另保 partition_binding 原失败，不授模型语义、P1、V1–V4 或交付通过；不操作原产品 repo、数据库或服务。新副本没有旧 receipt，其 authorChanges 的 null 前态保持，作者四→两变化另由原受控 request before/next Git 对象直接证明，不伪造已验证基线。相同冻结 Todo 输入在原实现与候选中对照缺席及 v1–v5 的分析/独审共 12 份完整请求，prompt、schema、业务摘要、seed/tree 均逐字相同，原 source/index 保持。
+
+P0 v6 当前作者意图回归以真实 Git 的四空格 JSON 实现、原测试及 raw 为基线，分别经真实 prepareControlledRequest UI 接缝和外部 Spec commit 冻结两空格新要求。分析与独审须拿到相同作者意图规则、原冻结方向、authorChanges before/after/IDs 及可读取的历史 Git 对象，source/test 仍为原四空格字节；缺 direction 的原实现先失败。混合提交另删除下载权限检查时，真实独立 conflict 原样进入 findings，不借新 raw 清空；code_to_spec 代码变化的 authorChanges 仍为空，原只读写范围和未授 AC/VERIFY 保持。runner 明确只验证生产请求、真实 Git 草稿和程序门禁，不宣称模型已做业务判断或 Todo 产品已通过。历史 v1–v5/缺席的请求、输入摘要和 Git context 逐字保持，新 v6 的分析与独审独立执行；同 v6 review 格式失败重验 readyAnalysis 后继续原 JSON，仅重开独审，旧批准与失败原件不回填。
+
 legacy冻结程序尾段先复现errors被[]替代，再核完整原对象及repairDiagnostics只读返回；字符串含相同分隔标记、转义引号/反斜线/换行、嵌套JSON和旧summary文字均正确，重复/缺尾/错schema路径/非数组/损坏或额外正文拒绝。原空数组不混旧错误，非draft请求无段保原空诊断。真实Git legacy/file续改夹具核新seed原稿/schema/OID与读回原错误对象相同，request原bytes不改；git-json业务摘要及23次accepted早退零调用保持。不代表真实模型或正式交付。
 
 P0 git-json-v2 回归以同一真实 Git fixture 对照旧运输。新 context 与 Native 请求不携历史诊断正文，完整当前任务和待审分析仍保持，旧业务输入与已批准复用身份一致。失败原稿仍可修改，程序只存状态摘要，业务修订读取真实独审原件。
