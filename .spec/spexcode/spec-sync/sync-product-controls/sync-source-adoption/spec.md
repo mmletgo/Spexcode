@@ -9,11 +9,13 @@ code:
 
 ## raw source
 
-用户从 Dashboard 或 CLI 将已验证完整交付采纳到原输入工作树。只接受真实已结算提交，保留本地修改和正常 Git hooks，不因按钮点击写入虚假的主分支完成状态。
+已启用主分支自动采纳已验证完整交付。用户也可从 Dashboard 或 CLI 显式采纳到原输入工作树。只接受真实已结算提交，保留本地修改和正常 Git hooks，主分支完成状态取自实际 Git。
 
 ## expanded spec
 
 [[sync-application]] 的详情资格与实际采纳使用同一后端判据。只接受完整 workspace_synced/awaiting_landing/canonical_synced 操作：没有未决范围、全部实际交付覆盖操作范围、当前尝试及全部 journal 已 settled，同来源没有未结算原生资源或交付日志，物理写入未暂停。未完成态先给出明确拒因，再读取固定 runtime 和完整证据。
+
+自动路径在同一来源发布锁中复核主分支、观察实例、冻结自动采纳标记与当前 HEAD 的直接正式后继。每次只快进到一份实际收据，下一次以最新 HEAD 查询。前序未采纳的旧手动收据没有自动授权时，后续候选仍保留为待采纳。原显式路径仍核同一工作树与 Git 快进资格。
 
 复核 [[sync-private-delivery]] 已持久的 input、candidate、四层 pass 验证、apply plan、文件步骤、receipt、commit intent 与真实 Git tree/parent/effect 绑定，不重造证据。receipt.actualCommit 必须真实存在；交付快照的 HEAD、工作树、index 和 manifest 等于已验证完整候选。unchanged intent 仅复用原 parent；普通提交必须匹配原 parent 和 effect。固定 runtime、canonical hooks 及执行配置须可静态证明。
 
@@ -25,7 +27,7 @@ settledReceipt及既有scope覆盖谓词可由[[sync-application]]复用为纯�
 
 完整 receipt 和只读 landing 已证明 sourceSynced 时，经过上述授权、结算证据和干净原树检查后直接幂等返回，不再要求写入用 hooks/footprint 与交付前冻结值相等；合法 post-merge 刷新不会把已采纳读取变成写入失败。
 
-所有前置检查保持业务 source、index、HEAD 与分支只读；沿应用既有快照读取可保存内容寻址对象和私有保活 metadata。真正写入前取得协调器既有 artifacts/.publication-locks 的同 source file-mutex，在锁内重读操作、snapshot、授权、证据及 hook binding，再执行普通 git merge --ff-only --no-autostash。清除内部发布模式、注入与 lint/defer bypass 环境；不禁用 hooks，不增加另一套 hook 协议。锁只协调正式服务写者，不能替用户锁住外部编辑器。
+所有前置检查保持业务 source、index、HEAD 与分支只读；沿应用既有快照读取可保存内容寻址对象和私有保活 metadata。真正写入前取得协调器既有 artifacts/.publication-locks 的同 source file-mutex，在锁内重读操作、snapshot、授权、证据及 hook binding，再执行普通 git merge --ff-only --no-autostash --no-overwrite-ignore。交付新文件与原工作树的忽略文件冲突时，Git 拒绝覆盖并保留私有收据。清除内部发布模式、注入与 lint/defer bypass 环境；不禁用 hooks，不增加另一套 hook 协议。锁只协调正式服务写者，不能替用户锁住外部编辑器。
 
 临近 merge 的同步边界再次核实 symbolic-ref HEAD 与实际 HEAD 仍为计划中的原分支/提交；preflight 后切支或推进 HEAD 明确拒绝。执行后的身份与分支仍需核实。这些复核不承诺阻绝任意外部进程同时操作 Git，最终仍以正常 hooks 和实际状态投影为准。
 

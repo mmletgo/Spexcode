@@ -124,7 +124,7 @@ export function fastForwardSource(plan: SourceAdoptionPlan): void {
   const branch = spawnSync(plan.binding.gitPath, [...args, 'symbolic-ref', '--quiet', 'HEAD'], { env, encoding: 'utf8' })
   const head = spawnSync(plan.binding.gitPath, [...args, 'rev-parse', '--verify', 'HEAD'], { env, encoding: 'utf8' })
   if (branch.error || head.error || branch.status !== 0 || head.status !== 0 || branch.stdout.trim() !== plan.source.branch || head.stdout.trim() !== plan.headCommit) fail('sync_source_changed', '采纳前当前分支或 HEAD 已变化，请重新读取资格')
-  const result = spawnSync(plan.binding.gitPath, [...args, 'merge', '--ff-only', '--no-edit', '--no-autostash', plan.actualCommit], { env, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 })
+  const result = spawnSync(plan.binding.gitPath, [...args, 'merge', '--ff-only', '--no-edit', '--no-autostash', '--no-overwrite-ignore', plan.actualCommit], { env, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 })
   const actualHead = gitText(plan.source.commonDir, ['rev-parse', plan.source.branch])
   if (result.error || result.status !== 0) fail('sync_adoption_git_failed', `Git 快进未完整成功（退出 ${result.status ?? result.signal ?? '启动失败'}）；${actualHead === plan.headCommit ? '当前 HEAD 未前进，仍须检查工作文件和 index' : `当前 HEAD 已变为 ${actualHead}，请重新读取实际采纳状态`}`)
   if (actualHead !== plan.actualCommit) fail('sync_adoption_result_changed', `采纳后实际 HEAD 为 ${actualHead}，与 receipt 提交不一致，请读取当前状态`)

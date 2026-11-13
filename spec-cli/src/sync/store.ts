@@ -360,7 +360,7 @@ export class SyncStore {
     validateScope({ paths: files.map(file => file.path), contractIds: [], flowIds: [] })
     return files as ApplyFilePlan[]
   }
-  private normalizedSemanticDigest(input: Pick<SyncOperation, 'input' | 'requestBlob' | 'origin' | 'policyDigest' | 'scope' | 'retryOf' | 'baselineSelection' | 'recordUnverifiedCoverage'>): string {
+  private normalizedSemanticDigest(input: Pick<SyncOperation, 'input' | 'requestBlob' | 'origin' | 'policyDigest' | 'scope' | 'retryOf' | 'baselineSelection' | 'recordUnverifiedCoverage' | 'automaticSourceAdoption'>): string {
     if (!input.requestBlob) return syncSemanticDigest(input)
     const evidence = JSON.parse(this.blob(input.requestBlob).toString('utf8')) as { type?: string }
     if (evidence.type === 'sync.decision') {
@@ -376,13 +376,14 @@ export class SyncStore {
     return syncSemanticDigest({ ...input, requestBlob: { sha256: digest({ ...request, origin }) } })
   }
   private saveIngressReceipt(tx: ProtocolTransaction, input: AdmitSyncInput, operationId: string, payloadDigest: string): void {
-    const receipt: SyncIngressReceipt = { operationId, payloadDigest, ...syncModelBinding(input.model), input: clone(input.input), origin: input.origin, ...(input.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), ...(input.requestBlob ? { requestBlob: input.requestBlob } : {}), budget: input.budget, deliveryPlan: input.deliveryPlan, previousBaselinePair: input.previousBaselinePair ?? null, ...(input.baselineSelection ? { baselineSelection: clone(input.baselineSelection) } : {}) }
+    const receipt: SyncIngressReceipt = { operationId, payloadDigest, ...syncModelBinding(input.model), input: clone(input.input), origin: input.origin, ...(input.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), ...(input.automaticSourceAdoption ? { automaticSourceAdoption: input.automaticSourceAdoption } : {}), ...(input.requestBlob ? { requestBlob: input.requestBlob } : {}), budget: input.budget, deliveryPlan: input.deliveryPlan, previousBaselinePair: input.previousBaselinePair ?? null, ...(input.baselineSelection ? { baselineSelection: clone(input.baselineSelection) } : {}) }
     tx.exec('INSERT INTO sync_ingress_receipts(ingress_key,operation_id,payload_digest,record_json) VALUES(?,?,?,?)', input.ingressKey, operationId, payloadDigest, JSON.stringify(receipt))
   }
   /** 稳定接入记录与既有消息派发计划共享一个 SQL 事务。 */
   admitAndEnqueue(input: AdmitSyncInput): SyncOperation { return this.admitWithObservation(input) }
   private admitWithObservation(input: AdmitSyncInput, observation?: SyncObservation): SyncOperation {
     validateScope(input.scope)
+    if (input.automaticSourceAdoption !== undefined && (input.automaticSourceAdoption !== 'canonical-source-v1' || !['initial', 'spec', 'code', 'combined'].includes(input.origin))) fail('SYNC_AUTOMATIC_ADOPTION_POLICY', '自动主来源采纳只接受可信应用冻结的新操作政策')
     if (input.recordUnverifiedCoverage !== undefined && (input.recordUnverifiedCoverage !== true || observation || input.requestBlob || !input.planBlob || !['initial', 'code'].includes(input.origin))) fail('SYNC_COVERAGE_AUTHORITY', '记录未执行验收覆盖需要显式只读同步请求')
     if (input.model !== undefined && (typeof input.model !== 'string' || !input.model || input.model !== input.model.trim())) fail('SYNC_MODEL_INVALID', '模型需要非空精确 ID')
     const { model, ...withoutModel } = input
@@ -401,15 +402,16 @@ export class SyncStore {
       }
     }
     if (input.delivery && (input.delivery.canonicalRoot !== input.deliveryPlan.canonicalRoot || input.delivery.branch !== input.deliveryPlan.branch || input.delivery.repositoryId !== input.input.source.repositoryId)) fail('SYNC_DELIVERY_BINDING', 'bound delivery differs from durable plan')
-    const payload = { input: inputPayload(input.input), ...syncModelBinding(input.model), ...(input.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), ...(input.requestBlob ? { requestBlob: input.requestBlob } : {}), ...(input.planBlob ? { planBlob: input.planBlob } : {}), ...(input.retryOf ? { retryOf: input.retryOf } : {}), scope: canonicalScope(input.scope), policyDigest: input.policyDigest, impactDigest: input.impactDigest, readSetDigest: input.readSetDigest, deliveryPlan: input.deliveryPlan, previousBaselinePairId: input.previousBaselinePair?.id ?? null, ...(input.baselineSelection ? { baselineSelectionDigest: input.baselineSelection.digest } : {}), budget: input.budget }
+    const payload = { input: inputPayload(input.input), ...syncModelBinding(input.model), ...(input.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), ...(input.automaticSourceAdoption ? { automaticSourceAdoption: input.automaticSourceAdoption } : {}), ...(input.requestBlob ? { requestBlob: input.requestBlob } : {}), ...(input.planBlob ? { planBlob: input.planBlob } : {}), ...(input.retryOf ? { retryOf: input.retryOf } : {}), scope: canonicalScope(input.scope), policyDigest: input.policyDigest, impactDigest: input.impactDigest, readSetDigest: input.readSetDigest, deliveryPlan: input.deliveryPlan, previousBaselinePairId: input.previousBaselinePair?.id ?? null, ...(input.baselineSelection ? { baselineSelectionDigest: input.baselineSelection.digest } : {}), budget: input.budget }
     const legacyPayloadDigest = digest(payload), payloadDigest = digest({ ...payload, origin: input.origin })
     const requestType = input.requestBlob ? JSON.parse(this.blob(input.requestBlob).toString('utf8')) as { type?: string } : null
     const decision = requestType?.type === 'sync.decision' ? readControlledDecision(input.input, input.requestBlob!) : null
     if (decision && input.origin !== 'decision') fail('SYNC_DECISION_BINDING', '业务裁决需要decision来源')
     const semanticDigest = this.normalizedSemanticDigest(input)
+    const otherAdoptionPolicyDigest = this.normalizedSemanticDigest({ ...input, automaticSourceAdoption: input.automaticSourceAdoption ? undefined : 'canonical-source-v1' })
     const compatibleCandidates = input.baselineSelection ? this.write(tx => tx.query("SELECT record_json FROM sync_operations WHERE repository_id=? AND source_key=? AND json_extract(record_json,'$.input.id')=? AND json_extract(record_json,'$.origin')=? AND json_extract(record_json,'$.retryOf') IS ?", input.input.source.repositoryId, identityKey(input.input.source), input.input.id, input.origin, input.retryOf ?? null).map(row => parseRecord<SyncOperation>(row)!).filter(operation => operation.baselineSelection && contains(operation.scope, canonicalScope(input.scope)) && (decision || operation.policyDigest === input.policyDigest))) : []
     const semanticIntent = input.baselineSelection ? this.normalizedSemanticDigest({ ...input, baselineSelection: undefined }) : null
-    const compatibleIds = compatibleCandidates.filter(operation => this.normalizedSemanticDigest({ ...operation, scope: input.scope, baselineSelection: undefined }) === semanticIntent).map(operation => operation.id)
+    const compatibleIds = compatibleCandidates.filter(operation => this.normalizedSemanticDigest({ ...operation, automaticSourceAdoption: input.automaticSourceAdoption, scope: input.scope, baselineSelection: undefined }) === semanticIntent).map(operation => operation.id)
     const legacyCandidates = this.write(tx => tx.query("SELECT record_json FROM sync_operations WHERE repository_id=? AND source_key=? AND json_extract(record_json,'$.input.id')=? AND json_extract(record_json,'$.origin')=? AND json_extract(record_json,'$.retryOf') IS ? AND (? OR normalized_semantic_digest IS NULL AND json_extract(record_json,'$.policyDigest')=?)", input.input.source.repositoryId, identityKey(input.input.source), input.input.id, input.origin, input.retryOf ?? null, decision ? 1 : 0, input.policyDigest).map(row => parseRecord<SyncOperation>(row)!).filter(operation => decision || digest(canonicalScope(operation.scope).paths) === digest(canonicalScope(input.scope).paths)))
     const normalized = legacyCandidates.map(operation => {
       try { return { id: operation.id, digest: this.normalizedSemanticDigest(operation) } }
@@ -424,18 +426,34 @@ export class SyncStore {
       const finish = (operation: SyncOperation, outcome: 'admitted' | 'coalesced' | 'duplicate'): SyncOperation => {
         if (syncModel(operation) !== syncModel(input)) fail('SYNC_MODEL_RETRY_REQUIRED', '相同业务输入切换模型必须使用正式 retryOf')
         if (operation.recordUnverifiedCoverage !== input.recordUnverifiedCoverage) fail('SYNC_COVERAGE_AUTHORITY', '接入与既有操作的验收覆盖授权不同')
+        if (!observation && operation.automaticSourceAdoption !== input.automaticSourceAdoption) fail('SYNC_AUTOMATIC_ADOPTION_POLICY', '同一业务输入必须保留原自动采纳政策')
         if (observation) { observation.operationId = operation.id; observation.outcome = outcome; this.saveObservation(tx, observation) }
         return operation
       }
+      const replayPayload = (operation: SyncOperation) => {
+        if (!observation) return payload
+        const { automaticSourceAdoption: _automatic, ...original } = payload
+        return { ...original, ...(operation.automaticSourceAdoption ? { automaticSourceAdoption: operation.automaticSourceAdoption } : {}) }
+      }
+      const saveAlias = (operation: SyncOperation): void => {
+        const { automaticSourceAdoption: _automatic, ...original } = input
+        const frozen = observation ? { ...original, ...(operation.automaticSourceAdoption ? { automaticSourceAdoption: operation.automaticSourceAdoption } : {}) } : input
+        tx.exec("UPDATE sync_operations SET ingress_aliases_json=json_insert(ingress_aliases_json,'$[#]',?) WHERE id=?", input.ingressKey, operation.id)
+        this.saveIngressReceipt(tx, frozen, operation.id, digest({ ...replayPayload(operation), origin: input.origin }))
+      }
       for (const operation of normalized) tx.exec('UPDATE sync_operations SET normalized_semantic_digest=? WHERE id=?', operation.digest, operation.id)
       const prior = parseRecord<SyncOperation>(tx.query('SELECT record_json FROM sync_operations WHERE ingress_key=? OR EXISTS (SELECT 1 FROM json_each(sync_operations.ingress_aliases_json) WHERE value=?)', input.ingressKey, input.ingressKey)[0])
-      if (prior) { const receipt = parseRecord<SyncIngressReceipt>(tx.query('SELECT record_json FROM sync_ingress_receipts WHERE ingress_key=?', input.ingressKey)[0]); if ((receipt?.origin ?? prior.origin) !== input.origin || !(receipt ? receipt.payloadDigest === payloadDigest : [payloadDigest, legacyPayloadDigest].includes(prior.payloadDigest))) fail('SYNC_IDEMPOTENCY_CONFLICT', input.ingressKey); return finish(prior, 'duplicate') }
+      if (prior) {
+        const receipt = parseRecord<SyncIngressReceipt>(tx.query('SELECT record_json FROM sync_ingress_receipts WHERE ingress_key=?', input.ingressKey)[0])
+        const replay = replayPayload(prior), exact = digest({ ...replay, origin: input.origin })
+        if ((receipt?.origin ?? prior.origin) !== input.origin || !(receipt ? receipt.payloadDigest === exact : [exact, observation ? digest(replay) : legacyPayloadDigest].includes(prior.payloadDigest))) fail('SYNC_IDEMPOTENCY_CONFLICT', input.ingressKey)
+        return finish(prior, 'duplicate')
+      }
       if (observation && !input.retryOf && !input.requestBlob) {
         const previous = parseRecord<SyncObservation>(tx.query("SELECT record_json FROM sync_observations WHERE source_key=? AND json_extract(record_json,'$.configRef.sha256')=? AND json_extract(record_json,'$.latestDifferenceDigest')=? AND json_extract(record_json,'$.selectionDigest')=? AND json_extract(record_json,'$.outcome') IN ('admitted','coalesced','duplicate') AND operation_id IS NOT NULL ORDER BY rowid DESC LIMIT 1", identityKey(input.input.source), observation.configRef.sha256, observation.latestDifferenceDigest, observation.selectionDigest)[0])
         if (previous) {
           const existing = this.operation(tx, previous.operationId!)
-          tx.exec("UPDATE sync_operations SET ingress_aliases_json=json_insert(ingress_aliases_json,'$[#]',?) WHERE id=?", input.ingressKey, existing.id)
-          this.saveIngressReceipt(tx, input, existing.id, payloadDigest)
+          saveAlias(existing)
           return finish(existing, 'duplicate')
         }
       }
@@ -444,17 +462,18 @@ export class SyncStore {
       const retainMatch = (operation: SyncOperation): boolean => {
         if (!replaceUnclaimedInitial || operation.input.captureKind !== 'commit' || operation.phase !== 'superseded' || operation.control !== 'run' || operation.currentAttemptId || operation.callsUsed !== 0 || operation.delivery || syncDeadlineExpired(operation.deadlineAtMs, this.now())) return true
         const newDelivery = operation.deliveryPlan.canonicalRoot !== input.deliveryPlan.canonicalRoot || operation.deliveryPlan.branch !== input.deliveryPlan.branch
-        if (!newDelivery || operation.deliveryPlan.baseCommit !== input.deliveryPlan.baseCommit || syncModel(operation) !== syncModel(input) || operation.impactDigest !== input.impactDigest || operation.readSetDigest !== input.readSetDigest || digest(operation.scope) !== digest(payload.scope) || operation.baselineSelection?.digest !== input.baselineSelection?.digest) return true
+        if (!newDelivery || operation.automaticSourceAdoption !== input.automaticSourceAdoption || operation.deliveryPlan.baseCommit !== input.deliveryPlan.baseCommit || syncModel(operation) !== syncModel(input) || operation.impactDigest !== input.impactDigest || operation.readSetDigest !== input.readSetDigest || digest(operation.scope) !== digest(payload.scope) || operation.baselineSelection?.digest !== input.baselineSelection?.digest) return true
         if (!supersededInitial || supersededInitial.generation < operation.generation) supersededInitial = operation
         return false
       }
       const compatible = compatibleIds.map(id => this.operation(tx, id)).find(operation => this.compatibleSelection(tx, operation, input.baselineSelection!) && retainMatch(operation))
-      const sameInput = compatible ?? tx.query('SELECT record_json FROM sync_operations WHERE normalized_semantic_digest=? ORDER BY rowid DESC LIMIT ?', semanticDigest, replaceUnclaimedInitial ? -1 : 1).map(row => parseRecord<SyncOperation>(row)!).find(retainMatch)
-      if (sameInput) { tx.exec("UPDATE sync_operations SET ingress_aliases_json=json_insert(ingress_aliases_json,'$[#]',?) WHERE id=?", input.ingressKey, sameInput.id); this.saveIngressReceipt(tx, input, sameInput.id, payloadDigest); return finish(sameInput, 'duplicate') }
+      const sameInput = compatible ?? tx.query('SELECT record_json FROM sync_operations WHERE normalized_semantic_digest IN (?,?) ORDER BY rowid DESC LIMIT ?', semanticDigest, otherAdoptionPolicyDigest, replaceUnclaimedInitial ? -1 : 1).map(row => parseRecord<SyncOperation>(row)!).find(retainMatch)
+      if (sameInput) { saveAlias(sameInput); return finish(sameInput, 'duplicate') }
       if (input.baselineSelection) this.assertSelection(tx, input.input.source, input.baselineSelection, scopeResources(input.scope))
       if (input.retryOf) {
         const previous = this.operation(tx, input.retryOf), eligibility = this.retryEligibility(tx, previous, revalidation)
         if (!eligibility.eligible) fail(eligibility.reason!.code, eligibility.reason!.message)
+        if (previous.automaticSourceAdoption !== input.automaticSourceAdoption) fail('SYNC_RETRY_BINDING', '正式重试必须保留原自动采纳政策')
         if ((previous.recordUnverifiedCoverage || revalidatable(previous)) && previous.recordUnverifiedCoverage !== input.recordUnverifiedCoverage) fail('SYNC_RETRY_BINDING', '重试必须保留原覆盖授权，已交付候选的重验亦不能改变选择')
         const selectionMatches = revalidation ? !!input.baselineSelection && this.revalidationSelection(tx, previous, input.baselineSelection) : (previous.baselineSelection?.digest ?? null) === (input.baselineSelection?.digest ?? null)
         if (!selectionMatches || revalidation && (digest(previous.budget) !== digest(input.budget) || digest(previous.scope) !== digest(canonicalScope(input.scope))) || previous.origin !== input.origin || identityKey(previous.input.source) !== identityKey(input.input.source) || digest(inputPayload(previous.input)) !== digest(inputPayload(input.input)) || (previous.requestBlob?.sha256 ?? null) !== (input.requestBlob?.sha256 ?? null) || previous.policyDigest !== input.policyDigest || previous.impactDigest !== input.impactDigest || previous.readSetDigest !== input.readSetDigest || previous.deliveryPlan.baseCommit !== input.deliveryPlan.baseCommit || (previous.previousBaselinePair?.id ?? null) !== (input.previousBaselinePair?.id ?? null) || digest(previous.scope.paths) !== digest(canonicalScope(input.scope).paths) || !contains(previous.scope, input.scope)) fail('SYNC_RETRY_BINDING', '显式重试必须完整复用原冻结来源、用户请求、政策及授权范围')
@@ -986,6 +1005,29 @@ export class SyncStore {
     return this.write(tx => parseRecord<SyncOperation>(tx.query('SELECT record_json FROM sync_operations WHERE ingress_key=? OR EXISTS (SELECT 1 FROM json_each(sync_operations.ingress_aliases_json) WHERE value=?)', ingressKey, ingressKey)[0]))
   }
   findIngressReceipt(ingressKey: string): SyncIngressReceipt | null { return this.write(tx => parseRecord<SyncIngressReceipt>(tx.query('SELECT record_json FROM sync_ingress_receipts WHERE ingress_key=?', ingressKey)[0])) }
+  /** 只找当前 HEAD 的正式后继；真实采纳仍由应用在来源发布锁内完整核验。 */
+  listAutomaticAdoptionCandidates(source: WorktreeIdentity, headCommit: string): SyncOperation[] {
+    const sourceKey = identityKey(source)
+    return this.write(tx => tx.query(`WITH candidate_ids AS (
+      SELECT id FROM sync_operations INDEXED BY sync_operations_automatic_adoption_parent
+      WHERE source_key=? AND json_extract(record_json,'$.deliveryPlan.baseCommit')=?
+        AND json_extract(record_json,'$.automaticSourceAdoption')='canonical-source-v1'
+      UNION
+      SELECT operation_id FROM sync_attempts INDEXED BY sync_attempts_publication_parent
+      WHERE status='settled' AND json_extract(record_json,'$.publicationBase.parentCommit')=?
+    )
+    SELECT o.record_json FROM candidate_ids c JOIN sync_operations o ON o.id=c.id
+      JOIN sync_attempts a ON a.id=o.current_attempt_id AND a.operation_id=o.id
+    WHERE o.source_key=? AND o.control='run' AND o.phase IN ('workspace_synced','awaiting_landing','canonical_synced')
+      AND json_extract(o.record_json,'$.automaticSourceAdoption')='canonical-source-v1' AND a.status='settled'
+      AND COALESCE(json_extract(a.record_json,'$.publicationBase.parentCommit'),json_extract(o.record_json,'$.deliveryPlan.baseCommit'))=?
+      AND EXISTS (SELECT 1 FROM sync_apply_journals j WHERE j.operation_id=o.id AND j.attempt_id=a.id
+        AND j.status='settled' AND j.receipt_id IS NOT NULL AND json_extract(j.record_json,'$.receipt.actualCommit')!=?)
+      AND NOT EXISTS (SELECT 1 FROM sync_apply_journals pending WHERE pending.operation_id=o.id AND pending.status!='settled')
+    ORDER BY o.generation,o.id`, sourceKey, headCommit, headCommit, sourceKey, headCommit, headCommit)
+      .map(row => parseRecord<SyncOperation>(row)!)
+      .filter(operation => !operation.blockedReason && !operation.blockedScope.paths.length && !operation.blockedScope.contractIds.length && !operation.blockedScope.flowIds.length && contains(operation.deliveredScope, operation.scope)))
+  }
   listOperations(repositoryId: string, options: { limit?: number; sourceRoot?: string } = {}): SyncOperation[] {
     const limit = options.limit ?? 100
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) fail('SYNC_LIST_LIMIT', 'limit must be an integer between 1 and 500')

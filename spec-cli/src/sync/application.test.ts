@@ -1254,11 +1254,12 @@ for (const choice of ['keep_intent', 'adopt_behavior', 'new_rule'] as const) tes
 
 test('AC-APPLICATION-06 应用真实Docker及compiled hooks完整交付，completed重放沿原共同基线幂等', { skip: process.env.SPEX_DOCKER_VERIFICATION_TEST !== '1', timeout: 180000 }, async t => {
   const { temp, root, application, calls } = await exportApplicationFixture(t)
-  const before = await captureInputSnapshot(root), request = { nodeId: 'export-contract', requestId: 'complete-replay', origin: 'initial' as const }
+  const before = await captureInputSnapshot(root), request = { nodeId: 'export-contract', requestId: 'complete-replay', origin: 'spec' as const }
   const admitted = await application.submit(request); assert.ok(admitted.operation)
   const delivered = await application.wait(admitted.operation.id)
   assert.equal(delivered.operation.phase, 'workspace_synced', JSON.stringify({ failure: delivered.attempt?.failure, blockedReason: delivered.operation.blockedReason, journals: delivered.journals }))
   assert.ok(delivered.journals[0]?.receipt)
+  assert.notEqual(delivered.journals[0].receipt.actualCommit, before.headCommit)
   assert.equal(delivered.sourceSynced, false); assert.equal(delivered.stale, false)
   assert.match(readFileSync(join(delivered.operation.deliveryPlan.canonicalRoot, 'src/export.js'), 'utf8'), /application verified delivery/)
   assert.equal((await captureInputSnapshot(root)).id, before.id)
