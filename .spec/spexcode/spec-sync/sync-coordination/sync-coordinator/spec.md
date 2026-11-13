@@ -21,6 +21,8 @@ P1 全图 seal 与完整候选 V1 仅从原 planBlob 的 [[sync-historical-cover
 
 P1 输入只透传原 planBlob 已冻结的 contextVerifications，供 [[sync-partition-execution]] 的全图封口引用校验；局部模型和 V3 继续使用原 verifications 与 mandatoryTests。旧计划没有该字段时不读取当前 settings 补签。
 
+候选独审未通过后的资源结算使用当前 attempt 的一份已认证阶段索引。每个局部生成或独审按原 resultRef 和精确读集、基线绑定取原结论；同次收尾共用同一选择认证，各组之间交还事件循环。原生 RPC 故障仍核真实停止和资源结算，暂停仍可在写失败结论前中断。
+
 P0 后置回审先按实际受影响的冻结 owner 及 `refactor_business_meaning_changed` 发现筛选原轮。普通 P1 结构、测试绑定或审查诊断留在 P1。跨操作重验命中的 Git 草稿用原已认证 Native 任务的完整 targets 计算 owner，包括 P0 已审后才加入的规格叶，继续核原 schema、真实 Git 对象及保活引用。
 
 Grok Build 的派发、候选和独审沿现有原生工作树编排。续用 Grok 格式拒绝前核对同一原生会话和 request ID。已停的只读复审在原候选下继续。
