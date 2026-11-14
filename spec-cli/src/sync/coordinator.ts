@@ -47,6 +47,7 @@ import { sessionIdForCreateKey, withArchivedStructuredWorktree } from '../sessio
 import { withoutSessionApplicationExecutionWake } from '../session-application.js'
 import { assertFrozenBinding, readFrozenManifest, readFrozenRange } from '../frozen-context.js'
 import { assertClaudeStoppedDraftSource, observeClaudeStoppedWorktreeFailure } from '../claude-structured.js'
+import { assertGrokStoppedDraftSource, GROK_NATIVE_EXIT_DEADLINE_FAILURE } from '../grok-structured.js'
 import { assertZCodeStoppedDraftSource, isZCodeEventsRpcTimeout, type ZCodeStructuredExecution } from '../zcode-structured.js'
 import { NATIVE_PERIODIC_OBSERVATION_FAILURE, NATIVE_PROCESS_OBSERVATION_PENDING, nativeWorktreePrompt, nativeWorktreeResult } from '../native-worktree-runtime.js'
 import { readRecord } from '../session-record.js'
@@ -2753,13 +2754,24 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           if (!resource || resource.phase !== 'removed' || resource.plan.inputId !== operation.input.id) continue
           const native = JSON.parse(readEvidence(operation.input.source.commonDir, resource.plan.planBlob).toString()) as NativeRunPlan
           const checkpoint = JSON.parse(readEvidence(operation.input.source.commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
-          if (native.request.worktree?.mode === 'edit' && (native.request.model?.startsWith('claude:') || native.request.model?.startsWith('zcode:')) && native.request.purpose === purpose && !native.request.frozenContext) {
-            const state = readRecord(native.expectedSessionId)?.structuredExecution
+          const grok = native.request.model?.startsWith('grok:') === true
+          if (native.request.worktree?.mode === 'edit' && (grok || native.request.model?.startsWith('claude:') || native.request.model?.startsWith('zcode:')) && native.request.purpose === purpose && !native.request.frozenContext) {
+            const record = readRecord(native.expectedSessionId), state = record?.structuredExecution
             const zcode = native.request.model?.startsWith('zcode:') === true
             const completedEventsRpc = zcode && !!state && isZCodeEventsRpcTimeout(state)
             const stoppedTransport = zcode && state?.state === 'failed' && state.errorCode === 'native_turn_transport_failed'
-            if (!state || state.state !== 'cancelled' && !(zcode && state.state === 'failed') || !state.cancellation?.nativeStopped || !(zcode ? state.zcodeNative : state.claudeNative) || !state.threadId || !state.turnId || !checkpoint.session.threadId || !checkpoint.session.turnId || state.failedWorktree || state.resultWorktree || state.rejectedOutput || state.errorCode && !completedEventsRpc && !stoppedTransport) continue
+            if (!state || !state.cancellation?.nativeStopped) continue
+            if (grok) {
+              if (!allowCommitted || !record?.archived || state.state !== 'failed' || state.error !== GROK_NATIVE_EXIT_DEADLINE_FAILURE
+                || owner.id !== operation.id && !settledApprovalSource(store, owner)) continue
+              if (resource.generation !== prior.generation || native.request.root !== operation.input.source.canonicalRoot || native.request.base !== native.request.worktree.baseCommit
+                || !checkpoint.nativeCallRequested || checkpoint.nativeStarted || checkpoint.status !== 'failed' || checkpoint.nativeState !== 'failed' || checkpoint.result || checkpoint.creationTermination
+                || checkpoint.failure?.code !== 'failed' || checkpoint.failure.message !== state.error || checkpoint.failure.rejectedOutput || checkpoint.failure.failedWorktree
+                || checkpoint.session.threadId !== null || checkpoint.session.turnId !== null
+                || canonical(prior.dispatchPlans.find(dispatch => dispatch.key === requestKey)?.session) !== canonical(checkpoint.session)) fail('stale_result', 'Grok分析草稿缺少原正式未发布失败')
+            } else if (state.state !== 'cancelled' && !(zcode && state.state === 'failed') || !(zcode ? state.zcodeNative : state.claudeNative) || !state.threadId || !state.turnId || !checkpoint.session.threadId || !checkpoint.session.turnId || state.failedWorktree || state.resultWorktree || state.rejectedOutput || state.errorCode && !completedEventsRpc && !stoppedTransport) continue
             const proof = authenticateNativeFailure(store, owner, prior, requestKey, { code: completedEventsRpc ? 'native_rpc_timeout' : stoppedTransport ? 'native_turn_transport_failed' : 'failed', message: state.state === 'failed' ? state.error! : prior.failure?.message ?? '', sessionId: checkpoint.session.sessionId, threadId: checkpoint.session.threadId ?? undefined, turnId: checkpoint.session.turnId ?? undefined }, readRecord, true)
+            if (grok && (proof.record.harness !== 'grok-structured' || proof.record.harnessSessionId !== null)) fail('stale_result', 'Grok分析草稿的原生身份不匹配')
             if (completedEventsRpc) assertStoppedEventsRpcDraft(prior, requestKey, proof)
             const seedEntries = readTree(operation.input.source.commonDir, native.request.worktree.tree)
             const schema = seedEntries.find(entry => entry.path === binding.path.replace(/\.json$/, '.schema.json'))
@@ -2769,12 +2781,14 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
             const allowUnpublishedCompletion = zcode && proof.observedFailure
               && checkpoint.status === 'cancelled' && checkpoint.nativeState === 'cancelled' && checkpoint.stop?.nativeStatus === 'stopped' && !checkpoint.result && !checkpoint.failure
               && proof.record.harnessSessionId === checkpoint.session.threadId && canonical(prior.dispatchPlans.find(dispatch => dispatch.key === requestKey)?.session) === canonical(checkpoint.session)
+            if (grok) assertMaterialFence()
             const material = await withArchivedStructuredWorktree(proof.record, (): ElaborationDraftMaterial | null => {
               if (allowUnpublishedCompletion) assertMaterialFence()
               const prompt = nativeWorktreePrompt(native.request.prompt, native.request.worktree!)
               const zcodeFailed = zcode ? assertZCodeStoppedDraftSource(prompt, (completedEventsRpc ? proof.state : state) as ZCodeStructuredExecution, proof.record.worktreePath, allowUnpublishedCompletion) : undefined
               if (zcode && zcodeFailed === null) return null
-              if (!zcode) assertClaudeStoppedDraftSource(prompt, state, proof.record.worktreePath)
+              if (grok) assertGrokStoppedDraftSource(proof.record.session, prompt, state, proof.record.worktreePath)
+              else if (!zcode) assertClaudeStoppedDraftSource(prompt, state, proof.record.worktreePath)
               assertMaterialFence()
               let physical: ReturnType<typeof readStoppedPhysicalDraft>
               try {
@@ -2784,6 +2798,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
                 saveStage(store, fence!, `${key}:${purpose}:stopped-physical-material-rejection`, { reason: 'outside-owner-status', fromOperationId: owner.id, fromAttemptId: prior.id, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef })
                 return null
               }
+              if (grok && !physical?.committedOid) return null
               if (physical && !physical.committedOid) {
                 if (zcode && !zcodeFailed) fail('stale_result', 'ZCode物理草稿没有原精确失败终态')
                 const context = readCodeBehaviorContext(native.request, operation.input.source.commonDir)
@@ -2797,7 +2812,13 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
                 : nativeWorktreeResult(proof.record.worktreePath, worktree)
               if (witness.headCommit === native.request.worktree!.baseCommit || zcode && witness.tree === witness.baseTree) return null
               if (zcode && !zcodeFailed) fail('stale_result', 'ZCode新Git材料没有原精确失败终态')
-              const format = !zcode && proof.observedFailure ? observeClaudeStoppedWorktreeFailure(prompt, state, proof.record.worktreePath) : undefined
+              if (grok) {
+                const archive = `refs/spex-archive/${proof.record.session}`
+                if (objectGit(commonDir, ['rev-list', '--parents', '-n', '1', archive]).toString().trim().split(' ').slice(1).join(' ') !== witness.headCommit
+                  || objectGit(commonDir, ['rev-parse', `${archive}^{tree}`]).toString().trim() !== witness.tree) fail('stale_result', 'Grok分析草稿与原已归档Git提交不一致')
+                assertMaterialFence()
+              }
+              const format = !zcode && !grok && proof.observedFailure ? observeClaudeStoppedWorktreeFailure(prompt, state, proof.record.worktreePath) : undefined
               const draft = captureStageDraft(operation.input.source.commonDir, native.request.worktree!, { worktree: witness }, binding)
               const source = readStageDraft(operation.input.source.commonDir, draft, binding), observedAt = Date.now()
               const context = completedEventsRpc ? readCodeBehaviorContext(native.request, operation.input.source.commonDir) : undefined
@@ -2806,7 +2827,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
                 const rpc = { code: 'native_rpc_timeout', message: proof.state.error! }
                 if (!errors.some(error => canonical(error) === canonical(rpc))) errors.push(rpc)
               }
-              const materialErrors = p0StatusOnly ? [] : errors ?? (zcode ? [...readCodeBehaviorContext(native.request, commonDir).errors] : format ? [{ code: format.code, message: format.message }] : [])
+              const materialErrors = p0StatusOnly ? [] : errors ?? (zcode || grok ? [...readCodeBehaviorContext(native.request, commonDir).errors] : format ? [{ code: format.code, message: format.message }] : [])
               saveStage(store, fence!, materialKey, { sourceKind: 'git_draft', approved: false, observationKind: format ? 'missing-final' : zcode || proof.observedFailure ? 'native-failure' : 'pause', observedAt, fromOperationId: owner.id, fromAttemptId: prior.id, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef, originalFailure: p0StatusOnly && prior.failure ? { code: prior.failure.code, kind: prior.failure.kind } : prior.failure, canonicalRecordSha256: contentHash(JSON.stringify(proof.record)), resultCommit: draft.resultCommit, resultTree: draft.resultTree, oid: draft.oid, draftSha256: contentHash(source), schemaDigest, originalInputDigest: native.request.inputDigest, currentInputDigest: inputDigest, ...(physical?.committedOid ? { committedDraft: { ...draft, errors: materialErrors }, currentSeed: request.worktree, indexSha256: physical.indexSha256 } : {}) })
               return { source, errors: materialErrors, ...(context ? { repairDiagnostics: context.repairDiagnostics } : {}), sourceKind: 'git_draft' }
             })
