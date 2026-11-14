@@ -22,6 +22,8 @@ code:
 
 同一 runtime 检查接缝使用超过32条目的 fixture 验证同步与异步 manifest 深等且顺序一致，并验证已排队 setImmediate 在异步检查完成前执行。文件字节、模式或内部链接变化都必须反映在后续 manifest，外部 symlink 必须由两种入口拒绝。
 
+当候选 lint 返回失败，真实 worktree add 仍须完成仅绑定原对象的结构 prepare 并运行严格 footprint refresh。随后严格发布必须实际调用完整候选 lint，拒绝未通过的提交并保留原 ref。
+
 针对命令：根目录 `npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/trusted-hooks.test.ts`；`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/commit-gate.test.ts spec-cli/src/session-stamp.test.ts spec-cli/src/commit-context.test.ts`；`npx tsx --import ./scripts/test-home.mjs --test --test-name-pattern='post-checkout defers only the session-owned refresh' spec-cli/src/init.test.ts`；局部 ESLint 与 typecheck。本测试不声称真实发布包已在完整 P2 coordinator 交付，该包准备和集成由上层证明。
 
 

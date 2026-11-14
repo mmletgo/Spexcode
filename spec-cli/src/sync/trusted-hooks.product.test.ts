@@ -23,7 +23,7 @@ after(() => {
   }
   writable(runtimeDirectory); rmSync(runtimeDirectory, { recursive: true, force: true })
 })
-function fixture(t: test.TestContext, differentStore = false) {
+function fixture(t: test.TestContext, differentStore = false, drifted = false) {
   const directory = realpathSync(mkdtempSync(join(tmpdir(), 'spex-real-hooks-'))), root = join(directory, 'source'), footprint = join(directory, 'footprint'), marker = join(directory, 'untrusted-executed')
   mkdirSync(root); mkdirSync(footprint, { mode: 0o700 })
   if (differentStore) { mkdirSync(join(directory, 'planted-home')); symlinkSync(join(directory, 'planted-home'), join(directory, 'planted-home-alias')) }
@@ -40,6 +40,18 @@ function fixture(t: test.TestContext, differentStore = false) {
   writeFileSync(join(plugin, 'spec.md'), '---\ntitle: 静态插件\nstatus: active\nsurface: hook\nevents: [PreToolUse]\norder: 99\nblock: false\n---\n仅静态元数据，不执行脚本。\n')
   writeFileSync(join(plugin, 'custom.sh'), `#!/bin/sh\nprintf bad > '${marker}'\n`); chmodSync(join(plugin, 'custom.sh'), 0o755)
   git('add', '.spec'); git('commit', '-m', 'adopt with static plugin')
+  const spec = `.spec/${project}/calculation/spec.md`
+  if (drifted) {
+    mkdirSync(join(root, 'src')); mkdirSync(join(root, '.spec', project, 'calculation'))
+    writeFileSync(join(root, 'src/calculation.py'), 'def result():\n    return 1\n')
+    writeFileSync(join(root, spec), '---\ntitle: calculation\ncode:\n  - src/calculation.py#result\n---\n# Calculation\nReturns 1.\n')
+    git('add', 'src', spec); git('commit', '-m', 'establish calculation contract')
+    writeFileSync(join(root, 'src/calculation.py'), 'def result():\n    return 2\n')
+    git('add', 'src/calculation.py')
+    const external = git('commit-tree', git('write-tree'), '-p', 'HEAD', '-m', 'external code author')
+    git('update-ref', 'refs/remotes/external/calculation', external)
+    git('merge', '--ff-only', external)
+  }
   for (const name of readdirSync(runtime.canonicalHooksDir)) { copyFileSync(join(runtime.canonicalHooksDir, name), join(root, '.git/hooks', name)); chmodSync(join(root, '.git/hooks', name), 0o755) }
   const parent = git('rev-parse', 'HEAD'), baseTree = git('write-tree')
   const options = { ...runtime, privateFootprintDir: footprint, operation: 'prepare' as const, expectedParent: parent, expectedTree: baseTree, expectedRef: 'refs/heads/node/delivery' }
@@ -47,8 +59,37 @@ function fixture(t: test.TestContext, differentStore = false) {
   const prepared = prepareTrustedHooksBinding(root, options)
   assert.equal(prepared.status, 'supported', prepared.status === 'unsupported' ? JSON.stringify(prepared.issues) : '')
   const binding = (prepared as { binding: TrustedHooksBinding }).binding
-  return { root, directory, footprint, marker, author, env: { ...env, SPEXCODE_HOME: process.env.SPEXCODE_HOME }, git, cli, parent, baseTree, options, binding }
+  return { root, directory, footprint, marker, author, env: { ...env, SPEXCODE_HOME: process.env.SPEXCODE_HOME }, git, cli, parent, baseTree, options, binding, spec }
 }
+
+test('冻结已有锚点漂移的代码提交可严格准备，只有修复Spec的候选通过严格发布', t => {
+  const f = fixture(t, false, true), delivery = join(f.directory, 'delivery')
+  assert.throws(() => f.cli('spec', 'lint', '--pending', f.parent), /anchor-drift.*src\/calculation\.py#result/)
+  const prepared = spawnSync('/usr/bin/git', ['-C', f.root, 'worktree', 'add', '-b', 'node/delivery', delivery, f.parent], { env: makeTrustedHookEnv(f.binding, f.env), encoding: 'utf8' })
+  assert.equal(prepared.status, 0, `${prepared.stdout}${prepared.stderr}`)
+  assert.equal(f.git('rev-parse', 'node/delivery'), f.parent)
+  const git = (...args: string[]): string => execFileSync('/usr/bin/git', ['-C', delivery, ...args], { env: f.env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+  const publish = (message: string) => {
+    const inspected = prepareTrustedHooksBinding(delivery, { ...f.options, operation: 'publish', expectedTree: git('write-tree') })
+    assert.equal(inspected.status, 'supported', inspected.status === 'unsupported' ? JSON.stringify(inspected.issues) : '')
+    return spawnSync('/usr/bin/git', ['-C', delivery, 'commit', '-m', message], { env: makeTrustedHookEnv(inspected.binding, f.env), encoding: 'utf8' })
+  }
+  writeFileSync(join(delivery, 'src/calculation.py'), 'def result():\n    return 3\n')
+  git('add', 'src/calculation.py')
+  const rejected = publish('candidate with new anchor drift')
+  assert.notEqual(rejected.status, 0)
+  assert.match(rejected.stderr, /anchor-drift.*src\/calculation\.py#result/)
+  assert.equal(git('rev-parse', 'HEAD'), f.parent)
+  git('restore', '--source=HEAD', '--staged', '--worktree', 'src/calculation.py')
+  writeFileSync(join(delivery, f.spec), readFileSync(join(delivery, f.spec), 'utf8').replace('Returns 1.', 'Returns 2.'))
+  git('add', f.spec)
+  const expectedTree = git('write-tree'), committed = publish('update the calculation Spec')
+  assert.equal(committed.status, 0, `${committed.stdout}${committed.stderr}`)
+  assert.equal(git('show', '-s', '--format=%T%n%P', 'HEAD'), `${expectedTree}\n${f.parent}`)
+  assert.equal(git('diff', '--name-only', f.parent, 'HEAD'), f.spec)
+  assert.equal(f.git('rev-parse', 'HEAD'), f.parent)
+  assert.equal(f.git('write-tree'), f.baseTree)
+})
 
 for (const differentStore of [false, true]) test(`完整冻结发布CLI在${differentStore ? '另一home已植入' : '现有'}canonical filter项目四真hook准备与发布，作者字节/source index/raw tree不变`, t => {
   const f = fixture(t, differentStore), delivery = join(f.directory, 'delivery')
