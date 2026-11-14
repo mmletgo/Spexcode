@@ -154,8 +154,27 @@ test('写前取消拒绝创建交付目录', async t => {
   assert.equal(existsSync(f.operation.deliveryPlan.canonicalRoot), false); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
 })
 
+test('相同完整tree的冻结parent full lint失败时不创建journal或receipt', { timeout: 30000 }, async t => {
+  const f = await fixture(t, true), lintArgs = join(dirname(f.root), 'lint-args.txt')
+  writeFileSync(f.options.tools.toolEntry, `import { writeFileSync } from 'node:fs';\nif(process.argv[2]==='internal'&&process.argv[3]==='trunk') console.log('main');\nif(process.argv[2]==='spec'&&process.argv[3]==='lint'&&process.argv[4]==='--pending'&&process.env.SPEXCODE_GATE_SCOPE_ONLY===undefined) { writeFileSync(${JSON.stringify(lintArgs)}, process.argv.slice(2).join(' ')); console.log('controlled no-op lint stdout'); console.error('controlled no-op lint stderr'); process.exit(process.argv[5]===${JSON.stringify(f.input.headCommit)}?23:24); }\n`)
+  await assert.rejects(deliverVerifiedAttempt(f.store, f.fence, f.options), error => error instanceof Error && /SYNC_DELIVERY_NOOP_LINT/.test(error.message))
+  assert.equal(readFileSync(lintArgs, 'utf8'), `spec lint --pending ${f.input.headCommit}`)
+  const lintFailure = f.store.readAttempt(f.fence.attemptId).checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(value => value.kind === 'private-delivery-noop-lint')
+  assert.equal(lintFailure.status, 23); assert.equal(lintFailure.stdout.trim(), 'controlled no-op lint stdout'); assert.equal(lintFailure.stderr.trim(), 'controlled no-op lint stderr')
+  assert.equal(f.store.readOperation(f.operation.id).phase, 'failed')
+  assert.equal(f.git('rev-parse', 'refs/heads/main'), f.input.headCommit)
+  assert.equal(f.git('rev-parse', f.operation.deliveryPlan.branch), f.input.headCommit)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+  assert.deepEqual(f.store.listJournals(f.operation.id), [])
+})
+
 test('相同完整tree只登记已验证基线，不制造空提交', { timeout: 30000 }, async t => {
-  const f = await fixture(t, true), delivered = await deliverVerifiedAttempt(f.store, f.fence, f.options)
+  const f = await fixture(t, true), lintArgs = join(dirname(f.root), 'lint-args.txt')
+  writeFileSync(f.options.tools.toolEntry, `import { writeFileSync } from 'node:fs';\nif(process.argv[2]==='internal'&&process.argv[3]==='trunk') console.log('main');\nif(process.argv[2]==='spec'&&process.argv[3]==='lint'&&process.argv[4]==='--pending'&&process.env.SPEXCODE_GATE_SCOPE_ONLY===undefined) writeFileSync(${JSON.stringify(lintArgs)}, process.argv.slice(2).join(' '));\n`)
+  const delivered = await deliverVerifiedAttempt(f.store, f.fence, f.options)
+  assert.equal(readFileSync(lintArgs, 'utf8'), `spec lint --pending ${f.input.headCommit}`)
+  const lintPass = f.store.readAttempt(f.fence.attemptId).checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(value => value.kind === 'private-delivery-noop-lint')
+  assert.equal(lintPass.status, 0); assert.equal(lintPass.parent, f.input.headCommit); assert.equal(lintPass.tree, f.candidate.tree)
   assert.equal(delivered.receipt.actualCommit, f.input.headCommit); assert.equal(f.git('rev-list', '--count', f.operation.deliveryPlan.branch), '1')
   assert.equal(delivered.operation.phase, 'workspace_synced')
 })

@@ -151,6 +151,16 @@ export async function deliverVerifiedAttempt(store: SyncStore, fence: WriteFence
     if (!journal) {
       await options.beforeApply(); assertOwner()
       const current = await captureInputSnapshot(root)
+      const parentTree = objectGit(commonDir, ['rev-parse', `${deliveryPlan.baseCommit}^{tree}`]).toString().trim()
+      if (candidate.tree === parentTree) {
+        if (current.headCommit !== deliveryPlan.baseCommit || current.immutableTree !== parentTree || current.indexTree !== parentTree) fail('SYNC_DELIVERY_NOOP_STATE', '同树交付的实际工作树或index不等于冻结parent')
+        const binding = trusted(root, 'prepare', parentTree)
+        const lint = spawnSync(binding.nodePath, [binding.toolEntry, 'spec', 'lint', '--pending', deliveryPlan.baseCommit], { cwd: root, env: makeTrustedHookEnv(binding), encoding: 'utf8', maxBuffer: 8 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] })
+        const lintEvidence = writeEvidence(commonDir, { version: 1, kind: 'private-delivery-noop-lint', operationId: operation.id, attemptId: attempt.id, parent: deliveryPlan.baseCommit, tree: parentTree, status: lint.status, signal: lint.signal, stdout: lint.stdout, stderr: lint.stderr, error: lint.error?.message ?? null })
+        store.checkpoint(fence, lintEvidence)
+        if (lint.error) throw lint.error
+        if (lint.status !== 0) fail('SYNC_DELIVERY_NOOP_LINT', `同树交付的冻结 parent full spec lint 未通过 (status=${lint.status ?? 'null'}, signal=${lint.signal ?? 'none'})`)
+      }
       journal = store.beginApply(fence, prepareApplyPlan(store.readOperation(operation.id), store.readAttempt(attempt.id), current), current)
     }
     owner = { ...owner, journalId: journal.id }; writeOwner(ownerPath, owner)
