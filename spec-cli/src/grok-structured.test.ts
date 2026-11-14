@@ -17,7 +17,7 @@ const sha256 = (text: string): string => createHash('sha256').update(text).diges
 
 type Scenario = 'success' | 'wrong-session' | 'wrong-cwd' | 'missing-request' | 'duplicate-terminal' | 'missing-terminal' | 'wrong-format' | 'bad-schema' | 'hang' | 'read' | 'periodic' | 'split-settlement-window' | 'cancel-during-settlement' | 'inherited-stdout' | 'inherited-stdout-trailing' | 'parent-awaits-owned-child' | 'parent-restarts-owned-child' | 'natural-child-shutdown' | 'short-lived-terminal-parent' | 'unowned-stdout' | 'terminal-exit-timeout' | 'terminal-timeout-unowned-stdout'
 
-function fixture(t: TestContext, scenario: Scenario, model = 'grok:default') {
+function fixture(t: TestContext, scenario: Scenario, model = 'grok:default', purpose = 'grok-fixture') {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'spex-grok-fixture-')))
   const bin = join(root, 'bin'), cli = join(bin, 'grok'), source = join(root, 'source'), workspace = join(root, 'workspace')
   const realm = join(root, 'realm'), sessionRoot = join(realm, 'dispatch'), started = join(sessionRoot, 'fixture-started.json')
@@ -45,8 +45,11 @@ if (args[0] === '--version') { console.log('grok 1.0.77 (fixture) [stable]'); pr
 const scenario = ${JSON.stringify(scenario)}
 const [cwdFlag, cwd, sessionFlag, sessionId, promptFlag, promptFile, outputFlag, outputFormat, ...extra] = args
 assert.deepEqual([cwdFlag, sessionFlag, promptFlag, outputFlag, outputFormat], ['--cwd', '--session-id', '--prompt-file', '--output-format', 'streaming-json'])
-if (scenario === 'read') assert.deepEqual(extra, ['--permission-mode', 'plan', '--disallowed-tools', 'enter_plan_mode,exit_plan_mode'])
-else assert.deepEqual(extra.slice(0, 2), ['--permission-mode', 'bypassPermissions'])
+if (scenario === 'read') {
+  assert.deepEqual(extra, ['--permission-mode', 'plan', '--disallowed-tools',
+    ['elaboration_review', 'code_review'].includes(${JSON.stringify(purpose)})
+      ? 'enter_plan_mode,exit_plan_mode,run_terminal_command,search_tool,use_tool' : 'enter_plan_mode,exit_plan_mode'])
+} else assert.deepEqual(extra.slice(0, 2), ['--permission-mode', 'bypassPermissions'])
 assert.equal(cwd, process.cwd())
 assert.match(sessionId, /^[0-9a-f-]{36}$/)
 assert.equal(process.env.TMPDIR, join(dirname(promptFile), 'tmp'))
@@ -153,7 +156,7 @@ if (scenario === 'split-settlement-window' || scenario === 'cancel-during-settle
 `, { mode: 0o700 })
 
   const prompt = nativeWorktreePrompt('保留原始输入\n\n第二行 \t ', worktree)
-  let state: GrokStructuredExecution = { ...structuredExecutionPolicy({ schema, model, nativeConfiguration: 'cli-config-v1', inputDigest: 'fixed-input', purpose: 'grok-fixture', timeoutMs: null, worktree }), state: 'running' }
+  let state: GrokStructuredExecution = { ...structuredExecutionPolicy({ schema, model, nativeConfiguration: 'cli-config-v1', inputDigest: 'fixed-input', purpose, timeoutMs: null, worktree }), state: 'running' }
   const update = (change: Partial<GrokStructuredExecution>): void => { state = { ...state, ...change } }
   const callbacks: Parameters<typeof grokStructuredTurn>[4] = {
     onThread: async threadId => update({ threadId }), onTurn: async turnId => update({ turnId }),
@@ -452,6 +455,17 @@ test('Grok read uses native plan mode, removes plan exit and leaves the original
   writeFileSync(planPath, JSON.stringify({ ...JSON.parse(originalPlan), readGuidance: 'direct-git-read-v1' }))
   await assert.rejects(f.run(f.state(), replayCallbacks), { code: 'stale_result' })
 })
+
+for (const purpose of ['elaboration_review', 'code_review']) {
+  test(`Grok removes command discovery tools from frozen candidate review: ${purpose}`, async t => {
+    const f = fixture(t, 'read', 'grok:default', purpose)
+    const result = await f.run()
+    assert.equal(result.text, finalText)
+    assert.equal(JSON.parse(readFileSync(join(f.sessionRoot, 'plan.json'), 'utf8')).readGuidance, 'native-candidate-read-v3')
+    assert.equal(nativeWorktreeResult(f.workspace, f.worktree).headCommit, f.worktree.baseCommit)
+    assert.deepEqual(await f.run(f.state(), replayCallbacks), result)
+  })
+}
 
 for (const scenario of ['wrong-session', 'wrong-cwd', 'missing-request', 'duplicate-terminal', 'missing-terminal'] as const) {
   test(`Grok cannot certify or rerun a ${scenario} stream`, async t => {
