@@ -14,7 +14,7 @@ export type GrokNativeState = { version: 1; root: string; sessionId: string; pid
 export type GrokStructuredExecution = StructuredExecution
 type Callbacks = { onNative(state: GrokNativeState): Promise<void>; onThread(id: string): Promise<void>; onTurn(id: string): Promise<void>; onTurnStarting?(): Promise<void>; onTimeout?(): Promise<void>; signal?: AbortSignal }
 type NativeResult = { threadId: string; turnId: string; text: string; frozenReadProof?: never }
-type NativePlan = { version: 1; readGuidance?: 'direct-git-read-v1' | 'native-file-read-v2' | 'native-candidate-read-v3' | 'native-review-table-read-v4'; root: string; sessionId: string; workspace: string; promptDigest: string; policyDigest: string; cliPath: string; cliVersion: string }
+type NativePlan = { version: 1; readGuidance?: 'direct-git-read-v1' | 'native-file-read-v2' | 'native-candidate-read-v3' | 'native-review-table-read-v4' | 'native-behavior-evidence-v5'; root: string; sessionId: string; workspace: string; promptDigest: string; policyDigest: string; cliPath: string; cliVersion: string }
 type NativeLaunch = { planDigest: string; pid: number; receiptFile: string; receiptDigest: string }
 type OwnedLaunch = NativePlan & NativeLaunch
 type Terminal = { sessionId: string; requestId: string; cwd: string; stopReason: string; models: string[] }
@@ -55,6 +55,7 @@ export function grokNativeModel(model: string | undefined): string | undefined {
 }
 
 const candidateReviewPurposes = new Set(['elaboration_review', 'code_review'])
+const behaviorDraftPurposes = new Set(['code_behavior_analyze', 'code_behavior_review'])
 const nativeFileReadGuidance = 'For checked-out repository evidence, use the built-in read-only tools read_file, grep, and list_dir. Do not use run_terminal_command to inspect checked-out files or run tests, and do not use search_tool or use_tool for local files. Use an exact read-only Git command only if the task explicitly requires inspecting a historical Git object that is not in the checked-out tree.'
 
 const readGuidanceText = {
@@ -62,6 +63,7 @@ const readGuidanceText = {
   'native-file-read-v2': nativeFileReadGuidance,
   'native-candidate-read-v3': 'The current worktree holds the frozen candidate for this independent review. Inspect it directly with read_file, grep, and list_dir. Trace the relevant source, tests, and requirements to complete the requested review. Test execution is a separate verification stage.',
   'native-review-table-read-v4': nativeFileReadGuidance + String.raw` Interpret Markdown table cells before comparing code literals to source code. Outside a matched code span, \\ encodes one literal backslash and \| encodes a cell character. Inside a code span, preserve literal backslashes except for an escaped table separator. For example, a plain cell containing /\\s+/ denotes /\s+/ in the contract. Check the decoded meaning against the actual implementation and tests, including any genuinely different decoded literal.`,
+  'native-behavior-evidence-v5': 'Ground current and previous business behavior in the frozen source and historical role objects identified in the task. Cite the actual repository path and symbol, condition, or assertion. Do not cite the current worktree HEAD, its ancestry, or temporary .spex-sync-drafts commits as business evidence. Analyze and review have separate seed and draft commits. On repair, replace inherited claims about temporary Git identities with evidence from the actual frozen business files. In independent review, reject incorrect frozen-object or code claims and request correction of misleading draft HEAD claims. Still inspect every required path and verify the substantive claims against the source and tests.',
 } satisfies Record<NonNullable<NativePlan['readGuidance']>, string>
 
 const nativePrompt = (prompt: string, execution: GrokStructuredExecution, readGuidance?: NativePlan['readGuidance']): string =>
@@ -69,7 +71,12 @@ const nativePrompt = (prompt: string, execution: GrokStructuredExecution, readGu
 
 function assertPlan(plan: NativePlan, root: string, execution: GrokStructuredExecution, prompt?: string, worktreePath?: string): void {
   const native = execution.grokNative
-  if (plan?.version !== 1 || plan.readGuidance !== undefined && (!Object.hasOwn(readGuidanceText, plan.readGuidance) || execution.worktree?.mode !== 'read' || (plan.readGuidance === 'native-candidate-read-v3' || plan.readGuidance === 'native-review-table-read-v4') && !candidateReviewPurposes.has(execution.purpose)) || native?.version !== 1 || plan.root !== root || native.root !== root || plan.sessionId !== native.sessionId
+  const guidance = plan?.readGuidance
+  const guidanceMatches = guidance === undefined || (guidance === 'native-behavior-evidence-v5'
+    ? execution.worktree?.mode === 'edit' && behaviorDraftPurposes.has(execution.purpose)
+    : Object.hasOwn(readGuidanceText, guidance) && execution.worktree?.mode === 'read' && (
+      guidance === 'direct-git-read-v1' || guidance === 'native-file-read-v2' || candidateReviewPurposes.has(execution.purpose)))
+  if (plan?.version !== 1 || !guidanceMatches || native?.version !== 1 || plan.root !== root || native.root !== root || plan.sessionId !== native.sessionId
     || execution.threadId && execution.threadId !== plan.sessionId || execution.turnId && execution.turnId !== native.turnId || worktreePath !== undefined && worktreePath !== plan.workspace
     || plan.policyDigest !== digest(structuredExecutionPolicy(execution)) || !plan.cliPath || !plan.cliVersion
     || prompt !== undefined && (plan.promptDigest !== sha256(nativePrompt(prompt, execution, plan.readGuidance)) || plan.promptDigest !== sha256(readEvidence(root, 'prompt.txt'))))
@@ -256,7 +263,9 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
   if (version.status !== 0 || !cliVersion) throw new StructuredSessionError('unsupported', 'Grok Build CLI did not report a version')
 
   const native = { version: 1 as const, root, sessionId: randomUUID() }
-  const readGuidance = execution.worktree.mode === 'read' ? candidateReviewPurposes.has(execution.purpose) ? 'native-review-table-read-v4' : 'native-file-read-v2' : undefined
+  const readGuidance = execution.worktree.mode === 'read'
+    ? candidateReviewPurposes.has(execution.purpose) ? 'native-review-table-read-v4' : 'native-file-read-v2'
+    : behaviorDraftPurposes.has(execution.purpose) ? 'native-behavior-evidence-v5' : undefined
   const promptPath = join(root, 'prompt.txt'), promptBytes = nativePrompt(prompt, execution, readGuidance), receiptFile = join(root, 'process.json'), tmp = join(root, 'tmp')
   const plan: NativePlan = { ...native, ...(readGuidance ? { readGuidance } : {}), workspace: worktreePath, cliPath, cliVersion, promptDigest: sha256(promptBytes), policyDigest: digest(structuredExecutionPolicy(execution)) }
   const args = ['--cwd', worktreePath, '--session-id', native.sessionId, '--prompt-file', promptPath, '--output-format', 'streaming-json',
