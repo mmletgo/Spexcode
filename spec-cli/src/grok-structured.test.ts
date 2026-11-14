@@ -458,7 +458,10 @@ for (const purpose of ['elaboration_review', 'code_review']) {
     const f = fixture(t, 'read', 'grok:default', purpose)
     const result = await f.run()
     assert.equal(result.text, finalText)
-    assert.equal(JSON.parse(readFileSync(join(f.sessionRoot, 'plan.json'), 'utf8')).readGuidance, 'native-file-read-v2')
+    assert.equal(JSON.parse(readFileSync(join(f.sessionRoot, 'plan.json'), 'utf8')).readGuidance, 'native-review-table-read-v4')
+    const { prompt } = JSON.parse(readFileSync(f.started, 'utf8')) as { prompt: string }
+    assert.match(prompt, /Interpret Markdown table cells before comparing code literals/)
+    assert.match(prompt, /if the task explicitly requires inspecting a historical Git object/)
     assert.equal(nativeWorktreeResult(f.workspace, f.worktree).headCommit, f.worktree.baseCommit)
     assert.deepEqual(await f.run(f.state(), replayCallbacks), result)
   })
