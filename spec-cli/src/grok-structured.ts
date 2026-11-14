@@ -53,7 +53,7 @@ export function grokNativeModel(model: string | undefined): string | undefined {
   return model === 'grok:default' ? undefined : model.slice(5)
 }
 
-const candidateReadPurposes = new Set(['elaboration_review', 'code_review'])
+const historicalCandidateReadPurposes = new Set(['elaboration_review', 'code_review'])
 
 const readGuidanceText = {
   'direct-git-read-v1': 'For repository inspection, use built-in file readers or read-only shell commands such as cat, rg, and git show. Read the exact files and Git objects in this worktree and avoid the search_tool and use_tool discovery wrappers for this local evidence.',
@@ -66,7 +66,7 @@ const nativePrompt = (prompt: string, execution: GrokStructuredExecution, readGu
 
 function assertPlan(plan: NativePlan, root: string, execution: GrokStructuredExecution, prompt?: string, worktreePath?: string): void {
   const native = execution.grokNative
-  if (plan?.version !== 1 || plan.readGuidance !== undefined && (!Object.hasOwn(readGuidanceText, plan.readGuidance) || execution.worktree?.mode !== 'read' || plan.readGuidance === 'native-candidate-read-v3' && !candidateReadPurposes.has(execution.purpose)) || native?.version !== 1 || plan.root !== root || native.root !== root || plan.sessionId !== native.sessionId
+  if (plan?.version !== 1 || plan.readGuidance !== undefined && (!Object.hasOwn(readGuidanceText, plan.readGuidance) || execution.worktree?.mode !== 'read' || plan.readGuidance === 'native-candidate-read-v3' && !historicalCandidateReadPurposes.has(execution.purpose)) || native?.version !== 1 || plan.root !== root || native.root !== root || plan.sessionId !== native.sessionId
     || execution.threadId && execution.threadId !== plan.sessionId || execution.turnId && execution.turnId !== native.turnId || worktreePath !== undefined && worktreePath !== plan.workspace
     || plan.policyDigest !== digest(structuredExecutionPolicy(execution)) || !plan.cliPath || !plan.cliVersion
     || prompt !== undefined && (plan.promptDigest !== sha256(nativePrompt(prompt, execution, plan.readGuidance)) || plan.promptDigest !== sha256(readEvidence(root, 'prompt.txt'))))
@@ -236,14 +236,11 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
   if (version.status !== 0 || !cliVersion) throw new StructuredSessionError('unsupported', 'Grok Build CLI did not report a version')
 
   const native = { version: 1 as const, root, sessionId: randomUUID() }
-  const readOnly = execution.worktree.mode === 'read'
-  const candidateReview = readOnly && candidateReadPurposes.has(execution.purpose)
-  const readGuidance = candidateReview ? 'native-candidate-read-v3' : readOnly ? 'native-file-read-v2' : undefined
+  const readGuidance = execution.worktree.mode === 'read' ? 'native-file-read-v2' : undefined
   const promptPath = join(root, 'prompt.txt'), promptBytes = nativePrompt(prompt, execution, readGuidance), receiptFile = join(root, 'process.json'), tmp = join(root, 'tmp')
   const plan: NativePlan = { ...native, ...(readGuidance ? { readGuidance } : {}), workspace: worktreePath, cliPath, cliVersion, promptDigest: sha256(promptBytes), policyDigest: digest(structuredExecutionPolicy(execution)) }
-  const disallowedTools = candidateReview ? 'enter_plan_mode,exit_plan_mode,run_terminal_command,search_tool,use_tool' : 'enter_plan_mode,exit_plan_mode'
   const args = ['--cwd', worktreePath, '--session-id', native.sessionId, '--prompt-file', promptPath, '--output-format', 'streaming-json',
-    ...(readOnly ? ['--permission-mode', 'plan', '--disallowed-tools', disallowedTools] : ['--permission-mode', 'bypassPermissions']),
+    ...(execution.worktree.mode === 'read' ? ['--permission-mode', 'plan', '--disallowed-tools', 'enter_plan_mode,exit_plan_mode'] : ['--permission-mode', 'bypassPermissions']),
     ...(model === undefined ? [] : ['--model', model])]
   mkdirSync(realm, { recursive: true, mode: 0o700 })
   try { mkdirSync(root, { mode: 0o700 }) }
