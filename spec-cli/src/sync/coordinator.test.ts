@@ -1225,17 +1225,25 @@ function committedDraftFixture(f: Awaited<ReturnType<typeof fixture>>, request: 
   return nativeWorktreeResult(workspace, seed)
 }
 
-test('Grok P0 正式失败并归档后，正式 retry 续用最新已提交 JSON 草稿', async t => {
+for (const stage of ['P0', 'P1'] as const) test(`Grok ${stage} 正式失败并归档后，正式 retry 续用最新已提交 JSON 草稿`, async t => {
+  const purpose = stage === 'P0' ? 'code_behavior_analyze' : 'elaboration_generate'
   const f = await fixture(t, { maxAttempts: 1, maxCalls: 8, maxRepairs: 0, timeoutMs: 120_000 }, false, original, 'project', original,
-    { agentWorkflow: 'native-worktree-v1' }, undefined, 'code', 'grok:default')
+    { agentWorkflow: 'native-worktree-v1' }, undefined, stage === 'P0' ? 'code' : 'spec', 'grok:default')
   const originalOperation = f.operation
   const failureMessage = 'Grok native exit was not observed before the settlement deadline'
   const previousCwd = process.cwd(); process.chdir(f.root); t.after(() => process.chdir(previousCwd))
   const originalPath = join(f.parent, 'grok-bin'), fakeGrok = join(originalPath, 'grok'), callCounter = join(f.parent, 'grok-call-count'), seedCapture = join(f.parent, 'formal-retry-seed.json')
   mkdirSync(originalPath, { mode: 0o700 })
   const analysisDraft = (evidence: string): string => JSON.stringify({ changes: [{ kind: 'refactor', paths: ['src/export.js'], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保留导出明确原意', previousBehavior: '导出任务结果保持不变', sourceBehavior: '仅修改内部实现文字', deliveryBehavior: '共同已验证语义保持不变', evidence, counterexample: '重复 COMPLETE 仍保留首次结果' }], facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] })
-  const olderDraftBytes = Buffer.from(analysisDraft('EARLIER_COMMITTED_ANALYSIS_DRAFT'), 'utf8')
-  const latestDraftBytes = Buffer.from(analysisDraft('LATEST_COMMITTED_ANALYSIS_DRAFT'), 'utf8')
+  const draftBytes = (marker: string): Buffer => {
+    if (stage === 'P0') return Buffer.from(analysisDraft(marker))
+    const draft = rows(original)
+    draft.changes[0].description = marker
+    const changes = draft.changes.map(({ nodeId: _nodeId, path: _path, ...change }) => ({ ...change, targetIndex: 0 }))
+    return Buffer.from(JSON.stringify({ ...draft, version: 'elaboration-target-rows-v3', changes }))
+  }
+  const olderDraftBytes = draftBytes('EARLIER_COMMITTED_DRAFT')
+  const latestDraftBytes = draftBytes('LATEST_COMMITTED_DRAFT')
   const fakeCliSource = `#!/usr/bin/env node
 const fs = require('node:fs')
 const path = require('node:path')
@@ -1245,35 +1253,47 @@ if (args.includes('--version')) { process.stdout.write('grok 1.0.77 (controlled 
 const value = name => args[args.indexOf(name) + 1]
 const cwd = value('--cwd'), sessionId = value('--session-id'), prompt = fs.readFileSync(value('--prompt-file'), 'utf8')
 const draftPath = /草稿文件=([^\\s；]+)/.exec(prompt)?.[1]
-if (!draftPath) process.exit(21)
 const countPath = process.env.SPEX_GROK_TEST_COUNTER
 const count = Number(fs.existsSync(countPath) ? fs.readFileSync(countPath, 'utf8') : '0') + 1
 fs.writeFileSync(countPath, String(count))
-if (count === 1) {
+let response = {}
+if (count === 1 && draftPath) {
   fs.mkdirSync(path.dirname(path.join(cwd, draftPath)), { recursive: true })
   fs.writeFileSync(path.join(cwd, draftPath), Buffer.from(process.env.SPEX_GROK_TEST_OLDER, 'base64'))
   execFileSync('/usr/bin/git', ['-C', cwd, 'add', draftPath], { stdio: 'ignore' })
-  execFileSync('/usr/bin/git', ['-C', cwd, 'commit', '-m', 'earlier Grok analysis draft'], { stdio: 'ignore' })
+  execFileSync('/usr/bin/git', ['-C', cwd, 'commit', '-m', 'earlier Grok draft'], { stdio: 'ignore' })
   fs.writeFileSync(path.join(cwd, draftPath), Buffer.from(process.env.SPEX_GROK_TEST_LATEST, 'base64'))
   execFileSync('/usr/bin/git', ['-C', cwd, 'add', draftPath], { stdio: 'ignore' })
-  execFileSync('/usr/bin/git', ['-C', cwd, 'commit', '-m', 'latest Grok analysis draft'], { stdio: 'ignore' })
-} else {
-  fs.writeFileSync(process.env.SPEX_GROK_TEST_CAPTURE, fs.existsSync(path.join(cwd, draftPath)) ? fs.readFileSync(path.join(cwd, draftPath)) : Buffer.from('<ABSENT>'))
-}
-const text = count === 1 ? Buffer.from(process.env.SPEX_GROK_TEST_LATEST, 'base64').toString('utf8') : '{}'
+  execFileSync('/usr/bin/git', ['-C', cwd, 'commit', '-m', 'latest Grok draft'], { stdio: 'ignore' })
+  response = { summary: 'latest Grok draft committed' }
+} else if (count === 2 && draftPath) {
+  const draft = path.join(cwd, draftPath)
+  fs.writeFileSync(process.env.SPEX_GROK_TEST_CAPTURE, fs.existsSync(draft) ? fs.readFileSync(draft) : Buffer.from('<ABSENT>'))
+  if (process.env.SPEX_GROK_TEST_STAGE === 'P1') {
+    fs.mkdirSync(path.dirname(draft), { recursive: true })
+    fs.writeFileSync(draft, Buffer.from(process.env.SPEX_GROK_TEST_LATEST, 'base64'))
+    execFileSync('/usr/bin/git', ['-C', cwd, 'add', draftPath], { stdio: 'ignore' })
+    execFileSync('/usr/bin/git', ['-C', cwd, 'commit', '--allow-empty', '-m', 'continue P1 draft'], { stdio: 'ignore' })
+    response = { summary: 'P1 draft repaired and committed' }
+  }
+} else if (count === 3 && !draftPath && prompt.includes('候选范围及适用性:')) {
+  response = { verdict: 'accept', checkedBoundaries: ${JSON.stringify(ELABORATION_BOUNDARIES)}, findings: [] }
+} else process.exit(21)
+const text = JSON.stringify(response)
 process.stdout.write(JSON.stringify({ type: 'text', data: text }) + '\\n')
 process.stdout.write(JSON.stringify({ type: 'end', sessionId, requestId: 'controlled-turn-' + count, cwd, stopReason: 'end_turn', modelUsage: { 'grok-fixture': {} } }) + '\\n')
 if (count === 1) { process.on('SIGTERM', () => {}); setTimeout(() => process.exit(0), 17_000) }
 else setTimeout(() => process.exit(0), 100)
 `
   writeFileSync(fakeGrok, fakeCliSource, { mode: 0o700 })
-  const previousPath = process.env.PATH, inheritedVars = ['SPEX_GROK_TEST_COUNTER', 'SPEX_GROK_TEST_CAPTURE', 'SPEX_GROK_TEST_OLDER', 'SPEX_GROK_TEST_LATEST'] as const
+  const previousPath = process.env.PATH, inheritedVars = ['SPEX_GROK_TEST_COUNTER', 'SPEX_GROK_TEST_CAPTURE', 'SPEX_GROK_TEST_OLDER', 'SPEX_GROK_TEST_LATEST', 'SPEX_GROK_TEST_STAGE'] as const
   const previousVars = Object.fromEntries(inheritedVars.map(name => [name, process.env[name]]))
   process.env.PATH = `${originalPath}:${previousPath ?? ''}`
   process.env.SPEX_GROK_TEST_COUNTER = callCounter
   process.env.SPEX_GROK_TEST_CAPTURE = seedCapture
   process.env.SPEX_GROK_TEST_OLDER = olderDraftBytes.toString('base64')
   process.env.SPEX_GROK_TEST_LATEST = latestDraftBytes.toString('base64')
+  process.env.SPEX_GROK_TEST_STAGE = stage
   f.options.runner = undefined
   t.after(() => {
     if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath
@@ -1281,7 +1301,9 @@ else setTimeout(() => process.exit(0), 100)
   })
 
   const first = await runSyncOperation(f.store, originalOperation.id, f.options)
-  const oldAttempt = f.store.readAttempt(first.operation.currentAttemptId!), oldDispatch = oldAttempt.dispatchPlans.find(dispatch => dispatch.purpose === 'code_behavior_analyze')!
+  const oldAttempt = f.store.readAttempt(first.operation.currentAttemptId!)
+  assert.deepEqual(oldAttempt.dispatchPlans.map(dispatch => dispatch.purpose), [purpose], JSON.stringify(first.failure))
+  const [oldDispatch] = oldAttempt.dispatchPlans
   const oldResource = f.store.findResource(oldAttempt.id, oldDispatch.key)
   assert.ok(oldResource, JSON.stringify({ status: first.status, failure: first.failure, calls: f.store.readAttempt(oldAttempt.id).dispatchPlans.map(dispatch => dispatch.purpose), resources: f.store.listResources(oldAttempt.id) }))
   const nativePlan = JSON.parse(readEvidence(f.input.source.commonDir, oldResource.plan.planBlob).toString()) as NativeRunPlan
@@ -1291,7 +1313,18 @@ else setTimeout(() => process.exit(0), 100)
   assert(originalWorkspace)
   const nativeFiles = (): Record<string, Buffer> => Object.fromEntries(readdirSync(nativeRoot, { withFileTypes: true }).filter(entry => entry.isFile()).map(entry => [entry.name, readFileSync(join(nativeRoot, entry.name))]))
   const originalFiles = nativeFiles()
-  assert.equal(nativePlan.request.purpose, 'code_behavior_analyze')
+  assert.equal(nativePlan.request.purpose, purpose)
+  if (stage === 'P1') {
+    assert.match(nativePlan.request.prompt, /以下流程规则适用于本轮可变目标/)
+    const stageResult = oldAttempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as { stage?: string; resultRef?: BlobRef }).find(value => value.stage === 'elaboration')
+    assert.ok(stageResult?.resultRef)
+    const failed = JSON.parse(readEvidence(f.input.source.commonDir, stageResult.resultRef).toString()) as ElaborationResult
+    assert.equal(failed.candidateDigest, null)
+    assert.equal(failed.reviewPassed, false)
+    assert.equal(failed.failure?.sessionId, nativeSessionId)
+    assert.equal(failed.rounds.length, 1)
+    assert.equal(failed.rounds[0].draft, undefined)
+  }
   assert.equal(nativePlan.request.model, 'grok:default')
   assert.equal(nativePlan.request.worktree?.mode, 'edit')
   assert.equal(oldResource.phase, 'removed')
@@ -1314,7 +1347,7 @@ else setTimeout(() => process.exit(0), 100)
 
   let archiveRef = f.git('for-each-ref', '--format=%(objectname)', `refs/spex-archive/${nativeSessionId}`)
   if (!archiveRef) {
-    const archivedBranch = `grok-p0-${nativeSessionId}`
+    const archivedBranch = `grok-draft-${nativeSessionId}`
     execFileSync('git', ['-C', originalWorkspace, 'switch', '-c', archivedBranch], { stdio: 'pipe' })
     writeRecord({ ...originalRecord, branch: archivedBranch })
     await withoutSessionApplicationExecutionWake(() => closeSession(nativeSessionId, undefined, { wakeQueue: false }))
@@ -1332,6 +1365,7 @@ else setTimeout(() => process.exit(0), 100)
   const path = /草稿文件=([^\s；]+)/.exec(nativePlan.request.prompt)![1]
   const archivedDraft = readTree(f.input.source.commonDir, archiveTree).find(entry => entry.path === path)
   assert.ok(archivedDraft)
+  assert.equal(f.git('diff', '--name-only', nativePlan.request.worktree!.baseCommit, originalCommit), path)
   assert.deepEqual(readObject(f.input.source.commonDir, archivedDraft.oid), latestDraftBytes)
   assert.notDeepEqual(readObject(f.input.source.commonDir, archivedDraft.oid), olderDraftBytes)
   const originalAttemptBytes = JSON.stringify(f.store.readAttempt(oldAttempt.id)), originalOperationState = f.store.readOperation(originalOperation.id)
@@ -1339,18 +1373,34 @@ else setTimeout(() => process.exit(0), 100)
   f.closeForRestart()
   const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
   const store = new SyncStore(protocol, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) }); f.useStore(store)
-  let activeOperation = store.admitAndEnqueue(await prepareSyncAdmission(f.input, f.plan, { ingressKey: 'grok-stopped-p0-formal-retry', rootCauseId: 'grok-stopped-p0-formal-retry',
+  const retryKey = `grok-stopped-${stage.toLowerCase()}-formal-retry`
+  let activeOperation = store.admitAndEnqueue(await prepareSyncAdmission(f.input, f.plan, { ingressKey: retryKey, rootCauseId: retryKey,
     retryOf: originalOperation.id, model: 'grok:default', origin: originalOperation.origin, budget: originalOperation.budget, managedRoot: f.managedRoot }))
   activeOperation = store.ackDispatch(f.input.source.repositoryId, activeOperation.dispatchMessageId); f.useOperation(activeOperation)
   const retried = await runSyncOperation(store, activeOperation.id, f.options)
   assert.equal(existsSync(seedCapture), true, JSON.stringify({ failure: retried.failure, attempts: store.listAttempts(activeOperation.id).map(attempt => attempt.dispatchPlans.map(dispatch => dispatch.purpose)) }))
   const capturedSeed = readFileSync(seedCapture)
-  assert.equal(capturedSeed.equals(latestDraftBytes), true, `正式retry必须逐字采用最新提交的Git草稿: expected ${contentHash(latestDraftBytes)}, got ${contentHash(capturedSeed)}`)
+  assert.equal(capturedSeed.equals(latestDraftBytes), true, `正式retry必须逐字采用最新提交的Git草稿: expected ${contentHash(latestDraftBytes)}, got ${capturedSeed.toString() === '<ABSENT>' ? '草稿缺席' : contentHash(capturedSeed)}`)
   const retryAttempt = store.readAttempt(retried.operation.currentAttemptId!)
-  const materialStage = retryAttempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as { stage?: string; resultRef?: import('./operation-types.js').BlobRef }).find(stage => stage.stage === 'analysis:code_behavior_analyze:stopped-git-material-provenance')
-  assert.ok(materialStage)
-  const material = JSON.parse(readEvidence(f.input.source.commonDir, materialStage.resultRef!).toString()) as { sourceKind: string; approved: boolean; resultCommit: string; draftSha256: string }
-  assert.equal(material.sourceKind, 'git_draft'); assert.equal(material.approved, false); assert.equal(material.resultCommit, originalCommit); assert.equal(material.draftSha256, contentHash(latestDraftBytes))
+  const stages = retryAttempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as { stage?: string; resultRef?: BlobRef })
+  const materialKey = stage === 'P0' ? 'analysis:code_behavior_analyze:stopped-git-material-provenance' : 'elaboration:stopped-git-material-provenance'
+  const materialStage = stages.find(stage => stage.stage === materialKey)
+  assert.ok(materialStage?.resultRef)
+  const material = JSON.parse(readEvidence(f.input.source.commonDir, materialStage.resultRef).toString()) as { sourceKind: string; approved: boolean; resultCommit: string; draftSha256: string }
+  assert.equal(material.sourceKind, stage === 'P0' ? 'git_draft' : 'stopped_git_draft')
+  assert.equal(material.approved, false)
+  assert.equal(material.resultCommit, originalCommit)
+  assert.equal(material.draftSha256, contentHash(latestDraftBytes))
+  if (stage === 'P1') {
+    const elaboration = stages.find(stage => stage.stage === 'elaboration')
+    assert.ok(elaboration?.resultRef)
+    const reviewed = JSON.parse(readEvidence(f.input.source.commonDir, elaboration.resultRef).toString()) as ElaborationResult
+    assert.equal(reviewed.structurePassed, true, JSON.stringify(reviewed.rounds.at(-1)?.findings ?? reviewed.failure))
+    assert.equal(reviewed.reviewPassed, true, JSON.stringify(reviewed.failure))
+    const traces = reviewed.rounds.at(-1)!.traces
+    assert.deepEqual(traces.map(trace => trace.purpose), [purpose, 'elaboration_review'])
+    assert.equal(new Set([nativeSessionId, ...traces.map(trace => trace.sessionId)]).size, 3)
+  }
   assert.equal(JSON.stringify(store.readAttempt(oldAttempt.id)), originalAttemptBytes)
   const originalOperationAfter = store.readOperation(originalOperation.id)
   assert.deepEqual(originalOperationAfter.input, originalOperationState.input)
