@@ -100,6 +100,8 @@ P0已校验分析准备独审时，正式认证及停止的历史独审物理稿
 
 P0仅续独审后得到合法业务repair时，最新continuation清除readyAnalysis，但继承的原分析Git稿仍沿已有continuation-provenance逐跳认证真实analyze来源，不能要求本轮存在未派发的analyze。每跳核同operation、已结算且严格较早attempt、完整input/readSet/selection/composed、原分区plan、来源resultRef与完整draft身份，终点保留原Native及Git/schema认证；恢复和保存仍采用最新语义状态与完整finding，不返回祖先ready。review草稿始终要求所属当前attempt的真实产出，只有旧稿搬运且新review cancelled/removed、没有新结果的较新attempt不能遮蔽已认证语义repair；不改变stage排序、历史字段或权限。
 
+Grok 的 P0 分析因成功终态后未及时自然退出而正式失败时，后续同绑定的续修可观察原已结算并正式归档的工作树中的新正常提交。沿 [[sync-checkpoint-evidence]] 和 [[grok-structured-runtime]] 精确冷验原失败及停止，沿 [[sync-stage-worktree]] 核对同 owner、输入、受保护树、schema、实际 Git 差量和索引。仅续入原 UTF-8 草稿，沿原临时恢复路径读取，归档收据的唯一父必须是观察到的 HEAD，且整树相同。使用最新合格来源，保留原诊断和原历史，仍需新分析与独立审查。没有正常提交、无内容差量或未确证停止的来源不取得续修资格。
+
 正式retryOf迁接上述分析稿时，原continuation的已完成reviewResult独立于父attempt根失败及partitionFailures诊断存在。即使父失败为环境/不支持且短errors为空，也须冷验该review的原Native/Git、完整input、精确schema、原analysisDigest与检查范围，将合法repair作为未批准依据交给同owner的新分析。新P0只引用真实Git独审结果的commit与path，旧运输沿原合同传具体finding。原review与continuation身份、owner或分析绑定失配拒绝迁接，不继承ready/accept，不补写旧原件。
 
 new tagged whole current/latestApproved接受先核原source协议；单体用当前完整输入重核Git正文与候选绑定，分区whole回到既有owner缓存重放与strict seal，不以聚合缓存跳过各owner的实际Git/schema校验。source tag沿ref精确匹配的原provenance读取，不能由当前新marker反向补给legacy；新tag缺draft拒绝，无tag旧原件不增新门。

@@ -8,7 +8,7 @@ import { Ajv } from 'ajv'
 import { detachedRuntimeIsGone, verifyDetachedRuntime, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
 import { NATIVE_PERIODIC_OBSERVATION_FAILURE, nativeWorktreeLaunch, periodicNativeWorktreeSampler, sampleNativeWorktreeProcesses, stopNativeWorktreeDescendants, waitForNativeWorktreeProcessesStopped } from './native-worktree-runtime.js'
 import { sessionIdentityEnvVars } from './harness-shim.js'
-import { assertRejectedOutput, rejectedFinalOutput, structuredExecutionPolicy, structuredExecutionTimer, StructuredSessionError, type StructuredExecution } from './session-structured-policy.js'
+import { assertRejectedOutput, rejectedFinalOutput, structuredExecutionPolicy, structuredExecutionTimer, structuredRealmRoot, StructuredSessionError, type StructuredExecution } from './session-structured-policy.js'
 
 export type GrokNativeState = { version: 1; root: string; sessionId: string; pid?: number; receiptFile?: string; turnId?: string }
 export type GrokStructuredExecution = StructuredExecution
@@ -25,6 +25,7 @@ type StopResult = { nativeStopped: boolean; acknowledged: false; nativeStatus?: 
 
 const STOP_MS = 15_000
 const NATIVE_SHUTDOWN_GRACE_MS = 5_000
+export const GROK_NATIVE_EXIT_DEADLINE_FAILURE = 'Grok native exit was not observed before the settlement deadline'
 const sha256 = (bytes: string | Buffer): string => createHash('sha256').update(bytes).digest('hex')
 const digest = (value: unknown): string => sha256(JSON.stringify(value))
 const pending = (message: string): StructuredSessionError => new StructuredSessionError('cancellation_pending', message)
@@ -160,6 +161,23 @@ export function assertGrokRejectedFinalSource(prompt: string, execution: GrokStr
   try { verifyFinal(native, prompt, execution) }
   catch (error) { if (error instanceof StructuredSessionError && error.code === 'structured_output_format_invalid') return; throw error }
   throw stale('Grok stopped draft unexpectedly passes its original schema')
+}
+
+/** 冷验原生退出失败，只供续修已提交的分析草稿。 */
+export function assertGrokStoppedDraftSource(id: string, prompt: string, execution: GrokStructuredExecution, worktreePath: string): void {
+  const native = execution.grokNative, realm = structuredRealmRoot(execution)
+  if (!realm || !native || native.root !== join(realm, id) || execution.state !== 'failed' || execution.errorCode || execution.error !== GROK_NATIVE_EXIT_DEADLINE_FAILURE
+    || execution.worktree?.mode !== 'edit' || execution.purpose !== 'code_behavior_analyze' || !execution.turnStartRequested
+    || execution.threadId !== undefined || execution.turnId !== undefined || native.turnId !== undefined || execution.rejectedOutput || execution.resultWorktree || execution.failedWorktree
+    || execution.output !== undefined || execution.resultDigest !== undefined || execution.cancellation?.nativeStopped !== true
+    || execution.cancellation.nativeStatus !== 'stopped' || execution.cancellation.acknowledged
+    || existsSync(join(native.root, 'settlement.json')) || existsSync(join(native.root, 'result.json')) || existsSync(join(native.root, 'cancel.json')))
+    throw stale('Grok stopped analysis draft lacks its original unpublished exit failure')
+  const plan = read<NativePlan>(native.root, 'plan.json'), launch = read<NativeLaunch>(native.root, 'launch.json')
+  assertPlan(plan, native.root, execution, prompt, worktreePath)
+  assertLaunch(plan, launch, execution)
+  if (!detachedRuntimeIsGone(launch.pid, launch.receiptFile)) throw stale('Grok stopped analysis draft process identity is not gone')
+  stopObservation(native.root, launch)
 }
 
 function signalOwnedGroup(plan: OwnedLaunch): boolean {
@@ -348,7 +366,7 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
       }), expiry])
       if (!ended || terminal?.stopReason === 'end_turn' && ended.observedAt >= deadline!) {
         if (terminal?.stopReason === 'end_turn' && !timedOut && !callbacks.signal?.aborted && !observerFailure) {
-          exitWindowFailure = new StructuredSessionError('failed', 'Grok native exit was not observed before the settlement deadline')
+          exitWindowFailure = new StructuredSessionError('failed', GROK_NATIVE_EXIT_DEADLINE_FAILURE)
           throw exitWindowFailure
         }
         throw pending('Grok native exit or terminal remains unproven')
