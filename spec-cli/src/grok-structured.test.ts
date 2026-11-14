@@ -45,11 +45,8 @@ if (args[0] === '--version') { console.log('grok 1.0.77 (fixture) [stable]'); pr
 const scenario = ${JSON.stringify(scenario)}
 const [cwdFlag, cwd, sessionFlag, sessionId, promptFlag, promptFile, outputFlag, outputFormat, ...extra] = args
 assert.deepEqual([cwdFlag, sessionFlag, promptFlag, outputFlag, outputFormat], ['--cwd', '--session-id', '--prompt-file', '--output-format', 'streaming-json'])
-if (scenario === 'read') {
-  assert.deepEqual(extra, ['--permission-mode', 'plan', '--disallowed-tools',
-    ['elaboration_review', 'code_review'].includes(${JSON.stringify(purpose)})
-      ? 'enter_plan_mode,exit_plan_mode,run_terminal_command,search_tool,use_tool' : 'enter_plan_mode,exit_plan_mode'])
-} else assert.deepEqual(extra.slice(0, 2), ['--permission-mode', 'bypassPermissions'])
+if (scenario === 'read') assert.deepEqual(extra, ['--permission-mode', 'plan', '--disallowed-tools', 'enter_plan_mode,exit_plan_mode'])
+else assert.deepEqual(extra.slice(0, 2), ['--permission-mode', 'bypassPermissions'])
 assert.equal(cwd, process.cwd())
 assert.match(sessionId, /^[0-9a-f-]{36}$/)
 assert.equal(process.env.TMPDIR, join(dirname(promptFile), 'tmp'))
@@ -457,11 +454,11 @@ test('Grok read uses native plan mode, removes plan exit and leaves the original
 })
 
 for (const purpose of ['elaboration_review', 'code_review']) {
-  test(`Grok removes command discovery tools from frozen candidate review: ${purpose}`, async t => {
+  test(`Grok preserves the required repository tools for ${purpose}`, async t => {
     const f = fixture(t, 'read', 'grok:default', purpose)
     const result = await f.run()
     assert.equal(result.text, finalText)
-    assert.equal(JSON.parse(readFileSync(join(f.sessionRoot, 'plan.json'), 'utf8')).readGuidance, 'native-candidate-read-v3')
+    assert.equal(JSON.parse(readFileSync(join(f.sessionRoot, 'plan.json'), 'utf8')).readGuidance, 'native-file-read-v2')
     assert.equal(nativeWorktreeResult(f.workspace, f.worktree).headCommit, f.worktree.baseCommit)
     assert.deepEqual(await f.run(f.state(), replayCallbacks), result)
   })
