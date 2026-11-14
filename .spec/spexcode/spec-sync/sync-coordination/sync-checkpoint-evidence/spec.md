@@ -47,4 +47,4 @@ Cursor 的格式拒绝沿 [[cursor-structured-runtime]] 核对原 ACP 会话和 
 
 同一新Git材料观察接缝接受有原failed资源观察的canonical failed，或已正式cancelled的历史记录；两者均强核原完整绑定、removed及stop全字段一致。failed不得用allowStoppedDraft绕过原failed观察；cancelled允许原失败未被旧版观察，不回签旧failed。具体ZCode任务/原公开终态认证及材料选择仍由adapter/coordinator负责，该认证不授格式、raw、output、成功或自动重试。
 
-未公开线程或回合的 Grok P0 分析逾期退出失败，原派发与资源中的空槽和 canonical record 中的缺席表示同一身份状态。认证必须保持 session 与所有已存在的 thread/turn 精确匹配。只凭缺席不能取得原生结果或不可信 final 资格。
+未公开线程或回合的 Grok P0 分析或完整 P1 细化逾期退出失败，原派发与资源中的空槽和 canonical record 中的缺席表示同一身份状态。此认证限于观察已停止的编辑任务草稿，必须保持 session 与所有已存在的 thread/turn 精确匹配。只凭缺席不能取得原生结果或不可信 final 资格。

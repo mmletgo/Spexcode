@@ -68,6 +68,8 @@ P1完整生成的`ac-test-flow-binding-v2`、`ac-test-flow-review-binding-v3`与
 
 P1生成的ZCode `session/events` 精确超时也可沿上述已提交材料准入。沿P0相同的原typed失败、正式派发与结算核对，由[[zcode-structured-runtime]]只读确认原turn成功、idle、closed及停止。原任务、owner、计划、schema、只读overlay和保护树仍须相符。只有同一已停edit的正常后代HEAD存在唯一指定草稿的实际更新、工作树和index证明该Git对象时，才将原字节及真实失败诊断冻结为未批准材料。无合格提交时继续检查较早合格来源，保留原失败；不得使用未提交正文、赋予成功输出或继承批准。下一真实生成仍须提交、校验并独审。
 
+Grok 完整 P1 细化若在成功终态后逾期退出并正式失败，未 reserve 的同 owner 可沿相同已提交材料准入。原失败须绑定局部阶段、轮次、请求与已结算的 Native 资源，冷验原归档提交的唯一父及同树，并核对冻结计划、输入、源码、测试和 schema。沿原来源顺序保留最新合格草稿的原字节和原失败诊断；已通过的候选与已取得资格的续审优先。材料只进入下一次生成，仍须正常提交并重新独立审查。父接口、只读独审、未提交草稿和已有 reserve 的请求不取得此资格。
+
 上述观察只从通过原请求和停止身份认证的 ZCode Native root 派生原树槽供 [[content-filter]] 字节核验。共用 filter root 指针不能代替原身份。无可认证树槽时仍要求物理字节匹配 Git 对象。
 
 P0 只在本次 attempt 尚无阶段检查点和 code_behavior saved/reserved 派发时冻结 git-json-v6。已冻结的 git-json-v1/v2/v3/v4/v5、缺席字段及原请求保持精确恢复，未知传输在派发前拒绝。新运输沿 v2 正文和失败状态策略以及 [[sync-code-behavior]] 的只读自检，并在分析自检定位非 user:raw 验收变更的未变化只读来源；新 v6 另冻结真实方向并向分析和独审共享作者当前意图规则。新指导重新分析与独审，旧请求、原草稿及原批准对象保持。已审 wrapper 的指导从程序 analysis 原字段读取，历史字段缺席保持 v7；不能用当前 writer 的 v8 给旧 v5 任务补签新指导批准。真实草稿、审查结果、source/tests 保护及资源结算仍依原门核验。

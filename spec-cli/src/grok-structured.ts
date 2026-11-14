@@ -172,20 +172,20 @@ export function assertGrokRejectedFinalSource(prompt: string, execution: GrokStr
   throw stale('Grok stopped draft unexpectedly passes its original schema')
 }
 
-/** 冷验原生退出失败，只供续修已提交的分析草稿。 */
-export function assertGrokStoppedDraftSource(id: string, prompt: string, execution: GrokStructuredExecution, worktreePath: string): void {
+/** 冷验原生退出失败，只供续修已提交的分析或完整细化草稿。 */
+export function assertGrokStoppedDraftSource(id: string, prompt: string, execution: GrokStructuredExecution, worktreePath: string, purpose: 'code_behavior_analyze' | 'elaboration_generate'): void {
   const native = execution.grokNative, realm = structuredRealmRoot(execution)
   if (!realm || !native || native.root !== join(realm, id) || execution.state !== 'failed' || execution.errorCode || execution.error !== GROK_NATIVE_EXIT_DEADLINE_FAILURE
-    || execution.worktree?.mode !== 'edit' || execution.purpose !== 'code_behavior_analyze' || !execution.turnStartRequested
+    || execution.worktree?.mode !== 'edit' || execution.purpose !== purpose || !execution.turnStartRequested
     || execution.threadId !== undefined || execution.turnId !== undefined || native.turnId !== undefined || execution.rejectedOutput || execution.resultWorktree || execution.failedWorktree
     || execution.output !== undefined || execution.resultDigest !== undefined || execution.cancellation?.nativeStopped !== true
     || execution.cancellation.nativeStatus !== 'stopped' || execution.cancellation.acknowledged
     || existsSync(join(native.root, 'settlement.json')) || existsSync(join(native.root, 'result.json')) || existsSync(join(native.root, 'cancel.json')))
-    throw stale('Grok stopped analysis draft lacks its original unpublished exit failure')
+    throw stale('Grok stopped edit draft lacks its original unpublished exit failure')
   const plan = read<NativePlan>(native.root, 'plan.json'), launch = read<NativeLaunch>(native.root, 'launch.json')
   assertPlan(plan, native.root, execution, prompt, worktreePath)
   assertLaunch(plan, launch, execution)
-  if (!detachedRuntimeIsGone(launch.pid, launch.receiptFile)) throw stale('Grok stopped analysis draft process identity is not gone')
+  if (!detachedRuntimeIsGone(launch.pid, launch.receiptFile)) throw stale('Grok stopped edit draft process identity is not gone')
   stopObservation(native.root, launch)
 }
 
