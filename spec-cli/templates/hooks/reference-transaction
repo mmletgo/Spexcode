@@ -44,7 +44,7 @@ if [ -n "${SPEXCODE_SYNC_HOOK_MODE:-}" ]; then
 fi
 [ "$spex_strict" -eq 1 ] || [ -z "${SPEXCODE_SKIP_LINT:-}" ] || exit 0
 
-# @@@ frozen delivery binding - additional internal V4 proof before every existing lint classification.
+# @@@ frozen delivery binding - check structural preparation before classifying authored candidates.
 if [ "$spex_strict" -eq 1 ]; then
   heads=0
   head_rows=0
@@ -103,6 +103,7 @@ if [ "$spex_strict" -eq 1 ]; then
       fi
       { [ "$strict_head_old" = "$SPEXCODE_SYNC_EXPECTED_PARENT" ] || [[ "$strict_head_old" =~ ^0+$ ]]; } || strict_mismatch
     fi
+    exit 0
   else
     # Publication must advance the named branch. A detached HEAD authoring transaction is never delivery.
     if [ "$cleanup_rows" -eq 1 ]; then

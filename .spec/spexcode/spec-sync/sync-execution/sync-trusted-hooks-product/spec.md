@@ -18,6 +18,8 @@ stub CLI 成功不能证明实际 Spex 项目的过滤器和托管指令渲染�
 
 验证新 worktree 和最终作者字节未混入 managed block；raw commit tree/单 parent/实际 index 精确匹配，原 source index 与 working 作者字节不变。静态自定义 plugin 声明可编译到私有投影，其 marker 脚本绝不执行；真实 Session stamping 证明 prepare-commit-msg 路径。初始manifest外部数据来源、私有目录物理身份变化、配置/shim/绑定或实际 hooks 漂移先检查拒绝，未知 filter/custom hook marker 不执行且诊断不回显命令值。
 
+将一个改变锚定函数的外部提交快进到来源后，真实 lint 应报告该 parent 的锚点漂移。绑定原 parent 的严格 prepare 可创建受管工作树，发布进一步改动该锚点且未更新 Spec 的候选仍被拒绝，ref 停在 parent。只反写 Spec 修复漂移的候选通过严格发布，最终提交的 tree 和单父匹配、差异只有 Spec，源 HEAD 和 index 保留。
+
 同一完整准备/发布场景分别覆盖同 store 与 A-home 正常 init 后由 B-home 协调的情况；四条真实 hooks 仍成功，原 filter-root 元数据、source index 和作者字节保持。root 只能绑定实际 commonDir 项目在正常 projects 目录下的已植入 store，任意目录、外来项目 key 或非 projects 层级拒绝；不得靠现场迁移元数据或候选配置获得通过。
 
 命令：`npm run build`；`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/trusted-hooks.product.test.ts`。普通 materialize/clean-smudge 与 staged surgery 使用 materialize.test.ts 的相关模式回归。未知冻结模式在真实CLI refresh/surgery 中直接失败，保留原文字节/index/config而不降级ordinary。此测试不代表 coordinator/P2 整体通过。
