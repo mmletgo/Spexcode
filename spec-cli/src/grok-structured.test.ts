@@ -467,6 +467,25 @@ for (const purpose of ['elaboration_review', 'code_review']) {
   })
 }
 
+for (const purpose of ['code_behavior_analyze', 'code_behavior_review']) {
+  test(`Grok keeps frozen business evidence distinct from draft HEAD for ${purpose}`, async t => {
+    const f = fixture(t, 'success', 'grok:default', purpose)
+    const result = await f.run()
+    const planPath = join(f.sessionRoot, 'plan.json')
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as { readGuidance?: string }
+    const invocation = JSON.parse(readFileSync(f.started, 'utf8')) as { args: string[]; prompt: string }
+    assert.equal(plan.readGuidance, 'native-behavior-evidence-v5')
+    assert.match(invocation.prompt, /current and previous business behavior.*frozen source and historical role objects/)
+    assert.match(invocation.prompt, /Do not cite the current worktree HEAD.*as business evidence/)
+    assert.match(invocation.prompt, /reject incorrect frozen-object or code claims/)
+    assert.ok(invocation.args.includes('bypassPermissions'))
+    assert.deepEqual(await f.run(f.state(), replayCallbacks), result)
+    rmSync(planPath)
+    writeFileSync(planPath, JSON.stringify({ ...plan, readGuidance: undefined }))
+    await assert.rejects(f.run(f.state(), replayCallbacks), { code: 'stale_result' })
+  })
+}
+
 for (const scenario of ['wrong-session', 'wrong-cwd', 'missing-request', 'duplicate-terminal', 'missing-terminal'] as const) {
   test(`Grok cannot certify or rerun a ${scenario} stream`, async t => {
     const f = fixture(t, scenario)
