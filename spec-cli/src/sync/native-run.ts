@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { getBlob, putBlob, runtimeRoot } from '@spexcode/spec-core'
 import { readRecord, type SessRec } from '../session-record.js'
+import { GROK_NATIVE_EXIT_DEADLINE_FAILURE } from '../grok-structured.js'
 import { closeSession, sessionIdForCreateKey, readSessionCreateTermination, recoverSessionCreateTermination, verifyPreservedSessionCreateTermination, type SessionCreateTermination } from '../sessions.js'
 import { cancelStructuredSession, runStructuredSession, SettledSessionCreateTimeoutError, StructuredSessionError, type StructuredCancellationResult } from '../session-structured.js'
 import { assertRejectedOutput, prepareFrozenReaderRuntime, structuredExecutionPolicy, pinNativeConfiguration, pinZCodeToolPolicy, type FrozenReaderRuntime, type StructuredExecution } from '../session-structured-policy.js'
@@ -12,6 +13,7 @@ import { nativeWorktreePrompt } from '../native-worktree-runtime.js'
 import { verifyStageResult } from './stage-worktree.js'
 import { withoutSessionApplicationExecutionWake } from '../session-application.js'
 import { zcodeNativeModel } from '../zcode-structured.js'
+import { finiteSyncBudget } from './budget.js'
 import type { ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult } from './elaboration-types.js'
 import { SyncStoreError, type SyncStore } from './store.js'
 import type { BlobRef, NativeSessionRef, SyncResourcePhase, WriteFence } from './operation-types.js'
@@ -50,6 +52,8 @@ export type NativeRunCheckpoint = {
 const sha = (bytes: string | Buffer): string => createHash('sha256').update(bytes).digest('hex')
 const hash = (value: unknown): string => sha(JSON.stringify(value))
 const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
+const nativeCreatePayloadHash = (prompt: string, base: string | undefined, execution: StructuredExecution): string =>
+  hash({ prompt, parent: null, launcher: null, ...(base?.trim() ? { base: base.trim() } : {}), structuredExecution: execution })
 
 type NativeFailureIdentity = { code?: string; message?: string; sessionId?: string; threadId?: string; turnId?: string; requestKey?: string; inputDigest?: string }
 
@@ -59,6 +63,25 @@ export function hasSettledNativeRpcFailure(store: SyncStore, operation: SyncOper
 
 export function hasSettledNativeTurnTransportFailure(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, failure: NativeFailureIdentity): boolean {
   return failure.code === 'native_turn_transport_failed' && hasSettledNativeFailure(store, operation, attempt, failure)
+}
+
+/** 认证可在原操作内重新独审的 Grok P0 退出失败，原轮次保持未批准。 */
+export function hasSettledGrokP0ReviewExitFailure(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, failure: NativeFailureIdentity & Pick<StructuredSessionError, 'rejectedOutput' | 'failedWorktree'>): boolean {
+  if (failure.code !== 'failed' || failure.message !== GROK_NATIVE_EXIT_DEADLINE_FAILURE || !failure.sessionId
+    || failure.rejectedOutput !== undefined || failure.failedWorktree !== undefined) return false
+  try {
+    const current = store.assertWriteFence({ operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, sourceFingerprint: operation.input.source.physicalFingerprint, leaseToken: attempt.leaseToken })
+    if (!hasSettledNativeFailure(store, current.operation, current.attempt, failure)) return false
+    const budget = finiteSyncBudget(current.operation.budget)
+    if (budget) {
+      const usage = store.readBudgetUsage(operation.id)
+      if (usage.callsUsed >= budget.maxCalls || usage.attemptsUsed >= budget.maxAttempts || usage.repairFailures >= budget.maxRepairs) return false
+    }
+    return true
+  } catch (error) {
+    if (error instanceof SyncStoreError && error.code === 'SYNC_FENCE_EXPIRED') return false
+    throw error
+  }
 }
 
 function hasSettledNativeFailure(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, failure: NativeFailureIdentity): boolean {
@@ -78,14 +101,34 @@ function hasSettledNativeFailure(store: SyncStore, operation: SyncOperation, att
     const settled = resource!.operationId === operation.id && resource!.attemptId === attempt.id && resource!.generation === attempt.generation && resource!.plan.inputId === operation.input.id && plan.operationId === operation.id && plan.attemptId === attempt.id && plan.inputId === operation.input.id && plan.expectedSessionId === failure.sessionId && plan.sessionCreateKey === dispatch.sessionCreateKey && plan.expectedSessionId === sessionIdForCreateKey(dispatch.sessionCreateKey) && plan.request.requestKey === dispatch.key && plan.requestDigest === dispatch.requestDigest && plan.requestDigest === resource!.plan.payloadDigest && plan.requestDigest === hash(plan.request)
       && (failure.requestKey === undefined || failure.requestKey === plan.request.requestKey) && (failure.inputDigest === undefined || failure.inputDigest === plan.request.inputDigest) && checkpoint.operationId === plan.operationId && checkpoint.attemptId === plan.attemptId && checkpoint.inputId === plan.inputId && checkpoint.candidateDigest === plan.candidateDigest && checkpoint.candidateDigest === resource!.plan.candidateDigest && checkpoint.requestDigest === plan.requestDigest && checkpoint.expectedSessionId === plan.expectedSessionId && checkpoint.phase === 'removed' && checkpoint.status === 'failed' && checkpoint.nativeState === 'failed' && checkpoint.failure?.code === failure.code && checkpoint.failure?.message === failure.message
       && stop?.nativeStopped === true && stop.state === 'failed' && stop.sessionId === failure.sessionId && checkpoint.session.sessionId === stop.sessionId && checkpoint.session.threadId === (stop.threadId ?? null) && checkpoint.session.turnId === (stop.turnId ?? null) && stop.threadId === failure.threadId && stop.turnId === failure.turnId
-    if (!settled || failure.code !== 'native_turn_transport_failed') return settled
-    return resource!.plan.key === dispatch.key && plan.schemaVersion === 1 && checkpoint.schemaVersion === 1
-      && plan.request.model?.startsWith('zcode:') === true && !!plan.request.worktree && !plan.request.frozenContext
-      && (plan.request.purpose === 'code_behavior_analyze' || plan.request.purpose === 'code_behavior_review') && dispatch.purpose === plan.request.purpose
-      && failure.requestKey === plan.request.requestKey && failure.inputDigest === plan.request.inputDigest && !!failure.threadId && !!failure.turnId
-      && dispatch.session?.sessionId === checkpoint.session.sessionId && dispatch.session.threadId === checkpoint.session.threadId && dispatch.session.turnId === checkpoint.session.turnId
-      && checkpoint.nativeCallRequested && checkpoint.nativeStarted && stop?.nativeStatus === 'stopped'
-      && !checkpoint.failure?.failedWorktree && !checkpoint.failure?.rejectedOutput && !checkpoint.result
+    if (!settled || failure.code === 'native_rpc_timeout') return settled
+    const { request } = plan
+    if (resource!.plan.key !== dispatch.key || plan.schemaVersion !== 1 || checkpoint.schemaVersion !== 1
+      || !request.worktree || request.frozenContext || dispatch.purpose !== request.purpose
+      || dispatch.session?.sessionId !== checkpoint.session.sessionId || dispatch.session.threadId !== checkpoint.session.threadId || dispatch.session.turnId !== checkpoint.session.turnId
+      || !checkpoint.nativeCallRequested || stop?.nativeStatus !== 'stopped') return false
+    if (failure.code === 'native_turn_transport_failed') return request.model?.startsWith('zcode:') === true
+      && (request.purpose === 'code_behavior_analyze' || request.purpose === 'code_behavior_review')
+      && failure.requestKey === request.requestKey && failure.inputDigest === request.inputDigest && !!failure.threadId && !!failure.turnId
+      && checkpoint.nativeStarted && !checkpoint.failure?.failedWorktree && !checkpoint.failure?.rejectedOutput && !checkpoint.result
+    if (failure.code !== 'failed' || request.purpose !== 'code_behavior_review' || request.model !== operation.model || !request.model?.startsWith('grok:')
+      || request.nativeConfiguration !== 'cli-config-v1' || request.root !== operation.input.source.canonicalRoot || request.base !== request.worktree.baseCommit
+      || checkpoint.nativeCallRequested !== true || checkpoint.nativeStarted !== false
+      || checkpoint.session.threadId !== null || checkpoint.session.turnId !== null || stop.threadId !== undefined || stop.turnId !== undefined
+      || stop.acknowledged !== false || stop.error !== undefined || checkpoint.creationTermination !== undefined || checkpoint.result !== undefined
+      || checkpoint.failure?.failedWorktree !== undefined || checkpoint.failure?.rejectedOutput !== undefined) return false
+    const record = readRecord(plan.expectedSessionId), state = record?.structuredExecution, cancellation = state?.cancellation
+    if (!record || record.session !== plan.expectedSessionId || record.harness !== 'grok-structured' || record.harnessSessionId !== null
+      || record.base !== request.base || record.forkCommit !== request.base || record.createRequestId !== sha(dispatch.sessionCreateKey)
+      || !state || state.state !== 'failed' || state.errorCode !== undefined || state.error !== failure.message
+      || state.threadId !== undefined || state.turnId !== undefined || state.turnStartRequested !== true
+      || state.grokNative?.version !== 1 || !state.grokNative.sessionId || state.grokNative.turnId !== undefined
+      || cancellation?.reason !== 'cancelled' || cancellation.nativeStopped !== stop.nativeStopped || cancellation.acknowledged !== stop.acknowledged
+      || cancellation.nativeStatus !== stop.nativeStatus || cancellation.error !== stop.error
+      || state.output !== undefined || state.resultDigest !== undefined || state.resultWorktree !== undefined || state.failedWorktree !== undefined || state.rejectedOutput !== undefined) return false
+    const execution = structuredExecutionPolicy(request)
+    return record.createPayloadHash === nativeCreatePayloadHash(nativeWorktreePrompt(request.prompt, request.worktree), request.base, execution)
+      && state.version === execution.version && state.policy === execution.policy && hash(structuredExecutionPolicy(state)) === hash(execution)
   })
 }
 
@@ -119,7 +162,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
     const execution = structuredExecutionPolicy(request)
     const creationPrompt = request.worktree ? nativeWorktreePrompt(request.prompt, request.worktree) : request.prompt
     const creationBase = request.worktree?.baseCommit ?? request.base
-    const expectedCreateHash = hash({ prompt: creationPrompt, parent: null, launcher: null, ...(creationBase?.trim() ? { base: creationBase.trim() } : {}), structuredExecution: execution })
+    const expectedCreateHash = nativeCreatePayloadHash(creationPrompt, creationBase, execution)
     const validate = new Ajv({ allErrors: true }).compile(request.schema)
     const identity = { operationId: operation.id, attemptId: attempt.id, inputId: operation.input.id, candidateDigest: resource ? resource.plan.candidateDigest : attempt.candidate?.digest ?? null }
     const plan: NativeRunPlan = { schemaVersion: 1, request, requestDigest, sessionCreateKey: dispatch.sessionCreateKey, expectedSessionId, ...identity }
