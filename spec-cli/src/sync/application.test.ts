@@ -1507,6 +1507,32 @@ test('暂停启用后显式提交快照初始化与自动观察共用 operation 
   } finally { await f.application.stopService(); f.cleanup() }
 })
 
+test('首次自动观察归并重新入队的提交初始化，保留被替换的旧接入', async () => {
+  const f = await fixture({ ...settings, model: 'claude:default' }, undefined, true)
+  try {
+    governDemoCode(f)
+    await f.application.automaticControl('pause')
+    await f.application.enable()
+    await f.application.startService({ compensationMs: 10000 })
+    const request = { nodeId: 'demo', origin: 'initial' as const, committed: true, model: 'grok:default' }
+    const first = (await f.application.submit({ ...request, requestId: 'first-explicit-initial' })).operation!
+    const alternate = (await f.application.submit({ nodeId: request.nodeId, requestId: 'overlapping-spec', origin: 'spec', model: request.model })).operation!
+    assert.equal(f.application.store.readOperation(first.id).phase, 'superseded')
+    const next = (await f.application.submit({ ...request, requestId: 'requeued-explicit-initial' })).operation!
+    assert.notEqual(next.id, first.id)
+    assert.equal(next.policyDigest, first.policyDigest)
+    assert.equal(next.input.id, first.input.id)
+    assert.equal(f.application.store.readOperation(alternate.id).phase, 'superseded')
+
+    await f.application.automaticControl('resume')
+    await f.application.wait(next.id)
+    assert.equal(f.application.store.listOperations(next.input.source.repositoryId).length, 3)
+    const frontier = f.application.store.listCommittedObservationFrontiers(next.input.source).find(row => row.operationId)
+    assert.equal(frontier?.operationId, next.id)
+    assert.equal(f.application.store.readOperation(first.id).callsUsed, 0)
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+
 test('提交门禁：外部Spec/代码保存与git add不改变自动输入，提交后才观察HEAD字节', async () => {
   const f = await fixture()
   try {

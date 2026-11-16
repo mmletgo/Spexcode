@@ -405,7 +405,7 @@ export class SyncStore {
   }
   /** 稳定接入记录与既有消息派发计划共享一个 SQL 事务。 */
   admitAndEnqueue(input: AdmitSyncInput): SyncOperation { return this.admitWithObservation(input) }
-  private admitWithObservation(input: AdmitSyncInput, observation?: SyncObservation): SyncOperation {
+  private admitWithObservation(input: AdmitSyncInput, observation?: SyncObservation, explicitInitialId?: string): SyncOperation {
     validateScope(input.scope)
     if (input.automaticSourceAdoption !== undefined && (input.automaticSourceAdoption !== 'canonical-source-v1' || !['initial', 'spec', 'code', 'combined'].includes(input.origin))) fail('SYNC_AUTOMATIC_ADOPTION_POLICY', '自动主来源采纳只接受可信应用冻结的新操作政策')
     if (input.recordUnverifiedCoverage !== undefined && (input.recordUnverifiedCoverage !== true || observation || input.requestBlob || !input.planBlob || !['initial', 'code'].includes(input.origin))) fail('SYNC_COVERAGE_AUTHORITY', '记录未执行验收覆盖需要显式只读同步请求')
@@ -474,12 +474,13 @@ export class SyncStore {
       for (const operation of normalized) tx.exec('UPDATE sync_operations SET normalized_semantic_digest=? WHERE id=?', operation.digest, operation.id)
       const prior = parseRecord<SyncOperation>(tx.query('SELECT record_json FROM sync_operations WHERE ingress_key=? OR EXISTS (SELECT 1 FROM json_each(sync_operations.ingress_aliases_json) WHERE value=?)', input.ingressKey, input.ingressKey)[0])
       if (prior) {
+        if (explicitInitialId && prior.id !== explicitInitialId) fail('SYNC_OBSERVATION_BINDING', '观察接入与已固定的显式初始化身份不同')
         const receipt = parseRecord<SyncIngressReceipt>(tx.query('SELECT record_json FROM sync_ingress_receipts WHERE ingress_key=?', input.ingressKey)[0])
         const replay = replayPayload(prior), exact = digest({ ...replay, origin: input.origin })
         if ((receipt?.origin ?? prior.origin) !== input.origin || !(receipt ? receipt.payloadDigest === exact : [exact, observation ? digest(replay) : legacyPayloadDigest].includes(prior.payloadDigest))) fail('SYNC_IDEMPOTENCY_CONFLICT', input.ingressKey)
         return finish(prior, 'duplicate')
       }
-      if (observation && !input.retryOf && !input.requestBlob) {
+      if (observation && !explicitInitialId && !input.retryOf && !input.requestBlob) {
         const previous = tx.query("SELECT operation_id FROM sync_observations WHERE source_key=? AND json_extract(record_json,'$.configRef.sha256')=? AND json_extract(record_json,'$.latestDifferenceDigest')=? AND json_extract(record_json,'$.selectionDigest')=? AND json_extract(record_json,'$.outcome') IN ('admitted','coalesced','duplicate') AND operation_id IS NOT NULL ORDER BY rowid DESC LIMIT 1", identityKey(input.input.source), observation.configRef.sha256, observation.latestDifferenceDigest, observation.selectionDigest)[0]
         if (previous) {
           const existing = this.operation(tx, String(previous.operation_id))
@@ -496,7 +497,8 @@ export class SyncStore {
         if (!supersededInitial || supersededInitial.generation < operation.generation) supersededInitial = operation
         return false
       }
-      const compatible = compatibleIds.map(id => this.operation(tx, id)).find(operation => this.compatibleSelection(tx, operation, input.baselineSelection!) && retainMatch(operation))
+      const compatible = compatibleIds.filter(id => !explicitInitialId || id === explicitInitialId).map(id => this.operation(tx, id)).find(operation => this.compatibleSelection(tx, operation, input.baselineSelection!) && retainMatch(operation))
+      if (explicitInitialId && !compatible) fail('SYNC_OBSERVATION_BINDING', '已固定的显式初始化与当前冻结输入不匹配')
       const sameInput = compatible ?? tx.query('SELECT record_json FROM sync_operations WHERE normalized_semantic_digest IN (?,?) ORDER BY rowid DESC LIMIT ?', semanticDigest, otherAdoptionPolicyDigest, replaceUnclaimedInitial ? -1 : 1).map(row => parseRecord<SyncOperation>(row)!).find(retainMatch)
       if (sameInput) { saveAlias(sameInput); return finish(sameInput, 'duplicate') }
       if (input.baselineSelection) this.assertSelection(tx, input.input.source, input.baselineSelection, scopeResources(input.scope))
@@ -587,13 +589,13 @@ export class SyncStore {
     const observation = this.observation(input, expected)
     return this.write(tx => { this.saveObservation(tx, observation); return observation })
   }
-  observeAndAdmit(input: SyncObservationInput, admission: AdmitSyncInput, expected: { controlRevision: number; selectionDigest: string }): ObserveAndAdmitResult {
+  observeAndAdmit(input: SyncObservationInput, admission: AdmitSyncInput, expected: { controlRevision: number; selectionDigest: string; explicitInitialId?: string }): ObserveAndAdmitResult {
     this.blob(input.configRef)
     const observation = this.observation(input, expected)
     if (input.failure) { observation.outcome = 'blocked'; observation.reason = clone(input.failure); this.write(tx => this.saveObservation(tx, observation)); return { outcome: 'blocked', observation, reason: input.failure } }
     try {
       if (!input.selection || digest(inputPayload(input.input)) !== digest(inputPayload(admission.input)) || input.selection.digest !== admission.baselineSelection?.digest || input.selection.digest !== expected.selectionDigest) fail('SYNC_OBSERVATION_BINDING', 'captured snapshot or selection differs from planned admission')
-      const operation = this.admitWithObservation(admission, observation)
+      const operation = this.admitWithObservation(admission, observation, expected.explicitInitialId)
       return { outcome: observation.outcome as 'admitted' | 'coalesced' | 'duplicate', operation, observation }
     } catch (error) {
       if (!(error instanceof SyncStoreError)) throw error

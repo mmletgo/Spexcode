@@ -489,7 +489,7 @@ export class SyncApplication {
       const admission = await prepareSyncAdmission(snapshot, dispatchPlan, { ingressKey, rootCauseId: ingressKey, origin: observedOrigin, ...syncModelBinding(model), budget: settings.budget, managedRoot: this.managedRoot, baselineSelection: selection, automaticSourceAdoption: this.automaticSourceAdoption(snapshot) })
       if (!this.ownsObservation()) return
       if (!explicit) this.prepareTools(ingressKey, this.store.findOperationByIngressKey(ingressKey), model, plan.agentWorkflow)
-      const result = this.store.observeAndAdmit(observation, admission, { controlRevision: control.revision, selectionDigest: selection.digest })
+      const result = this.store.observeAndAdmit(observation, admission, { controlRevision: control.revision, selectionDigest: selection.digest, ...(explicit ? { explicitInitialId: explicit.id } : {}) })
       this.latestObservation = result.observation
       if (result.outcome !== 'blocked') this.start(result.operation.id)
     } catch (error) {
