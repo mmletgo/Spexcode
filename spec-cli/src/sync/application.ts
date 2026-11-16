@@ -479,10 +479,16 @@ export class SyncApplication {
       if (!changed || !observedOrigin || control.control === 'pause' || previouslyAdmitted || this.store.findOperationByIngressKey(ingressKey)) {
         this.latestObservation = this.store.recordObservation(observation, { controlRevision: control.revision, selectionDigest: selection.digest }); return
       }
-      const model = await resolveSyncModel(syncModel(settings, Boolean(plan.agentWorkflow)), Boolean(plan.agentWorkflow))
-      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: ingressKey, origin: observedOrigin, ...syncModelBinding(model), budget: settings.budget, managedRoot: this.managedRoot, baselineSelection: selection, automaticSourceAdoption: this.automaticSourceAdoption(snapshot) })
+      let dispatchPlan = plan, explicit: SyncOperation | null = null
+      if (observedOrigin === 'initial' && trigger?.commitTrigger.before === null && plan.version === 'sync-coordinator-v2') {
+        const { commitTrigger: _trigger, ...explicitPlan } = plan
+        explicit = this.store.findExplicitCommittedInitial(snapshot, syncPlanDigest(explicitPlan), selection.digest)
+        if (explicit) dispatchPlan = explicitPlan
+      }
+      const model = explicit ? syncModel(explicit) : await resolveSyncModel(syncModel(settings, Boolean(plan.agentWorkflow)), Boolean(plan.agentWorkflow))
+      const admission = await prepareSyncAdmission(snapshot, dispatchPlan, { ingressKey, rootCauseId: ingressKey, origin: observedOrigin, ...syncModelBinding(model), budget: settings.budget, managedRoot: this.managedRoot, baselineSelection: selection, automaticSourceAdoption: this.automaticSourceAdoption(snapshot) })
       if (!this.ownsObservation()) return
-      this.prepareTools(ingressKey, this.store.findOperationByIngressKey(ingressKey), model, plan.agentWorkflow)
+      if (!explicit) this.prepareTools(ingressKey, this.store.findOperationByIngressKey(ingressKey), model, plan.agentWorkflow)
       const result = this.store.observeAndAdmit(observation, admission, { controlRevision: control.revision, selectionDigest: selection.digest })
       this.latestObservation = result.observation
       if (result.outcome !== 'blocked') this.start(result.operation.id)

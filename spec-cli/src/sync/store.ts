@@ -1108,6 +1108,16 @@ export class SyncStore {
   findOperationByIngressKey(ingressKey: string): SyncOperation | null {
     return this.write(tx => parseRecord<SyncOperation>(tx.query('SELECT record_json FROM sync_operations WHERE ingress_key=? OR EXISTS (SELECT 1 FROM json_each(sync_operations.ingress_aliases_json) WHERE value=?)', ingressKey, ingressKey)[0]))
   }
+  findExplicitCommittedInitial(input: InputSnapshot, policyDigest: string, selectionDigest: string): SyncOperation | null {
+    const prefix = `application:${input.source.repositoryId}:${input.source.canonicalRoot}:`
+    return this.write(tx => parseRecord<SyncOperation>(tx.query(`SELECT record_json FROM sync_operations
+      WHERE repository_id=? AND source_root=? AND source_key=? AND substr(ingress_key,1,length(?))=?
+        AND json_extract(record_json,'$.origin')='initial' AND json_extract(record_json,'$.input.captureKind')='commit'
+        AND json_extract(record_json,'$.input.id')=? AND json_extract(record_json,'$.policyDigest')=?
+        AND json_extract(record_json,'$.baselineSelection.digest')=? AND json_extract(record_json,'$.requestBlob') IS NULL
+        AND json_extract(record_json,'$.retryOf') IS NULL AND json_extract(record_json,'$.recordUnverifiedCoverage') IS NULL
+      ORDER BY generation DESC LIMIT 1`, input.source.repositoryId, input.source.canonicalRoot, identityKey(input.source), prefix, prefix, input.id, policyDigest, selectionDigest)[0]))
+  }
   findIngressReceipt(ingressKey: string): SyncIngressReceipt | null { return this.write(tx => parseRecord<SyncIngressReceipt>(tx.query('SELECT record_json FROM sync_ingress_receipts WHERE ingress_key=?', ingressKey)[0])) }
   /** 只找当前 HEAD 的正式后继；真实采纳仍由应用在来源发布锁内完整核验。 */
   listAutomaticAdoptionCandidates(source: WorktreeIdentity, headCommit: string): SyncOperation[] {
