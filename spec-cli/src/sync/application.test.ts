@@ -1472,6 +1472,41 @@ async function observeUntil(predicate: () => boolean, timeoutMs = 5000): Promise
   const deadline = Date.now() + timeoutMs
   while (!predicate()) { assert.ok(Date.now() < deadline, '后台同步观察超时'); await new Promise(resolve => setTimeout(resolve, 10)) }
 }
+test('暂停启用后显式提交快照初始化与自动观察共用 operation 和显式模型', async () => {
+  const f = await fixture({ ...settings, model: 'claude:default' }, undefined, true)
+  try {
+    governDemoCode(f)
+    await f.application.automaticControl('pause')
+    await f.application.enable()
+    await f.application.startService({ compensationMs: 10000 })
+    const request = { nodeId: 'demo', requestId: 'explicit-committed-initial', origin: 'initial' as const, committed: true, model: 'grok:default' }
+    const { operation } = await f.application.submit(request)
+    assert.ok(operation)
+    assert.equal(operation.phase, 'queued')
+    assert.equal(f.calls.length, 0)
+
+    await f.application.automaticControl('resume')
+    await f.application.wait(operation.id)
+    const originals = f.application.store.listOperations(operation.input.source.repositoryId)
+    assert.deepEqual(originals.map(item => item.id), [operation.id])
+    assert.equal(originals[0].model, request.model)
+    const observed = f.application.store.listCommittedObservationFrontiers(operation.input.source).find(item => item.operationId === operation.id)
+    assert.equal(observed?.input.id, operation.input.id)
+    assert.equal(observed?.outcome, 'duplicate')
+    assert.ok(f.calls.length > 0 && f.calls.every(call => call.model === request.model))
+
+    writeFileSync(join(f.root, 'src/demo.mjs'), 'export const demo = text => String(text)\n')
+    f.git(['add', 'src/demo.mjs']); f.git(['commit', '-qm', 'new code after explicit initial'])
+    await f.application['scanObservedInput']()
+    const next = f.application.store.listOperations(operation.input.source.repositoryId)[0]
+    assert.notEqual(next.id, operation.id)
+    assert.equal(next.origin, 'code')
+    assert.equal(next.model, 'claude:default')
+    await f.application.wait(next.id)
+    assert.ok(f.calls.some(call => call.model === next.model))
+  } finally { await f.application.stopService(); f.cleanup() }
+})
+
 test('提交门禁：外部Spec/代码保存与git add不改变自动输入，提交后才观察HEAD字节', async () => {
   const f = await fixture()
   try {

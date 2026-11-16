@@ -30,6 +30,8 @@ isSupersededOperationSettled(operationId) 在同一 assertSchema 只读事务内
 
 提交快照的显式初始化若被替换且从未领取，新请求可在同一冻结输入、范围、基线选择和模型下，以新交付计划入队。它继承前驱的队列锚、预算族和原截止时间，旧操作及旧 ingress 仍可查询。已领取、已有调用或交付、已过期及精确旧 payload 继续去重。若同语义已有其他可复用操作，先复用它。自动观察和正式 retry 的准入不变。
 
+首次自动观察可按 [[sync-application]] 查询同一物理来源、提交快照、计划和基线选择的显式初始化接入。读取限于原 application ingress 和无需附加授权的 committed initial。自动接入沿既有事务核验控制版本和选择，再归并原操作并保留原请求固定模型。
+
 额外的受控用户请求通过 requestBlob 单独持久绑定，接入前验存在和内容摘要，并纳入 payload 去重与 pinnedBlobRefs。同一实际来源快照上的不同用户编辑不能误归并为同一次操作。没有额外请求的历史操作及自动文件事件保留原摘要语义；请求正文仅在 evidence blob 中，不改来源快照或复制入数据库正文。
 
 bindComposedInput 同时核对 operation.requestBlob 与 composed.requestBlob 的内容寻址身份，存在或缺失都必须一致；错误请求、漏叠加请求或把请求附到自动文件操作不能取得生成输入绑定。请求证据读取和 hash 核验在 SQL 事务外完成。
