@@ -1216,8 +1216,8 @@ async function rejectedReviewFixture(f: Awaited<ReturnType<typeof fixture>>, req
   } })(request)
 }
 
-for (const phase of ['独审', '分析'] as const) test(`Grok P0 ${phase}退出超时并结算后在同一操作接续`, async t => {
-  const reviewFailure = phase === '独审'
+for (const scenario of ['独审退出超时', '分析退出超时', '分析续稿未提交'] as const) test(`Grok P0 ${scenario}并结算后在同一操作接续`, async t => {
+  const reviewFailure = scenario === '独审退出超时', commitMissing = scenario === '分析续稿未提交'
   const f = await fixture(t, { maxAttempts: 3, maxCalls: 8, maxRepairs: 2, timeoutMs: 120_000 }, false, original, 'project', original, {
     version: 'sync-coordinator-v2', direction: 'code_to_spec', sourcePaths: ['src'], writePaths: ['.spec'], agentWorkflow: 'native-worktree-v1',
     partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, commitTrigger: { before: null, paths: ['src/export.js'] },
@@ -1243,6 +1243,9 @@ const reviews = path.join(__dirname, '..', 'pending-reviews.ndjson')
 const analyses = path.join(__dirname, '..', 'analysis-seeds.ndjson')
 const review = context.purpose === 'code_behavior_review'
 const hold = ${reviewFailure} ? review && !fs.existsSync(reviews) : !review && !fs.existsSync(analyses)
+const previousAnalyses = fs.existsSync(analyses) ? fs.readFileSync(analyses, 'utf8').trimEnd().split('\\n').length : 0
+const omitCommit = ${commitMissing} && !review && previousAnalyses === 1
+if (${commitMissing} && !review && previousAnalyses === 2 && !prompt.includes('无需改正文时可正常commit --allow-empty')) process.exit(23)
 let output
 if (review) {
   if (fs.existsSync(path.join(cwd, draftPath))) process.exit(22)
@@ -1254,11 +1257,13 @@ if (review) {
   const source = fs.existsSync(path.join(cwd, draftPath)) ? fs.readFileSync(path.join(cwd, draftPath), 'utf8') : null
   fs.appendFileSync(analyses, JSON.stringify({ source, draft: JSON.stringify(output) }) + '\\n', { mode: 0o600 })
 } else process.exit(21)
-fs.mkdirSync(path.dirname(path.join(cwd, draftPath)), { recursive: true })
-fs.writeFileSync(path.join(cwd, draftPath), JSON.stringify(output))
-execFileSync('/usr/bin/git', ['-C', cwd, 'add', draftPath], { stdio: 'ignore' })
-execFileSync('/usr/bin/git', ['-C', cwd, 'commit', '--allow-empty', '-m', 'commit controlled Grok draft'], { stdio: 'ignore' })
-process.stdout.write(JSON.stringify({ type: 'text', data: JSON.stringify({ summary: 'draft committed' }) }) + '\\n')
+if (!omitCommit) {
+  fs.mkdirSync(path.dirname(path.join(cwd, draftPath)), { recursive: true })
+  fs.writeFileSync(path.join(cwd, draftPath), JSON.stringify(output))
+  execFileSync('/usr/bin/git', ['-C', cwd, 'add', draftPath], { stdio: 'ignore' })
+  execFileSync('/usr/bin/git', ['-C', cwd, 'commit', '--allow-empty', '-m', 'commit controlled Grok draft'], { stdio: 'ignore' })
+}
+process.stdout.write(JSON.stringify({ type: 'text', data: JSON.stringify({ summary: omitCommit ? 'reviewed existing draft' : 'draft committed' }) }) + '\\n')
 process.stdout.write(JSON.stringify({ type: 'end', sessionId, requestId: 'controlled-' + sessionId, cwd, stopReason: 'end_turn', modelUsage: { 'grok-fixture': {} } }) + '\\n')
 if (hold) { process.on('SIGTERM', () => {}); setTimeout(() => process.exit(0), 17_000) }
 else setTimeout(() => process.exit(0), 100)
@@ -1271,7 +1276,7 @@ else setTimeout(() => process.exit(0), 100)
 
   await runSyncOperation(f.store, f.operation.id, f.options)
   const attempts = f.store.listAttempts(f.operation.id)
-  const [before, after] = attempts
+  const before = attempts[0], after = attempts.at(-1)!
   const failedPurposes = reviewFailure ? ['code_behavior_analyze', 'code_behavior_review'] : ['code_behavior_analyze']
   assert.deepEqual(before.dispatchPlans.map(dispatch => dispatch.purpose), failedPurposes, JSON.stringify(before.failure))
   const rejected = before.dispatchPlans.at(-1)!, removed = f.store.findResource(before.id, rejected.key)!
@@ -1280,7 +1285,7 @@ else setTimeout(() => process.exit(0), 100)
   assert.equal(checkpoint.status, 'failed'); assert.equal(checkpoint.stop?.nativeStopped, true)
   assert.equal(checkpoint.failure?.message, 'Grok native exit was not observed before the settlement deadline')
   assert.equal(checkpoint.result, undefined)
-  assert.equal(attempts.length, 2, JSON.stringify(before.failure))
+  assert.equal(attempts.length, commitMissing ? 3 : 2, JSON.stringify(after.failure))
   assert.equal(before.failure?.kind, 'repairable')
   assert.deepEqual(after.dispatchPlans.filter(dispatch => dispatch.purpose.startsWith('code_behavior_')).map(dispatch => dispatch.purpose), reviewFailure ? ['code_behavior_review'] : ['code_behavior_analyze', 'code_behavior_review'])
   const pendingAnalyses = readFileSync(reviews, 'utf8').trimEnd().split('\n').map(line => JSON.parse(line))
@@ -1298,12 +1303,31 @@ else setTimeout(() => process.exit(0), 100)
   if (reviewFailure) assert.deepEqual(pendingAnalyses[0], pendingAnalyses[1])
   else {
     const seeds = readFileSync(analyses, 'utf8').trimEnd().split('\n').map(line => JSON.parse(line) as { source: string | null; draft: string })
-    assert.equal(seeds.length, 2); assert.equal(seeds[0].source, null); assert.equal(seeds[1].source, seeds[0].draft)
+    assert.equal(seeds.length, commitMissing ? 3 : 2)
+    assert.equal(seeds[0].source, null)
+    for (const seed of seeds.slice(1)) assert.equal(seed.source, seeds[0].draft)
     assert.notEqual(analyzer.session?.sessionId, rejected.session?.sessionId)
     const priorDraft = evidence.find(value => value.sourceKind === 'git_draft' && value.approved === false && value.fromAttemptId === before.id)
     assert.ok(priorDraft?.oid)
     assert.deepEqual(priorDraft.checkpointRef, removed.checkpointRef)
     assert.equal(readObject(f.input.source.commonDir, priorDraft.oid).toString('utf8'), seeds[0].draft)
+  }
+  if (commitMissing) {
+    const [, missing] = attempts
+    assert.deepEqual(missing.dispatchPlans.map(dispatch => dispatch.purpose), ['code_behavior_analyze'])
+    assert.equal(missing.failure?.kind, 'repairable'); assert.equal(missing.failure.code, 'behavior_draft_commit_missing')
+    const resource = f.store.findResource(missing.id, missing.dispatchPlans[0].key)!
+    const result = JSON.parse(readEvidence(f.input.source.commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
+    assert.equal(resource.phase, 'removed'); assert.equal(result.status, 'completed')
+    assert.ok(result.result?.worktree)
+    assert.equal(result.result.worktree.headCommit, result.result.worktree.baseCommit)
+    assert.equal(result.result.worktree.tree, result.result.worktree.baseTree)
+    assert.ok(readSyncCheckpoints(f.store, operation, missing).json.every(({ value }) => !(value as { reviewPassed?: boolean }).reviewPassed))
+    assert.notEqual(analyzer.session?.sessionId, missing.dispatchPlans[0].session?.sessionId)
+    const finalAnalysis = f.store.findResource(after.id, analyzer.key)!
+    const finalResult = JSON.parse(readEvidence(f.input.source.commonDir, finalAnalysis.checkpointRef).toString()) as NativeRunCheckpoint
+    assert.ok(finalResult.result?.worktree)
+    assert.notEqual(finalResult.result.worktree.headCommit, finalResult.result.worktree.baseCommit)
   }
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
   assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
