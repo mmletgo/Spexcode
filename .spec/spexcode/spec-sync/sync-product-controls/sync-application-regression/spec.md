@@ -28,7 +28,7 @@ AC-APPLICATION-STOPPED-01/02/03用真实Git/SQLite和正式stopWriter→control(
 
 AC-APPLICATION-01 验证配置缺口、enable 摘要 CAS 与配置字节保留；02 验证 no-op 不派发、不提交及过期正文拒绝；03 验证 requestBlob 进入 coordinator、请求幂等/键冲突、失败查询及 source/HEAD 保留；04 验证输入过期、旧输入恢复拒绝及配置变化失效；05 验证共享治理叶闭包及宿主命令拒绝。
 
-用真实 Git 与 SQLite 验证先暂停、启用、显式提交快照 initial、恢复自动执行仅产生原 operation。默认模型与显式模型不同，自动观察仍归并原模型并记录提交消费点。随后提交的源码变化沿新 code 接入和项目默认模型派发。
+用真实 Git 与 SQLite 验证先暂停、启用、显式提交快照 initial、恢复自动执行仅产生原 operation。默认模型与显式模型不同，自动观察仍归并原模型并记录提交消费点。随后提交的源码变化沿新 code 接入和项目默认模型派发。显式初始化被替换并重新入队时，恢复观察仅归并新一代，旧操作保留为零调用历史。
 
 AC-APPLICATION-SCRATCH 从真实 Git 冻结配置读取 environment 的可选布尔 scratchExecutable，省略/false/true 原样进入受信环境，字符串、数字和 null 明确拒绝。
 
