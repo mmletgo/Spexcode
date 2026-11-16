@@ -22,6 +22,8 @@ ZCode 原生工作树 native_turn_transport_failed 须绑定精确非空 thread/
 
 Grok 原生工作树的 P0 `code_behavior_review` 在收到 `end_turn` 后未按期观察到进程退出，只有固定原失败、当前写 fence、剩余预算和全部派发资源正式 removed 均已认证时，才可进入同 operation、同模型的新独审尝试。旧 review 的 dispatch 须已绑定精确 session，thread/turn 尚未发布，checkpoint 与 canonical Grok record 保留同一 failed 错误和已确认停止。原创建请求、工作树 seed 及模型按冻结计划逐项核对，已归档记录沿原身份读取。旧轮次及其草稿保持未批准，成功、拒稿和 failed-worktree 证据均不属于此资格。
 
+P0 `code_behavior_analyze` 的原生退出故障按相同结算与会话证据准入分析重跑。未批准的原 Git 草稿只能走独立的材料认证接缝，须产生新分析及独审证据才可批准。
+
 原生错误携rejectedOutput时，仅在本资源精确record为failed、证据与错误相同且固定创建请求/schema/input/purpose/thread/turn逐项一致后，经现有blobIO保存完整被拒final原文字节，并携原文ref/SHA传回；不读取provider协议目录。原error/code/身份保持，资源停止仍走原正式结算，不因诊断取得成功或removed。旧无证据不扫描补读。
 
 真正新建的 Claude/ZCode worktree 资源在 reserveDispatch/requestDigest/plan 之前冻结 nativeConfiguration:cli-config-v1，ZCode read 工具策略独立冻结。新配置同步请求在冻结前省略各业务阶段内部默认high，让原生CLI配置决定执行强度；本桥没有用户effort入口，不用内部提示限制模型资格。已有资源及reserved请求按原完整摘要保留其effort或缺席，包括已带配置标记的原件，独立结构化API显式effort仍按原请求透传。协调器对实际持久Native原件的冷验复用同一规范化接缝，不能漏配置字段或按今天默认重签历史。已有 resource 只沿原 plan.request 的字段或缺席；仅 reserved 的冷恢复先核调用者完整请求摘要；上一代只冻结 ZCode 工具策略的请求可经原工具策略重建，但只有完整摘要精确匹配原 dispatch 才保留其原配置缺席。字段参与资源 payloadDigest 与创建 execution 哈希；不能重签旧 plan/receipt、补旧缺席或只凭 key 采纳。显式变更配置、model、source/input、prompt、schema 或 seed 仍经原完整摘要拒绝，预算和停止门禁保持。

@@ -65,8 +65,8 @@ export function hasSettledNativeTurnTransportFailure(store: SyncStore, operation
   return failure.code === 'native_turn_transport_failed' && hasSettledNativeFailure(store, operation, attempt, failure)
 }
 
-/** 认证可在原操作内重新独审的 Grok P0 退出失败，原轮次保持未批准。 */
-export function hasSettledGrokP0ReviewExitFailure(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, failure: NativeFailureIdentity & Pick<StructuredSessionError, 'rejectedOutput' | 'failedWorktree'>): boolean {
+/** 认证可在原操作内重跑的 Grok P0 退出失败，原轮次保持未批准。 */
+export function hasSettledGrokP0ExitFailure(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, failure: NativeFailureIdentity & Pick<StructuredSessionError, 'rejectedOutput' | 'failedWorktree'>): boolean {
   if (failure.code !== 'failed' || failure.message !== GROK_NATIVE_EXIT_DEADLINE_FAILURE || !failure.sessionId
     || failure.rejectedOutput !== undefined || failure.failedWorktree !== undefined) return false
   try {
@@ -111,7 +111,8 @@ function hasSettledNativeFailure(store: SyncStore, operation: SyncOperation, att
       && (request.purpose === 'code_behavior_analyze' || request.purpose === 'code_behavior_review')
       && failure.requestKey === request.requestKey && failure.inputDigest === request.inputDigest && !!failure.threadId && !!failure.turnId
       && checkpoint.nativeStarted && !checkpoint.failure?.failedWorktree && !checkpoint.failure?.rejectedOutput && !checkpoint.result
-    if (failure.code !== 'failed' || request.purpose !== 'code_behavior_review' || request.model !== operation.model || !request.model?.startsWith('grok:')
+    if (failure.code !== 'failed' || (request.purpose !== 'code_behavior_analyze' && request.purpose !== 'code_behavior_review')
+      || request.model !== operation.model || !request.model?.startsWith('grok:')
       || request.nativeConfiguration !== 'cli-config-v1' || request.root !== operation.input.source.canonicalRoot || request.base !== request.worktree.baseCommit
       || checkpoint.nativeCallRequested !== true || checkpoint.nativeStarted !== false
       || checkpoint.session.threadId !== null || checkpoint.session.turnId !== null || stop.threadId !== undefined || stop.turnId !== undefined
