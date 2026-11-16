@@ -26,6 +26,8 @@ type StopResult = { nativeStopped: boolean; acknowledged: false; nativeStatus?: 
 const STOP_MS = 15_000
 const NATIVE_SHUTDOWN_GRACE_MS = 5_000
 export const GROK_NATIVE_EXIT_DEADLINE_FAILURE = 'Grok native exit was not observed before the settlement deadline'
+export const isGrokNativeExitFailure = ({ code, message }: { code: string; message: string }): boolean =>
+  code === 'failed' && message === GROK_NATIVE_EXIT_DEADLINE_FAILURE
 const sha256 = (bytes: string | Buffer): string => createHash('sha256').update(bytes).digest('hex')
 const digest = (value: unknown): string => sha256(JSON.stringify(value))
 const pending = (message: string): StructuredSessionError => new StructuredSessionError('cancellation_pending', message)
@@ -172,20 +174,21 @@ export function assertGrokRejectedFinalSource(prompt: string, execution: GrokStr
   throw stale('Grok stopped draft unexpectedly passes its original schema')
 }
 
-/** 冷验原生退出失败，只供续修已提交的分析或完整细化草稿。 */
-export function assertGrokStoppedDraftSource(id: string, prompt: string, execution: GrokStructuredExecution, worktreePath: string, purpose: 'code_behavior_analyze' | 'elaboration_generate'): void {
+/** 冷验未发布的原生退出失败，供同步继续原草稿或独审。 */
+export function assertGrokUnpublishedExitSource(id: string, prompt: string, execution: GrokStructuredExecution, worktreePath: string, purpose: 'code_behavior_analyze' | 'elaboration_generate' | 'elaboration_review'): void {
   const native = execution.grokNative, realm = structuredRealmRoot(execution)
+  const mode = purpose === 'elaboration_review' ? 'read' : 'edit'
   if (!realm || !native || native.root !== join(realm, id) || execution.state !== 'failed' || execution.errorCode || execution.error !== GROK_NATIVE_EXIT_DEADLINE_FAILURE
-    || execution.worktree?.mode !== 'edit' || execution.purpose !== purpose || !execution.turnStartRequested
+    || execution.worktree?.mode !== mode || execution.purpose !== purpose || !execution.turnStartRequested
     || execution.threadId !== undefined || execution.turnId !== undefined || native.turnId !== undefined || execution.rejectedOutput || execution.resultWorktree || execution.failedWorktree
     || execution.output !== undefined || execution.resultDigest !== undefined || execution.cancellation?.nativeStopped !== true
     || execution.cancellation.nativeStatus !== 'stopped' || execution.cancellation.acknowledged
     || existsSync(join(native.root, 'settlement.json')) || existsSync(join(native.root, 'result.json')) || existsSync(join(native.root, 'cancel.json')))
-    throw stale('Grok stopped edit draft lacks its original unpublished exit failure')
+    throw stale('Grok source lacks its original unpublished exit failure')
   const plan = read<NativePlan>(native.root, 'plan.json'), launch = read<NativeLaunch>(native.root, 'launch.json')
   assertPlan(plan, native.root, execution, prompt, worktreePath)
   assertLaunch(plan, launch, execution)
-  if (!detachedRuntimeIsGone(launch.pid, launch.receiptFile)) throw stale('Grok stopped edit draft process identity is not gone')
+  if (!detachedRuntimeIsGone(launch.pid, launch.receiptFile)) throw stale('Grok unpublished exit process identity is not gone')
   stopObservation(native.root, launch)
 }
 

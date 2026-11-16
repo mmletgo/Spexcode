@@ -1343,6 +1343,151 @@ function committedDraftFixture(f: Awaited<ReturnType<typeof fixture>>, request: 
   return nativeWorktreeResult(workspace, seed)
 }
 
+for (const missingLaunch of [false, true]) test(`Grok P1 独审退出超时结算后只重审原Git候选 missingLaunch=${missingLaunch}`, async t => {
+  const failureMessage = 'Grok native exit was not observed before the settlement deadline'
+  const budget = { maxAttempts: 2, maxCalls: 8, maxRepairs: 1, timeoutMs: 120_000 }
+  const f = await fixture(t, budget, false, original, 'project', original, {
+    version: 'sync-coordinator-v2', direction: 'spec_to_code', sourcePaths: ['src/export.js'], agentWorkflow: 'native-worktree-v1',
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 },
+  }, undefined, 'spec', 'grok:default')
+  const previousCwd = process.cwd(), previousPath = process.env.PATH
+  process.chdir(f.root)
+  const bin = join(f.parent, 'grok-bin'), log = join(f.parent, 'grok-p1-calls.ndjson')
+  mkdirSync(bin, { mode: 0o700 })
+  process.env.PATH = `${bin}:${previousPath ?? ''}`
+  t.after(() => {
+    process.chdir(previousCwd)
+    if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath
+  })
+  const draft = rows(original)
+  const changes = draft.changes.map(({ nodeId: _nodeId, path: _path, ...change }) => ({ ...change, targetIndex: 0 }))
+  writeFileSync(join(bin, 'grok'), `#!/usr/bin/env node
+const fs = require('node:fs')
+const path = require('node:path')
+const { execFileSync } = require('node:child_process')
+const args = process.argv.slice(2)
+if (args.includes('--version')) { process.stdout.write('grok 1.0.77 (controlled fixture)\\n'); process.exit(0) }
+const value = name => args[args.indexOf(name) + 1]
+const cwd = value('--cwd'), sessionId = value('--session-id'), mode = value('--permission-mode')
+const prompt = fs.readFileSync(value('--prompt-file'), 'utf8'), draftPath = /草稿文件=([^\\s；]+)/.exec(prompt)?.[1]
+const git = (...args) => execFileSync('/usr/bin/git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim()
+const log = ${JSON.stringify(log)}, review = !draftPath && prompt.includes('候选范围及适用性:')
+if (review ? mode !== 'plan' : !draftPath || mode !== 'bypassPermissions') process.exit(21)
+const prior = fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : ''
+const hold = review && !prior.includes('"purpose":"elaboration_review"')
+const purpose = review ? 'elaboration_review' : 'elaboration_generate'
+fs.appendFileSync(log, JSON.stringify({ purpose, mode, sessionId, commit: git('rev-parse', 'HEAD'), tree: git('rev-parse', 'HEAD^{tree}') }) + '\\n', { mode: 0o600 })
+let output = { verdict: 'accept', checkedBoundaries: ${JSON.stringify(ELABORATION_BOUNDARIES)}, findings: [] }
+if (!review) {
+  const draft = ${JSON.stringify({ ...draft, version: 'elaboration-target-rows-v3', changes })}
+  draft.changes[0].description = prior ? '重新生成的说明' : '首次有效草稿的说明'
+  fs.mkdirSync(path.dirname(path.join(cwd, draftPath)), { recursive: true })
+  fs.writeFileSync(path.join(cwd, draftPath), JSON.stringify(draft))
+  git('add', draftPath); git('commit', '-m', 'commit P1 draft')
+  output = { summary: '已正常提交草稿' }
+}
+process.stdout.write(JSON.stringify({ type: 'text', data: JSON.stringify(output) }) + '\\n')
+process.stdout.write(JSON.stringify({ type: 'end', sessionId, requestId: 'review-fixture-' + sessionId, cwd, stopReason: 'end_turn', modelUsage: { 'grok-fixture': {} } }) + '\\n')
+if (hold) { process.on('SIGTERM', () => {}); setTimeout(() => process.exit(0), 17_000) }
+else setTimeout(() => process.exit(0), 100)
+`, { mode: 0o700 })
+
+  f.options.runner = undefined
+  f.store.expandContractScope = () => { throw new StructuredSessionError('unsupported', 'fixture在P1独审通过后停止') }
+  const commonDir = f.input.source.commonDir
+  const read = <T>(ref: BlobRef): T => JSON.parse(readEvidence(commonDir, ref).toString('utf8')) as T
+  const readLocal = (attempt: SyncAttempt) => {
+    const ref = attempt.checkpointRefs.find(item => /^partition:.+:elaboration$/.test(read<{ stage?: string }>(item).stage ?? ''))
+    assert.ok(ref, JSON.stringify(attempt.failure))
+    return { wrapper: ref, result: read<ElaborationResult>(read<{ resultRef: BlobRef }>(ref).resultRef) }
+  }
+  const recordFailure = f.store.recordFailure.bind(f.store)
+  let saved: { failure: SyncAttempt['failure']; local: ReturnType<typeof readLocal>; resource: string; record: string; archive: string; hiddenLaunch?: string } | undefined
+  f.store.recordFailure = (fence, issue) => {
+    const recorded = recordFailure(fence, issue)
+    if (saved || issue.message !== failureMessage) return recorded
+    const attempt = f.store.readAttempt(fence.attemptId), dispatch = attempt.dispatchPlans.find(item => item.purpose === 'elaboration_review')!
+    const resource = f.store.findResource(attempt.id, dispatch.key)!, record = readRecord(sessionIdForCreateKey(dispatch.sessionCreateKey))!
+    saved = { failure: attempt.failure, local: readLocal(attempt), resource: JSON.stringify(resource), record: JSON.stringify(record), archive: f.git('rev-parse', `refs/spex-archive/${record.session}`) }
+    if (missingLaunch) {
+      const launch = join(record.structuredExecution!.grokNative!.root, 'launch.json')
+      renameSync(launch, `${launch}.hidden`); saved.hiddenLaunch = launch
+    }
+    return recorded
+  }
+
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  const attempts = f.store.listAttempts(f.operation.id), [before, after] = attempts
+  if (!saved) assert.fail(JSON.stringify({ failure: result.failure, attempts: attempts.map(attempt => ({ failure: attempt.failure, dispatches: attempt.dispatchPlans.map(dispatch => dispatch.purpose) })), calls: existsSync(log) ? readFileSync(log, 'utf8') : '' }))
+  if (saved.hiddenLaunch) renameSync(`${saved.hiddenLaunch}.hidden`, saved.hiddenLaunch)
+  assert.equal(attempts.length, 2)
+  assert.deepEqual(before.dispatchPlans.map(dispatch => dispatch.purpose), ['elaboration_generate', 'elaboration_review'])
+  const [generate, review] = before.dispatchPlans, resource = f.store.findResource(before.id, review.key)!
+  const originalPlan = read<NativeRunPlan>(resource.plan.planBlob), checkpoint = read<NativeRunCheckpoint>(resource.checkpointRef)
+  const reviewId = sessionIdForCreateKey(review.sessionCreateKey), record = readRecord(reviewId)!, state = record.structuredExecution!
+  const originalRound = saved.local.result.rounds.at(-1)!, seed = originalPlan.request.worktree!
+  assert.deepEqual(before.failure, saved.failure)
+  assert.deepEqual(readLocal(before), saved.local)
+  assert.equal(JSON.stringify(resource), saved.resource)
+  assert.equal(JSON.stringify(record), saved.record)
+  assert.equal(resource.phase, 'removed')
+  assert.equal(checkpoint.phase, 'removed'); assert.equal(checkpoint.status, 'failed')
+  assert.deepEqual(checkpoint.failure, { code: 'failed', message: failureMessage })
+  assert.deepEqual(saved.local.result.failure, { code: 'failed', message: failureMessage, sessionId: reviewId })
+  assert.ok(checkpoint.nativeCallRequested && !checkpoint.nativeStarted)
+  assert.deepEqual(checkpoint.session, { sessionId: reviewId, threadId: null, turnId: null })
+  assert.equal(checkpoint.stop?.nativeStatus, 'stopped')
+  assert.ok(resource.checkpoints.some(({ checkpointRef }) => read<NativeRunCheckpoint>(checkpointRef).nativeState === 'failed'))
+  assert.equal(state.state, 'failed'); assert.equal(state.output, undefined); assert.equal(state.resultWorktree, undefined)
+  assert.equal(state.grokNative?.turnId, undefined)
+  assert.equal(existsSync(join(state.grokNative!.root, 'result.json')), false)
+  assert.equal(f.git('rev-parse', `refs/spex-archive/${reviewId}`), saved.archive)
+  assert.equal(f.git('rev-parse', `refs/spex-archive/${reviewId}^`), seed.baseCommit)
+  assert.equal(f.git('rev-parse', `refs/spex-archive/${reviewId}^{tree}`), seed.tree)
+  assert.equal(saved.local.result.structurePassed, true)
+  assert.equal(saved.local.result.reviewPassed, false)
+  assert.deepEqual(saved.local.result.readyIds, [])
+  assert.equal(originalRound.review, null); assert.equal(originalRound.reviewOutput, null)
+  assert.ok(originalRound.draft); assert.ok(originalRound.candidate?.changes.length)
+  const candidateChange = originalRound.candidate.changes[0]
+  assert.equal(readObject(commonDir, readTree(commonDir, seed.tree).find(entry => entry.path === candidateChange.path)!.oid).toString('utf8'), candidateChange.source)
+  const calls = readFileSync(log, 'utf8').trimEnd().split('\n').map(line => JSON.parse(line) as { purpose: string; mode: string; sessionId: string; commit: string; tree: string })
+  t.diagnostic(JSON.stringify({ dispatches: attempts.map(attempt => attempt.dispatchPlans.map(dispatch => dispatch.purpose)), callsUsed: result.operation.callsUsed, failure: result.failure?.code }))
+  assert.equal(result.operation.id, f.operation.id)
+  assert.deepEqual(result.operation.budget, f.operation.budget)
+  assert.deepEqual(after.dispatchPlans.map(dispatch => dispatch.purpose), missingLaunch ? [] : ['elaboration_review'], '下一轮只可派发原候选的独审')
+  assert.deepEqual(calls.map(call => call.purpose), missingLaunch ? ['elaboration_generate', 'elaboration_review'] : ['elaboration_generate', 'elaboration_review', 'elaboration_review'])
+  assert.equal(result.operation.callsUsed, missingLaunch ? 2 : 3)
+  if (missingLaunch) {
+    assert.ok(result.failure, '缺少原生启动原件须明确拒绝')
+  } else {
+    const approved = readLocal(after).result, approvedRound = approved.rounds.at(-1)!, [newReview] = after.dispatchPlans
+    const newResource = f.store.findResource(after.id, newReview.key)!, newPlan = read<NativeRunPlan>(newResource.plan.planBlob)
+    assert.equal(approved.reviewPassed, true)
+    assert.equal(approved.candidateDigest, saved.local.result.candidateDigest)
+    assert.deepEqual(approvedRound.candidate, originalRound.candidate)
+    assert.deepEqual({ ...approvedRound.draft, errors: undefined }, { ...originalRound.draft, errors: undefined })
+    assert.deepEqual(approvedRound.traces[0], originalRound.traces[0])
+    assert.equal(approvedRound.traces[1].sessionId, newReview.session?.sessionId)
+    assert.equal(newResource.phase, 'removed')
+    assert.deepEqual(newPlan.request.worktree, seed)
+    assert.deepEqual(newPlan.request.schema, originalPlan.request.schema)
+    for (const { mode, commit, tree } of calls.slice(1)) {
+      assert.equal(mode, 'plan')
+      assert.equal(commit, seed.baseCommit)
+      assert.equal(tree, seed.tree)
+    }
+    assert.notEqual(calls[1].sessionId, calls[2].sessionId)
+    assert.notEqual(newReview.session?.sessionId, reviewId)
+    assert.notEqual(newReview.session?.sessionId, generate.session?.sessionId)
+    assert.equal(after.failure?.code, 'unsupported')
+  }
+  assert.equal(f.store.listJournals(f.operation.id).length, 0)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+  assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+  assert.deepEqual(readFileSync(join(f.root, 'tests/export.test.mjs')), readFileSync(new URL('tests/export.test.mjs', fixturePath)))
+})
+
 for (const stage of ['P0', 'P1'] as const) test(`Grok ${stage} 正式失败并归档后，正式 retry 续用最新已提交 JSON 草稿`, async t => {
   const purpose = stage === 'P0' ? 'code_behavior_analyze' : 'elaboration_generate'
   const f = await fixture(t, { maxAttempts: 1, maxCalls: 8, maxRepairs: 0, timeoutMs: 120_000 }, false, original, 'project', original,
@@ -4238,14 +4383,15 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-form
     }
   }
   if (mode === 'wrong-task') {
-    const recordFailure = f.store.recordFailure.bind(f.store), findResource = f.store.findResource.bind(f.store), listAttempts = f.store.listAttempts.bind(f.store)
-    f.store.recordFailure = (fence, issue) => {
-      const result = recordFailure(fence, issue)
-      if (issue.code !== 'native_rpc_timeout') return result
-      const commonDir = f.input.source.commonDir, prior = f.store.readAttempt(fence.attemptId)
+    const claimAttempt = f.store.claimAttempt.bind(f.store), findResource = f.store.findResource.bind(f.store), listAttempts = f.store.listAttempts.bind(f.store)
+    f.store.claimAttempt = input => {
+      const result = claimAttempt(input)
+      if (result.attempt.number !== 2) return result
+      const commonDir = f.input.source.commonDir, [prior] = listAttempts(f.operation.id)
+      assert.equal(prior.failure?.code, 'native_rpc_timeout')
       const dispatch = prior.dispatchPlans.find(item => item.purpose === 'elaboration_review')!, resource = findResource(prior.id, dispatch.key)!
       const native = JSON.parse(readEvidence(commonDir, resource.plan.planBlob).toString()) as NativeRunPlan
-      const local = JSON.parse(readEvidence(commonDir, issue.evidenceRefs[0]).toString()) as ElaborationResult
+      const local = JSON.parse(readEvidence(commonDir, prior.failure!.evidenceRefs[0]).toString()) as ElaborationResult
       const request = native.request
       request.prompt += '\n另一候选的任务。'
       request.inputDigest = contentHash(JSON.stringify({ inputDigest: local.inputDigest, purpose: request.purpose, prompt: request.prompt, schema: request.schema, worktree: request.worktree }))

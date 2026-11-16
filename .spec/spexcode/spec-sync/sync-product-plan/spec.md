@@ -38,6 +38,8 @@ V3主机选择与真实候选运输遵循[[verification-transport]]，远端effe
 
 当前受审分析存在冻结owner时，P1独审沿[[sync-elaboration]]的生成侧同一范围事实拒绝仅改未变owner历史文案或未知ID绑定的repair。程序给具体拒因并保完整原review；原JSON/Git稿、summary追踪、Native请求及同一candidate经当前完整机械门重核后，仅新派独审，不重复生成或扩大源码/tests写权。真正域内语义repair仍续生成；原件绑定损坏明确停止，失败小回执的认证Git稿仍仅作材料。旧请求、字段缺席、控制中断回溯、原预算及最终V1–V4/采纳门保持。
 
+P1 已通过结构校验的候选遇到正式结算的 ZCode 事件读取超时或 Grok 独审退出逾期时，沿 [[sync-coordinator]] 认证同一操作、输入及原 Git 候选，只继续独立只读审查。新审查通过后才取得批准，原失败和后续交付验收继续保留。
+
 完整 settled 私有交付尚未采纳时，用户可沿现有执行入口以新 requestId 和 retryOf 显式重验同输入。workspace_synced 与 awaiting_landing 均须当前 attempt 和全部真实 journal/receipt 完整结算、验证及覆盖原范围，无未决业务或资源，Source 身份与干净工作区/index/冻结 HEAD 未变，且真实交付尚未由 Source/canonical Git 采纳；不能仅由阶段或 false 投影授予资格。已采纳、部分交付、缺证据、漂移及第三方资源头推进拒绝，准入事务重新核父完整记录和交付证据。
 
 原 business selection、冻结 input/request/plan/readSet/scope 沿 retryOf 链保留，用于组合、目标 before、分析与细化；新操作的当前 selection 只保护 CAS，必须同资源集且仅含父本次 receipt 实际造成的文件/业务 ID/退役头推进，未写资源不能借父 receipt 推进。后续普通 failed→retry 仍沿最早业务基线，claim/fence/验证/交付保持新 CAS。旧 operation、attempt、原生会话、候选、journal/receipt、Git 分支与资源历史保留，不改旧阶段骗取重试。

@@ -47,7 +47,7 @@ import { sessionIdForCreateKey, withArchivedStructuredWorktree } from '../sessio
 import { withoutSessionApplicationExecutionWake } from '../session-application.js'
 import { assertFrozenBinding, readFrozenManifest, readFrozenRange } from '../frozen-context.js'
 import { assertClaudeStoppedDraftSource, observeClaudeStoppedWorktreeFailure } from '../claude-structured.js'
-import { assertGrokStoppedDraftSource, GROK_NATIVE_EXIT_DEADLINE_FAILURE } from '../grok-structured.js'
+import { assertGrokUnpublishedExitSource, GROK_NATIVE_EXIT_DEADLINE_FAILURE, isGrokNativeExitFailure } from '../grok-structured.js'
 import { assertZCodeStoppedDraftSource, isZCodeEventsRpcTimeout, type ZCodeStructuredExecution } from '../zcode-structured.js'
 import { NATIVE_PERIODIC_OBSERVATION_FAILURE, NATIVE_PROCESS_OBSERVATION_PENDING, nativeWorktreePrompt, nativeWorktreeResult } from '../native-worktree-runtime.js'
 import { readRecord } from '../session-record.js'
@@ -405,31 +405,38 @@ function assertStoppedEventsRpcDraft(prior: SyncAttempt, key: string, proof: Ret
     || proof.record.harnessSessionId !== null && proof.record.harnessSessionId !== session.threadId) fail('stale_result', 'ZCode events RPC草稿缺少原完整派发与canonical Native身份')
 }
 
-function assertUnpublishedGrokDraft(operation: SyncOperation, prior: SyncAttempt, resource: SyncResourceRecord, proof: ReturnType<typeof authenticateNativeFailure>): void {
+function assertUnpublishedGrokFailure(operation: SyncOperation, prior: SyncAttempt, resource: SyncResourceRecord, proof: ReturnType<typeof authenticateNativeFailure>): void {
   const { plan, checkpoint, record, state } = proof
   if (resource.generation !== prior.generation || plan.request.root !== operation.input.source.canonicalRoot || plan.request.base !== plan.request.worktree?.baseCommit
     || !checkpoint.nativeCallRequested || checkpoint.nativeStarted || checkpoint.status !== 'failed' || checkpoint.nativeState !== 'failed' || checkpoint.result || checkpoint.creationTermination
     || checkpoint.failure?.code !== 'failed' || checkpoint.failure.message !== state.error || checkpoint.failure.rejectedOutput || checkpoint.failure.failedWorktree
     || checkpoint.session.threadId !== null || checkpoint.session.turnId !== null
-    || canonical(prior.dispatchPlans.find(dispatch => dispatch.key === plan.request.requestKey)?.session) !== canonical(checkpoint.session)) fail('stale_result', 'Grok草稿缺少原正式未发布失败')
-  if (record.harness !== 'grok-structured' || record.harnessSessionId !== null) fail('stale_result', 'Grok草稿的原生身份不匹配')
+    || canonical(prior.dispatchPlans.find(dispatch => dispatch.key === plan.request.requestKey)?.session) !== canonical(checkpoint.session)) fail('stale_result', 'Grok 来源缺少原正式未发布失败')
+  if (record.harness !== 'grok-structured' || record.harnessSessionId !== null) fail('stale_result', 'Grok 来源的原生身份不匹配')
 }
 
-function assertGrokDraftArchive(commonDir: string, sessionId: string, headCommit: string, tree: string): void {
+function assertGrokArchiveTree(commonDir: string, sessionId: string, headCommit: string, tree: string): void {
   const archive = `refs/spex-archive/${sessionId}`
   if (objectGit(commonDir, ['rev-list', '--parents', '-n', '1', archive]).toString().trim().split(' ').slice(1).join(' ') !== headCommit
-    || objectGit(commonDir, ['rev-parse', `${archive}^{tree}`]).toString().trim() !== tree) fail('stale_result', 'Grok草稿与原已归档Git提交不一致')
+    || objectGit(commonDir, ['rev-parse', `${archive}^{tree}`]).toString().trim() !== tree) fail('stale_result', 'Grok 归档与原 Git HEAD 或树不一致')
 }
 
 function settledElaborationReview(store: SyncStore, operation: SyncOperation, prior: SyncAttempt, ownerKey: string, result: SavedElaboration, round: ElaborationResult['rounds'][number], failure: NonNullable<ElaborationResult['failure']>): ElaborationRepairDiagnostics['settledReview'] {
   if (result.status !== 'failed' || !result.structurePassed || result.reviewPassed || !round.draft || !round.candidate || round.review !== null || round.reviewOutput !== null) return
-  const rejection = round.rejectedOutput
-  if (rejection ? !reviewFormatRepairCodes.has(failure.code) || rejection.purpose !== 'elaboration_review' || !rejection.ref || rejection.ownerRequestKey !== ownerKey || rejection.ownerInputDigest !== result.inputDigest : failure.code !== 'native_rpc_timeout' || !isZCodeEventsRpcTimeout({ state: 'failed', errorCode: failure.code, error: failure.message })) return
+  const rejection = round.rejectedOutput, grokExit = !rejection && isGrokNativeExitFailure(failure)
+  if (rejection ? !reviewFormatRepairCodes.has(failure.code) || rejection.purpose !== 'elaboration_review' || !rejection.ref || rejection.ownerRequestKey !== ownerKey || rejection.ownerInputDigest !== result.inputDigest : !grokExit && (failure.code !== 'native_rpc_timeout' || !isZCodeEventsRpcTimeout({ state: 'failed', errorCode: failure.code, error: failure.message }))) return
   const key = `${ownerKey}:${round.index}:elaboration_review`
   const resource = store.findResource(prior.id, key)
   if (!resource || resource.phase !== 'removed' || prior.dispatchPlans.some(dispatch => store.findResource(prior.id, dispatch.key)?.phase !== 'removed')) fail('review_retry_binding', '独审失败缺少原正式资源及结算证明')
-  const { plan, checkpoint, record, state } = authenticateNativeFailure(store, operation, prior, key, failure, readRecord, true)
-  const { request } = plan, { session } = checkpoint
+  const proof = authenticateNativeFailure(store, operation, prior, key, failure, readRecord, true)
+  const { plan, checkpoint, record, state } = proof, { request } = plan, { session } = checkpoint
+  if (grokExit) {
+    if (request.worktree?.mode !== 'read' || request.model !== operation.model || !request.model?.startsWith('grok:')
+      || request.nativeConfiguration !== 'cli-config-v1' || !record.archived) fail('review_retry_binding', 'Grok 独审退出失败缺少原只读归档及冻结执行绑定')
+    assertUnpublishedGrokFailure(operation, prior, resource, proof)
+    assertGrokUnpublishedExitSource(record.session, nativeWorktreePrompt(request.prompt, request.worktree), state, record.worktreePath, 'elaboration_review')
+    assertGrokArchiveTree(operation.input.source.commonDir, record.session, request.worktree.baseCommit, request.worktree.tree)
+  }
   const authenticateRejection = (source: SyncAttempt, sourceKey: string, sourceFailure: typeof failure, sourceRejection: NonNullable<typeof rejection>, original: NativeRunCheckpoint): void => {
     const { ownerInputDigest: _ownerInputDigest, ownerRequestKey: _ownerRequestKey, ...packet } = sourceRejection
     const originalPacket = original.failure?.rejectedOutput
@@ -438,18 +445,19 @@ function settledElaborationReview(store: SyncStore, operation: SyncOperation, pr
     authenticateNativeRejectedFinal(store, operation, source, sourceKey, sourceFailure, packet)
   }
   if (rejection) authenticateRejection(prior, key, failure, rejection, checkpoint)
-  const transportMatches = rejection
+  const transportMatches = grokExit || (rejection
     ? state.state === 'failed' && (request.model?.startsWith('zcode:') && record.harness === 'zcode' || request.model?.startsWith('claude:') && record.harness === 'claude'
       || request.model?.startsWith('grok:') && record.harness === 'grok-structured' && state.grokNative?.sessionId === session.threadId && state.grokNative?.turnId === session.turnId
       || request.model?.startsWith('cursor:') && record.harness === 'cursor-structured' && state.cursorNative?.sessionId === session.threadId && state.cursorNative?.requestId === session.turnId)
-    : request.model?.startsWith('zcode:') && isZCodeEventsRpcTimeout(state) && record.harness === 'zcode' && state.zcodeNative?.sessionId === session.threadId && state.zcodeNative.turnId === session.turnId && !state.rejectedOutput
+    : request.model?.startsWith('zcode:') && isZCodeEventsRpcTimeout(state) && record.harness === 'zcode' && state.zcodeNative?.sessionId === session.threadId && state.zcodeNative.turnId === session.turnId && !state.rejectedOutput)
+  const publishedIdentity = checkpoint.nativeStarted && !!session.threadId && !!session.turnId
   const boundInput = ({ purpose, prompt, schema, worktree }: ElaborationSessionRequest): string => contentHash(JSON.stringify({ inputDigest: result.inputDigest, purpose, prompt, schema, worktree }))
   if (resource.attemptId !== prior.id || resource.generation !== prior.generation || plan.schemaVersion !== 1 || checkpoint.schemaVersion !== 1
     || request.purpose !== 'elaboration_review' || request.worktree?.mode !== 'read' || request.frozenContext || !transportMatches || request.inputDigest !== boundInput(request)
     || request.root !== operation.input.source.canonicalRoot || request.base !== request.worktree.baseCommit || record.base !== request.base || record.forkCommit !== request.base
-    || !checkpoint.nativeCallRequested || !checkpoint.nativeStarted || checkpoint.status !== 'failed' || checkpoint.nativeState !== 'failed' || checkpoint.stop?.nativeStatus !== 'stopped' || checkpoint.result || checkpoint.creationTermination
+    || !checkpoint.nativeCallRequested || !grokExit && !publishedIdentity || checkpoint.status !== 'failed' || checkpoint.nativeState !== 'failed' || checkpoint.stop?.nativeStatus !== 'stopped' || checkpoint.result || checkpoint.creationTermination
     || checkpoint.candidateDigest !== null && checkpoint.candidateDigest !== round.candidateDigest
-    || !session.threadId || !session.turnId || canonical(prior.dispatchPlans.find(dispatch => dispatch.key === key)?.session) !== canonical(session)
+    || canonical(prior.dispatchPlans.find(dispatch => dispatch.key === key)?.session) !== canonical(session)
     || canonical(checkpoint.failure) !== canonical({ code: failure.code, message: failure.message, ...(rejection ? { rejectedOutput: checkpoint.failure?.rejectedOutput } : {}) })
     || record.harnessSessionId !== session.threadId || state.failedWorktree || state.resultWorktree || state.output !== undefined || state.resultDigest !== undefined) fail('review_retry_binding', '独审失败缺少同owner原只读请求及精确已结算的Native失败身份')
   const generation = elaborationGenerationSource(store, operation, prior, round)
@@ -2503,7 +2511,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
                 && (!state.errorCode || stoppedTransport || completedEventsRpc) && state.threadId && state.turnId
               if (native.request.purpose === 'elaboration_generate' && native.request.worktree?.mode === 'edit' && !native.request.frozenContext && state?.cancellation?.nativeStopped && !state.failedWorktree && !state.resultWorktree && !state.rejectedOutput && (grokDraft || otherStoppedDraft)) {
                 const proof = authenticateNativeFailure(store, owner, prior, requestKey, grokDraft ? failure! : { code: completedEventsRpc ? 'native_rpc_timeout' : stoppedTransport ? 'native_turn_transport_failed' : 'failed', message: state.state === 'failed' ? state.error! : prior.failure?.message ?? '', sessionId: checkpoint.session.sessionId, threadId: checkpoint.session.threadId ?? undefined, turnId: checkpoint.session.turnId ?? undefined }, readRecord, true)
-                if (grokDraft) assertUnpublishedGrokDraft(operation, prior, resource, proof)
+                if (grokDraft) assertUnpublishedGrokFailure(operation, prior, resource, proof)
                 if (completedEventsRpc) assertStoppedEventsRpcDraft(prior, requestKey, proof)
                 const context = elaborationMaterialContext(operation.input.source.commonDir, native.request, request)
                 if (proof.record.base === native.request.worktree.baseCommit && proof.record.forkCommit === native.request.worktree.baseCommit && /草稿文件=([^\s；。]+)/.exec(native.request.prompt)?.[1] === request.binding.path && context) {
@@ -2512,7 +2520,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
                     const prompt = nativeWorktreePrompt(native.request.prompt, native.request.worktree!)
                     const failed = zcode ? assertZCodeStoppedDraftSource(prompt, (completedEventsRpc ? proof.state : state) as ZCodeStructuredExecution, proof.record.worktreePath) : undefined
                     if (zcode && failed === null) { skipSource = true; return null }
-                    if (grokDraft) assertGrokStoppedDraftSource(proof.record.session, prompt, state, proof.record.worktreePath, 'elaboration_generate')
+                    if (grokDraft) assertGrokUnpublishedExitSource(proof.record.session, prompt, state, proof.record.worktreePath, 'elaboration_generate')
                     else if (!zcode) assertClaudeStoppedDraftSource(prompt, state, proof.record.worktreePath)
                     assertMaterialFence()
                     store.assertWriteFence(fence!)
@@ -2522,7 +2530,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
                       const errors = [...existingDraft?.errors ?? [], ...round.findings, ...source.result.failure ? [{ code: source.result.failure.code, message: source.result.failure.message }] : []]
                       if (physical.committedOid) {
                         if (grokDraft) {
-                          assertGrokDraftArchive(commonDir, proof.record.session, physical.observedHeadCommit, physical.observedTree)
+                          assertGrokArchiveTree(commonDir, proof.record.session, physical.observedHeadCommit, physical.observedTree)
                           assertMaterialFence()
                         }
                         const material = { source: physical.source, errors, diagnostics: context.diagnostics, sourceKind: 'stopped_git_draft' as const }
@@ -2602,7 +2610,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           if (!newerGeneration && source && round && failure
             && (!carriedGenerations.size || carriedGenerations.size === 1 && carriedGenerations.has(canonical(round.traces.find(trace => trace.purpose === 'elaboration_generate'))))
             && (prior.failure?.kind === 'repairable' || prior.status === 'superseded' && !prior.failure)
-            && (failure.code === 'native_rpc_timeout' || reviewFormatRepairCodes.has(failure.code)) && priorElaborationInputMatches(prior, binding)) {
+            && (failure.code === 'native_rpc_timeout' || reviewFormatRepairCodes.has(failure.code) || isGrokNativeExitFailure(failure)) && priorElaborationInputMatches(prior, binding)) {
             const settledReview = settledElaborationReview(store, operation, prior, requestKey, source.result, round, failure)
             if (settledReview) {
               saveStage(store, fence!, `${key}:repair-diagnostics-provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef })
@@ -2800,7 +2808,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
                 || owner.id !== operation.id && !settledApprovalSource(store, owner)) continue
             } else if (state.state !== 'cancelled' && !(zcode && state.state === 'failed') || !(zcode ? state.zcodeNative : state.claudeNative) || !state.threadId || !state.turnId || !checkpoint.session.threadId || !checkpoint.session.turnId || state.failedWorktree || state.resultWorktree || state.rejectedOutput || state.errorCode && !completedEventsRpc && !stoppedTransport) continue
             const proof = authenticateNativeFailure(store, owner, prior, requestKey, { code: completedEventsRpc ? 'native_rpc_timeout' : stoppedTransport ? 'native_turn_transport_failed' : 'failed', message: state.state === 'failed' ? state.error! : prior.failure?.message ?? '', sessionId: checkpoint.session.sessionId, threadId: checkpoint.session.threadId ?? undefined, turnId: checkpoint.session.turnId ?? undefined }, readRecord, true)
-            if (grok) assertUnpublishedGrokDraft(operation, prior, resource, proof)
+            if (grok) assertUnpublishedGrokFailure(operation, prior, resource, proof)
             if (completedEventsRpc) assertStoppedEventsRpcDraft(prior, requestKey, proof)
             const seedEntries = readTree(operation.input.source.commonDir, native.request.worktree.tree)
             const schema = seedEntries.find(entry => entry.path === binding.path.replace(/\.json$/, '.schema.json'))
@@ -2816,7 +2824,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
               const prompt = nativeWorktreePrompt(native.request.prompt, native.request.worktree!)
               const zcodeFailed = zcode ? assertZCodeStoppedDraftSource(prompt, (completedEventsRpc ? proof.state : state) as ZCodeStructuredExecution, proof.record.worktreePath, allowUnpublishedCompletion) : undefined
               if (zcode && zcodeFailed === null) return null
-              if (grok) assertGrokStoppedDraftSource(proof.record.session, prompt, state, proof.record.worktreePath, 'code_behavior_analyze')
+              if (grok) assertGrokUnpublishedExitSource(proof.record.session, prompt, state, proof.record.worktreePath, 'code_behavior_analyze')
               else if (!zcode) assertClaudeStoppedDraftSource(prompt, state, proof.record.worktreePath)
               assertMaterialFence()
               let physical: ReturnType<typeof readStoppedPhysicalDraft>
@@ -2842,7 +2850,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
               if (witness.headCommit === native.request.worktree!.baseCommit || zcode && witness.tree === witness.baseTree) return null
               if (zcode && !zcodeFailed) fail('stale_result', 'ZCode新Git材料没有原精确失败终态')
               if (grok) {
-                assertGrokDraftArchive(commonDir, proof.record.session, witness.headCommit, witness.tree)
+                assertGrokArchiveTree(commonDir, proof.record.session, witness.headCommit, witness.tree)
                 assertMaterialFence()
               }
               const format = !zcode && !grok && proof.observedFailure ? observeClaudeStoppedWorktreeFailure(prompt, state, proof.record.worktreePath) : undefined
