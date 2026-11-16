@@ -36,7 +36,7 @@ import { contractOmissionBound, freezeGenerationInput, generationReviewRequest, 
 import type { GenerationReadCache } from './generation.js'
 import type { GenerationFinding, GenerationInput, GenerationResult, StoppedCandidateReviewDraft } from './generation-types.js'
 import { captureStageDraft, readStageDraft, readStoppedPhysicalDraft, stageWorktree, StoppedPhysicalDraftStatusError, type StageDraftMaterialRequest } from './stage-worktree.js'
-import { createAttemptRunner, hasSettledGrokP0ReviewExitFailure, hasSettledNativeRpcFailure, hasSettledNativeTurnTransportFailure, pinSyncNativeRequest } from './native-run.js'
+import { createAttemptRunner, hasSettledGrokP0ExitFailure, hasSettledNativeRpcFailure, hasSettledNativeTurnTransportFailure, pinSyncNativeRequest } from './native-run.js'
 import type { NativeRunCheckpoint, NativeRunPlan } from './native-run.js'
 import type { AdmitSyncInput, ApplyReceipt, BlobRef, CandidateRef, ComposedInputRef, FrozenBaselineSelection, InputSnapshot, SyncAttempt, SyncFailure, SyncOperation, SyncScope, SyncResourceRecord, VerificationResultBlob, WriteFence } from './operation-types.js'
 import { deliverVerifiedAttempt, planPrivateDelivery } from './private-delivery.js'
@@ -3430,7 +3430,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
               || item instanceof StructuredSessionError && (structuredAnalysisRepairCodes.has(item.code)
                 || hasSettledNativeRpcFailure(store, operation, currentAttempt, item)
                 || hasSettledNativeTurnTransportFailure(store, operation, currentAttempt, item)
-                || hasSettledGrokP0ReviewExitFailure(store, operation, currentAttempt, item))))
+                || hasSettledGrokP0ExitFailure(store, operation, currentAttempt, item))))
             if (!signal.aborted && blocked instanceof StructuredSessionError && blocked.code === 'native_turn_transport_failed') fail('cancellation_pending', '原生turn传输故障尚无本尝试的精确停止及资源结算证明')
             if (blocked || signal.aborted) {
               const cause = blocked ?? error

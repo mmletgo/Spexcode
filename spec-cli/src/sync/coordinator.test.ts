@@ -1216,13 +1216,14 @@ async function rejectedReviewFixture(f: Awaited<ReturnType<typeof fixture>>, req
   } })(request)
 }
 
-test('Grok P0 独审退出超时并结算后，同一操作只派发新独审', async t => {
+for (const phase of ['独审', '分析'] as const) test(`Grok P0 ${phase}退出超时并结算后在同一操作接续`, async t => {
+  const reviewFailure = phase === '独审'
   const f = await fixture(t, { maxAttempts: 3, maxCalls: 8, maxRepairs: 2, timeoutMs: 120_000 }, false, original, 'project', original, {
     version: 'sync-coordinator-v2', direction: 'code_to_spec', sourcePaths: ['src'], writePaths: ['.spec'], agentWorkflow: 'native-worktree-v1',
     partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, commitTrigger: { before: null, paths: ['src/export.js'] },
   }, undefined, 'code', 'grok:default', true)
   const previousCwd = process.cwd(); process.chdir(f.root); t.after(() => process.chdir(previousCwd))
-  const bin = join(f.parent, 'grok-bin'), reviews = join(f.parent, 'pending-reviews.ndjson')
+  const bin = join(f.parent, 'grok-bin'), reviews = join(f.parent, 'pending-reviews.ndjson'), analyses = join(f.parent, 'analysis-seeds.ndjson')
   mkdirSync(bin, { mode: 0o700 })
   const fakeCli = `#!/usr/bin/env node
 const fs = require('node:fs')
@@ -1239,15 +1240,19 @@ if (!fs.existsSync(contextPath)) process.exit(21)
 const context = JSON.parse(fs.readFileSync(contextPath, 'utf8'))
 const changedPaths = context.task.requiredChangedPaths
 const reviews = path.join(__dirname, '..', 'pending-reviews.ndjson')
-const hold = context.purpose === 'code_behavior_review' && !fs.existsSync(reviews)
+const analyses = path.join(__dirname, '..', 'analysis-seeds.ndjson')
+const review = context.purpose === 'code_behavior_review'
+const hold = ${reviewFailure} ? review && !fs.existsSync(reviews) : !review && !fs.existsSync(analyses)
 let output
-if (context.purpose === 'code_behavior_review') {
+if (review) {
   if (fs.existsSync(path.join(cwd, draftPath))) process.exit(22)
   const { analysisDigest, analysis } = context.pendingAnalysis
   fs.appendFileSync(reviews, JSON.stringify(context.pendingAnalysis) + '\\n', { mode: 0o600 })
   output = { inputDigest: context.inputDigest, analysisDigest, verdict: 'accept', checkedPaths: changedPaths, checkedChangeIds: analysis.changes.map(change => change.id), findings: [] }
 } else if (context.purpose === 'code_behavior_analyze') {
   output = { changes: changedPaths.map(file => ({ kind: 'refactor', paths: [file], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保留导出明确原意', previousBehavior: '导出任务结果保持不变', sourceBehavior: '仅修改内部实现文字', deliveryBehavior: '共同已验证语义保持不变', evidence: '冻结源码与断言 ' + file, counterexample: '重复 COMPLETE 仍保留首次结果' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+  const source = fs.existsSync(path.join(cwd, draftPath)) ? fs.readFileSync(path.join(cwd, draftPath), 'utf8') : null
+  fs.appendFileSync(analyses, JSON.stringify({ source, draft: JSON.stringify(output) }) + '\\n', { mode: 0o600 })
 } else process.exit(21)
 fs.mkdirSync(path.dirname(path.join(cwd, draftPath)), { recursive: true })
 fs.writeFileSync(path.join(cwd, draftPath), JSON.stringify(output))
@@ -1267,8 +1272,9 @@ else setTimeout(() => process.exit(0), 100)
   await runSyncOperation(f.store, f.operation.id, f.options)
   const attempts = f.store.listAttempts(f.operation.id)
   const [before, after] = attempts
-  assert.deepEqual(before.dispatchPlans.map(dispatch => dispatch.purpose), ['code_behavior_analyze', 'code_behavior_review'], JSON.stringify(before.failure))
-  const rejected = before.dispatchPlans[1], removed = f.store.findResource(before.id, rejected.key)!
+  const failedPurposes = reviewFailure ? ['code_behavior_analyze', 'code_behavior_review'] : ['code_behavior_analyze']
+  assert.deepEqual(before.dispatchPlans.map(dispatch => dispatch.purpose), failedPurposes, JSON.stringify(before.failure))
+  const rejected = before.dispatchPlans.at(-1)!, removed = f.store.findResource(before.id, rejected.key)!
   const checkpoint = JSON.parse(readEvidence(f.input.source.commonDir, removed.checkpointRef).toString()) as NativeRunCheckpoint
   assert.equal(removed.phase, 'removed')
   assert.equal(checkpoint.status, 'failed'); assert.equal(checkpoint.stop?.nativeStopped, true)
@@ -1276,18 +1282,29 @@ else setTimeout(() => process.exit(0), 100)
   assert.equal(checkpoint.result, undefined)
   assert.equal(attempts.length, 2, JSON.stringify(before.failure))
   assert.equal(before.failure?.kind, 'repairable')
-  assert.deepEqual(after.dispatchPlans.filter(dispatch => dispatch.purpose.startsWith('code_behavior_')).map(dispatch => dispatch.purpose), ['code_behavior_review'])
+  assert.deepEqual(after.dispatchPlans.filter(dispatch => dispatch.purpose.startsWith('code_behavior_')).map(dispatch => dispatch.purpose), reviewFailure ? ['code_behavior_review'] : ['code_behavior_analyze', 'code_behavior_review'])
   const pendingAnalyses = readFileSync(reviews, 'utf8').trimEnd().split('\n').map(line => JSON.parse(line))
-  assert.equal(pendingAnalyses.length, 2); assert.ok(pendingAnalyses[0]); assert.deepEqual(pendingAnalyses[0], pendingAnalyses[1])
-  const accepted = after.dispatchPlans[0]
+  assert.equal(pendingAnalyses.length, reviewFailure ? 2 : 1); assert.ok(pendingAnalyses[0])
+  const accepted = after.dispatchPlans.find(dispatch => dispatch.purpose === 'code_behavior_review')!
   assert.notEqual(accepted.session?.sessionId, rejected.session?.sessionId)
   assert.equal(f.store.findResource(after.id, accepted.key)?.phase, 'removed')
   const operation = f.store.readOperation(f.operation.id)
   const priorEvidence = readSyncCheckpoints(f.store, operation, before).json.map(({ value }) => value as { reviewPassed?: boolean })
   assert.ok(priorEvidence.every(value => !value.reviewPassed))
-  const evidence = readSyncCheckpoints(f.store, operation, after).json.map(({ value }) => value as { reviewPassed?: boolean; traces?: { sessionId: string }[] })
+  const evidence = readSyncCheckpoints(f.store, operation, after).json.map(({ value }) => value as { reviewPassed?: boolean; traces?: { sessionId: string }[]; sourceKind?: string; approved?: boolean; oid?: string; fromAttemptId?: string; checkpointRef?: BlobRef })
+  const analyzer = (reviewFailure ? before : after).dispatchPlans[0]
   const analysis = evidence.find(value => value.reviewPassed)
-  assert.deepEqual(analysis?.traces?.map(trace => trace.sessionId), [before.dispatchPlans[0].session?.sessionId, accepted.session?.sessionId])
+  assert.deepEqual(analysis?.traces?.map(trace => trace.sessionId), [analyzer.session?.sessionId, accepted.session?.sessionId])
+  if (reviewFailure) assert.deepEqual(pendingAnalyses[0], pendingAnalyses[1])
+  else {
+    const seeds = readFileSync(analyses, 'utf8').trimEnd().split('\n').map(line => JSON.parse(line) as { source: string | null; draft: string })
+    assert.equal(seeds.length, 2); assert.equal(seeds[0].source, null); assert.equal(seeds[1].source, seeds[0].draft)
+    assert.notEqual(analyzer.session?.sessionId, rejected.session?.sessionId)
+    const priorDraft = evidence.find(value => value.sourceKind === 'git_draft' && value.approved === false && value.fromAttemptId === before.id)
+    assert.ok(priorDraft?.oid)
+    assert.deepEqual(priorDraft.checkpointRef, removed.checkpointRef)
+    assert.equal(readObject(f.input.source.commonDir, priorDraft.oid).toString('utf8'), seeds[0].draft)
+  }
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
   assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
   assert.equal(f.store.listJournals(f.operation.id).length, 0)
