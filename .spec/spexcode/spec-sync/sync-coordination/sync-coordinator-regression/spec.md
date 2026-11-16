@@ -95,6 +95,8 @@ Grok P0 独审退出超时回归使用真实 SQLite、Git、原生资源桥和�
 
 同一受控 CLI 另覆盖分析退出超时。新 attempt 在同 operation 逐字读取原 Git 草稿，重新提交新分析，并由另一个会话独审。原失败保持无批准、原草稿归档和作者源码/索引保持，结果证据只引用新分析和新独审。
 
+另一路让接续的分析会话仅返回正常回执并保持原 seed。核其 Native 资源成功结算、原 Git 书证没有新提交、程序不产生批准，原 attempt 留缺少新提交的失败类别。下一 attempt 逐字续原草稿，正常提交后才开启独审；最终分析不得引用上轮无提交的回执。
+
 Native P0单体与分区使用真实临时worktree、Git提交和SQLite检查点，分析/独审syntax或schema拒绝后沿同operation/原预算续原草稿，独审格式拒绝不重跑已校验分析。独审accept的change.id尾字抄错须先持久拒绝并关闭重开SQLite，下一attempt只新派review，原JSON/schema字节及OID、完整missing/unknown诊断与分析trace/OID保持；原accept不成为批准。完整合法业务repair仍按analyze→review→analyze→review续原分析，新review不带旧稿；三attempt兄弟已审原件及各自provenance保持。旧reserved只读派发不补协议，其认证Native错误/CAS原bytes通过原资源桥进入下一真实草稿seed，记录native-material provenance；旧原件保持，不造历史Git witness或业务批准。只读源码/tests及原index保持，回归在P1前明确停止，不调用真实模型、Docker或采纳。
 
 P0协议续审与语义repair的组合回归关闭重开SQLite：A1分析后review协议拒绝保ready，A2仅review合法业务repair清ready，下一attempt必须续原分析JSON并收到完整finding，再派新的独立review；连续两次协议续审同样逐跳回真实分析来源。额外重放旧版本已持久的较新搬运状态：旧ready及review稿仍来自A1，新review经真实Native资源桥cancelled/removed且无result/failure，再冷恢复仍选A2最新semantic resultRef，不能认证旧review为搬运attempt的新产物。同OID的schema/resultCommit/purpose或provenance失配，以及Native原operation/inputId或内部摘要自洽但业务inputDigest不同的来源，均不得取得继承分析稿资格。已accept兄弟精确复用原ref和真实两次调用，原source/tests/index、预算与零journal保持；受控Native桥及正常Git提交只证明编排/来源认证，不冒称真实模型、Docker或最终交付。

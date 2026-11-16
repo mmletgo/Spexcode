@@ -177,13 +177,17 @@ export function readStageDraft(commonDir: string, draft: ElaborationDraft, bindi
   return bytes.toString('utf8')
 }
 
+export class StageDraftCommitMissingError extends Error {}
+
 /** 先从真实正常提交保活草稿，再由调用者解析；syntax-invalid字节同样不能丢失。 */
 export function captureStageDraft(commonDir: string, seed: StageWorktree, result: Pick<ElaborationSessionResult, 'worktree'>, binding: StageDraftBinding): ElaborationDraft {
   const actual = verifyStageResult(commonDir, seed, result), entries = readTree(commonDir, actual.tree), entry = entries.find(entry => entry.path === binding.path)
-  if (seed.mode !== 'edit' || actual.headCommit === seed.baseCommit || !entry || entry.mode !== '100644'
+  const draftScopeError = '同步仅允许正常提交指定UTF8草稿文件，不得修改Spec、源码、测试或其他owner'
+  if (seed.mode !== 'edit' || !entry || entry.mode !== '100644'
     || binding.path !== `.spex-sync-drafts/${binding.ownerDigest}.json` || !/^[a-f0-9]{64}$/.test(binding.ownerDigest)
     || actualTreeDiff(readTree(commonDir, seed.tree), entries).some(change => change.path !== binding.path)
-    || !isUtf8Text(readObject(commonDir, entry.oid))) throw new Error('同步仅允许正常提交指定UTF8草稿文件，不得修改Spec、源码、测试或其他owner')
+    || !isUtf8Text(readObject(commonDir, entry.oid))) throw new Error(draftScopeError)
+  if (actual.headCommit === seed.baseCommit) throw new StageDraftCommitMissingError(draftScopeError)
   objectGit(commonDir, ['update-ref', `refs/spex-sync/drafts/${binding.ownerDigest}/${actual.headCommit}`, actual.headCommit])
   return { version: 'elaboration-draft-v1', ...binding, seed: { ...seed, mode: 'edit' }, resultCommit: actual.headCommit, resultTree: actual.tree, oid: entry.oid, errors: [] }
 }

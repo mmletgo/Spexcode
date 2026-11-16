@@ -1,4 +1,4 @@
-import { captureStageDraft, DRAFT_RECEIPT_INSTRUCTIONS, DRAFT_RECEIPT_SCHEMA, overlayStageTree, readStageDraft, stageWorktree, STAGE_READING_INSTRUCTIONS, type StageDraftBinding } from './stage-worktree.js'
+import { captureStageDraft, DRAFT_RECEIPT_INSTRUCTIONS, DRAFT_RECEIPT_SCHEMA, overlayStageTree, readStageDraft, StageDraftCommitMissingError, stageWorktree, STAGE_READING_INSTRUCTIONS, type StageDraftBinding } from './stage-worktree.js'
 import { posix } from 'node:path'
 import { parseCodeEntry, relationClaimsPath } from '@spexcode/spec-core'
 import { syncModel } from './model-selection.js'
@@ -36,6 +36,7 @@ export type CodeBehaviorApprovalBinding = { analysisSchemaDigest: string; change
 export const CODE_BEHAVIOR_GUIDANCE_VERSION = 'code-behavior-guidance-v8'
 export const LEGACY_CODE_BEHAVIOR_GUIDANCE_VERSION = 'code-behavior-guidance-v7'
 export const CODE_BEHAVIOR_FAILURE_STATUS = 'P0 行为校验未通过'
+export const CODE_BEHAVIOR_DRAFT_COMMIT_MISSING = 'behavior_draft_commit_missing'
 const CONTEXT_TRANSPORTS = ['git-json-v1', 'git-json-v2', 'git-json-v3', 'git-json-v4', 'git-json-v5', 'git-json-v6'] as const
 export type CodeBehaviorContextTransport = typeof CONTEXT_TRANSPORTS[number]
 export function isCodeBehaviorContextTransport(value: unknown): value is CodeBehaviorContextTransport {
@@ -721,7 +722,12 @@ SPEX_P0_REVIEW_PATHS`
     if (!result.sessionId || !result.threadId || !result.turnId || result.resultDigest !== contentHash(JSON.stringify(result.output))) reject('行为分析native身份/输出摘要不匹配')
     let output: unknown = structuredClone(result.output)
     if (draftMode) {
-      const draft = captureStageDraft(commonDir, seed!, result, binding)
+      let draft: ElaborationDraft
+      try { draft = captureStageDraft(commonDir, seed!, result, binding) }
+      catch (error) {
+        if (purpose !== 'code_behavior_analyze' || !(error instanceof StageDraftCommitMissingError) || outputErrors(result.output, DRAFT_RECEIPT_SCHEMA).length) throw error
+        throw Object.assign(error, { code: CODE_BEHAVIOR_DRAFT_COMMIT_MISSING, message: 'P0 分析没有在冻结 seed 之后新增草稿提交' })
+      }
       continuation!.drafts[purpose] = draft; delete continuation!.errors?.[purpose]; persist()
       if (outputErrors(result.output, DRAFT_RECEIPT_SCHEMA).length) reject('Native草稿summary回执不符合schema')
       try { output = JSON.parse(readStageDraft(commonDir, draft, binding)) as unknown }
