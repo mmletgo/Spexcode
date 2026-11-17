@@ -53,6 +53,8 @@ export type ElaborationInput = {
   citationRepairDiagnostics?: 'actionable-v1'
   /** 只读引用返修提示支持JS族本地默认导出。 */
   defaultExportCitation?: true
+  /** 新attempt冻结的Native提示投影，共用完全相同的草稿和运行诊断内容。 */
+  sharedDraftDiagnostics?: true
   /** 仅由分区执行器用于无源码writer的初始或既有纯父接口；结果不是完整P1或实现就绪。 */
   phase?: 'interface_seed'
   /** 原分区计划及后验纯父分类证据，只绑定本区来源，不授予写权限或完成度。 */
