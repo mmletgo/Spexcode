@@ -285,19 +285,29 @@ export function plantContractFilter(proj: string, payloads: ContractFilterPayloa
 // runs the filter and shows nothing; even `update-index --really-refresh` leaves it). The block-strip side of
 // a mode switch/backout leaves the same stale stat on the then-unfiltered path. `git add --renormalize`
 // re-cleans the file and refreshes the cached stat — run ONLY when the (possibly filtered) worktree already
-// EQUALS the index blob, so it is a pure stat refresh that can never stage a user's real unstaged edit (a
-// genuine edit keeps its honest `M`). Exported for dematerialize (the unplant side); plant calls it below.
+// EQUALS the index entry, so a genuine content or executable-mode edit keeps its honest `M`.
+// Managed writes follow aliases; refresh the canonical in-tree file whose stat the write actually changed.
+// Exported for dematerialize (the unplant side).
 // Best-effort: an unsettled stat is cosmetic noise, never corruption.
 export function settleIndexStat(proj: string, files: string[]): void {
   const env = { ...process.env }
   delete env.GIT_DIR; delete env.GIT_WORK_TREE; delete env.GIT_INDEX_FILE; delete env.GIT_OBJECT_DIRECTORY
+  const canonicalPaths = new Set(canonicalContractFilterBindings(proj).map(binding => binding.file))
+  const visited = new Set<string>()
   for (const f of files) {
-    const rel = relative(proj, f)
     try {
-      const indexBlob = git(['-C', proj, 'rev-parse', `:${rel}`]).trim()
+      const file = realpathSync(f)
+      const rel = relative(realpathSync(proj), file)
+      if (!canonicalPaths.has(rel) || visited.has(rel)) continue
+      visited.add(rel)
+      const stat = lstatSync(file)
+      if (!stat.isFile()) continue
+      const entry = git(['-C', proj, '--literal-pathspecs', 'ls-files', '--stage', '-z', '--', rel])
+        .match(/^(100644|100755) ([a-f0-9]+) 0\t[^\0]+\0$/)
+      if (entry?.[1] !== (stat.mode & 0o100 ? '100755' : '100644')) continue
       const filtered = execFileSync(gitBinary(env), ['-C', proj, 'hash-object', '--path', rel, '--stdin'],
-        { input: readFileSync(f), env, stdio: ['pipe', 'pipe', 'ignore'] }).toString().trim()
-      if (indexBlob === filtered) git(['-C', proj, 'add', '--renormalize', '--', rel])
+        { input: readFileSync(file), env, stdio: ['pipe', 'pipe', 'ignore'] }).toString().trim()
+      if (entry[2] === filtered) git(['-C', proj, '--literal-pathspecs', 'add', '--renormalize', '--', rel])
     } catch { /* best-effort */ }
   }
 }
