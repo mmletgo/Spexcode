@@ -483,7 +483,7 @@ test('cold ZCode cancellation verifies the original group and null-token MCP thr
     assert.deepEqual(await stopZCodeStructuredTurn(execution, 3000), { nativeStopped: true, acknowledged: false, nativeStatus: 'stopped' })
     await readerExited
     const before = readFileSync(join(root, 'plan.json'))
-    assert.deepEqual(await stopZCodeStructuredTurn(execution, 20), { nativeStopped: true, acknowledged: false, nativeStatus: 'stopped' })
+    assert.deepEqual(await stopZCodeStructuredTurn(execution, 3000), { nativeStopped: true, acknowledged: false, nativeStatus: 'stopped' })
     assert.deepEqual(readFileSync(join(root, 'plan.json')), before)
   } finally {
     if (processStartToken(child.pid)) { process.kill(-child.pid, 'SIGTERM'); await exited }
@@ -563,7 +563,7 @@ test('cold ZCode cancellation settles an unpublished worktree launch only after 
   assert.equal(existsSync(join(root, 'exit.json')), false)
 })
 
-for (const censusPhase of ['pre-exit', 'post-exit', 'late-protocol-error', 'startup-transient'] as const) test(`same-stack ZCode completion reuses its fresh stop proof while cold unsettled replay reobserves processes: ${censusPhase}`, { timeout: 30_000 }, async t => {
+for (const censusPhase of ['pre-exit', 'post-exit', 'late-protocol-error', 'startup-transient', 'mixed-message-protocol'] as const) test(`same-stack ZCode completion reuses its fresh stop proof while cold unsettled replay reobserves processes: ${censusPhase}`, { timeout: 30_000 }, async t => {
   const directory = mkdtempSync(join(tmpdir(), 'zcode-worktree-census-repro-'))
   t.after(() => rmSync(directory, { recursive: true, force: true }))
   const bin = join(directory, 'bin'), workspace = join(directory, 'workspace'), realm = join(directory, 'realm'), id = 'fixture'
@@ -589,6 +589,26 @@ else if(request.method==='session/events'){const events=[
 {type:'session.updated',payload:{providerId:model().providerId,modelId:model().modelId,toolCount:0}},
 {type:'turn.completed',payload:{inputId:send.inputId,resultType:'success',response,usage:{source:${JSON.stringify(censusPhase === 'pre-exit' ? 'provider' : 'estimate')},inputTokens:1100,outputTokens:134,cacheReadTokens:800,cacheWriteTokens:0,unretained:'SYNTHETIC_USAGE_METADATA'}}}
 ].map((event,index)=>({...event,eventId:'fixture-event-'+index,seq:index+1,sessionId:create.sessionId,turnId}));reply(request.id,{events})}
+else if(request.method==='session/messages'&&['startup-transient','mixed-message-protocol'].includes(${JSON.stringify(censusPhase)})){
+const message=(messageId,role,kind,selection,text,parentMessageId)=>({
+  info:{messageId,sessionId:create.sessionId,role,model:selection,semantics:{kind},...(parentMessageId?{parentMessageId}:{})},
+  parts:[{type:'text',partId:messageId+'-text',messageId,sessionId:create.sessionId,text}]
+});
+const assistantModel={providerId:model().providerId,modelId:model().modelId};
+const messages=[
+  message('fixture-user','user','user_prompt',model(),send.content),
+  message('fixture-intermediate','assistant','assistant_response',assistantModel,'Working…','fixture-user'),
+  message('fixture-final','assistant','assistant_response',assistantModel,response,'fixture-user')
+];
+if(${JSON.stringify(censusPhase)}==='mixed-message-protocol'){
+  messages[0]={info:{id:'fixture-user',sessionID:create.sessionId,role:'user',modelSelection:model(),anchor:{turnId},semantics:{kind:'user_prompt'}},parts:[{type:'text',text:send.content}]};
+  for(const entry of messages.slice(1)){
+    Object.assign(entry.info,{anchor:{turnId},...assistantModel,sessionId:'other-session',parentMessageId:'other-user',model:{...assistantModel,modelId:'other-model'}});
+    entry.parts[0].messageId='other-message';
+  }
+}
+reply(request.id,{hasMore:false,messages});
+}
 else if(request.method==='session/messages')reply(request.id,{hasMore:false,messages:[
 {info:{id:'fixture-user',sessionID:create.sessionId,role:'user',modelSelection:model(),anchor:{turnId},semantics:{kind:'user_prompt'}},parts:[{type:'text',text:send.content}]},
 {info:{id:'fixture-final',sessionID:create.sessionId,role:'assistant',providerId:model().providerId,modelId:model().modelId,anchor:{turnId},semantics:{kind:'assistant_response'}},parts:[{type:'text',text:response}]}
@@ -659,6 +679,13 @@ else throw new Error('unexpected fixture RPC')
       result => ({ result }),
       error => ({ error: error as { code?: string; message?: string } }),
     )
+    if (censusPhase === 'mixed-message-protocol') {
+      assert('error' in outcome, 'legacy aliases must not authenticate a mixed Native message history')
+      assert.deepEqual({ code: outcome.error.code, message: outcome.error.message }, { code: 'stale_result', message: 'ZCode worktree original native user/input differs' })
+      assert.equal(existsSync(exitPath), true)
+      assert.equal(existsSync(completedPath), false)
+      return
+    }
     if ('error' in outcome) {
       assert.equal(outcome.error.code, 'cancellation_pending')
       if (censusPhase !== 'post-exit') {
@@ -717,6 +744,40 @@ else throw new Error('unexpected fixture RPC')
     const stopObservations = readFileSync(stopObservationsPath, 'utf8').trim().split('\n').map(line => JSON.parse(line) as { nativeStopped: boolean })
     assert(censusPhase === 'pre-exit' ? stopObservations.length === 1 : [1, 2].includes(stopObservations.length))
     assert(stopObservations.every(observation => observation.nativeStopped))
+    if (censusPhase === 'startup-transient') {
+      const messagesPath = join(root, 'messages.json'), original = readFileSync(messagesPath, 'utf8')
+      const completed = readFileSync(completedPath, 'utf8')
+      chmodSync(messagesPath, 0o600)
+      const coldExecution = { ...replayExecution, state: 'completed' as const, resultDigest: createHash('sha256').update(outcome.result.text).digest('hex') }
+      const noDispatch = { onThread: async () => assert.fail('no new thread'), onTurn: async () => assert.fail('no new turn'), onNative: async () => assert.fail('no new native') }
+      assert.deepEqual(await zcodeStructuredTurn(realm, id, prompt, coldExecution, noDispatch, workspace), outcome.result)
+      const mismatches = [
+        [0, 'info', 'messageId', 'other-user'],
+        [0, 'info', 'sessionId', 'other-session'],
+        [0, 'info', 'model', { providerId: 'fixture', modelId: 'model', options: { reasoningLevel: 'max' } }],
+        [0, 'part', 'text', 'other prompt'],
+        [1, 'info', 'parentMessageId', 'other-user'],
+        [2, 'info', 'messageId', 'fixture-intermediate'],
+        [2, 'info', 'model', { providerId: 'fixture', modelId: 'other-model' }],
+        [2, 'part', 'sessionId', 'other-session'],
+        [2, 'part', 'messageId', 'other-message'],
+        [2, 'part', 'text', '{"ok":false}'],
+      ] as const
+      for (const [index, entry, key, value] of mismatches) {
+        const messages = JSON.parse(original) as Array<{ info: Record<string, unknown>; parts: Array<Record<string, unknown>> }>
+        const message = messages[index]
+        const target = entry === 'info' ? message.info : message.parts[0]
+        target[key] = value
+        if (index === 2 && key === 'messageId') message.parts[0].messageId = value
+        writeFileSync(messagesPath, JSON.stringify(messages))
+        const expected = index === 0 ? 'ZCode worktree original native user/input differs' : 'ZCode worktree final assistant identity/response differs'
+        await assert.rejects(zcodeStructuredTurn(realm, id, prompt, coldExecution, noDispatch, workspace), { code: 'stale_result', message: expected })
+        assert.equal(readFileSync(completedPath, 'utf8'), completed)
+      }
+      writeFileSync(messagesPath, original)
+      chmodSync(messagesPath, 0o400)
+      assert.equal(postExitCensusCalls, 0, 'completed replay verifies original history without sampling historical PIDs')
+    }
     rmSync(completedPath)
     coldReplayRequested = true
     await assert.rejects(zcodeStructuredTurn(realm, id, prompt, replayExecution, callbacks, workspace), error => {

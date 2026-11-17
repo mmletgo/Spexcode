@@ -76,7 +76,11 @@ else if(p.method==='session/close')reply({closed:true});else throw Error('unexpe
     for (const kind of ['new-read', 'legacy-read', 'edit'] as const) await t.test(kind, async () => {
       const workspace = join(directory, kind), realm = join(directory, 'realm'), root = join(realm, kind)
       mkdirSync(workspace)
-      const policy = structuredExecutionPolicy({ ...read, worktree: { ...read.worktree, mode: kind === 'edit' ? 'edit' : 'read' }, ...(kind === 'new-read' ? { zcodeToolPolicy: tools } : {}) })
+      const git = (args: string[]) => execFileSync('git', ['-C', workspace, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+      git(['init', '-q'])
+      git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture seed', '--allow-empty'])
+      const worktree = { baseCommit: git(['rev-parse', 'HEAD']), tree: git(['rev-parse', 'HEAD^{tree}']), mode: kind === 'edit' ? 'edit' as const : 'read' as const }
+      const policy = structuredExecutionPolicy({ ...read, worktree, ...(kind === 'new-read' ? { zcodeToolPolicy: tools } : {}) })
       let execution = { ...policy, version: 6, policy: 'native-worktree-v1' } as ZCodeStructuredExecution
       const result = await zcodeStructuredTurn(realm, kind, '原业务正文  ', execution, {
         onNative: async zcodeNative => { execution = { ...execution, zcodeNative } },
