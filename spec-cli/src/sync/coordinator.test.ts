@@ -816,8 +816,10 @@ for (const missingFinal of [false, true]) test(`P1失败summary的精确stopped 
   assert.equal(readObject(f.input.source.commonDir, round.draft!.oid).toString('utf8'), originalText)
 })
 
-for (const corruptBinding of ['none', 'native', 'candidate', 'pause-binding', 'pause-review'] as const) test(`P1越界独审跨多个attempt仅续同candidate审查，原generation按真实dispatch冷验 tamper=${corruptBinding}`, async t => {
-  const pauseBeforeAggregation = corruptBinding === 'pause-binding' || corruptBinding === 'pause-review'
+for (const corruptBinding of ['none', 'native', 'candidate', 'pause-binding', 'pause-review', 'pause-missing-review', 'pause-native', 'pause-native-record'] as const) test(`P1越界独审跨多个attempt仅续同candidate审查，原generation按真实dispatch冷验 tamper=${corruptBinding}`, async t => {
+  const pauseBeforeAggregation = corruptBinding.startsWith('pause-')
+  const nativeResources = corruptBinding === 'pause-native' || corruptBinding === 'pause-native-record'
+  const acceptedAttempt = nativeResources ? 2 : 3
   const historyPath = '.spec/project/frozen-history/spec.md'
   const history = '---\ntitle: 冻结历史说明\ncontract-schema: sync-v1\n---\n## raw source\n\n保留已接受的技术登记。\n\n## expanded spec\n\n旧轮进度5/5，实现待写。\n\n### VERIFY\n\n| id | command | cwd | timeout-ms |\n| --- | --- | --- | --- |\n| VERIFY-HISTORY-01 | ["node","--version"] | . | 1000 |\n'
   const verification = parseContract({ nodeId: 'export-contract', path: contractPath, source: original }).contract!.items.find(item => item.kind === 'VERIFY')!
@@ -825,6 +827,11 @@ for (const corruptBinding of ['none', 'native', 'candidate', 'pause-binding', 'p
   const environment = { version: 'trusted-test-v1' as const, image: 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392', platform: 'linux/arm64' as const, memoryBytes: 128 * 1024 * 1024, cpus: 1, pidsLimit: 64, scratchBytes: 16 * 1024 * 1024, logBytes: 128 * 1024 }
   const verifications = [{ definition: { id: verification.id, command: verification.command, cwd: verification.cwd, timeoutMs: verification.timeoutMs }, environment }, { definition: { id: 'VERIFY-HISTORY-01', command: ['node', '--version'], cwd: '.', timeoutMs: 1000 }, environment }]
   const f = await fixture(t, { maxAttempts: 3, maxCalls: 12, maxRepairs: 2, timeoutMs: 120000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1', verifications, targets: [{ nodeId: 'export-contract', path: contractPath }, { nodeId: 'frozen-history', path: historyPath }] }, undefined, 'code', 'claude:default', false, { [historyPath]: history })
+  if (nativeResources) {
+    const previousCwd = process.cwd()
+    process.chdir(f.root)
+    t.after(() => process.chdir(previousCwd))
+  }
   const calls: ElaborationSessionRequest[] = [], snapshots: { ref: string; value: ElaborationResult }[] = []
   const checkpoint = f.store.checkpoint.bind(f.store)
   f.store.checkpoint = (fence, ref) => {
@@ -834,9 +841,10 @@ for (const corruptBinding of ['none', 'native', 'candidate', 'pause-binding', 'p
       const value = structuredClone(snapshots[0].value); value.rounds[0].candidateDigest = contentHash('corrupted saved candidate digest')
       ref = writeEvidence(f.input.source.commonDir, { ...saved, resultRef: writeEvidence(f.input.source.commonDir, value) })
     }
-    if (corruptBinding === 'pause-review' && saved.stage === 'elaboration' && snapshots.length === 1) {
+    if ((corruptBinding === 'pause-review' || corruptBinding === 'pause-missing-review') && saved.stage === 'elaboration' && snapshots.length === 1) {
       const value = structuredClone(snapshots[0].value)
-      value.rounds[0].traces.find(trace => trace.purpose === 'elaboration_review')!.resultDigest = contentHash('invalid saved review trace')
+      if (corruptBinding === 'pause-review') value.rounds[0].traces.find(trace => trace.purpose === 'elaboration_review')!.resultDigest = contentHash('invalid saved review trace')
+      else value.rounds[0].review = null
       ref = writeEvidence(f.input.source.commonDir, { ...saved, resultRef: writeEvidence(f.input.source.commonDir, value) })
     }
     const result = checkpoint(fence, ref)
@@ -852,15 +860,41 @@ for (const corruptBinding of ['none', 'native', 'candidate', 'pause-binding', 'p
   f.store.startGeneration = () => { throw Object.assign(new Error('在P1完成后停止，不运行P2或Docker'), { code: 'unsupported' }) }
   f.options.runner = async request => {
     calls.push(request)
-    const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!), dispatch = attempt.dispatchPlans.find(item => item.key === request.requestKey)!
+    const operation = f.store.readOperation(f.operation.id), attempt = f.store.readAttempt(operation.currentAttemptId!), dispatch = attempt.dispatchPlans.find(item => item.key === request.requestKey)!
     const identity = { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `scope-cold-${request.requestKey}`, turnId: 'turn' }
+    const native = nativeResources && request.purpose.startsWith('elaboration_')
+    const branch = `scope-cold-native-${identity.sessionId}`
+    const checkout = (workspace: string) => f.git('worktree', 'add', ...(native ? ['-b', branch] : ['--detach']), workspace, request.worktree!.baseCommit)
+    const complete = (output: unknown, workspace?: string) => {
+      const worktree = workspace ? nativeWorktreeResult(workspace, request.worktree!) : undefined
+      const result = { ...identity, output, resultDigest: contentHash(JSON.stringify(output)), ...(worktree ? { worktree } : {}) }
+      if (!native) return Promise.resolve(result)
+      const fence = { operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }
+      return createAttemptRunner(f.store, fence, { pollMs: 2, runtime: { readRecord, cancel: cancelStructuredSession, run: async actual => {
+        const seed = actual.worktree!, execution = structuredExecutionPolicy(actual), prompt = nativeWorktreePrompt(actual.prompt, seed)
+        configuredSessionApplication().createSession({ sessionId: identity.sessionId, status: 'awaiting' })
+        writeRecord({
+          session: identity.sessionId, governed: true, worktreePath: workspace!, base: seed.baseCommit, forkCommit: seed.baseCommit, branch,
+          title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(),
+          harness: 'claude-headless', harnessSessionId: identity.threadId, runtimeStartToken: null, status: 'awaiting', stopped: false,
+          archived: false, closedAt: null, launcher: null, launchCmd: null, launchOwner: null, createRequestId: contentHash(actual.sessionCreateKey!),
+          createPayloadHash: contentHash(JSON.stringify({ prompt, parent: null, launcher: null, base: seed.baseCommit, structuredExecution: execution })),
+          structuredExecution: { ...execution, threadId: identity.threadId, turnId: identity.turnId,
+            turnStartRequested: true, state: 'completed', output, resultDigest: result.resultDigest, resultWorktree: worktree },
+        })
+        return result
+      } } })(request)
+    }
     if (request.purpose === 'elaboration_review') {
       const affectedId = pauseBeforeAggregation ? 'export-contract' : 'VERIFY-HISTORY-01'
-      const output = attempt.number < 3 ? { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ code: 'old-history-prose', kind: 'repair', message: '未变owner旧5/5/实现待写正文需要更新7/7，条款无需改', affectedIds: [affectedId], evidence: `${historyPath}:14旧prose`, decision: '仅修冻结owner进度叙述，业务行和实现不变' }] } : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
-      return { ...identity, output, resultDigest: contentHash(JSON.stringify(output)) }
+      const output = attempt.number < acceptedAttempt ? { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ code: 'old-history-prose', kind: 'repair', message: '未变owner旧5/5/实现待写正文需要更新7/7，条款无需改', affectedIds: [affectedId], evidence: `${historyPath}:14旧prose`, decision: '仅修冻结owner进度叙述，业务行和实现不变' }] } : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+      if (!nativeResources) return complete(output)
+      const workspace = join(f.parent, `scope-cold-review-${calls.length}`)
+      checkout(workspace)
+      return complete(output, workspace)
     }
-    const seed = request.worktree!, draftPath = /草稿文件=([^\s；]+)/.exec(request.prompt)![1], workspace = join(f.parent, `scope-cold-${calls.length}`)
-    f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
+    const draftPath = /草稿文件=([^\s；]+)/.exec(request.prompt)![1], workspace = join(f.parent, `scope-cold-${calls.length}`)
+    checkout(workspace)
     let output: unknown
     if (request.purpose === 'code_behavior_analyze') {
       const task = nativeTask(request, f.input.source.commonDir) as { requiredChangedPaths: string[] }
@@ -875,7 +909,7 @@ for (const corruptBinding of ['none', 'native', 'candidate', 'pause-binding', 'p
     mkdirSync(join(workspace, draftPath, '..'), { recursive: true }); writeFileSync(join(workspace, draftPath), JSON.stringify(output))
     execFileSync('git', ['-C', workspace, 'add', draftPath], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '--allow-empty', '-m', 'scope cold fixture draft'], { stdio: 'pipe' })
     const receipt = { summary: '提交原草稿' }
-    return { ...identity, output: receipt, resultDigest: contentHash(JSON.stringify(receipt)), worktree: nativeWorktreeResult(workspace, seed) }
+    return complete(receipt, workspace)
   }
   let result = await runSyncOperation(f.store, f.operation.id, f.options)
   if (pauseBeforeAggregation) {
@@ -883,18 +917,28 @@ for (const corruptBinding of ['none', 'native', 'candidate', 'pause-binding', 'p
     const [paused] = f.store.listAttempts(f.operation.id)
     assert.equal(paused.status, 'superseded')
     assert.equal(paused.failure, null)
+    if (nativeResources) {
+      const dispatch = paused.dispatchPlans.find(item => item.purpose === 'elaboration_review')!
+      const resource = f.store.findResource(paused.id, dispatch.key)!
+      assert.equal(resource.phase, 'removed')
+      assert.equal((JSON.parse(readEvidence(f.input.source.commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint).status, 'completed')
+      if (corruptBinding === 'pause-native-record') {
+        const record = readRecord(dispatch.session!.sessionId)!
+        writeRecord({ ...record, createPayloadHash: contentHash('invalid canonical Native payload') })
+      }
+    }
     f.store.requestControl(f.operation.id, 'run')
     result = await runSyncOperation(f.store, f.operation.id, f.options)
   }
   assert.equal(result.status, 'unsupported', JSON.stringify({ failure: result.failure, snapshots: snapshots.map(item => ({ status: item.value.status, failure: item.value.failure, findings: item.value.rounds.flatMap(round => round.findings) })) }))
   assert.equal(calls.filter(call => call.purpose === 'elaboration_generate').length, 1)
-  if (corruptBinding === 'native' || corruptBinding === 'candidate' || corruptBinding === 'pause-review') {
+  if (['native', 'candidate', 'pause-review', 'pause-missing-review', 'pause-native-record'].includes(corruptBinding)) {
     assert.equal(result.failure?.code, 'review_retry_binding')
     assert.equal(calls.filter(call => call.purpose === 'elaboration_review').length, 1, '原Native或candidate绑定失配后新attempt零派发')
     return
   }
-  assert.equal(calls.filter(call => call.purpose === 'elaboration_review').length, 3)
-  assert.equal(snapshots.length, 3); assert.ok(snapshots[2].value.reviewPassed)
+  assert.equal(calls.filter(call => call.purpose === 'elaboration_review').length, acceptedAttempt)
+  assert.equal(snapshots.length, acceptedAttempt); assert.ok(snapshots.at(-1)!.value.reviewPassed)
   for (const snapshot of snapshots.slice(1)) {
     assert.equal(snapshot.value.candidateDigest, snapshots[0].value.candidateDigest)
     assert.deepEqual(snapshot.value.rounds[0].traces[0], snapshots[0].value.rounds[0].traces[0])
@@ -902,7 +946,7 @@ for (const corruptBinding of ['none', 'native', 'candidate', 'pause-binding', 'p
   }
   assert.ok(snapshots[0].value.rounds[0].findings.some(issue => issue.code === (pauseBeforeAggregation ? 'review_binding' : 'review_scope')))
   assert.equal(snapshots[0].value.rounds[0].review!.verdict, 'repair')
-  assert.equal(snapshots[2].value.changes.find(change => change.path === historyPath)!.source, history)
+  assert.equal(snapshots.at(-1)!.value.changes.find(change => change.path === historyPath)!.source, history)
   assert.equal(calls.some(call => call.purpose === 'code_generate'), false); assert.deepEqual(f.store.listJournals(f.operation.id), [])
 })
 

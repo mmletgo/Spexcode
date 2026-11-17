@@ -2621,14 +2621,17 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           }
           if (prior.failure?.kind !== 'repairable') {
             const errors = round?.findings.filter(issue => issue.severity === 'error') ?? []
-            if (!newerGeneration && source && round?.draft && round.review && failure && prior.status === 'superseded' && !prior.failure
+            if (!newerGeneration && source && round?.draft && failure && prior.status === 'superseded' && !prior.failure
               && source.result.structurePassed && priorElaborationInputMatches(prior, binding)
               && errors.length && errors.every(issue => issue.code === 'review_scope' || issue.code === 'review_binding')
-              && !store.listResources(prior.id).some(resource => resource.phase !== 'removed')
-              && renderedElaborationSource(operation, prior, key)) {
-              const review = authenticatedDraftResult(store, operation, prior, `${requestKey}:${round.index}:elaboration_review`, 'elaboration_review')
+              && !store.listResources(prior.id).some(resource => resource.phase !== 'removed')) {
+              const scope = frozenAnalysisScope.getStore()!
+              const review = frozenAnalysisScope.run({ ...scope, readNativeRecord: readRecord }, () => {
+                if (!renderedElaborationSource(operation, prior, key)) return null
+                return authenticatedDraftResult(store, operation, prior, `${requestKey}:${round.index}:elaboration_review`, 'elaboration_review')
+              })
               const trace = round.traces.find(trace => trace.purpose === 'elaboration_review'), request = review?.request
-              if (!review?.result || !trace || trace.sessionId !== review.result.sessionId || trace.threadId !== review.result.threadId
+              if (!round.review || !review?.result || !trace || trace.sessionId !== review.result.sessionId || trace.threadId !== review.result.threadId
                 || trace.turnId !== review.result.turnId || trace.resultDigest !== review.result.resultDigest
                 || canonical(round.reviewOutput) !== canonical(review.result.output)
                 || request && (trace.inputDigest !== request.inputDigest || request.inputDigest !== elaborationNativeInputDigest(inputDigest, request)
