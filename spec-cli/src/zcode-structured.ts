@@ -393,7 +393,10 @@ function verifyWorktreeCompletion(plan: NativePlan, model: NativeModel, prompt: 
   const userId = starts[0].payload.messageId
   if (users.length !== 1 || !user.info || typeof userId !== 'string' || !userId || text(user) !== zcodeExecutionPrompt(prompt, execution)) throw new StructuredSessionError('stale_result', 'ZCode worktree original native user/input differs')
   const assistants = messages.filter(message => message.info?.role === 'assistant' && (message.info.semantics as Record<string, unknown>)?.kind === 'assistant_response')
-  if ('messageId' in user.info || 'sessionId' in user.info) {
+  const usesCurrentMessageIdentity = ({ info, parts }: NativeMessage) =>
+    !!info && ('messageId' in info || 'sessionId' in info || 'parentMessageId' in info)
+    || parts?.some(part => 'messageId' in part || 'sessionId' in part) === true
+  if (usesCurrentMessageIdentity(user) || assistants.some(usesCurrentMessageIdentity)) {
     const messageIds = new Set<string>()
     const bindMessage = ({ info, parts }: NativeMessage): boolean => {
       const id = info?.messageId

@@ -563,7 +563,7 @@ test('cold ZCode cancellation settles an unpublished worktree launch only after 
   assert.equal(existsSync(join(root, 'exit.json')), false)
 })
 
-for (const censusPhase of ['pre-exit', 'post-exit', 'late-protocol-error', 'startup-transient'] as const) test(`same-stack ZCode completion reuses its fresh stop proof while cold unsettled replay reobserves processes: ${censusPhase}`, { timeout: 30_000 }, async t => {
+for (const censusPhase of ['pre-exit', 'post-exit', 'late-protocol-error', 'startup-transient', 'mixed-message-protocol'] as const) test(`same-stack ZCode completion reuses its fresh stop proof while cold unsettled replay reobserves processes: ${censusPhase}`, { timeout: 30_000 }, async t => {
   const directory = mkdtempSync(join(tmpdir(), 'zcode-worktree-census-repro-'))
   t.after(() => rmSync(directory, { recursive: true, force: true }))
   const bin = join(directory, 'bin'), workspace = join(directory, 'workspace'), realm = join(directory, 'realm'), id = 'fixture'
@@ -589,17 +589,25 @@ else if(request.method==='session/events'){const events=[
 {type:'session.updated',payload:{providerId:model().providerId,modelId:model().modelId,toolCount:0}},
 {type:'turn.completed',payload:{inputId:send.inputId,resultType:'success',response,usage:{source:${JSON.stringify(censusPhase === 'pre-exit' ? 'provider' : 'estimate')},inputTokens:1100,outputTokens:134,cacheReadTokens:800,cacheWriteTokens:0,unretained:'SYNTHETIC_USAGE_METADATA'}}}
 ].map((event,index)=>({...event,eventId:'fixture-event-'+index,seq:index+1,sessionId:create.sessionId,turnId}));reply(request.id,{events})}
-else if(request.method==='session/messages'&&${JSON.stringify(censusPhase)}==='startup-transient'){
+else if(request.method==='session/messages'&&['startup-transient','mixed-message-protocol'].includes(${JSON.stringify(censusPhase)})){
 const message=(messageId,role,kind,selection,text,parentMessageId)=>({
   info:{messageId,sessionId:create.sessionId,role,model:selection,semantics:{kind},...(parentMessageId?{parentMessageId}:{})},
   parts:[{type:'text',partId:messageId+'-text',messageId,sessionId:create.sessionId,text}]
 });
 const assistantModel={providerId:model().providerId,modelId:model().modelId};
-reply(request.id,{hasMore:false,messages:[
+const messages=[
   message('fixture-user','user','user_prompt',model(),send.content),
   message('fixture-intermediate','assistant','assistant_response',assistantModel,'Working…','fixture-user'),
   message('fixture-final','assistant','assistant_response',assistantModel,response,'fixture-user')
-]});
+];
+if(${JSON.stringify(censusPhase)}==='mixed-message-protocol'){
+  messages[0]={info:{id:'fixture-user',sessionID:create.sessionId,role:'user',modelSelection:model(),anchor:{turnId},semantics:{kind:'user_prompt'}},parts:[{type:'text',text:send.content}]};
+  for(const entry of messages.slice(1)){
+    Object.assign(entry.info,{anchor:{turnId},...assistantModel,sessionId:'other-session',parentMessageId:'other-user',model:{...assistantModel,modelId:'other-model'}});
+    entry.parts[0].messageId='other-message';
+  }
+}
+reply(request.id,{hasMore:false,messages});
 }
 else if(request.method==='session/messages')reply(request.id,{hasMore:false,messages:[
 {info:{id:'fixture-user',sessionID:create.sessionId,role:'user',modelSelection:model(),anchor:{turnId},semantics:{kind:'user_prompt'}},parts:[{type:'text',text:send.content}]},
@@ -671,6 +679,13 @@ else throw new Error('unexpected fixture RPC')
       result => ({ result }),
       error => ({ error: error as { code?: string; message?: string } }),
     )
+    if (censusPhase === 'mixed-message-protocol') {
+      assert('error' in outcome, 'legacy aliases must not authenticate a mixed Native message history')
+      assert.deepEqual({ code: outcome.error.code, message: outcome.error.message }, { code: 'stale_result', message: 'ZCode worktree original native user/input differs' })
+      assert.equal(existsSync(exitPath), true)
+      assert.equal(existsSync(completedPath), false)
+      return
+    }
     if ('error' in outcome) {
       assert.equal(outcome.error.code, 'cancellation_pending')
       if (censusPhase !== 'post-exit') {

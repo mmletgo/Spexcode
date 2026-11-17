@@ -76,7 +76,7 @@ ZCode 启动在固定 plan 与真实 detached receipt 落盘后立即发布原 P
 
 明确的 version6/native-worktree-v1 使用创建记录的真实 worktree 作为 workspace/cwd，read 用原生 plan、edit 用原生 build，保留正常内置工具，不设 frozen MCP/只读 Seatbelt 或唯一工具限制。权限请求仅对当前 session 一次批准正常读/搜索/shell，文件修改只批准 edit 模式的本 worktree，且不写 permissionUpdates、不建立读取内容/路径白名单。仅 schema 控制最终 JSON；原 provider/model/effort 快照、唯一 session/input/query/turn、原始 send/messages/events、精确成功终态、idle/close、exit0 与整个自有进程停止仍逐项核实。完成及冷复用不生成或消费 frozenReadProof，也不要求分块读取及逐字 API 消费；旧 frozen policy 及工具门不变。
 
-v6 worktree 的当前原生消息协议以唯一成功轮次的 `turn.started.messageId` 核 `user_prompt.messageId`，同一 session 内所有 `assistant_response` 的 `parentMessageId` 都必须指向该 user；参与核验的消息 ID 非空且唯一，每个 part 的原生 session/message 身份须归属该消息。用户 `model` 包括精确 options，最后一条 assistant 的 `model` 与真实 provider/model 相同；原始 user 文本和成功 terminal 响应逐字核对。旧原生消息协议仍以原保存的 `anchor.turnId`、`sessionID` 和 modelSelection 认证；缺失当前字段时不以旧字段替代。实时结算与冷重放核原始消息，证据不改写。
+v6 worktree 的当前原生消息协议以唯一成功轮次的 `turn.started.messageId` 核 `user_prompt.messageId`，同一 session 内所有 `assistant_response` 的 `parentMessageId` 都必须指向该 user；参与核验的消息 ID 非空且唯一，每个 part 的原生 session/message 身份须归属该消息。用户 `model` 包括精确 options，最后一条 assistant 的 `model` 与真实 provider/model 相同；原始 user 文本和成功 terminal 响应逐字核对。用户或任一 assistant 消息及其 part 出现当前原生 session/message/parent 身份字段时，整段相关历史以当前消息协议认证；混合或残缺历史不得用旧字段完成认证。纯旧原生消息协议仍以原保存的 `anchor.turnId`、`sessionID` 和 modelSelection 认证。实时结算与冷重放核原始消息，证据不改写。
 
 macOS 的新 worktree 版本探测与 app-server 子进程沿 [[native-worktree-runtime]] 保护实际共享 Git config 及其锁文件；仍使用原生 CLI、同一参数与本机配置。冻结只读和历史结果的认证保持原协议。
 
