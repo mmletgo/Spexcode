@@ -1015,7 +1015,8 @@ for (const partitioned of [false, true]) for (const keepRefactor of [false, true
   assert.equal(f.store.listJournals(f.operation.id).length, 0)
 })
 
-for (const partitioned of [false, true]) for (const invalidBinding of partitioned ? ['', 'missing-ref', 'foreign-owner'] : ['']) test(`rendered P1旧短errors经真实coordinator传完整诊断 ${partitioned ? 'partition' : 'whole'} ${invalidBinding}`, async t => {
+for (const [partitioned, variant] of [[false, 'legacy'], [true, 'legacy'], [true, 'shared'], [true, 'missing-ref'], [true, 'foreign-owner']] as const) test(`rendered P1经真实coordinator传完整诊断 ${partitioned ? 'partition' : 'whole'} ${variant}`, async t => {
+  const invalidBinding = variant === 'missing-ref' || variant === 'foreign-owner'
   const plan = partitioned ? { version: 'sync-coordinator-v2' as const, direction: 'code_to_spec' as const, sourcePaths: ['src'], writePaths: ['.spec'], partitionPolicy: { version: 'sync-partition-policy-v1' as const, maxReadBytes: 524288, maxParallel: 1 }, commitTrigger: { before: null, paths: ['src/export.js'] } } : {}
   const f = await fixture(t, { maxAttempts: 2, maxCalls: 12, maxRepairs: 1, timeoutMs: 120_000 }, false, original, 'project', original, { ...plan, agentWorkflow: 'native-worktree-v1' }, undefined, 'code', 'claude:MiniMax-M3.1-Flash', partitioned)
   const originalRunner = f.options.runner!, calls: ElaborationSessionRequest[] = []
@@ -1028,9 +1029,9 @@ for (const partitioned of [false, true]) for (const invalidBinding of partitione
       const round = saved.rounds.at(-1)!
       assert.ok(round.candidate); assert.ok(round.draft); assert.equal(saved.status, 'exhausted')
       const findings = structuredClone(round.findings)
-      if (invalidBinding === 'missing-ref') delete saved.partitionBinding!.analysisRef
-      if (invalidBinding === 'foreign-owner') saved.partitionBinding!.partitionId = 'another-owner'
-      round.draft.errors = round.draft.errors.map(({ code, message }) => ({ code, message }))
+      if (variant === 'missing-ref') delete saved.partitionBinding!.analysisRef
+      if (variant === 'foreign-owner') saved.partitionBinding!.partitionId = 'another-owner'
+      if (variant !== 'shared') round.draft.errors = round.draft.errors.map(({ code, message }) => ({ code, message }))
       const oldRef = writeEvidence(f.input.source.commonDir, saved)
       historic = { ref: oldRef, bytes: readEvidence(f.input.source.commonDir, oldRef), findings }
       return checkpoint(fence, { ...writeEvidence(f.input.source.commonDir, { ...wrapper, resultRef: oldRef }), artifacts: [{ kind: 'json', ref: oldRef }, ...syncCheckpointArtifacts(saved, oldRef)] })
@@ -1051,9 +1052,11 @@ for (const partitioned of [false, true]) for (const invalidBinding of partitione
       if (attempt.number === 1) generated.changes[0].tables.RULE.find(row => row.id === (invalidBinding ? 'RULE-EXPORT-05' : 'RULE-EXPORT-06'))!.basis = '无关P1漂移'
       else {
         assert.ok(historic)
-        assert.equal(request.prompt.includes(`"runtimeFindings":${JSON.stringify(historic.findings)}`), !invalidBinding, '缺refs或非本owner不打开原round诊断')
+        assert.equal(request.prompt.includes(`"runtimeFindings":${JSON.stringify(historic.findings)}`), !invalidBinding && variant !== 'shared')
+        assert.equal(request.prompt.includes('"runtimeFindingsRef":"priorDraft.errors"'), variant === 'shared')
+        if (variant === 'shared') assert.ok(request.prompt.includes(`"errors":${JSON.stringify(historic.findings)}`), '引用同序完整原诊断')
         assert.ok(historic.findings.some(finding => finding.path === contractPath && finding.itemId === (invalidBinding ? 'RULE-EXPORT-05' : 'RULE-EXPORT-06') && finding.severity === 'error'))
-        if (invalidBinding === 'foreign-owner') assert.equal(existsSync(join(workspace, path)), false)
+        if (variant === 'foreign-owner') assert.equal(existsSync(join(workspace, path)), false)
         else assert.ok(readFileSync(join(workspace, path), 'utf8').includes('无关P1漂移'))
       }
       produced = { sessionId: '', threadId: '', turnId: '', output: adaptElaborationNativeOutput(request, generated), resultDigest: '' }
@@ -1069,7 +1072,8 @@ for (const partitioned of [false, true]) for (const invalidBinding of partitione
   assert.deepEqual(readEvidence(f.input.source.commonDir, historic!.ref), historic!.bytes)
   const first = f.store.listAttempts(f.operation.id)[0]
   const source = JSON.parse(historic!.bytes.toString()) as ElaborationResult
-  assert.ok(source.rounds[0].draft!.errors.every(error => !('path' in error) && !('severity' in error)))
+  if (variant === 'shared') assert.deepEqual(source.rounds[0].draft!.errors, historic!.findings)
+  else assert.ok(source.rounds[0].draft!.errors.every(error => !('path' in error) && !('severity' in error)))
   assert.equal(source.prior, null); assert.equal(first.status, 'superseded')
   assert.equal(calls.filter(call => call.purpose === 'code_generate').length, 0)
 })
@@ -7138,7 +7142,7 @@ for (const [guidance, purpose] of [
   const commonDir = f.input.source.commonDir
   const expectedProtocol = { version: 'elaboration-draft-v1',
     ...(guidance === 'absent' ? {} : { generationGuidance: guidance }),
-    ...(guidance === ELABORATION_GENERATION_GUIDANCE ? { compactSealDiagnostics: true, citationRepairDiagnostics: 'actionable-v1', defaultExportCitation: true } : {}),
+    ...(guidance === ELABORATION_GENERATION_GUIDANCE ? { compactSealDiagnostics: true, citationRepairDiagnostics: 'actionable-v1', defaultExportCitation: true, sharedDraftDiagnostics: true } : {}),
   }
   if (guidance !== ELABORATION_GENERATION_GUIDANCE) {
     const value = expectedProtocol, resultRef = writeEvidence(commonDir, value)

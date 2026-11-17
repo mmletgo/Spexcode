@@ -453,6 +453,44 @@ test('历史失败原件仅复制为非权威草稿材料，不在prompt重答JS
   assert.equal(result.status, 'complete'); assert.equal(JSON.stringify(material), original); assert.equal(result.repairDiagnostics, undefined)
 })
 
+test('新P1请求单次传送同一组完整草稿和运行发现，历史请求继续按原绑定重放', async t => {
+  const f = await fixture(t), invalid = draftRows(f.input.targets[0].source!)
+  invalid.changes[0].tables.REQ[0].goal = '擅自改变导出业务目标'
+  invalid.changes[0].tables.RULE[0].constraint = '擅自改变提交权限'
+  const originalDraft = JSON.stringify(invalid), input = { ...f.input, mode: 'preserve_business' as const, maxRepairs: 0 }
+  const failed = await elaborate(input, { runner: f.run(() => originalDraft) })
+  const round = failed.rounds[0], draft = round.draft!, resultRef = writeEvidence(f.commonDir, failed)
+  const originalResult = readEvidence(f.commonDir, resultRef)
+  assert.ok(round.findings.length >= 2)
+  assert.deepEqual(draft.errors, round.findings)
+  const repairDiagnostics = { requestKey: input.requestKey, inputDigest: failed.inputDigest, resultRef, failure: failed.failure!, round }
+  const run = f.run((_request, workspace, draftPath) => {
+    assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), originalDraft)
+    return JSON.stringify(rows)
+  })
+  const runRepair = (repairInput: ElaborationInput) => elaborate(repairInput, { draft, repairDiagnostics, runner: run })
+  const historical = { ...input, requestKey: 'historical-repair' }
+  const historicalResult = await runRepair(historical), historicalRequest = f.requests[1]
+  const current: ElaborationInput = { ...historical, requestKey: 'new-repair', sharedDraftDiagnostics: true }
+  const repaired = await runRepair(current), currentRequest = f.requests[3]
+  const binding = { binding: draft, worktree: currentRequest.worktree!, inputDigest: repaired.inputDigest }
+  assert.equal(repaired.status, 'complete')
+  assert.equal(repaired.inputDigest, historicalResult.inputDigest)
+  assert.notEqual(currentRequest.inputDigest, historicalRequest.inputDigest)
+  const oldDiagnostics = elaborationMaterialContext(f.commonDir, historicalRequest, binding)!.diagnostics
+  const { runtimeFindings, ...diagnostics } = oldDiagnostics
+  assert.deepEqual(runtimeFindings, round.findings)
+  assert.deepEqual(elaborationMaterialContext(f.commonDir, currentRequest, binding)!.diagnostics, {
+    ...diagnostics, runtimeFindingsRef: 'priorDraft.errors',
+  })
+  assert.ok(Buffer.byteLength(currentRequest.prompt) < Buffer.byteLength(historicalRequest.prompt))
+  await runRepair(historical)
+  await runRepair(current)
+  assert.deepEqual({ ...f.requests[5], signal: undefined }, { ...historicalRequest, signal: undefined })
+  assert.deepEqual({ ...f.requests[7], signal: undefined }, { ...currentRequest, signal: undefined })
+  assert.deepEqual(readEvidence(f.commonDir, resultRef), originalResult)
+})
+
 test('草稿续修保留同码同文的具体finding定位和严重级别，历史短错误不改写', async t => {
   const f = await fixture(t), invalid = draftRows(f.input.targets[0].source!)
   invalid.changes[0].tables.REQ[0].goal = '擅自改变导出业务目标'
@@ -467,7 +505,7 @@ test('草稿续修保留同码同文的具体finding定位和严重级别，历�
   assert.deepEqual(checkpoint.draft!.errors, checkpoint.findings, '保存原finding，不丢path/itemId/severity')
   const legacyDraft = { ...structuredClone(checkpoint.draft!), errors: checkpoint.findings.map(({ code, message }) => ({ code, message })) }
   const legacyBytes = JSON.stringify(legacyDraft), inputDigest = failed.inputDigest
-  const restored = await elaborate({ ...input, requestKey: 'diagnostic-next-attempt' }, {
+  const restored = await elaborate({ ...input, requestKey: 'diagnostic-next-attempt', sharedDraftDiagnostics: true }, {
     draft: legacyDraft,
     repairDiagnostics: { requestKey: input.requestKey, inputDigest, resultRef: writeEvidence(f.commonDir, failed), failure: failed.failure!, round: checkpoint },
     runner: f.run((request, workspace, draftPath) => {
