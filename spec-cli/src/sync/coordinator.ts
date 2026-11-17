@@ -397,6 +397,10 @@ function elaborationGenerationSource(store: SyncStore, owner: SyncOperation, pri
   return null
 }
 
+function elaborationNativeInputDigest(inputDigest: string, { purpose, prompt, schema, worktree }: ElaborationSessionRequest): string {
+  return contentHash(JSON.stringify({ inputDigest, purpose, prompt, schema, worktree }))
+}
+
 function assertStoppedEventsRpcDraft(prior: SyncAttempt, key: string, proof: ReturnType<typeof authenticateNativeFailure>): void {
   const { status, nativeState, failure, result, session } = proof.checkpoint
   if (!isZCodeEventsRpcTimeout(proof.state) || status !== 'failed' || nativeState !== 'failed' || failure?.code !== 'native_rpc_timeout' || failure.message !== proof.state.error || failure.failedWorktree || failure.rejectedOutput || result
@@ -451,9 +455,8 @@ function settledElaborationReview(store: SyncStore, operation: SyncOperation, pr
       || request.model?.startsWith('cursor:') && record.harness === 'cursor-structured' && state.cursorNative?.sessionId === session.threadId && state.cursorNative?.requestId === session.turnId)
     : request.model?.startsWith('zcode:') && isZCodeEventsRpcTimeout(state) && record.harness === 'zcode' && state.zcodeNative?.sessionId === session.threadId && state.zcodeNative.turnId === session.turnId && !state.rejectedOutput)
   const publishedIdentity = checkpoint.nativeStarted && !!session.threadId && !!session.turnId
-  const boundInput = ({ purpose, prompt, schema, worktree }: ElaborationSessionRequest): string => contentHash(JSON.stringify({ inputDigest: result.inputDigest, purpose, prompt, schema, worktree }))
   if (resource.attemptId !== prior.id || resource.generation !== prior.generation || plan.schemaVersion !== 1 || checkpoint.schemaVersion !== 1
-    || request.purpose !== 'elaboration_review' || request.worktree?.mode !== 'read' || request.frozenContext || !transportMatches || request.inputDigest !== boundInput(request)
+    || request.purpose !== 'elaboration_review' || request.worktree?.mode !== 'read' || request.frozenContext || !transportMatches || request.inputDigest !== elaborationNativeInputDigest(result.inputDigest, request)
     || request.root !== operation.input.source.canonicalRoot || request.base !== request.worktree.baseCommit || record.base !== request.base || record.forkCommit !== request.base
     || !checkpoint.nativeCallRequested || !grokExit && !publishedIdentity || checkpoint.status !== 'failed' || checkpoint.nativeState !== 'failed' || checkpoint.stop?.nativeStatus !== 'stopped' || checkpoint.result || checkpoint.creationTermination
     || checkpoint.candidateDigest !== null && checkpoint.candidateDigest !== round.candidateDigest
@@ -462,7 +465,7 @@ function settledElaborationReview(store: SyncStore, operation: SyncOperation, pr
     || record.harnessSessionId !== session.threadId || state.failedWorktree || state.resultWorktree || state.output !== undefined || state.resultDigest !== undefined) fail('review_retry_binding', '独审失败缺少同owner原只读请求及精确已结算的Native失败身份')
   const generation = elaborationGenerationSource(store, operation, prior, round)
   const generationOwner = generation && ownerKey.replace(`sync:${prior.id}:`, `sync:${generation.attempt.id}:`)
-  if (!generation?.request || !generation.key.startsWith(`${generationOwner}:`) || generation.request.inputDigest !== boundInput(generation.request)
+  if (!generation?.request || !generation.key.startsWith(`${generationOwner}:`) || generation.request.inputDigest !== elaborationNativeInputDigest(result.inputDigest, generation.request)
     || generation.request.root !== request.root || generation.request.base !== round.draft.seed.baseCommit
     || store.findResource(generation.attempt.id, generation.key)?.generation !== generation.attempt.generation
     || round.candidate.inputDigest !== result.inputDigest || round.candidateDigest !== result.candidateDigest || round.candidateDigest !== contentHash(JSON.stringify(round.candidate))) fail('review_retry_binding', '独审失败缺少同owner原Native生成及其精确Git候选绑定')
@@ -590,7 +593,7 @@ function authenticatedApprovedElaboration(store: SyncStore, owner: SyncOperation
   if (!generation?.request || !source?.request || !source.result || source.request.inputDigest !== review.inputDigest || source.result.resultDigest !== review.resultDigest || canonical(source.result.output) !== canonical(round.reviewOutput)
     || round.traces.some(trace => trace.purpose === 'elaboration_generate' && (trace.sessionId === review.sessionId || trace.threadId === review.threadId))) return false
   for (const request of [generation.request, source.request]) {
-    const expected = contentHash(JSON.stringify({ inputDigest: result.inputDigest, purpose: request.purpose, prompt: request.prompt, schema: request.schema, worktree: request.worktree }))
+    const expected = elaborationNativeInputDigest(result.inputDigest, request)
     const origin = request.purpose === 'elaboration_generate' ? generation.attempt : reviewed!
     if (request.model !== syncModel(owner) || request.root !== owner.input.source.canonicalRoot || request.frozenContext || !request.worktree || request.base !== request.worktree.baseCommit
       || request.worktree.mode !== (request.purpose === 'elaboration_generate' ? 'edit' : 'read') || request.inputDigest !== expected
@@ -2506,7 +2509,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
                 && (priorGuidance === ELABORATION_GENERATION_GUIDANCE_V2 || priorGuidance === ELABORATION_GENERATION_GUIDANCE_V3 || priorGuidance === ELABORATION_GENERATION_GUIDANCE_V4 || priorGuidance === ELABORATION_GENERATION_GUIDANCE)
                 && canonical(source.result.partitionBinding) === canonical(binding) && priorElaborationInputMatches(prior, binding, owner, checkpoints)
                 && (owner.id === operation.id || settledApprovalSource(store, owner))
-                && native.request.inputDigest === contentHash(JSON.stringify({ inputDigest: source.result.inputDigest, purpose: native.request.purpose, prompt: native.request.prompt, schema: native.request.schema, worktree: native.request.worktree }))
+                && native.request.inputDigest === elaborationNativeInputDigest(source.result.inputDigest, native.request)
               const otherStoppedDraft = state && (zcode || native.request.model?.startsWith('claude:')) && (state.state === 'cancelled' || zcode && state.state === 'failed')
                 && (!state.errorCode || stoppedTransport || completedEventsRpc) && state.threadId && state.turnId
               if (native.request.purpose === 'elaboration_generate' && native.request.worktree?.mode === 'edit' && !native.request.frozenContext && state?.cancellation?.nativeStopped && !state.failedWorktree && !state.resultWorktree && !state.rejectedOutput && (grokDraft || otherStoppedDraft)) {
@@ -2578,7 +2581,6 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
       const renderedRepairAttempt = (prior: SyncAttempt): boolean => ['failed', 'superseded', 'settled'].includes(prior.status) && prior.failure?.kind === 'repairable' && canonical(prior.composedInput) === canonical(view.composed)
       // 同一原round既供P1完整定位，也供精确P0分类质疑；候选仍只是拒绝诊断。
       const renderedElaborationSource = (owner: SyncOperation, prior: SyncAttempt, key: string, checkpoints?: SyncCheckpointStageView, matchesFinding?: (finding: ContractFinding) => boolean): { result: SavedElaboration; resultRef: BlobRef; round: ElaborationResult['rounds'][number] } | null => {
-        if (!renderedRepairAttempt(prior)) return null
         const source = partitionStage<SavedElaboration>(store, owner, prior, key, undefined, checkpoints), round = source?.result.rounds.at(-1)
         if (!source || source.result.reviewPassed || source.result.phase === 'partitioned_final' || source.result.status !== 'exhausted' || source.result.failure?.code !== 'repair_budget_exhausted' || !round?.candidate || !round.findings.some(finding => finding.severity === 'error' && (!matchesFinding || matchesFinding(finding)))) return null
         if (round.candidate.inputDigest !== source.result.inputDigest || round.candidateDigest !== contentHash(JSON.stringify(round.candidate))) fail('review_retry_binding', '已生成P1候选的原输入或摘要失配，不能回退为重新生成')
@@ -2618,6 +2620,23 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
             }
           }
           if (prior.failure?.kind !== 'repairable') {
+            const errors = round?.findings.filter(issue => issue.severity === 'error') ?? []
+            if (!newerGeneration && source && round?.draft && round.review && failure && prior.status === 'superseded' && !prior.failure
+              && source.result.structurePassed && priorElaborationInputMatches(prior, binding)
+              && errors.length && errors.every(issue => issue.code === 'review_scope' || issue.code === 'review_binding')
+              && !store.listResources(prior.id).some(resource => resource.phase !== 'removed')
+              && renderedElaborationSource(operation, prior, key)) {
+              const review = authenticatedDraftResult(store, operation, prior, `${requestKey}:${round.index}:elaboration_review`, 'elaboration_review')
+              const trace = round.traces.find(trace => trace.purpose === 'elaboration_review'), request = review?.request
+              if (!review?.result || !trace || trace.sessionId !== review.result.sessionId || trace.threadId !== review.result.threadId
+                || trace.turnId !== review.result.turnId || trace.resultDigest !== review.result.resultDigest
+                || canonical(round.reviewOutput) !== canonical(review.result.output)
+                || request && (trace.inputDigest !== request.inputDigest || request.inputDigest !== elaborationNativeInputDigest(inputDigest, request)
+                  || request.model !== model || request.root !== operation.input.source.canonicalRoot || request.base !== request.worktree?.baseCommit))
+                fail('review_retry_binding', '暂停前被拒独审不匹配原只读请求、真实结果及追踪')
+              saveStage(store, fence!, `${key}:repair-diagnostics-provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef })
+              return { requestKey, inputDigest, resultRef: source.resultRef, failure, round }
+            }
             if (source && canRecoverInterruptedElaborationResult(prior, source, binding)) {
               if (failure && round) {
                 const runtimeFailure = source.result.status === 'failed' && source.result.candidateDigest === null && round.candidate === null && round.candidateDigest === null && structuredAnalysisRepairCodes.has(failure.code)

@@ -816,7 +816,8 @@ for (const missingFinal of [false, true]) test(`P1失败summary的精确stopped 
   assert.equal(readObject(f.input.source.commonDir, round.draft!.oid).toString('utf8'), originalText)
 })
 
-for (const corruptBinding of ['none', 'native', 'candidate'] as const) test(`P1越界独审跨多个attempt仅续同candidate审查，原generation按真实dispatch冷验 tamper=${corruptBinding}`, async t => {
+for (const corruptBinding of ['none', 'native', 'candidate', 'pause-binding', 'pause-review'] as const) test(`P1越界独审跨多个attempt仅续同candidate审查，原generation按真实dispatch冷验 tamper=${corruptBinding}`, async t => {
+  const pauseBeforeAggregation = corruptBinding === 'pause-binding' || corruptBinding === 'pause-review'
   const historyPath = '.spec/project/frozen-history/spec.md'
   const history = '---\ntitle: 冻结历史说明\ncontract-schema: sync-v1\n---\n## raw source\n\n保留已接受的技术登记。\n\n## expanded spec\n\n旧轮进度5/5，实现待写。\n\n### VERIFY\n\n| id | command | cwd | timeout-ms |\n| --- | --- | --- | --- |\n| VERIFY-HISTORY-01 | ["node","--version"] | . | 1000 |\n'
   const verification = parseContract({ nodeId: 'export-contract', path: contractPath, source: original }).contract!.items.find(item => item.kind === 'VERIFY')!
@@ -833,7 +834,15 @@ for (const corruptBinding of ['none', 'native', 'candidate'] as const) test(`P1�
       const value = structuredClone(snapshots[0].value); value.rounds[0].candidateDigest = contentHash('corrupted saved candidate digest')
       ref = writeEvidence(f.input.source.commonDir, { ...saved, resultRef: writeEvidence(f.input.source.commonDir, value) })
     }
+    if (corruptBinding === 'pause-review' && saved.stage === 'elaboration' && snapshots.length === 1) {
+      const value = structuredClone(snapshots[0].value)
+      value.rounds[0].traces.find(trace => trace.purpose === 'elaboration_review')!.resultDigest = contentHash('invalid saved review trace')
+      ref = writeEvidence(f.input.source.commonDir, { ...saved, resultRef: writeEvidence(f.input.source.commonDir, value) })
+    }
     const result = checkpoint(fence, ref)
+    if (pauseBeforeAggregation && saved.stage === 'elaboration' && snapshots.length === 1) {
+      f.store.requestControl(f.operation.id, 'pause')
+    }
     if (corruptBinding === 'native' && saved.stage === 'elaboration' && snapshots.length === 1) {
       const listAttempts = f.store.listAttempts.bind(f.store)
       f.store.listAttempts = id => listAttempts(id).map(attempt => attempt.number !== 1 ? attempt : { ...attempt, dispatchPlans: attempt.dispatchPlans.map(dispatch => dispatch.purpose !== 'elaboration_generate' ? dispatch : { ...dispatch, requestDigest: contentHash('corrupted original Native request') }) })
@@ -846,7 +855,8 @@ for (const corruptBinding of ['none', 'native', 'candidate'] as const) test(`P1�
     const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!), dispatch = attempt.dispatchPlans.find(item => item.key === request.requestKey)!
     const identity = { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `scope-cold-${request.requestKey}`, turnId: 'turn' }
     if (request.purpose === 'elaboration_review') {
-      const output = attempt.number < 3 ? { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ code: 'old-history-prose', kind: 'repair', message: '未变owner旧5/5/实现待写正文需要更新7/7，条款无需改', affectedIds: ['VERIFY-HISTORY-01'], evidence: `${historyPath}:14旧prose`, decision: '仅修冻结owner进度叙述，业务行和实现不变' }] } : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+      const affectedId = pauseBeforeAggregation ? 'export-contract' : 'VERIFY-HISTORY-01'
+      const output = attempt.number < 3 ? { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ code: 'old-history-prose', kind: 'repair', message: '未变owner旧5/5/实现待写正文需要更新7/7，条款无需改', affectedIds: [affectedId], evidence: `${historyPath}:14旧prose`, decision: '仅修冻结owner进度叙述，业务行和实现不变' }] } : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
       return { ...identity, output, resultDigest: contentHash(JSON.stringify(output)) }
     }
     const seed = request.worktree!, draftPath = /草稿文件=([^\s；]+)/.exec(request.prompt)![1], workspace = join(f.parent, `scope-cold-${calls.length}`)
@@ -867,10 +877,18 @@ for (const corruptBinding of ['none', 'native', 'candidate'] as const) test(`P1�
     const receipt = { summary: '提交原草稿' }
     return { ...identity, output: receipt, resultDigest: contentHash(JSON.stringify(receipt)), worktree: nativeWorktreeResult(workspace, seed) }
   }
-  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  let result = await runSyncOperation(f.store, f.operation.id, f.options)
+  if (pauseBeforeAggregation) {
+    assert.equal(result.status, 'paused', JSON.stringify(result.failure))
+    const [paused] = f.store.listAttempts(f.operation.id)
+    assert.equal(paused.status, 'superseded')
+    assert.equal(paused.failure, null)
+    f.store.requestControl(f.operation.id, 'run')
+    result = await runSyncOperation(f.store, f.operation.id, f.options)
+  }
   assert.equal(result.status, 'unsupported', JSON.stringify({ failure: result.failure, snapshots: snapshots.map(item => ({ status: item.value.status, failure: item.value.failure, findings: item.value.rounds.flatMap(round => round.findings) })) }))
   assert.equal(calls.filter(call => call.purpose === 'elaboration_generate').length, 1)
-  if (corruptBinding !== 'none') {
+  if (corruptBinding === 'native' || corruptBinding === 'candidate' || corruptBinding === 'pause-review') {
     assert.equal(result.failure?.code, 'review_retry_binding')
     assert.equal(calls.filter(call => call.purpose === 'elaboration_review').length, 1, '原Native或candidate绑定失配后新attempt零派发')
     return
@@ -882,7 +900,7 @@ for (const corruptBinding of ['none', 'native', 'candidate'] as const) test(`P1�
     assert.deepEqual(snapshot.value.rounds[0].traces[0], snapshots[0].value.rounds[0].traces[0])
     assert.deepEqual(snapshot.value.changes, snapshots[0].value.changes)
   }
-  assert.ok(snapshots[0].value.rounds[0].findings.some(issue => issue.code === 'review_scope'))
+  assert.ok(snapshots[0].value.rounds[0].findings.some(issue => issue.code === (pauseBeforeAggregation ? 'review_binding' : 'review_scope')))
   assert.equal(snapshots[0].value.rounds[0].review!.verdict, 'repair')
   assert.equal(snapshots[2].value.changes.find(change => change.path === historyPath)!.source, history)
   assert.equal(calls.some(call => call.purpose === 'code_generate'), false); assert.deepEqual(f.store.listJournals(f.operation.id), [])
