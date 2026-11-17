@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, lstatSync, statSync, realpathSync, rmSync, readdirSync } from 'node:fs'
-import { join, dirname } from 'node:path'
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, lstatSync, statSync, realpathSync, rmSync, readdirSync, symlinkSync } from 'node:fs'
+import { join, dirname, delimiter } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
@@ -32,7 +32,7 @@ function gitAvailable(): boolean {
 
 // a fresh host repo that tracks its own contract files + .gitignore (internal blank-line run included —
 // the shape whose bytes every round-trip must preserve), adopted via the real `spex init`, data committed.
-function makeHost() {
+function makeHost(contractAlias = false) {
   const proj = realpathSync(mkdtempSync(join(tmpdir(), 'spex-rp-')))
   const home = mkdtempSync(join(tmpdir(), 'spex-home-'))
   const codex = mkdtempSync(join(tmpdir(), 'spex-codex-'))
@@ -48,11 +48,12 @@ function makeHost() {
   }
   g('init', '-q', '-b', 'main')
   g('config', 'user.email', 't@t.co'); g('config', 'user.name', 't')
-  writeFileSync(join(proj, 'CLAUDE.md'), '# team notes\nkeep me\n')
+  if (contractAlias) symlinkSync('AGENTS.md', join(proj, 'CLAUDE.md'))
+  else writeFileSync(join(proj, 'CLAUDE.md'), '# team notes\nkeep me\n')
   writeFileSync(join(proj, 'AGENTS.md'), '# team agents\nkeep me\n')
   writeFileSync(join(proj, '.gitignore'), 'node_modules/\nartifacts/\n\n\ndist/\n')
   g('add', '-A'); g('commit', '-qm', 'init')
-  spex('init', '.', '--harness', 'claude,codex')
+  spex('init', '.', '--harness', contractAlias ? 'claude' : 'claude,codex')
   g('add', '.spec'); g('commit', '-qm', 'adopt (data tracked)', '--no-verify')
   const setLocal = (json: string | null) => {
     if (json === null) rmSync(join(proj, '.spec/spexcode.local.json'), { force: true })
@@ -62,6 +63,42 @@ function makeHost() {
 }
 
 const status = (g: (...a: string[]) => string) => g('status', '--short').trim()
+
+test('normal linked-worktree commits settle the tracked contract behind a selected harness symlink', t => {
+  const { proj, env, g } = makeHost(true)
+  const hookEnv = { ...env, PATH: [join(PACKAGE, '..', 'node_modules', '.bin'), process.env.PATH].join(delimiter) }
+  const directory = mkdtempSync(join(tmpdir(), 'spex-alias-commit-'))
+  t.after(() => {
+    rmSync(directory, { recursive: true, force: true })
+    rmSync(proj, { recursive: true, force: true })
+  })
+  const hostBlob = g('rev-parse', 'HEAD:AGENTS.md')
+  const linkBlob = g('rev-parse', 'HEAD:CLAUDE.md')
+  const hostProse = g('show', 'HEAD:AGENTS.md')
+  for (const edit of ['none', 'prose', 'mode'] as const) {
+    const worktree = join(directory, edit)
+    execFileSync('git', ['-C', proj, 'worktree', 'add', '--quiet', '--detach', worktree, 'HEAD'], {
+      env: { ...hookEnv, SPEXCODE_DEFER_FOOTPRINT_REFRESH: 'session-create' },
+    })
+    const run = (...args: string[]) => execFileSync('git', ['-C', worktree, ...args], { encoding: 'utf8', env: hookEnv })
+    const notes = join(worktree, 'AGENTS.md')
+    assert.equal(readFileSync(notes, 'utf8'), hostProse, 'the native seed starts without a materialized block')
+    if (edit === 'prose') writeFileSync(notes, hostProse + 'A real unstaged host edit.\n')
+    if (edit === 'mode') chmodSync(notes, 0o755)
+    writeFileSync(join(worktree, 'draft.json'), '{}\n')
+    run('add', '--', 'draft.json')
+    run('commit', '-m', 'Normal draft progress')
+
+    assert.match(readFileSync(notes, 'utf8'), /<!-- spexcode:start -->/)
+    assert.ok(lstatSync(join(worktree, 'CLAUDE.md')).isSymbolicLink())
+    assert.equal(run('rev-parse', ':AGENTS.md', 'HEAD:AGENTS.md'), hostBlob.repeat(2))
+    assert.equal(run('rev-parse', ':CLAUDE.md', 'HEAD:CLAUDE.md'), linkBlob.repeat(2))
+    assert.equal(run('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'), 'draft.json\n')
+    assert.equal(run('--no-optional-locks', 'status', '--porcelain=v1'), edit === 'none' ? '' : ' M AGENTS.md\n', edit)
+    if (edit === 'prose') assert.match(readFileSync(notes, 'utf8'), /A real unstaged host edit\./)
+    if (edit === 'mode') assert.equal(statSync(notes).mode & 0o100, 0o100)
+  }
+})
 
 test('one residence behavior: tracked host text keeps pristine index bytes while the working tree carries local delivery; idempotent', { skip: !gitAvailable() && 'git not available' }, () => {
   const { proj, g, spex } = makeHost()

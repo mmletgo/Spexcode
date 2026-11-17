@@ -54,8 +54,11 @@ Three field-verified edges the mechanism must hold:
    block write IS the re-smudge) and refreshes the shim's block-content file. And a filtered path can never
    be verified by stat alone, so `git status` reports it modified FOREVER without content-checking (while
    `git diff` runs the filter and shows nothing) — settled by a content-GUARDED `git add --renormalize`:
-   run only when the cleaned worktree already equals the index blob, a pure stat refresh that can never
-   stage a user's real unstaged edit (a genuine edit keeps its honest `M`).
+   run only when the cleaned worktree and executable mode already equal the tracked regular index entry.
+   When the selected harness contract is a symlink to another canonical contract in the same checkout
+   (for example `CLAUDE.md` points to `AGENTS.md`), the managed write and the stat refresh target the
+   same physical file. An ordinary hooked commit keeps the link and host blob unchanged. Genuine
+   unstaged host text and mode changes remain visible.
 3. **Ordered unplant.** Strip the block from the working files FIRST, then remove its tree payload; remove the
    common attributes/config/shim only after no registered tree payload needs them —
    the reverse order leaves the block exposed as an uncommitted modification the moment the clean filter
