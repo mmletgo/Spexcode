@@ -76,6 +76,8 @@ ZCode 启动在固定 plan 与真实 detached receipt 落盘后立即发布原 P
 
 明确的 version6/native-worktree-v1 使用创建记录的真实 worktree 作为 workspace/cwd，read 用原生 plan、edit 用原生 build，保留正常内置工具，不设 frozen MCP/只读 Seatbelt 或唯一工具限制。权限请求仅对当前 session 一次批准正常读/搜索/shell，文件修改只批准 edit 模式的本 worktree，且不写 permissionUpdates、不建立读取内容/路径白名单。仅 schema 控制最终 JSON；原 provider/model/effort 快照、唯一 session/input/query/turn、原始 send/messages/events、精确成功终态、idle/close、exit0 与整个自有进程停止仍逐项核实。完成及冷复用不生成或消费 frozenReadProof，也不要求分块读取及逐字 API 消费；旧 frozen policy 及工具门不变。
 
+v6 worktree 的当前原生消息协议以唯一成功轮次的 `turn.started.messageId` 核 `user_prompt.messageId`，同一 session 内所有 `assistant_response` 的 `parentMessageId` 都必须指向该 user；参与核验的消息 ID 非空且唯一，每个 part 的原生 session/message 身份须归属该消息。用户 `model` 包括精确 options，最后一条 assistant 的 `model` 与真实 provider/model 相同；原始 user 文本和成功 terminal 响应逐字核对。旧原生消息协议仍以原保存的 `anchor.turnId`、`sessionID` 和 modelSelection 认证；缺失当前字段时不以旧字段替代。实时结算与冷重放核原始消息，证据不改写。
+
 macOS 的新 worktree 版本探测与 app-server 子进程沿 [[native-worktree-runtime]] 保护实际共享 Git config 及其锁文件；仍使用原生 CLI、同一参数与本机配置。冻结只读和历史结果的认证保持原协议。
 
 同一 v6 worktree 调用收到原子进程 close、且没有 stop 请求、取消、协议错误或原执行错误时，关闭后的首次非终止完整观察一旦确认停止，就在原绝对截止内直接用它写原 exit。未获 close、首检未证停止、进入终止回退、已有取消或失败及旧 frozen 仍按原观察与结算路径。随后本次 worktree 调用直接使用写原 exit 前的同一次新鲜停止观察。只有该次观察确认原进程组、相关后代与任务域未知进程都已结算，才进入同栈完成核验；期间不再排队重复观察，仍在原绝对停止截止内完成核验与发布。取消优先、原 exit、终态、消息、模型与 schema 门不变。

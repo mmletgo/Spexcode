@@ -387,10 +387,37 @@ function verifyWorktreeCompletion(plan: NativePlan, model: NativeModel, prompt: 
     || !events.some(event => digest(event) === digest(terminal)) || events.some(event => event.sessionId !== plan.sessionId || event.turnId !== plan.turnId)
     || !requests.length || requests.some(event => event.payload.providerId !== model.providerId || event.payload.modelId !== model.modelId)
     || !exit.stopped || !exit.idle || !exit.closed || exit.code !== 0 || exit.signal !== null) throw new StructuredSessionError('stale_result', 'ZCode worktree exact native model/terminal/process evidence differs')
+  const text = (message: NativeMessage) => message.parts?.filter(part => part.type === 'text').map(part => part.text).join('')
   const users = messages.filter(message => message.info?.role === 'user' && (message.info.semantics as Record<string, unknown>)?.kind === 'user_prompt')
-  if (users.length !== 1 || users[0].info?.id !== starts[0].payload.messageId || (users[0].info?.anchor as Record<string, unknown>)?.turnId !== plan.turnId || digest(users[0].info?.modelSelection) !== digest(model) || users[0].info?.sessionID !== plan.sessionId || users[0].parts?.filter(part => part.type === 'text').map(part => part.text).join('') !== zcodeExecutionPrompt(prompt, execution)) throw new StructuredSessionError('stale_result', 'ZCode worktree original native user/input differs')
-  const finals = messages.filter(message => message.info?.role === 'assistant' && (message.info.anchor as Record<string, unknown>)?.turnId === plan.turnId && (message.info.semantics as Record<string, unknown>)?.kind === 'assistant_response')
-  if (!finals.length || finals.at(-1)!.info?.providerId !== model.providerId || finals.at(-1)!.info?.modelId !== model.modelId || finals.at(-1)!.parts?.filter(part => part.type === 'text').map(part => part.text).join('') !== terminal.payload.response) throw new StructuredSessionError('stale_result', 'ZCode worktree final assistant identity/response differs')
+  const user = users[0]
+  const userId = starts[0].payload.messageId
+  if (users.length !== 1 || !user.info || typeof userId !== 'string' || !userId || text(user) !== zcodeExecutionPrompt(prompt, execution)) throw new StructuredSessionError('stale_result', 'ZCode worktree original native user/input differs')
+  const assistants = messages.filter(message => message.info?.role === 'assistant' && (message.info.semantics as Record<string, unknown>)?.kind === 'assistant_response')
+  if ('messageId' in user.info || 'sessionId' in user.info) {
+    const messageIds = new Set<string>()
+    const bindMessage = ({ info, parts }: NativeMessage): boolean => {
+      const id = info?.messageId
+      if (typeof id !== 'string' || !id || info?.sessionId !== plan.sessionId || messageIds.has(id) || !parts?.length
+        || !parts.every(part => part.messageId === id && part.sessionId === plan.sessionId)) return false
+      messageIds.add(id)
+      return true
+    }
+    if (user.info.messageId !== userId || !isDeepStrictEqual(user.info.model, model) || !bindMessage(user))
+      throw new StructuredSessionError('stale_result', 'ZCode worktree original native user/input differs')
+    // 当前消息协议用原生 user messageId 和 assistant parentMessageId 绑定同一轮次。
+    const final = assistants.at(-1)
+    const finalModel = final?.info?.model as NativeModel | undefined
+    if (!final || assistants.some(message => message.info?.parentMessageId !== userId || !bindMessage(message))
+      || finalModel?.providerId !== model.providerId || finalModel?.modelId !== model.modelId || text(final) !== terminal.payload.response)
+      throw new StructuredSessionError('stale_result', 'ZCode worktree final assistant identity/response differs')
+  } else {
+    const turn = (message: NativeMessage) => (message.info?.anchor as Record<string, unknown>)?.turnId
+    if (user.info.id !== userId || turn(user) !== plan.turnId || digest(user.info.modelSelection) !== digest(model) || user.info.sessionID !== plan.sessionId)
+      throw new StructuredSessionError('stale_result', 'ZCode worktree original native user/input differs')
+    const final = assistants.filter(message => turn(message) === plan.turnId).at(-1)
+    if (!final || final.info?.providerId !== model.providerId || final.info?.modelId !== model.modelId || text(final) !== terminal.payload.response)
+      throw new StructuredSessionError('stale_result', 'ZCode worktree final assistant identity/response differs')
+  }
   const { nativeTokenUsage } = terminal
   let output: unknown
   try { output = decodeZCodeStructuredText(terminal.payload.response) }
