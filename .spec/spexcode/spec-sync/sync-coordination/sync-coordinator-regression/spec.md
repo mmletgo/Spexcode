@@ -16,6 +16,8 @@ related:
 
 ## expanded spec
 
+同operation格式续审回归以真实只读Git工作树产生原失败收尾的 `failedWorktree`，验证首次及连续两次格式拒稿后只重审同一候选、原生成trace/Git稿不重派，拒稿附件逐字保存。正式checkpoint与canonical见证路径不一致的反例在派发前拒绝。
+
 真实 Git 和隔离 SQLite 中，P1 候选结构通过、原独审因无效 affectedIds 被拒后，在写入结果与汇总 attempt 失败之间正式暂停。恢复后只为原候选新派独立审查，原生成 trace、候选摘要及正文一致。原审查缺失、追踪摘要失配或正式 Native 资源的原生完成记录不符时，拒绝恢复且零新增派发。
 
 候选换模型的混合独审回归在真实 SQLite 冷恢复期间计数格式判据的单对象 Git 调用，保留合法 repair 与格式失败的分流。候选、已审结果及原 Native 绑定继续精确核验。

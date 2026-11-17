@@ -35,7 +35,7 @@ import type { SyncPartitionPlan } from './partitioning.js'
 import { contractOmissionBound, freezeGenerationInput, generationReviewRequest, generationStageTree, restoreGenerationInput, reviewError, verifyGenerationReviewDraft, runGeneration } from './generation.js'
 import type { GenerationReadCache } from './generation.js'
 import type { GenerationFinding, GenerationInput, GenerationResult, StoppedCandidateReviewDraft } from './generation-types.js'
-import { captureStageDraft, readStageDraft, readStoppedPhysicalDraft, StageDraftCommitMissingError, stageWorktree, StoppedPhysicalDraftStatusError, type StageDraftMaterialRequest } from './stage-worktree.js'
+import { captureStageDraft, readStageDraft, readStoppedPhysicalDraft, StageDraftCommitMissingError, stageWorktree, StoppedPhysicalDraftStatusError, verifyStageResult, type StageDraftMaterialRequest } from './stage-worktree.js'
 import { createAttemptRunner, hasSettledGrokP0ExitFailure, hasSettledNativeRpcFailure, hasSettledNativeTurnTransportFailure, pinSyncNativeRequest } from './native-run.js'
 import type { NativeRunCheckpoint, NativeRunPlan } from './native-run.js'
 import type { AdmitSyncInput, ApplyReceipt, BlobRef, CandidateRef, ComposedInputRef, FrozenBaselineSelection, InputSnapshot, SyncAttempt, SyncFailure, SyncOperation, SyncScope, SyncResourceRecord, VerificationResultBlob, WriteFence } from './operation-types.js'
@@ -449,6 +449,13 @@ function settledElaborationReview(store: SyncStore, operation: SyncOperation, pr
     authenticateNativeRejectedFinal(store, operation, source, sourceKey, sourceFailure, packet)
   }
   if (rejection) authenticateRejection(prior, key, failure, rejection, checkpoint)
+  const failedWorktree = state.failedWorktree
+  if (failedWorktree || checkpoint.failure?.failedWorktree) {
+    if (!rejection || !failedWorktree || request.worktree?.mode !== 'read'
+      || canonical(failedWorktree) !== canonical(checkpoint.failure?.failedWorktree)
+      || failedWorktree.worktreePath !== record.worktreePath) fail('review_retry_binding', '独审拒稿的只读Git见证与原失败记录不匹配')
+    verifyStageResult(operation.input.source.commonDir, request.worktree, { worktree: failedWorktree })
+  }
   const transportMatches = grokExit || (rejection
     ? state.state === 'failed' && (request.model?.startsWith('zcode:') && record.harness === 'zcode' || request.model?.startsWith('claude:') && record.harness === 'claude'
       || request.model?.startsWith('grok:') && record.harness === 'grok-structured' && state.grokNative?.sessionId === session.threadId && state.grokNative?.turnId === session.turnId
@@ -461,8 +468,8 @@ function settledElaborationReview(store: SyncStore, operation: SyncOperation, pr
     || !checkpoint.nativeCallRequested || !grokExit && !publishedIdentity || checkpoint.status !== 'failed' || checkpoint.nativeState !== 'failed' || checkpoint.stop?.nativeStatus !== 'stopped' || checkpoint.result || checkpoint.creationTermination
     || checkpoint.candidateDigest !== null && checkpoint.candidateDigest !== round.candidateDigest
     || canonical(prior.dispatchPlans.find(dispatch => dispatch.key === key)?.session) !== canonical(session)
-    || canonical(checkpoint.failure) !== canonical({ code: failure.code, message: failure.message, ...(rejection ? { rejectedOutput: checkpoint.failure?.rejectedOutput } : {}) })
-    || record.harnessSessionId !== session.threadId || state.failedWorktree || state.resultWorktree || state.output !== undefined || state.resultDigest !== undefined) fail('review_retry_binding', '独审失败缺少同owner原只读请求及精确已结算的Native失败身份')
+    || canonical(checkpoint.failure) !== canonical({ code: failure.code, message: failure.message, ...(rejection ? { rejectedOutput: checkpoint.failure?.rejectedOutput } : {}), ...(failedWorktree ? { failedWorktree } : {}) })
+    || record.harnessSessionId !== session.threadId || state.resultWorktree || state.output !== undefined || state.resultDigest !== undefined) fail('review_retry_binding', '独审失败缺少同owner原只读请求及精确已结算的Native失败身份')
   const generation = elaborationGenerationSource(store, operation, prior, round)
   const generationOwner = generation && ownerKey.replace(`sync:${prior.id}:`, `sync:${generation.attempt.id}:`)
   if (!generation?.request || !generation.key.startsWith(`${generationOwner}:`) || generation.request.inputDigest !== elaborationNativeInputDigest(result.inputDigest, generation.request)

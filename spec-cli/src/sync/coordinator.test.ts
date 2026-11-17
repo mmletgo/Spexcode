@@ -4394,16 +4394,18 @@ for (const target of ['code_behavior_analyze', 'elaboration_generate'] as const)
   assert.equal(f.calls.some(call => call.purpose === 'code_generate'), false)
 })
 
-for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-formal-retry', 'format-wrong-packet', 'format-wrong-candidate', 'legacy-review', 'v3-review', 'paused', 'paused-review', 'newer-generation', 'wrong-stop', 'wrong-candidate', 'wrong-task'] as const) test(`P1已结算${mode.startsWith('format') ? '格式失败独审' : 'session/events独审超时'}只重审同一Git候选 ${mode}`, async t => {
+for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read-witness', 'format-read-witness-twice', 'format-wrong-witness', 'format-formal-retry', 'format-wrong-packet', 'format-wrong-candidate', 'legacy-review', 'v3-review', 'paused', 'paused-review', 'newer-generation', 'wrong-stop', 'wrong-candidate', 'wrong-task'] as const) test(`P1已结算${mode.startsWith('format') ? '格式失败独审' : 'session/events独审超时'}只重审同一Git候选 ${mode}`, async t => {
   const formatFailure = mode.startsWith('format')
-  const formatTwice = mode === 'format-twice'
+  const formatTwice = mode === 'format-twice' || mode === 'format-read-witness-twice'
+  const readWitness = mode === 'format-read-witness' || mode === 'format-read-witness-twice' || mode === 'format-wrong-witness'
+  const wrongWitness = mode === 'format-wrong-witness'
   const wrongPacket = mode === 'format-wrong-packet'
   const wrongCandidate = mode === 'wrong-candidate' || mode === 'format-wrong-candidate'
   const failureCode = formatFailure ? 'structured_output_format_invalid' : 'native_rpc_timeout'
   const formalRetry = mode === 'format-formal-retry', codeToSpec = formatTwice || formalRetry
   const partitioned = mode === 'partition' || codeToSpec
   const plan = partitioned ? { version: 'sync-coordinator-v2' as const, direction: codeToSpec ? 'code_to_spec' as const : 'spec_to_code' as const, sourcePaths: ['src/export.js'], ...(codeToSpec ? { writePaths: ['.spec'], commitTrigger: { before: null, paths: ['src/export.js'] } } : {}), partitionPolicy: { version: 'sync-partition-policy-v1' as const, maxReadBytes: 524288, maxParallel: 1 } } : {}
-  const f = await fixture(t, { maxAttempts: ['newer-generation', 'paused-review', 'wrong-task', 'format-twice', 'format-formal-retry', 'format-wrong-packet'].includes(mode) ? 3 : 2, maxCalls: 30, maxRepairs: ['wrong-task', 'format-twice', 'format-wrong-packet'].includes(mode) ? 2 : 1, timeoutMs: 120_000 }, false, original, 'project', original, { ...plan, agentWorkflow: 'native-worktree-v1', ...(formalRetry ? { executionScope: { paths: [contractPath], contractIds: [], flowIds: [] } } : {}) }, undefined, codeToSpec ? 'code' : 'spec', 'zcode:default', partitioned)
+  const f = await fixture(t, { maxAttempts: ['newer-generation', 'paused-review', 'wrong-task', 'format-formal-retry', 'format-wrong-packet'].includes(mode) || formatTwice ? 3 : 2, maxCalls: 30, maxRepairs: ['wrong-task', 'format-wrong-packet'].includes(mode) || formatTwice ? 2 : 1, timeoutMs: 120_000 }, false, original, 'project', original, { ...plan, agentWorkflow: 'native-worktree-v1', ...(formalRetry ? { executionScope: { paths: [contractPath], contractIds: [], flowIds: [] } } : {}) }, undefined, codeToSpec ? 'code' : 'spec', 'zcode:default', partitioned)
   const calls: ElaborationSessionRequest[] = []
   if (mode === 'paused' || mode === 'newer-generation') {
     const recordFailure = f.store.recordFailure.bind(f.store)
@@ -4432,7 +4434,7 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-form
     const wrapper = writeEvidence(commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: claimed.attempt.id, inputId: f.input.id, policyDigest: f.operation.policyDigest, stage: 'elaboration-draft-protocol', resultRef })
     f.store.checkpoint(claimed.fence, { ...wrapper, artifacts: syncCheckpointArtifacts(value, resultRef) })
   }
-  if (mode === 'wrong-stop' || wrongPacket) {
+  if (mode === 'wrong-stop' || wrongPacket || wrongWitness) {
     const recordFailure = f.store.recordFailure.bind(f.store), findResource = f.store.findResource.bind(f.store)
     f.store.recordFailure = (fence, issue) => {
       const result = recordFailure(fence, issue)
@@ -4441,7 +4443,8 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-form
         const resource = findResource(attemptId, key)
         if (!resource || attemptId !== fence.attemptId || !key.endsWith(':elaboration_review')) return resource
         const saved = JSON.parse(readEvidence(f.input.source.commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
-        if (wrongPacket) saved.failure!.rejectedOutput!.representation = 'native_json'
+        if (wrongWitness) saved.failure!.failedWorktree!.worktreePath += '-other-session'
+        else if (wrongPacket) saved.failure!.rejectedOutput!.representation = 'native_json'
         else saved.stop!.nativeStatus = 'unknown'
         return { ...resource, checkpointRef: writeEvidence(f.input.source.commonDir, saved) }
       }
@@ -4517,16 +4520,17 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-form
         const worktree = draft ? committedDraftFixture(f, actual, draft, workspace) : undefined
         const output = draft ? { summary: '已正常提交草稿' } : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
         const resultDigest = contentHash(JSON.stringify(output)), message = formatFailure ? 'fixture拒绝原格式' : 'ZCode native RPC timeout (session/events)'
-        if (!timingOut && !worktree) f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
+        if ((!timingOut || readWitness) && !worktree) f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
         const resultWorktree = timingOut ? undefined : worktree ?? nativeWorktreeResult(workspace, seed)
+        const failedWorktree = timingOut && readWitness ? nativeWorktreeResult(workspace, seed) : undefined
         const prompt = nativeWorktreePrompt(actual.prompt, seed)
         const rejectedOutput = formatFailure && timingOut ? rejectedFinalOutput('invalid JSON from review ' + attempt.number + '\u0000', prompt, execution, identity) : undefined
         configuredSessionApplication().createSession({ sessionId, status: timingOut ? 'error' : 'awaiting' })
         writeRecord({ session: sessionId, governed: true, worktreePath: workspace, base: seed.baseCommit, forkCommit: seed.baseCommit, branch: null, title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(), harness: 'zcode', harnessSessionId: identity.threadId, runtimeStartToken: null, status: timingOut ? 'error' : 'awaiting', stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: null, launchOwner: null,
           createRequestId: contentHash(key), createPayloadHash: contentHash(JSON.stringify({ prompt, parent: null, launcher: null, base: seed.baseCommit, structuredExecution: execution })),
-          structuredExecution: { ...execution, ...identity, turnStartRequested: true, ...(timingOut ? { state: 'failed', errorCode: failureCode, error: message, ...(rejectedOutput ? { rejectedOutput } : {}), zcodeNative: { version: 1, root: workspace, sessionId: identity.threadId, inputId: 'fixture-input', turnId: identity.turnId, pid: process.pid, receiptFile: join(workspace, 'fixture-process.json') }, cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: true, acknowledged: true, nativeStatus: 'stopped' } } : { state: 'completed', output, resultDigest, resultWorktree }) },
+          structuredExecution: { ...execution, ...identity, turnStartRequested: true, ...(timingOut ? { state: 'failed', errorCode: failureCode, error: message, ...(rejectedOutput ? { rejectedOutput } : {}), ...(failedWorktree ? { failedWorktree } : {}), zcodeNative: { version: 1, root: workspace, sessionId: identity.threadId, inputId: 'fixture-input', turnId: identity.turnId, pid: process.pid, receiptFile: join(workspace, 'fixture-process.json') }, cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: true, acknowledged: true, nativeStatus: 'stopped' } } : { state: 'completed', output, resultDigest, resultWorktree }) },
         })
-        if (timingOut) throw new StructuredSessionError(failureCode, message, { sessionId, ...identity, ...(rejectedOutput ? { rejectedOutput } : {}) })
+        if (timingOut) throw new StructuredSessionError(failureCode, message, { sessionId, ...identity, ...(rejectedOutput ? { rejectedOutput } : {}), ...(failedWorktree ? { failedWorktree } : {}) })
         return { sessionId, ...identity, output, resultDigest, worktree: resultWorktree }
       },
     } })(request)
@@ -4570,7 +4574,7 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-form
     assert.equal(savedLocal(retry).repairDiagnostics, undefined)
     return
   }
-  if (mode === 'wrong-stop' || wrongCandidate || mode === 'wrong-task' || wrongPacket) {
+  if (mode === 'wrong-stop' || wrongCandidate || mode === 'wrong-task' || wrongPacket || wrongWitness) {
     assert.deepEqual(elaborationCalls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review'])
     assert.equal(result.failure?.code, mode === 'wrong-stop' ? 'checkpoint_artifact_binding' : 'review_retry_binding', JSON.stringify(result.failure))
     assert.equal(retry.dispatchPlans.length, 0)
@@ -4608,6 +4612,11 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-form
       const checkpoint = JSON.parse(readEvidence(commonDir, f.store.findResource(attempts[index].id, requestKey)!.checkpointRef).toString()) as NativeRunCheckpoint
       assert.equal(checkpoint.failure!.rejectedOutput!.ref, undefined)
       assert.equal(checkpoint.failure!.rejectedOutput!.text, rejected.text)
+      if (readWitness) {
+        assert.equal(checkpoint.failure!.failedWorktree!.baseCommit, elaborationCalls[index + 1].worktree!.baseCommit)
+        assert.equal(checkpoint.failure!.failedWorktree!.headCommit, checkpoint.failure!.failedWorktree!.baseCommit)
+        assert.equal(checkpoint.failure!.failedWorktree!.tree, checkpoint.failure!.failedWorktree!.baseTree)
+      }
     }
   } else assert.deepEqual(elaborationCalls[1].worktree, elaborationCalls[2].worktree)
   assert.deepEqual(elaborationCalls[1].schema, elaborationCalls[2].schema)

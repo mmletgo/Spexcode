@@ -118,6 +118,8 @@ new tagged whole current/latestApproved接受先核原source协议；单体用�
 
 同一operation内，已通过结构的P1候选若独审以明确的格式/schema失败正式结算，且原完整拒稿有对应round和CAS，可沿原仅续独审入口。沿原输入、owner、P0、计划、较新生成和控制恢复门限认证原generation及只读请求。原失败状态、停止、正式dispatch、拒稿packet、CAS正文与canonical Native原件都匹配才授予诊断；原checkpoint的ref若缺席不追补。此前已续审的附件还须按原resultRef核回真实失败round及其正式Native/CAS原件。新fence只继承同一候选及原生成trace，重新派独审，不重新派生成，不改历史原件或预算，完整格式及语义门保持。
 
+格式拒稿收尾附带的可选 `failedWorktree` 继续作为失败原件。只读请求的见证须与 canonical Native、正式 checkpoint 及原会话路径逐值一致，并通过既有 Git seed 校验，证明实际 HEAD/tree 未变化。同一候选仅续独审继续保留该见证、完整拒稿及原失败；原历史无见证保持缺席。见证失配、源码或候选变化、未知停止及非格式失败仍由原认证门拒绝。
+
 新Native P1在首次实际派发前冻结`elaboration-draft-v1`阶段标记；已冻结或仅reserved的旧P1请求没有该标记时保持原prompt/schema/模式，不补签新协议。草稿loader与原严格accept/repairSeed loader分离：只从当前operation或正式retryOf祖先、已结算attempt、原stage/readSet/selection的对应owner读取Git草稿引用或旧认证原件的临时材料，父context导致的局部inputDigest变化不丢草稿，但不能复用旧批准。非权威材料优先保原精确partitionStage；只有完整baseline/readSet/selection原件经既有stageSelectionMatches证明同source、旧binding逐字保留且新增资源全null时，才可跨合法P1扩域继承正式草稿。无baseline的旧路径仍精确匹配，不向缺席字段补签；纯控制attempt没有正式draft时跳过，advisory不能补权。原owner/schema/path/ref/Git与写范围重验后，仅将原JSON字节overlay到当前seed，不迁旧树、旧摘要或accept。原件及Native身份、失败/候选/review字段不改写；当前fence只登记provenance。新草稿正文不成为JSON checkpoint artifact，不进入raw role；新增持久字段的上线须配套sync writer v22围栏拒绝旧v21 writer、停稳资源和完整备份，回滚恢复一致旧库及原Git/evidence/CAS字段，不靠删除marker。
 
 resource-only入口按 [[sync-source-registration]] 使用专用raw Git登记元数据核原root/commonDir/input，允许失效continuity见证后仍清理；该raw路径不进入normal resume/admit/adopt/currentness/V4，不放宽业务物理权限或重放journal。
