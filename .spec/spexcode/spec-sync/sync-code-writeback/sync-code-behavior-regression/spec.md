@@ -29,6 +29,8 @@ git-json-v4 回归先令 v3 独审提交实际不存在的路径，随后只续�
 
 git-json-v5 回归先提交路径齐全但引用未变化只读验收来源的 v4 Git 草稿，确认旧自检通过而正式分析拒绝。新分析承接原 OID 和业务摘要，在该稿上运行自检，精确列出 AC 及未变化的只读依据。合法可写、已变化的只读依据与 user:raw 走正式原门。自检不修改草稿、context、schema 或业务文件，改正后正常提交并独立审查，旧失败保留状态。
 
+分区 P0 路径自检回归以实际 Git 任务和草稿执行提示中的命令。旧提示自检会遗漏实际不在本区变化集合的路径，正式分析拒绝原稿。开启新冻结字段后，自检报告空集合下的全部越界路径及非空集合中的共享或未来路径，路径原字节去重，退出码非零。续修沿原草稿、schema 和业务摘要，修正后经完整校验和独审。旧提示、独审提示和已认证批准沿原字节身份。
+
 P0 git-json-v1真实Git合同回归先在旧实现复现context文件指针缺席，再验证完整task、两条不同历史拒因/旧JSON及pendingAnalysis逐项可读、blob/SHA/tree与原业务digest绑定。相同单owner fixture的23次accepted查找保持零runner，不等同真实23owner缓存验收。legacy与文件运输均覆盖syntax/schema原稿及schema字节续修、独审ID/路径/身份错误；临时context误列checkedPaths、context/schema修改或删除均拒绝。受控fixture不模拟EPIPE根因，也不宣称真实大owner独审已通过。
 
 指导版本回归覆盖旧v6及更早/无版本accept与当前v7的真实上下文摘要差异，旧分析ref及Native原件保持；原输出schema、源码保护、精确局部路径与独立审查断言不变。

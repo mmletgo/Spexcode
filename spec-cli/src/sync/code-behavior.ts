@@ -50,7 +50,7 @@ export type CodeBehaviorPostGateReview = {
   findings: { finding: ContractFinding; before: ContractItem; after: ContractItem; changedPaths: string[] }[]
   codeDiff: string
 }
-export type CodeBehaviorInput = { contextTransport?: CodeBehaviorContextTransport; postGateReview?: readonly CodeBehaviorPostGateReview[]; draftProtocol?: 'code-behavior-draft-v1'; partition?: { id: string; changedPaths: readonly string[]; factSourcePaths: readonly string[]; authorizedParentSpecPaths?: readonly string[] }; model?: string; snapshot: InputSnapshot; baseline: BaselinePair | null; baselineSelection?: FrozenBaselineSelection; composed: ComposedInputRef; readSetDigest: string; policyDigest: string; plan: SyncCoordinatorPlan; requestKey: string; timeoutMs: number | null; signal?: AbortSignal; origin?: 'initial' | 'spec' | 'code' | 'combined' | 'reconcile' | 'decision'; decision?: { request: SyncDecisionInput; previous: CodeBehaviorEvidence; previousComposed?: ComposedInputRef; previousReadPaths?: readonly string[] }; repairDiagnostics?: readonly { code: string; message: string }[] }
+export type CodeBehaviorInput = { contextTransport?: CodeBehaviorContextTransport; exactChangedPathsPreflight?: true; postGateReview?: readonly CodeBehaviorPostGateReview[]; draftProtocol?: 'code-behavior-draft-v1'; partition?: { id: string; changedPaths: readonly string[]; factSourcePaths: readonly string[]; authorizedParentSpecPaths?: readonly string[] }; model?: string; snapshot: InputSnapshot; baseline: BaselinePair | null; baselineSelection?: FrozenBaselineSelection; composed: ComposedInputRef; readSetDigest: string; policyDigest: string; plan: SyncCoordinatorPlan; requestKey: string; timeoutMs: number | null; signal?: AbortSignal; origin?: 'initial' | 'spec' | 'code' | 'combined' | 'reconcile' | 'decision'; decision?: { request: SyncDecisionInput; previous: CodeBehaviorEvidence; previousComposed?: ComposedInputRef; previousReadPaths?: readonly string[] }; repairDiagnostics?: readonly { code: string; message: string }[] }
 type BehaviorPurpose = 'code_behavior_analyze' | 'code_behavior_review'
 type CompletedBehaviorDraft = { trace: ElaborationTrace; draftOid: string; resultCommit: string; requestRef: BlobRef; receipt: unknown }
 /** 未批准临时稿只记录真实Git身份；readyAnalysis仅省去独审协议失败后的重复分析，不批准独审。 */
@@ -674,9 +674,10 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     }
     if (draftMode) prompt += `\n草稿文件=${binding.path}；${material ? material.sourceKind === 'physical_draft' ? '已认证停止的旧工作树中明确未批准的物理草稿已按原字节复制到当前seed；它未提交，不是历史Git稿、Native final或批准；仅续修此文件，正常提交后重新独审。' : material.sourceKind === 'git_draft' ? '认证的原Git分析草稿已按原字节复制到当前seed；沿该原文件核实分类并续修，旧批准不继承。' : material.sourceKind === 'native_output' ? '认证的旧只读Native成功结构化输出已序列化为本轮临时材料；它不是历史Git草稿或新批准，在该文件核实分类并续修。' : '旧Native原输出材料已按认证CAS原字节复制为本轮临时输入，不是既有Git草稿；在该原文件继续修复。' : source === undefined ? '首次实际创建该文件。' : '已有原草稿已复制到当前seed，在原文件继续修改，不从零重答。'}本段只把上文直接返回业务JSON的交付方式改为草稿文件；业务文件仍只读，唯一可写例外为此草稿。结构化业务JSON写入此临时文件，Spec、源码、全部测试、其他owner文件保持不变。只允许正常git add和git commit该草稿并保持clean；无需改正文时可正常commit --allow-empty，保留hooks。${DRAFT_RECEIPT_INSTRUCTIONS} 草稿仅为非权威诊断材料，不是raw、事实、批准或新授权。\n草稿业务schema只读文件=${binding.path.replace(/\.json$/, '.schema.json')}；先读取精确schema并自检，禁止修改schema。${contextSource === undefined ? `原具体错误：${JSON.stringify(repairErrors)}；本轮修复诊断：${JSON.stringify(repairDiagnostics)}` : statusOnly ? '读取任务指针指定的只读context JSON。task为原任务，review的pendingAnalysis为本轮完整待审分析。按原JSON草稿与精确schema继续自检和修复。context、schema等临时协议文件不属于业务checkedPaths。保持这些文件只读，仓库仍可自由读取。' : `读取任务指针指定的完整只读context JSON：task为原任务，repairDiagnostics/errors仅为非权威修复诊断，review的pendingAnalysis为本轮完整待审分析，均须保留各项具体拒因；按原JSON草稿继续修复。context、schema等临时协议文件不属于业务checkedPaths，不修改这些只读文件；仓库仍可自由读取。`}`
     if (reviewFeedback) prompt += `\n用 git show ${reviewFeedback.commit}:${reviewFeedback.path} 读取本区最近一次真实业务独审的原JSON。沿其具体发现修复原草稿。原审查意见只供返修，不授予批准或新写权。`
+    const exactChangedPaths = input.contextTransport === 'git-json-v6' && input.exactChangedPathsPreflight === true && input.partition !== undefined
     if (purpose === 'code_behavior_analyze' && (input.contextTransport === 'git-json-v3' || input.contextTransport === 'git-json-v4' || acceptancePreflight)) prompt += `
 初始化时即使基线与 HEAD 的 Git 内容相同，task.requiredChangedPaths 仍须全部在 changes[].paths 中归类。可把同一行为的多条实际路径放在一项。每条 task.unownedSourcePaths 要有 newNodes，或有真实重大未知/冲突的对应项。
-在续修开头对已有草稿运行下方只读检查，提交前对最终草稿再运行。按输出的具体路径补足分析和归属。${acceptancePreflight ? 'invalidAcceptanceBasis 定位当前草稿中非 user:raw 验收更新引用的未变只读依据。核实后只保留真实变化的合法依据，没有合法依据则撤回该项验收更新并保留原 AC 义务。user:raw 须有真实作者依据，继续由正式程序校验。各列表为空后提交。检查仅输出当前问题' : '两组列表为空后提交。检查仅输出当前漏项'}，独审仍核业务事实及归属，禁止为通过检查虚构 GAP。
+${exactChangedPaths ? 'changes[].paths 只允许 task.requiredChangedPaths 中的精确路径。按 invalidChangedPaths 移除原稿中的越界路径，包括未列入该集合的共享读取文件或拟修改的实现路径。task.requiredChangedPaths 为空时提交 changes:[]。\n' : ''}在续修开头对已有草稿运行下方只读检查，提交前对最终草稿再运行。按输出的具体路径补足分析和归属。${acceptancePreflight ? 'invalidAcceptanceBasis 定位当前草稿中非 user:raw 验收更新引用的未变只读依据。核实后只保留真实变化的合法依据，没有合法依据则撤回该项验收更新并保留原 AC 义务。user:raw 须有真实作者依据，继续由正式程序校验。各列表为空后提交。检查仅输出当前问题' : '两组列表为空后提交。检查仅输出当前漏项'}，独审仍核业务事实及归属，禁止为通过检查虚构 GAP。
 node - ${contextPath} ${binding.path} <<'SPEX_P0_COVERAGE'
 const { readFileSync } = require('node:fs')
 const { task${acceptancePreflight ? ', readonlyUnchangedAcceptanceSources' : ''} } = JSON.parse(readFileSync(process.argv[2], 'utf8'))
@@ -690,14 +691,16 @@ for (const change of changes) {
 }
 const missingChangedPaths = task.requiredChangedPaths.filter(path => !analyzed.has(path))
 const missingOwnerPaths = task.unownedSourcePaths.filter(path => !ownerOrGap.has(path))
-${acceptancePreflight ? `const readonlySources = new Map(readonlyUnchangedAcceptanceSources.map(item => [item.id, item]))
+${exactChangedPaths ? `const requiredChangedPaths = new Set(task.requiredChangedPaths)
+const invalidChangedPaths = [...analyzed].filter(path => !requiredChangedPaths.has(path))
+` : ''}${acceptancePreflight ? `const readonlySources = new Map(readonlyUnchangedAcceptanceSources.map(item => [item.id, item]))
 const invalidAcceptanceBasis = acceptanceChanges.flatMap(({ id, ruleIds, source }) => {
   if (source === 'user:raw') return []
   const unchangedReadonlyBasis = ruleIds.filter(ruleId => readonlySources.has(ruleId)).map(ruleId => readonlySources.get(ruleId))
   return unchangedReadonlyBasis.length ? [{ id, unchangedReadonlyBasis }] : []
 })
-` : ''}console.log(JSON.stringify({ missingChangedPaths, missingOwnerPaths${acceptancePreflight ? ', invalidAcceptanceBasis' : ''} }, null, 2))
-if (missingChangedPaths.length || missingOwnerPaths.length${acceptancePreflight ? ' || invalidAcceptanceBasis.length' : ''}) process.exitCode = 1
+` : ''}console.log(JSON.stringify({ missingChangedPaths, missingOwnerPaths${acceptancePreflight ? ', invalidAcceptanceBasis' : ''}${exactChangedPaths ? ', invalidChangedPaths' : ''} }, null, 2))
+if (missingChangedPaths.length || missingOwnerPaths.length${acceptancePreflight ? ' || invalidAcceptanceBasis.length' : ''}${exactChangedPaths ? ' || invalidChangedPaths.length' : ''}) process.exitCode = 1
 SPEX_P0_COVERAGE`
     if ((input.contextTransport === 'git-json-v4' || input.contextTransport === 'git-json-v5' || input.contextTransport === 'git-json-v6') && purpose === 'code_behavior_review') prompt += `
 在续审开头对已有评审稿运行下方只读检查，提交前再次检查。checkedPaths 只记录已实际独立检查的冻结文件。输出中的路径须重新核对，改用真实已检查文件的精确仓库相对路径；只读了目录、临时文件或不存在的路径时，先检查真正相关的文件。全部必审路径、业务证据、拒因和独立审查继续按原要求完成。
