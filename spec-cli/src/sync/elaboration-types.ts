@@ -56,6 +56,8 @@ export type ElaborationInput = {
   defaultExportCitation?: true
   /** 新attempt冻结的Native提示投影，共用完全相同的草稿和运行诊断内容。 */
   sharedDraftDiagnostics?: true
+  /** 新Native attempt冻结的完整叶冷续稿诊断角色。 */
+  draftRepairDisposition?: true
   /** 同attempt冻结的Native父接口独审提示，仅限定当前阶段的审查范围。 */
   parentInterfaceReview?: true | 'scope-v2'
   /** 新Native spec_to_code attempt在P1开始前冻结的分区影响判据。 */

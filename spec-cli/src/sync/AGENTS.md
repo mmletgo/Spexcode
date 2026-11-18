@@ -18,6 +18,7 @@
 - P1候选GAP只复核同operation新提议的code/derived missing_fact；原aggregate/local/Native refs冷验后只让命中owner续原Git稿、新独审及strict seal，其他业务字段与源码/tests保持。新checkpoint仅留refs和身份，诊断现读；真实未知及已处理负例不反复派发，旧批准不改签。
 - P1 V5完整叶只读事实返修只消费原candidate_review认证诊断的typed relatedIds与冻结owner交集：仅desc/expanded及命中RULE.basis可变，其余业务列/raw/绑定/AC/VERIFY严格保持；旧缺席不补写、不从message或草稿errors授信，局部与strict seal共用。
 - P1独审共用生成侧owner范围；仅要求冻结owner改写的repair或未知ID绑定须给具体拒因重审。原JSON/Git稿、候选与原Native生成身份冷验相同后只续独审；域内语义repair仍续生成。已结算的 ZCode session/events 超时与 Grok 独审退出逾期均可仅续审。沿同一 operation 冷验原只读请求、canonical 失败和正式 removed/stop。Grok 另核原生启动与停止原件和只读 Git 归档。保留原失败及未批准状态。旧请求字段不追补。
+- 跨 attempt 的新增完整叶 Native 草稿提示按 `draftRepairDisposition` 标记后续实现诊断。原 Git 及 findings 逐字保留，P1 只读/结构门和 V3 原执行保持。writer60 升级停稳、结算并保存一致 v59 online backup 及配套 Git/CAS。
 - 新 Native spec_to_code 的冻结父作者 REQ/RULE 差量按原 P0、独审父接口与显式叶引用证明，精确影响既选叶目标；局部与 strict seal 共用，既有验收授权和同候选冷复核保持。writer59 升级停稳、结算并保存一致 v58 online backup 及配套 Git/CAS。
 - 新 Native 纯父接口独审只核父层义务、事实来源与授权；实现和验收绑定由完整叶独审核对。提示由新attempt的`parentInterfaceReview`冻结。writer58 保护 `scope-v2` 的父误绑同候选续审。沿正式只读原件和 Git/Native 身份冷验，再独立派发。旧 `true` 提示逐字重放。
 - 状态派发 STEP 显式关联实际 TR；next→TR 是依赖，next→STEP/STATE 仍为导航，独立审查核对派发集合与步骤声明范围。

@@ -92,6 +92,8 @@ export function elaborationMaterialContext(commonDir: string, previous: Pick<Ela
 }
 // 未决事实保留为显式业务门禁；不能要求构建者编造事实来消除检查错误。
 const implementationFinding = (issue: ContractFinding): boolean => ['missing-implementation', 'missing-test-file', 'missing-test-case', 'implementation-review'].includes(issue.code)
+const readonlyTestFinding = (input: ElaborationInput, issue: Pick<ContractFinding, 'code' | 'message'>): boolean =>
+  ['missing-test-file', 'missing-test-case'].includes(issue.code) && input.readonlyTestPaths?.some(path => issue.message.includes(path)) === true
 const contextCoverageFinding = new Set(['missing-source-file', 'missing-governed-file', 'missing-test-file', 'missing-test-case', 'missing-requirement-flow', 'missing-acceptance', 'acceptance-not-executed', 'missing-implementation', 'missing-event-disposition', 'step-event-disposition-missing', 'missing-initial-state', 'missing-object-event', 'unreachable-state', 'nonterminal-no-exit', 'empty-flow', 'missing-stateless-rationale', 'incomplete-stateless-step', 'missing-flow-terminal', 'flow-no-exit', 'unreachable-step'])
 const interfaceSeedCoverageFinding = new Set([...contextCoverageFinding, 'incomplete-contract'])
 const interfaceSeedCompletionFinding = new Set(['missing-requirement-flow', 'missing-acceptance', 'missing-implementation', 'incomplete-contract'])
@@ -548,8 +550,7 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
       : strictContextCoverage || targetNodeIds.has(issue.nodeId) || !contextCoverageFinding.has(issue.code))
     .map(original => {
       const issue = historicalCoverageFinding(original, historical)
-      const readonlyTest = ['missing-test-file', 'missing-test-case'].includes(issue.code) && input.readonlyTestPaths?.some(path => issue.message.includes(path))
-      return (input.implementationWritePaths?.length === 0 || readonlyTest) && implementationFinding(issue) ? { ...issue, code: 'readonly_implementation_gap', message: `本轮实现或测试只读，不能延后补写代码或测试；${issue.message}` } : issue
+      return (input.implementationWritePaths?.length === 0 || readonlyTestFinding(input, issue)) && implementationFinding(issue) ? { ...issue, code: 'readonly_implementation_gap', message: `本轮实现或测试只读，不能延后补写代码或测试；${issue.message}` } : issue
     })
   findings.push(...localValidation)
   const baseline = [...input.targets.filter(target => target.source !== null), ...(input.context ?? [])].flatMap(source => parseContract({ nodeId: source.nodeId, path: source.path, source: source.source! }).contract?.items ?? [])
@@ -900,7 +901,23 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
     const runtimeFindings = runtimeDiagnostics?.round.findings
     const sharedFindings = input.sharedDraftDiagnostics === true && draft && runtimeFindings?.length
       && JSON.stringify(draft.errors) === JSON.stringify(runtimeFindings)
-    const diagnostics = { priorDraft: draft ? { sourceInputId: draft.sourceInputId, errors: draft.errors } : null, materialErrors: draftMaterial?.errors, materialDiagnostics: draftMaterial?.diagnostics, failures: runtimeDiagnostics ? { code: runtimeDiagnostics.failure.code, message: runtimeDiagnostics.failure.message } : null, ...(sharedFindings ? { runtimeFindingsRef: 'priorDraft.errors' } : { runtimeFindings }), seedFindings: seed?.findings, readonlyFindings: anchorRepair ? undefined : input.readonlySpecRepair?.findings }
+    const coldWritableLeaf = input.draftRepairDisposition === true && input.phase !== 'interface_seed'
+      && (input.implementationWritePaths?.length ?? 0) > 0 && Boolean(draft || draftMaterial || runtimeDiagnostics || seed)
+    const previousRound = runtimeDiagnostics?.round
+    const deferred = new Set(coldWritableLeaf && previousRound?.candidate && previousRound.reviewOutput === null && previousRound.review === null
+      ? previousRound.findings.filter(issue => implementationFinding(issue) && !readonlyTestFinding(input, issue)).map(issue => JSON.stringify(issue))
+      : [])
+    const projectFindings = <T extends Pick<ContractFinding, 'code' | 'message'>>(findings?: readonly T[]) => deferred.size
+      ? findings?.map(issue => deferred.has(JSON.stringify(issue)) ? { ...issue, deferToImplementation: true } : issue)
+      : findings
+    const diagnostics = {
+      priorDraft: draft ? { sourceInputId: draft.sourceInputId, errors: projectFindings(draft.errors) } : null,
+      materialErrors: projectFindings(draftMaterial?.errors), materialDiagnostics: draftMaterial?.diagnostics,
+      failures: runtimeDiagnostics ? { code: runtimeDiagnostics.failure.code, message: runtimeDiagnostics.failure.message } : null,
+      ...(sharedFindings ? { runtimeFindingsRef: 'priorDraft.errors' } : { runtimeFindings: projectFindings(runtimeFindings) }),
+      seedFindings: projectFindings(seed?.findings), readonlyFindings: anchorRepair ? undefined : input.readonlySpecRepair?.findings,
+      ...(coldWritableLeaf ? { deferredImplementationPolicy: '带 deferToImplementation 的发现归后续 P2 实现。P1 保留相关业务义务和合法 AC，修复本轮结构或独审阻断。新场景沿原写权和可信 VERIFY 指定精确测试路径与稳定 ID，P2 补齐后由 V3 实跑。readonly_implementation_gap 仍在 P1 处理。' } : {}),
+    }
     repairContext = JSON.stringify(citationRepair && input.citationRepairDiagnostics === 'actionable-v1' ? citationRepairPromptDiagnostics(diagnostics) : diagnostics)
   }
   const reviewScopeInstructions = `本轮审查修复范围（由生成侧同一owner事实派生，不新增写权）：${JSON.stringify({ targets: targetBindings.map(binding => ({ ...binding, mutable: targetHasCurrentChanges(input, input.targets[binding.targetIndex]) || factRepairTargets.some(target => target.targetIndex === binding.targetIndex), ...(factRepairTargets.find(target => target.targetIndex === binding.targetIndex) ? { factRepairIds: factRepairTargets.find(target => target.targetIndex === binding.targetIndex)!.factRepairIds } : {}) })), readonlyContext: input.context?.map(({ nodeId, path }) => ({ nodeId, path })) ?? [] })}。mutable=false及readonlyContext的metadata、description、prose、绑定和业务行均为冻结已接受内容，不因历史进度/文案质量在本轮要求修订。mutable=true只允许原raw/分析/逐项授权支持的字段差量；raw仍由程序保持，AC/VERIFY与生命周期继续核原授权。repair的affectedIds须全部存在且至少一个属于本轮可变owner；允许同时引用冻结祖先/依赖作为证据，须定位本轮改变造成的具体义务失败。真实扩域沿原分析重审与授权流程，不由finding扩权。`

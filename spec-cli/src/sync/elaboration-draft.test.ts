@@ -418,6 +418,80 @@ for (const missing of ['case', 'files'] as const) test(`Native完整P1把原授�
   assert.deepEqual(f.requests.map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
 })
 
+for (const mode of ['editable', 'readonly'] as const) test(`Native完整P1冷稿区分原阻断与待实现发现 ${mode}`, async t => {
+  const f = await fixture(t), source = f.input.targets[0].source!
+  const oldId = 'AC-EXPORT-03', futureId = 'AC-EXPORT-FUTURE-01', testPath = 'tests/future-export.test.mjs'
+  const original = parseContract({ nodeId: 'export-contract', path, source }).contract!.items.find(item => item.kind === 'VERIFY')!
+  const pending = { id: 'VERIFY-EXPORT-FUTURE', command: ['node', '--test', testPath], cwd: '.', timeoutMs: 10000 }
+  const input: ElaborationInput = {
+    ...f.input, generationGuidance: ELABORATION_GENERATION_GUIDANCE, sharedDraftDiagnostics: true, maxRepairs: 0,
+    implementationWritePaths: mode === 'editable' ? [testPath] : [],
+    verifications: [{ id: original.id, command: original.command, cwd: original.cwd, timeoutMs: original.timeoutMs }, pending],
+  }
+  const repaired = draftRows(source), tables = repaired.changes[0].tables
+  const old = tables.AC.find(item => item.id === oldId)!
+  tables.AC.push({ ...old, id: futureId, action: '当前所有者下载首次结果', assertion: '返回首次完成的结果引用', test: `${testPath}#${futureId}`, command: pending.id })
+  tables.VERIFY.push({ id: pending.id, command: pending.command, cwd: pending.cwd, 'timeout-ms': pending.timeoutMs })
+  const broken = structuredClone(repaired)
+  broken.changes[0].tables.AC.find(item => item.id === oldId)!.assertion = '非所有者请求也返回结果'
+  const originalDraft = JSON.stringify(broken)
+  const failed = await elaborate(input, { runner: f.run(() => originalDraft) })
+  assert.equal(failed.reviewPassed, false)
+  assert.equal(failed.failure?.code, 'repair_budget_exhausted')
+  assert.deepEqual(f.requests.map(request => request.purpose), ['elaboration_generate'])
+  const resultRef = writeEvidence(f.commonDir, failed), originalResult = readEvidence(f.commonDir, resultRef)
+  const saved = JSON.parse(originalResult.toString('utf8')) as ElaborationResult, round = saved.rounds[0], draft = round.draft!
+  assert.deepEqual(draft.errors, round.findings)
+  assert.ok(round.findings.some(issue => issue.code === 'acceptance_update_unauthorized' && issue.itemId === oldId), JSON.stringify(round.findings))
+  const expectedCode = mode === 'editable' ? 'missing-test-file' : 'readonly_implementation_gap'
+  const implementation = round.findings.find(issue => issue.code === expectedCode && issue.itemId === futureId)
+  assert.ok(implementation, JSON.stringify(round.findings))
+  assert.ok(implementation.message.includes(testPath))
+  assert.equal(implementation.severity, 'error')
+  assert.deepEqual(saved.deferredImplementationFindings, mode === 'editable' ? [implementation] : [])
+  const repairDiagnostics = { requestKey: input.requestKey, inputDigest: saved.inputDigest, resultRef, failure: saved.failure!, round }
+  for (const workspace of f.workspaces) git(f.root, 'worktree', 'remove', workspace)
+  const run = async (retry: ElaborationInput) => {
+    const start = f.requests.length
+    const result = await elaborate(retry, { draft, repairDiagnostics, runner: f.run((_request, workspace, draftPath) => {
+      assert.equal(git(workspace, 'rev-parse', `HEAD:${draftPath}`), draft.oid)
+      assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), originalDraft)
+      return JSON.stringify(repaired)
+    }) })
+    const requests = f.requests.slice(start), request = requests[0]
+    assert.equal(result.inputDigest, saved.inputDigest)
+    assert.deepEqual(requests.map(item => item.purpose), mode === 'editable' ? ['elaboration_generate', 'elaboration_review'] : ['elaboration_generate'])
+    const diagnostics = elaborationMaterialContext(f.commonDir, request, { binding: draft, worktree: request.worktree!, inputDigest: result.inputDigest })!.diagnostics
+    return { result, diagnostics }
+  }
+  const legacy = mode === 'editable' ? await run({ ...input, requestKey: 'cold-diagnostics-legacy' }) : null
+  const disposition = { draftRepairDisposition: true } as const
+  const current = await run({ ...input, ...disposition, requestKey: 'cold-diagnostics-current' })
+  assert.equal(readStageDraft(f.commonDir, draft, draft), originalDraft)
+  assert.deepEqual(readEvidence(f.commonDir, resultRef), originalResult)
+  assert.deepEqual(current.result.repairDiagnostics, repairDiagnostics)
+  const { deferredImplementationPolicy, ...currentDiagnostics } = current.diagnostics
+  const prior = currentDiagnostics.priorDraft as { sourceInputId: string; errors: typeof draft.errors }
+  const originalPrior = { sourceInputId: draft.sourceInputId, errors: draft.errors }
+  if (legacy) {
+    assert.equal(legacy.result.reviewPassed, true, JSON.stringify(legacy.result.failure))
+    assert.deepEqual(legacy.diagnostics.priorDraft, originalPrior)
+    assert.equal(legacy.diagnostics.deferredImplementationPolicy, undefined)
+    assert.deepEqual(currentDiagnostics, { ...legacy.diagnostics, priorDraft: { ...originalPrior, errors: draft.errors.map(issue => issue.code === expectedCode && issue.itemId === futureId ? { ...issue, deferToImplementation: true } : issue) } })
+    assert.match(String(deferredImplementationPolicy), /P2/)
+    assert.match(String(deferredImplementationPolicy), /保留.*AC/)
+    assert.equal(current.result.reviewPassed, true)
+    assert.equal(JSON.stringify(current.result.deferredImplementationFindings), JSON.stringify([implementation]))
+  } else {
+    assert.equal(current.result.reviewPassed, false)
+    assert.equal(deferredImplementationPolicy, undefined)
+    assert.deepEqual(prior, originalPrior)
+    assert.ok(current.result.rounds[0].findings.some(issue => issue.code === 'readonly_implementation_gap' && issue.itemId === futureId))
+  }
+  const acceptedRows = current.result.contracts.find(contract => contract.path === path)!.items
+  assert.equal(acceptedRows.find(item => item.kind === 'AC' && item.id === futureId)?.kind, 'AC')
+})
+
 test('跨source/父上下文只迁移同owner草稿；新seed保留新父Spec、全部源码/tests对象与absence', async t => {
   const f = await fixture(t), invalid = '{ prior invalid draft, do not discard'
   const failed = await elaborate({ ...f.input, maxRepairs: 0 }, { runner: f.run(() => invalid) })
@@ -451,6 +525,30 @@ test('历史失败原件仅复制为非权威草稿材料，不在prompt重答JS
     return JSON.stringify(rows)
   }) })
   assert.equal(result.status, 'complete'); assert.equal(JSON.stringify(material), original); assert.equal(result.repairDiagnostics, undefined)
+})
+
+test('Native冷续仅有草稿材料时同名缺测试发现不标记待P2', async t => {
+  const f = await fixture(t), testPath = 'tests/future-export.test.mjs'
+  const material = { source: JSON.stringify(rows), errors: [{
+    code: 'missing-test-file', message: `AC-EXPORT-03 测试文件不存在：${testPath}`, severity: 'error' as const,
+    nodeId: 'export-contract', path, line: 131, itemId: 'AC-EXPORT-03', relatedIds: ['REQ-EXPORT-01'],
+  }] }
+  const original = JSON.stringify(material)
+  const disposition = { draftRepairDisposition: true } as const
+  const input: ElaborationInput = { ...f.input, ...disposition, generationGuidance: ELABORATION_GENERATION_GUIDANCE, implementationWritePaths: [testPath], maxRepairs: 0 }
+  const result = await elaborate(input, { draftMaterial: material, runner: f.run((_request, workspace, draftPath) => {
+    assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), material.source)
+    return material.source
+  }) })
+  assert.equal(result.status, 'complete', JSON.stringify(result.failure))
+  assert.equal(result.repairDiagnostics, undefined)
+  assert.equal(JSON.stringify(material), original)
+  const request = f.requests[0], draft = result.rounds[0].draft!
+  assert.equal(readStageDraft(f.commonDir, draft, draft), material.source)
+  const { diagnostics } = elaborationMaterialContext(f.commonDir, request, { binding: draft, worktree: request.worktree!, inputDigest: result.inputDigest })!
+  assert.equal(diagnostics.priorDraft, null)
+  assert.equal(diagnostics.runtimeFindings, undefined)
+  assert.deepEqual(diagnostics.materialErrors, material.errors)
 })
 
 test('新P1请求单次传送同一组完整草稿和运行发现，历史请求继续按原绑定重放', async t => {

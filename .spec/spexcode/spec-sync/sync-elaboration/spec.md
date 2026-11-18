@@ -82,6 +82,8 @@ P1草稿与旧Native材料在本轮业务schema计算完成后才通过进程内
 
 临时草稿的续修诊断保留原finding完整身份，包括原有severity、nodeId、path、line、itemId及relatedIds；同码同文但定位不同的发现不得压成重复code/message。当前轮检查点、跨请求的已结算诊断及其实际生成prompt均保留这些字段，未提供的字段保持缺席。诊断仅帮助定位与区分error/warning，不改变业务授权、拒绝门、原稿或独审资格。
 
+完整 Native 叶跨 attempt 续稿使用与同 attempt 返修一致的实现待办角色。`draftRepairDisposition` 冻结后，当前明确有实现写权，且正式冷验的原候选结构检查在独审前已允许交 P2 的发现，仅在生成任务里与原条目逐字段一致的位置标记 `deferToImplementation: true`，并提示保留合法 AC 及按原可信 VERIFY 执行。仍保留原 severity、原条目和原诊断出处。无原结构见证的续稿材料及独审输出沿原诊断角色。只读实现、只读测试、原有结构阻断和程序验收继续按原门核对；冷恢复原 Git 稿、在库 findings 和旧派发字节保持。
+
 新P1草稿attempt在首次派发前冻结 `sharedDraftDiagnostics`。仅当原非空 `runtimeFindings` 与 `priorDraft.errors` 逐字段、同序序列化相同时，提示发送一份诊断内容，并以 `runtimeFindingsRef: "priorDraft.errors"` 指明所在诊断对象中的内容也供运行发现使用。不同定位、字段或顺序时同时发送两组。V1引用返修继续使用既有提示诊断筛选。业务输入、草稿字节、原运行发现、失败类别和程序验收使用原件。历史字段缺席时继续按原提示重建，已冻结请求及其引用不补写。[[sync-migrations]] writer55 保护新投影。
 
 显式draft-v1的只读V1引用返修沿既有未定义kind分支，把精确引用定位、原candidate/accepted/generation引用及真实baselineSpecPath同时交给生成与独审；重复诊断的归并保留实际路径、引用角色及全部受影响业务行，不把mode=reelaborate误当重新细化授权。baseline只从当前acceptedRef核验的真实owner完整正文复制为只读诊断文件，独审候选overlay不能覆盖它；文件不成为raw、事实、新义务或写权限。Agent依据该正文自行恢复坏草稿中被改写的prose及已接受RULE等业务字段，仅修finding定位的引用，选择冻结源码真实可索引声明或实际存在的related文件，不猜局部变量或调用符号，不顺手改basis、政策、流程/验收和稳定ID。原草稿字节、错误及trace不改写，schema、单一draft写范围、源码/tests对象与absence、契约演进及锚点门保持；candidate_review、partition_seal和旧无草稿请求不取得此V1任务。提示或seed改变不能为旧同attempt reserved请求重签，冷切换须在原请求结算后通过新attempt冻结。
