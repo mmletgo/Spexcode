@@ -32,7 +32,7 @@ import type { VerificationCheckpoint, VerificationCommandResult, VerificationDri
 import { runAttemptVerification } from './verification-run.js'
 import { remoteVerificationFixture } from './verification-transport.fixture.test.js'
 import { exportCandidate, freezeCandidate } from './candidate.js'
-import { composeInputSnapshots } from './composition.js'
+import { baselineSelectionDigest, composeInputSnapshots } from './composition.js'
 import { freezeDeliveryRuntime } from './runtime-freeze.js'
 import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence } from './snapshot.js'
 import { readCodeBehaviorContext } from './code-behavior.js'
@@ -49,7 +49,8 @@ import { adaptElaborationNativeOutput } from '../../test/elaboration-native-outp
 import { pinZCodeToolPolicy, rejectedFinalOutput, StructuredSessionError, structuredExecutionPolicy, structuredRealmRoot } from '../session-structured-policy.js'
 import { nativeWorktreePrompt, nativeWorktreeResult, sampleNativeWorktreeProcesses } from '../native-worktree-runtime.js'
 import { cancelStructuredSession, SettledSessionCreateTimeoutError } from '../session-structured.js'
-import { freezeContext, prepareFrozenPrompt } from '../frozen-context.js'
+import { FROZEN_READ_MAX_BYTES, FROZEN_READ_TOOL, freezeContext, prepareFrozenPrompt, proveFrozenReads, readFrozenManifest, readFrozenRange, type FrozenNativeItem } from '../frozen-context.js'
+import { stageWorktree } from './stage-worktree.js'
 import { retainHistoricalFrozenWorkflow } from './historical-workflow.test-helpers.js'
 import { stopZCodeStructuredTurn, zcodeCapability, zcodeNativeConfigSelection, zcodeNativeSelection, type ZCodeStructuredExecution } from '../zcode-structured.js'
 
@@ -4975,7 +4976,7 @@ test('readonly-owner零派发guard只阻相同候选诊断，真实owner新派�
   assert.equal(readonlySpecRepairStalled(repair, 'same', [{ ...findings[0], message: '另一真实错误' }], attempt), false)
 })
 
-for (const mode of ['review-format-continuation', 'review-format-interleaved', 'review-format-finite-one', 'review-format-finite-zero', 'review-failure-settlement', 'existing', 'mixed-citations', 'unsupported-source', 'unsupported-source-refactor', 'unsupported-source-mixed', 'new-leaf', 'aggregate-only', 'review', 'review-anchor-reference', 'review-accepted-reuse', 'review-accepted-reuse-repair', 'review-partial', 'review-pending', 'review-pending-unchanged', 'review-pending-sibling', 'review-pending-cross-source', 'review-pending-missing-owner', 'review-pending-lineage', 'review-pending-foreign-base', 'review-pending-unreviewed-base', 'review-prose', 'review-prose-cross-owner', 'review-prose-unknown', 'review-prose-path', 'review-prose-empty', 'review-multi', 'review-p1-fail', 'review-rebind', 'review-rebind-native', 'review-resume', 'review-location', 'review-ref', 'wrong-ref', 'unaffected-ref', 'readset', 'selection', 'selection-deleted', 'selection-source', 'non-null-selection', 'input-digest', 'foreign', 'policy', 'candidate', 'missing-owner'] as const) test(`readonly-owner late V1 ${mode} 只返修精确owner`, async t => {
+for (const mode of ['review-format-continuation', 'review-format-interleaved', 'review-format-finite-one', 'review-format-finite-zero', 'review-failure-settlement', 'existing', 'mixed-citations', 'unsupported-source', 'unsupported-source-refactor', 'unsupported-source-mixed', 'inline-native', 'inline-native-missing', 'inline-native-unsettled', 'inline-native-model', 'inline-native-readproof', 'inline-p0-frozen', 'inline-p0-worktree-analyze', 'inline-p0-worktree-review', 'inline-p0-cross-local', 'inline-p0-cross-whole', 'inline-plan-readset', 'inline-plan-selection', 'inline-plan-source', 'inline-plan-owner', 'inline-plan-digest', 'inline-plan-missing-expansion', 'inline-plan-unknown-expansion', 'inline-plan-nonnull-expansion', 'new-leaf', 'aggregate-only', 'review', 'review-anchor-reference', 'review-accepted-reuse', 'review-accepted-reuse-repair', 'review-partial', 'review-pending', 'review-pending-unchanged', 'review-pending-sibling', 'review-pending-cross-source', 'review-pending-missing-owner', 'review-pending-lineage', 'review-pending-foreign-base', 'review-pending-unreviewed-base', 'review-prose', 'review-prose-cross-owner', 'review-prose-unknown', 'review-prose-path', 'review-prose-empty', 'review-multi', 'review-p1-fail', 'review-rebind', 'review-rebind-native', 'review-resume', 'review-location', 'review-ref', 'wrong-ref', 'unaffected-ref', 'readset', 'selection', 'selection-deleted', 'selection-source', 'non-null-selection', 'input-digest', 'foreign', 'policy', 'candidate', 'missing-owner'] as const) test(`readonly-owner late V1 ${mode} 只返修精确owner`, async t => {
   const formatFinite = mode === 'review-format-finite-one' || mode === 'review-format-finite-zero'
   const formatRemaining = mode === 'review-format-finite-one' ? 1 : 0
   const settleFailureOnly = mode === 'review-failure-settlement'
@@ -4994,8 +4995,15 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
   const mixedSource = mode === 'unsupported-source-mixed'
   const unsupportedSource = freshSource || existingSource
   const newLeaf = freshSource || semantic && !partial && !reuse || mode === 'new-leaf' || mode === 'aggregate-only', aggregateOnly = mode === 'aggregate-only'
-  const negative = !['existing', 'mixed-citations', 'unsupported-source', 'unsupported-source-refactor', 'unsupported-source-mixed', 'new-leaf', 'aggregate-only', 'review', 'review-anchor-reference', 'review-accepted-reuse', 'review-accepted-reuse-repair', 'review-partial', 'review-pending', 'review-pending-unchanged', 'review-pending-sibling', 'review-pending-lineage', 'review-prose', 'review-multi', 'review-p1-fail', 'review-rebind', 'review-rebind-native', 'review-resume'].includes(mode)
-  const mixedCitations = mode === 'mixed-citations'
+  const negative = !['existing', 'mixed-citations', 'inline-native', 'inline-p0-frozen', 'unsupported-source', 'unsupported-source-refactor', 'unsupported-source-mixed', 'new-leaf', 'aggregate-only', 'review', 'review-anchor-reference', 'review-accepted-reuse', 'review-accepted-reuse-repair', 'review-partial', 'review-pending', 'review-pending-unchanged', 'review-pending-sibling', 'review-pending-lineage', 'review-prose', 'review-multi', 'review-p1-fail', 'review-rebind', 'review-rebind-native', 'review-resume'].includes(mode)
+  const inlineDrift = mode.startsWith('inline-plan-')
+  const inlineNative = mode.startsWith('inline-native')
+  const inlineNativeDefect = inlineNative && mode !== 'inline-native'
+  const inlineP0Frozen = mode === 'inline-p0-frozen'
+  const inlineP0Worktree = mode.startsWith('inline-p0-worktree-')
+  const inlineP0Foreign = mode === 'inline-p0-cross-local' || mode === 'inline-p0-cross-whole'
+  let producingForeignParent = inlineP0Foreign
+  const mixedCitations = mode === 'mixed-citations' || inlineDrift || inlineNative || inlineP0Frozen || inlineP0Worktree || inlineP0Foreign
   const shellPath = 'src/greet.sh'
   const baseSpec = (mixedCitations ? original.replace('code:\n', 'related:\n  - tests/export.test.mjs\ncode:\n') : original).split('\n').map(line => {
     if (existingSource && /^\| STEP-EXPORT-0[23] /.test(line)) return line.replace('derived:FLOW-EXPORT-01', 'code:src/export.js#ExportService')
@@ -5019,7 +5027,7 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
   const mandatoryTests = definitions.map(definition => ({ verificationId: `VERIFY-${definition.upper}-01`, testPath: definition.testPath, testId: `AC-${definition.upper}-01` }))
   if (unsupportedSource) extras[shellPath] = '#!/bin/sh\nprintf "starting\\n"\nprintf "finished\\n"\n'
   const nativeContinuation = reuse || mode === 'existing' || unsupportedSource
-  const f = await fixture(t, formatFinite ? { maxAttempts: 3, maxCalls: 30 + formatRemaining, maxRepairs: 2, timeoutMs: 300000 } : { mode: 'unlimited' }, false, baseSpec, 'project', baseSpec, { version: 'sync-coordinator-v2', direction: 'code_to_spec', ...(nativeContinuation ? { agentWorkflow: 'native-worktree-v1' } : {}), targets: definitions.filter(item => !newLeaf || item !== badOwner).map(({ nodeId, path }) => ({ nodeId, path })), sourcePaths: unsupportedSource ? definitions.map(item => item.sourcePath) : ['src'], writePaths: ['.spec'], verifications, mandatoryTests, partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, commitTrigger: { before: null, paths: definitions.map(item => item.sourcePath) } }, undefined, 'code', nativeContinuation ? 'claude:default' : undefined, true, extras)
+  const f = await fixture(t, formatFinite ? { maxAttempts: 3, maxCalls: 30 + formatRemaining, maxRepairs: 2, timeoutMs: 300000 } : { mode: 'unlimited' }, false, baseSpec, 'project', baseSpec, { version: 'sync-coordinator-v2', direction: 'code_to_spec', ...(nativeContinuation ? { agentWorkflow: 'native-worktree-v1' } : {}), targets: definitions.filter(item => !newLeaf || item !== badOwner).map(({ nodeId, path }) => ({ nodeId, path })), sourcePaths: unsupportedSource ? definitions.map(item => item.sourcePath) : ['src'], writePaths: ['.spec'], verifications, mandatoryTests, partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, commitTrigger: { before: null, paths: definitions.map(item => item.sourcePath) } }, undefined, 'code', nativeContinuation || inlineP0Worktree || inlineP0Foreign ? 'claude:default' : undefined, true, extras)
   const renewals: { attemptId: string; at: number }[] = []
   if (formatInterleaved) {
     const renew = f.store.renewLease.bind(f.store)
@@ -5043,6 +5051,7 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
       if (request.purpose === 'code_behavior_analyze') return { ...(output as object), changes: (output as { changes: object[] }).changes.map(change => ({ ...change, ...(newLeaf && badOwners.includes(definition) ? { kind: 'allowed_change', affectedIds: [], ruleIds: [] } : { ...(mixedSource && definition === definitions[1] ? { kind: 'allowed_change' } : {}), affectedIds: [`RULE-${definition.upper}-05`], ruleIds: [`RULE-${definition.upper}-05`] }) })), newNodes: newLeaf && definition === badOwner ? [{ codePath: definition.sourcePath, parentNodeId: 'export-contract', basis: '真实新增无治理模块具有父raw对应的服务职责' }] : [] }
     }
     if (request.purpose.startsWith('elaboration_')) {
+      if (producingForeignParent) throw Object.assign(new Error('fixture正式前序已批准P0，在P1停止'), { code: 'unsupported' })
       const context = (nativeContinuation ? nativeTask(request, f.input.source.commonDir) : JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0])) as { targets: { nodeId: string; path: string }[]; readonlySpecRepair?: ElaborationResult['readonlySpecRepair']; repair?: { kind: 'readonly_v1_anchor'; baselines: { nodeId: string; baselineSpecPath: string }[]; findings: unknown[]; generationRef: BlobRef; acceptedRef: BlobRef; candidateDigest: string } }
       const definition = definitions.find(item => item.nodeId === context.targets[0].nodeId)!
       ownerCalls.push({ attempt: attempt.number, nodeId: definition.nodeId, purpose: request.purpose })
@@ -5194,7 +5203,75 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
     return output
   }
   if (!nativeContinuation) f.transform(respond)
-  else f.options.runner = async request => {
+  if (inlineNative || inlineP0Frozen || inlineP0Worktree || inlineP0Foreign) {
+    const selectsP0 = (key: string): boolean => inlineP0Frozen || producingForeignParent ? key.includes(':code_behavior_')
+      : inlineP0Worktree && key.endsWith(`:code_behavior_${mode.endsWith('analyze') ? 'analyze' : 'review'}`)
+    const checkpoint = f.store.checkpoint.bind(f.store), reserve = f.store.reserveDispatch.bind(f.store)
+    let producingNativeP0 = false
+    f.store.reserveDispatch = (fence, binding) => {
+      // 外层测试runner只取确定性创建键。真正P0的派发摘要由内层Native运输冻结后持久登记。
+      if (!producingNativeP0 && selectsP0(binding.key) && f.store.readAttempt(fence.attemptId).number === 1)
+        return { ...binding, sessionCreateKey: `sync-call-${contentHash(JSON.stringify({ attemptId: fence.attemptId, key: binding.key }))}`, session: null }
+      return reserve(fence, binding)
+    }
+    f.store.checkpoint = (fence, ref) => {
+      const wrapper = JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as { stage?: string }
+      if (wrapper.stage?.startsWith('injected:') && (selectsP0(wrapper.stage) || inlineNative && wrapper.stage.includes(':elaborate:'))
+        && f.store.readAttempt(fence.attemptId).number === 1) return f.store.readAttempt(fence.attemptId)
+      return checkpoint(fence, ref)
+    }
+    const inline = f.options.runner!
+    const records = new Map<string, NativeRunRecord>()
+    f.options.runner = async request => {
+      const operation = f.store.readOperation(f.operation.id), attempt = f.store.readAttempt(operation.currentAttemptId!)
+      const nativeP0 = attempt.number === 1 && selectsP0(request.requestKey)
+      if (!nativeP0 && !(attempt.number === 1 && inlineNative && request.purpose.startsWith('elaboration_'))) return inline(request)
+      const worktree = nativeP0 && (inlineP0Worktree || producingForeignParent) ? stageWorktree(f.input.source.commonDir, f.input.headCommit, f.input.immutableTree, 'read') : undefined
+      const fence = { operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }
+      const runner = createAttemptRunner(f.store, fence, { pollMs: 2, runtime: {
+        readRecord: id => records.get(id) ?? null,
+        cancel: async () => { throw new Error('fixture不会控制真实原生进程') },
+        run: async actual => {
+          assert.deepEqual(actual.worktree, worktree)
+          assert.equal(Boolean(actual.frozenContext), nativeP0 && inlineP0Frozen)
+          const baseline = await inline(request)
+          const execution = structuredExecutionPolicy(actual), key = actual.sessionCreateKey ?? actual.requestKey, identity = { threadId: baseline.threadId, turnId: baseline.turnId }
+          assert.equal(baseline.sessionId, sessionIdForCreateKey(key))
+          const result = { ...baseline }
+          if (worktree) {
+            const workspace = join(f.parent, `p0-worktree-${baseline.sessionId}`)
+            f.git('worktree', 'add', '--detach', workspace, worktree.baseCommit)
+            result.worktree = nativeWorktreeResult(workspace, worktree)
+          }
+          const frozen = actual.frozenContext
+          if (frozen) {
+            const items: FrozenNativeItem[] = []
+            for (const entry of readFrozenManifest(frozen).entries) {
+              let startByte = 0
+              do {
+                const endByte = Math.min(startByte + FROZEN_READ_MAX_BYTES, entry.byteLength)
+                const read = readFrozenRange(frozen, { contextDigest: frozen.contextDigest, entryId: entry.id, startByte, endByte })
+                items.push({ type: 'dynamicToolCall', id: `read-${items.length}`, tool: FROZEN_READ_TOOL, status: 'completed', success: true, arguments: read.arguments, contentItems: read.response.contentItems })
+                startByte = endByte
+              } while (startByte < entry.byteLength)
+            }
+            result.frozenReadProof = proveFrozenReads(frozen, identity, items)
+          }
+          const prompt = worktree ? nativeWorktreePrompt(actual.prompt, worktree) : actual.prompt
+          const record: NativeRunRecord = { session: result.sessionId, status: 'awaiting', harnessSessionId: result.threadId, createRequestId: contentHash(key),
+            createPayloadHash: contentHash(JSON.stringify({ prompt, parent: null, launcher: null, ...(actual.base?.trim() ? { base: actual.base.trim() } : {}), structuredExecution: execution })),
+            structuredExecution: { ...execution, state: 'completed', ...identity, output: result.output, resultDigest: result.resultDigest,
+              ...(result.worktree ? { resultWorktree: result.worktree } : {}), ...(result.frozenReadProof ? { frozenReadProof: result.frozenReadProof } : {}) } }
+          records.set(result.sessionId, record)
+          writeRecord({ governed: false, worktreePath: result.worktree?.worktreePath ?? f.root, branch: null, title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(), harness: worktree ? 'claude' : 'codex', runtimeStartToken: null, stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: null, launchOwner: null, ...(worktree ? { base: worktree.baseCommit, forkCommit: worktree.baseCommit } : {}), ...record })
+          return result
+        },
+      } })
+      producingNativeP0 = nativeP0
+      try { return await runner(worktree ? { ...request, base: worktree.baseCommit, frozenEntries: undefined, worktree } : request) }
+      finally { producingNativeP0 = false }
+    }
+  } else if (nativeContinuation) f.options.runner = async request => {
     f.calls.push(request)
     const seed = request.worktree!, commonDir = f.input.source.commonDir
     const readJson = (marker: string) => JSON.parse(request.prompt.split(marker)[1].split('\n')[0])
@@ -5231,8 +5308,11 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
   const claim = f.store.claimQueuedAttempt.bind(f.store)
   const recordFailure = f.store.recordFailure.bind(f.store)
   const listAttempts = f.store.listAttempts.bind(f.store)
+  const readAttempt = f.store.readAttempt.bind(f.store)
+  const readOperation = f.store.readOperation.bind(f.store)
   let immutable: { refs: import('./operation-types.js').BlobRef[]; failure: unknown; dispatchPlans: SyncAttempt['dispatchPlans'] } | undefined
   let missingOwnerOriginal: SyncAttempt | undefined
+  let inlineColdProofView: (() => void) | undefined
   f.store.recordFailure = (fence, issue) => {
     const before = f.store.readAttempt(fence.attemptId)
     if (partial && before.number === 1) {
@@ -5271,7 +5351,7 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
       else review.review.findings[0].message += '外来改写'
       const resultRef = writeEvidence(f.input.source.commonDir, generated); f.store.checkpoint(fence, resultRef); f.store.checkpoint(fence, writeEvidence(f.input.source.commonDir, { ...wrapper, resultRef }))
     }
-    if (before.number === 1 && issue.code === 'generation_failed' && negative && !semantic) {
+    if (before.number === 1 && issue.code === 'generation_failed' && negative && !semantic && !inlineDrift && !inlineNativeDefect && !inlineP0Worktree && !inlineP0Foreign) {
       const wrappers = before.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
       const local = wrappers.find(value => value.stage?.startsWith('partition:') && value.stage.endsWith(':elaboration') && JSON.parse(readEvidence(f.input.source.commonDir, value.resultRef).toString()).changes.some((change: { nodeId: string }) => change.nodeId === badOwner.nodeId))
       if (['readset', 'selection', 'selection-deleted', 'selection-source', 'non-null-selection', 'foreign', 'policy'].includes(mode)) {
@@ -5312,6 +5392,70 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
     if (missingOwner && before.number === 3) missingOwnerOriginal = f.store.readAttempt(fence.attemptId)
     if (before.number === 1) {
       const saved = f.store.readAttempt(fence.attemptId); immutable = { refs: saved.checkpointRefs, failure: saved.failure, dispatchPlans: saved.dispatchPlans }
+      if (inlineDrift && issue.code === 'generation_failed') {
+        const commonDir = f.input.source.commonDir, operation = readOperation(f.operation.id)
+        const stages = saved.checkpointRefs.map(ref => ({ ref, value: JSON.parse(readEvidence(commonDir, ref).toString()) }))
+        const plan = stages.find(({ value }) => value.stage === 'partition-plan')!, analysis = stages.find(({ value }) => value.stage === 'analysis')!, approved = stages.find(({ value }) => value.stage === 'elaboration')!
+        const expansion = operation.contractScopeExpansions!.find(expansion => expansion.evidenceRef.sha256 === approved.value.resultRef.sha256)!
+        assert.ok(expansion.baselineSelectionDigest === operation.baselineSelection!.digest && expansion.previousBaselineSelectionDigest !== expansion.baselineSelectionDigest)
+        assert.equal(analysis.value.guidanceContractVersion, 'code-behavior-guidance-v7')
+        assert.equal(stages.some(({ value }) => value.stage === 'behavior-draft-protocol'), false)
+        assert.notEqual(plan.value.readSetDigest, operation.readSetDigest, '反例实际经过P1的正式扩域')
+        const source = structuredClone(saved)
+        if (mode === 'inline-plan-missing-expansion' || mode === 'inline-plan-unknown-expansion' || mode === 'inline-plan-nonnull-expansion') {
+          const changed = structuredClone(operation)
+          if (mode === 'inline-plan-missing-expansion') changed.contractScopeExpansions = []
+          else if (mode === 'inline-plan-unknown-expansion') changed.contractScopeExpansions = changed.contractScopeExpansions!.map(item => ({ ...item, evidenceRef: plan.value.resultRef }))
+          else {
+            const binding = changed.baselineSelection!.bindings.find(binding => binding.resource.kind === 'contract')!
+            assert.ok('intentPair' in binding && binding.intentPair === null)
+            binding.intentPair = { id: 'uncertified-selection-pair', repositoryId: f.input.source.repositoryId, source: f.input.source, sourceInput: f.input, verifiedDelivery: f.input, coveredScope: operation.scope, receiptId: 'unsettled-test-receipt', settledAtMs: 1 }
+            changed.baselineSelection!.digest = baselineSelectionDigest(changed.baselineSelection!)
+            changed.contractScopeExpansions!.find(item => item.evidenceRef.sha256 === approved.value.resultRef.sha256)!.baselineSelectionDigest = changed.baselineSelection!.digest
+          }
+          f.store.readOperation = id => id === operation.id ? { ...readOperation(id), baselineSelection: changed.baselineSelection, contractScopeExpansions: changed.contractScopeExpansions } : readOperation(id)
+        } else if (mode === 'inline-plan-source') {
+          source.composedInput!.sourceInputId = contentHash('different composed input')
+        } else {
+          const wrapper = { ...plan.value }
+          if (mode === 'inline-plan-readset') wrapper.readSetDigest = contentHash('different original plan read set')
+          else if (mode === 'inline-plan-selection') wrapper.baselineSelectionRef = writeEvidence(commonDir, operation.baselineSelection)
+          else {
+            const body = JSON.parse(readEvidence(commonDir, wrapper.resultRef).toString())
+            if (mode === 'inline-plan-digest') body.digest = contentHash('different original plan')
+            else body.partitions[0].changedPaths = ['src/unrelated.js']
+            wrapper.resultRef = writeEvidence(commonDir, body)
+          }
+          source.checkpointRefs = source.checkpointRefs.map(ref => ref.sha256 === plan.ref.sha256 ? writeEvidence(commonDir, wrapper) : ref)
+        }
+        f.store.readAttempt = id => id === source.id ? structuredClone(source) : readAttempt(id)
+        f.store.listAttempts = id => listAttempts(id).map(attempt => attempt.id === source.id ? structuredClone(source) : attempt)
+      }
+      if (inlineNativeDefect && issue.code === 'generation_failed') {
+        const commonDir = f.input.source.commonDir, findResource = f.store.findResource.bind(f.store)
+        const resource = f.store.listResources(saved.id).find(resource => resource.plan.key.endsWith(':elaboration_generate'))!
+        const plan = JSON.parse(readEvidence(commonDir, resource.plan.planBlob).toString()) as NativeRunPlan
+        const altered = structuredClone(resource)
+        if (mode === 'inline-native-unsettled') altered.phase = 'terminal'
+        else if (mode === 'inline-native-model') altered.plan.planBlob = writeEvidence(commonDir, { ...plan, request: { ...plan.request, model: 'unrelated-model' } })
+        else if (mode === 'inline-native-readproof') {
+          const request = prepareFrozenPrompt({ ...plan.request, frozenEntries: [{ id: 'task', label: 'Complete original task and frozen context', kind: 'utf8', text: plan.request.prompt }] }, { directory: join(f.parent, 'cold-fixture-frozen-context'), binding: { attemptId: saved.id, policyDigest: f.operation.policyDigest } })
+          assert.ok(request.frozenContext)
+          const requestDigest = contentHash(JSON.stringify(request))
+          const checkpoint = JSON.parse(readEvidence(commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
+          assert.equal(checkpoint.result?.frozenReadProof, undefined)
+          altered.plan.planBlob = writeEvidence(commonDir, { ...plan, request, requestDigest })
+          altered.plan.payloadDigest = requestDigest
+          altered.checkpointRef = writeEvidence(commonDir, { ...checkpoint, requestDigest })
+          const origin = { ...saved, dispatchPlans: saved.dispatchPlans.map(dispatch => dispatch.key === resource.plan.key ? { ...dispatch, requestDigest } : dispatch) }
+          inlineColdProofView = () => {
+            f.store.readAttempt = id => id === origin.id ? origin : readAttempt(id)
+            f.store.listAttempts = id => listAttempts(id).map(attempt => attempt.id === origin.id ? origin : attempt)
+            f.store.findResource = (id, key) => id === saved.id && key === resource.plan.key ? altered : findResource(id, key)
+          }
+        }
+        if (mode !== 'inline-native-readproof') f.store.findResource = (id, key) => id === saved.id && key === resource.plan.key ? mode === 'inline-native-missing' ? null : altered : findResource(id, key)
+      }
       if (pending && !sibling && issue.code === 'generation_failed') {
         const operation = f.store.readOperation(f.operation.id)
         const broken = claim({ operationId: operation.id, source: operation.input.source, scope: operation.scope, leaseMs: 30000, expectedRevision: operation.revision, continuation: true })
@@ -5358,7 +5502,14 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
     }
     return failed
   }
-  f.store.claimQueuedAttempt = input => { if (f.store.listAttempts(f.operation.id).length >= (lineage ? 6 : formatInterleaved ? 4 : reuseRepair ? 4 : unchanged || invalidBase || sibling ? 5 : pending || aggregateOnly || mode === 'review-resume' || mode === 'review-rebind-native' ? 4 : 3)) throw new Error('fixture仅阻止旧实现无限零调用热循环'); return claim(input) }
+  f.store.claimQueuedAttempt = input => {
+    if (f.store.listAttempts(f.operation.id).length >= (lineage ? 6 : formatInterleaved ? 4 : reuseRepair ? 4 : unchanged || invalidBase || sibling ? 5 : pending || aggregateOnly || mode === 'review-resume' || mode === 'review-rebind-native' ? 4 : 3)) throw new Error('fixture仅阻止旧实现无限零调用热循环')
+    const next = claim(input)
+    // 读取证据反例只出现在冷认证视图，原resource恢复仍看实际原件。
+    inlineColdProofView?.()
+    inlineColdProofView = undefined
+    return next
+  }
   const countCandidateHistory = mode === 'existing' || mode === 'review-accepted-reuse'
   const candidateHistory = { windows: 0, fullClones: 0, indexClones: new Map<string, number>() }
   if (countCandidateHistory) {
@@ -5405,6 +5556,59 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
       }
       return clone(value, options)
     })
+  }
+  if (inlineP0Foreign) {
+    const parent = (await runSyncOperation(f.store, f.operation.id, f.options)).operation
+    const original = readAttempt(parent.currentAttemptId!)
+    assert.equal(original.failure?.message, 'fixture正式前序已批准P0，在P1停止')
+    assert.ok(f.store.readRetryEligibility(parent.id).eligible)
+    assert.equal(f.store.listResources(original.id).filter(resource => resource.phase === 'removed' && resource.plan.key.includes(':code_behavior_')).length, definitions.length * 2)
+    producingForeignParent = false
+    const commonDir = f.input.source.commonDir
+    const stages = original.checkpointRefs.flatMap(ref => {
+      const wrapper = JSON.parse(readEvidence(commonDir, ref).toString())
+      return wrapper.stage === 'analysis' || wrapper.stage === 'partition-plan' || /^partition:[^:]+:analysis$/.test(wrapper.stage) ? [{ ref, wrapper }] : []
+    })
+    const child = f.store.admitAndEnqueue(await prepareSyncAdmission(f.input, f.plan, { ingressKey: 'inline-legacy-retry', rootCauseId: 'inline-legacy-retry', retryOf: parent.id, model: parent.model,
+      origin: parent.origin, budget: parent.budget, managedRoot: f.managedRoot, baselineSelection: f.store.readBusinessBaselineSelection(parent.id), executionScope: parent.scope }))
+    f.operation = f.store.ackDispatch(f.input.source.repositoryId, child.dispatchMessageId)
+    f.useOperation(f.operation)
+    const bind = f.store.bindComposedInput.bind(f.store)
+    let copiedOriginal = false
+    f.store.bindComposedInput = (fence, composed, basis) => {
+      const attempt = bind(fence, composed, basis)
+      if (fence.operationId !== child.id || copiedOriginal) return attempt
+      copiedOriginal = true
+      assert.equal(composed.contentDigest, original.composedInput?.contentDigest)
+      for (const { ref, wrapper } of stages) {
+        const base = { ...wrapper, operationId: child.id, attemptId: fence.attemptId }
+        f.store.checkpoint(fence, { ...writeEvidence(commonDir, base), artifacts: ref.artifacts })
+        if (mode === 'inline-p0-cross-whole' ? wrapper.stage === 'analysis' : /^partition:[^:]+:analysis$/.test(wrapper.stage)) {
+          const provenance = { fromOperationId: parent.id, fromAttemptId: original.id,
+            ...(wrapper.stage === 'analysis' ? { analysisRef: wrapper.resultRef } : { resultRef: wrapper.resultRef }) }
+          const resultRef = writeEvidence(commonDir, provenance)
+          const stage = wrapper.stage === 'analysis' ? 'analysis-provenance' : wrapper.stage + ':provenance'
+          f.store.checkpoint(fence, { ...writeEvidence(commonDir, { ...base, stage, resultRef }), artifacts: syncCheckpointArtifacts(provenance, resultRef) })
+        }
+      }
+      return f.store.readAttempt(fence.attemptId)
+    }
+    const existingRecorder = f.store.recordFailure
+    f.store.recordFailure = (fence, issue) => {
+      const failed = existingRecorder(fence, issue)
+      if (fence.operationId === child.id && issue.code === 'generation_failed') f.store.requestControl(child.id, 'pause')
+      return failed
+    }
+    // 用旧writer读取明确复制的原refs并正常生成P1/V1，接着由当前公开入口冷验。
+    const historical = await historicalBehaviorCoordinator(f.parent, 'v7')
+    const paused = await historical(f.store, child.id, f.options)
+    assert.ok(copiedOriginal)
+    assert.equal(readOperation(child.id).control, 'pause', JSON.stringify({ status: paused.status, failure: paused.failure, attempts: listAttempts(child.id).map(attempt => [attempt.status, attempt.failure]) }))
+    assert.equal(listAttempts(child.id)[0].failure?.code, 'generation_failed')
+    assert.equal(listAttempts(child.id)[0].dispatchPlans.some(dispatch => dispatch.purpose.startsWith('code_behavior_')), false)
+    f.store.bindComposedInput = bind
+    f.store.recordFailure = existingRecorder
+    f.store.requestControl(child.id, 'run')
   }
   const result = await runSyncOperation(f.store, f.operation.id, f.options)
   if (settleFailureOnly) {
@@ -5639,7 +5843,46 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
     assert.equal(f.store.listJournals(f.operation.id).length, 0)
     return
   }
+  if (inlineP0Frozen || inlineP0Worktree) {
+    const origin = listAttempts(f.operation.id)[0], resources = f.store.listResources(origin.id).filter(resource => resource.plan.key.includes(':code_behavior_'))
+    assert.equal(resources.length, definitions.length * (inlineP0Frozen ? 2 : 1), JSON.stringify(origin.failure))
+    assert.equal(origin.failure?.code, 'generation_failed')
+    for (const resource of resources) {
+      const plan = JSON.parse(readEvidence(f.input.source.commonDir, resource.plan.planBlob).toString()) as NativeRunPlan
+      const checkpoint = JSON.parse(readEvidence(f.input.source.commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
+      assert.equal(checkpoint.phase, 'removed')
+      assert.equal(Boolean(plan.request.worktree), inlineP0Worktree)
+      assert.equal(Boolean(checkpoint.result?.frozenReadProof), inlineP0Frozen)
+      assert.equal(origin.dispatchPlans.find(dispatch => dispatch.key === resource.plan.key)?.requestDigest, plan.requestDigest)
+    }
+  }
+  if (inlineDrift || inlineNativeDefect || inlineP0Worktree || inlineP0Foreign) {
+    assert.equal(result.status, 'unsupported', JSON.stringify(result.failure))
+    assert.equal(result.failure?.code, inlineNativeDefect ? 'readonly_spec_repair_binding' : 'frozen_candidate_analysis_binding', JSON.stringify(result.failure))
+    if (inlineP0Foreign) assert.match(result.failure!.message, /inline P0.*同operation/)
+    const attempts = listAttempts(f.operation.id)
+    assert.equal(attempts.length, 2)
+    assert.deepEqual(attempts[1].dispatchPlans, [])
+    assert.deepEqual(attempts[0].checkpointRefs, immutable!.refs)
+    assert.deepEqual(attempts[0].dispatchPlans, immutable!.dispatchPlans)
+    assert.deepEqual(attempts[0].failure, immutable!.failure)
+    assert.equal(f.store.listJournals(f.operation.id).length, 0)
+    assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+    return
+  }
   if (negative) { assert.equal(finalReview, false); assert.equal(f.store.listAttempts(f.operation.id).length, 2); assert.equal(ownerCalls.filter(call => call.attempt > 1).length, 0); assert.notEqual(result.failure?.kind, 'repairable', JSON.stringify(result.failure)); assert.ok(['failed', 'unsupported'].includes(result.status), JSON.stringify(result.failure)); return }
+  if (inlineNative) {
+    const original = f.store.listAttempts(f.operation.id)[0]
+    const resources = f.store.listResources(original.id)
+    assert.equal(resources.length, definitions.length * 2, JSON.stringify(original.failure))
+    assert.ok(resources.every(resource => resource.phase === 'removed' && original.dispatchPlans.some(dispatch => dispatch.key === resource.plan.key && dispatch.requestDigest === resource.plan.payloadDigest)))
+    assert.equal(original.failure?.code, 'generation_failed')
+    const stages = stageValues(original)
+    const whole = stages.find(value => value.stage === 'elaboration')!.resultRef
+    const owner = (JSON.parse(readEvidence(f.input.source.commonDir, whole).toString()) as ElaborationResult).partitionEvidence![0]
+    assert.throws(() => continuationCoordinator.reviewedReadonlyLocal(f.store, f.store.readOperation(f.operation.id), original, `partition:${owner.partitionId}:elaboration`, owner.resultRef, whole), /readonly_spec_repair_binding/, '认证scope退出后同一inline Native记录不授P1批准')
+    assert.equal(await continuationCoordinator.authenticateFrozenCandidateAnalysis(f.store, f.store.readOperation(f.operation.id), original, { includeCurrent: true }), null, '未通过V1的inline记录不进入完整候选或handoff认证')
+  }
   assert.ok(finalReview, JSON.stringify({ failure: result.failure, calls: ownerCalls, failures: f.store.listAttempts(f.operation.id).map(attempt => attempt.failure) }))
   const second = pending ? 4 : aggregateOnly || mode === 'review-resume' ? 3 : 2
   for (const owner of badOwners) assert.deepEqual(ownerCalls.filter(call => call.attempt > 1 && call.nodeId === owner.nodeId).map(({ attempt, purpose }) => [attempt, purpose]), freshSource ? [[2, 'elaboration_generate'], [2, 'elaboration_review']] : existingSource || mixedCitations ? [[2, 'elaboration_generate'], [3, 'elaboration_generate'], [3, 'elaboration_review']] : partial ? [[second, 'elaboration_generate'], [second, 'elaboration_review']] : lineage ? [[4, 'elaboration_generate'], [4, 'elaboration_review'], [5, 'elaboration_generate'], [5, 'elaboration_review']] : pending || mode === 'review-p1-fail' && owner !== badOwner ? [[second, 'elaboration_generate'], [second, 'elaboration_review']] : [[second, 'elaboration_generate'], [second, 'elaboration_review'], [mode === 'review-rebind-native' ? 4 : second + 1, 'elaboration_generate'], [mode === 'review-rebind-native' ? 4 : second + 1, 'elaboration_review']])
@@ -5667,6 +5910,14 @@ for (const mode of ['review-format-continuation', 'review-format-interleaved', '
   }
   const generations = stages.map(values => { const saved = values.find(stage => stage.stage === 'generation'); return saved ? JSON.parse(readEvidence(f.input.source.commonDir, saved.resultRef).toString()) : null })
   assert.ok(generations.filter(Boolean).every(value => Array.isArray(value.p2SpecWritePaths) && value.p2SpecWritePaths.length === 0), 'Spec-only权限由宿主dispatch投影为空，不能借用P2 writer')
+  if (mixedCitations) {
+    const original = stages[0].find(stage => stage.stage === 'analysis')
+    assert.equal(original.guidanceContractVersion, 'code-behavior-guidance-v7')
+    assert.equal(stages[0].some(stage => stage.stage === 'behavior-draft-protocol'), false)
+    assert.ok(attempts.slice(1).every(attempt => attempt.dispatchPlans.every(dispatch => !dispatch.purpose.startsWith('code_behavior_'))), '不得用新P0重签原只读诊断')
+    for (const recovered of stages.slice(1)) assert.deepEqual(recovered.find(stage => stage.stage === 'analysis').resultRef, original.resultRef)
+    assert.deepEqual(attempts[0].dispatchPlans, immutable!.dispatchPlans)
+  }
   if (semantic) {
     for (const generated of [generations[0], pending || partial ? null : mode === 'review-rebind-native' ? generations[2] : generations[second - 1]].filter(Boolean)) { assert.equal(generated.candidateValidated, true); assert.ok(generated.partitionEvidence.some((evidence: { review: { verdict: string } }) => evidence.review.verdict === 'repair')) }
   } else if (unsupportedSource) {

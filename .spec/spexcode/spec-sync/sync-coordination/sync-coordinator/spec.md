@@ -29,6 +29,8 @@ related:
 
 同一 operation 的 code_to_spec 已有原冻结候选时，git-json-v4 / v7 的 P0 只可沿该候选专用冷验恢复。原完整计划、读集和基线、P0 每个 owner 的分析及独审、P1 实际生成与独审、仅分析覆盖、候选 Git/CAS 与全部 required P2 原件须一致，Native 成功也核 canonical 请求、输出和身份。正式 freezeCandidate 尚未执行时，原 partition:candidate 与实际独审绑定可证明该既有候选；不能重造候选或补旧 failure。组间交还控制并续原租约，先仅补格式失败，再沿合法发现回精确 P1 owner，随后继续原 V1–V4。资格仅在本轮同 operation/input/source/candidate 范围有效，退出后清除；普通自动复用只接受当前指导 v9，无正式来源的跨操作、新业务、缺证或漂移不借旧批准。原P0/P1生产者可来自严格更早且正式结算的 retryOf 链；逐跳保原计划、local ref及Git组合内容，null扩域只凭该wrapper原selection/readSet与同次已审whole证明回接。模型按各真实生产者原冻结请求认证，正式重试已换模型不重签旧请求。生成与独审可来自原同操作的不同轮。原 v7 标记、缺席字段、raw、Git/Native 和调用账本保持，不追加数据库协议。
 
+未登记 Native 工作树协议的旧 inline code→spec 操作，可在同一操作的已结算 V1 引用失败后继续原 P1 owner 返修。原 P0 whole 与各区的实际生产者均须属于同一操作，whole 与 owner 的来源链不能跨正式重试。P0 分析及独审都须由无工作树的实际 inline 请求生成。原 P1 的组合树、读集、计划与生成及独审原件须逐项一致。计划冻结早于扩域时，沿同一 P1 作证的正式扩域记录恢复原选择，核对既有 binding 保持与新增资源全为 null。无 worktree 的原请求按同一原派发、会话记录、已移除资源及结果重验，冻结传输还须重验原读取证据。只在当前返修范围复用原 P0 refs，候选仍须经过新 P1 独审和完整 V1；该证明不授候选独审续轮或换模型交接资格。原 wrapper、协议字段缺席及失败不改签。
+
 已结算的未发布 v8 候选沿同一 operation 原模型、输入和预算进入下一 attempt 时，以当前指导重新分析及独审，再做 P1 细化与 P2 候选独审。旧指导下的 P1 批准、候选及组结论、依赖这些批准的返修依据不进入自动批准或续审来源；真实历史 refs、failure、Native 请求、草稿和证据保持原样。此边界不改变已验证、正在 apply 或已交付的真实 Git/journal 恢复。
 
 候选独审的已审来源校验沿 [[sync-input-composition]] 的原 v1 分段摘要核精确冻结选择；大范围共享 pair 时也保持原字节顺序及全部身份。
