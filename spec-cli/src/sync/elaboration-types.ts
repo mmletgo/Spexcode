@@ -56,7 +56,7 @@ export type ElaborationInput = {
   /** 新attempt冻结的Native提示投影，共用完全相同的草稿和运行诊断内容。 */
   sharedDraftDiagnostics?: true
   /** 同attempt冻结的Native父接口独审提示，仅限定当前阶段的审查范围。 */
-  parentInterfaceReview?: true
+  parentInterfaceReview?: true | 'scope-v2'
   /** 仅由分区执行器用于无源码writer的初始或既有纯父接口；结果不是完整P1或实现就绪。 */
   phase?: 'interface_seed'
   /** 原分区计划及后验纯父分类证据，只绑定本区来源，不授予写权限或完成度。 */
@@ -153,6 +153,7 @@ export type ElaborationRepairDiagnostics = {
   requestKey: string; inputDigest: string; resultRef: BlobRef; failure: NonNullable<ElaborationResult['failure']>; round: ElaborationRound
   /** 当次派发前重验的只读审查请求绑定，检查点仍只保存原诊断。 */
   settledReview?: Pick<ElaborationSessionRequest, 'prompt' | 'schema' | 'worktree'> & {
+    kind?: 'parent-implementation-binding'
     previousRejection?: Pick<RejectedStructuredOutput, 'sha256' | 'text'>
   }
 }

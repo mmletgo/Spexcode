@@ -50,7 +50,7 @@ import { pinZCodeToolPolicy, rejectedFinalOutput, StructuredSessionError, struct
 import { nativeWorktreePrompt, nativeWorktreeResult, sampleNativeWorktreeProcesses } from '../native-worktree-runtime.js'
 import { cancelStructuredSession, SettledSessionCreateTimeoutError } from '../session-structured.js'
 import { FROZEN_READ_MAX_BYTES, FROZEN_READ_TOOL, freezeContext, prepareFrozenPrompt, proveFrozenReads, readFrozenManifest, readFrozenRange, type FrozenNativeItem } from '../frozen-context.js'
-import { stageWorktree } from './stage-worktree.js'
+import { readStageDraft, stageWorktree } from './stage-worktree.js'
 import { retainHistoricalFrozenWorkflow } from './historical-workflow.test-helpers.js'
 import { stopZCodeStructuredTurn, zcodeCapability, zcodeNativeConfigSelection, zcodeNativeSelection, type ZCodeStructuredExecution } from '../zcode-structured.js'
 
@@ -7434,13 +7434,155 @@ test('Native P1草稿跨attempt从真实Git原文件续改，小回执保持成�
   for (const attempt of attempts) {
     const stages = attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
     const protocol = stages.find(stage => stage.stage === 'elaboration-draft-protocol')
-    assert.equal(JSON.parse(readEvidence(f.input.source.commonDir, protocol.resultRef).toString()).parentInterfaceReview, true)
+    assert.equal(JSON.parse(readEvidence(f.input.source.commonDir, protocol.resultRef).toString()).parentInterfaceReview, 'scope-v2')
     const wrapper = stages.find(stage => stage.stage === 'elaboration'), saved = JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString()) as ElaborationResult
     assert.deepEqual(saved.rounds[0].output, { summary: '已正常提交草稿' }); assert.equal(saved.rounds[0].rejectedOutput, undefined); assert.ok(saved.rounds[0].draft)
     if (attempt.number === 1) { assert.equal(saved.rounds[0].candidate, null); assert.ok(saved.rounds[0].findings.some(issue => issue.code === 'output_json')) }
     else assert.ok(stages.some(stage => stage.stage === 'elaboration:draft-provenance'))
   }
   assert.equal(f.store.listJournals(f.operation.id).length, 0); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+  assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+})
+
+for (const witness of ['missing', 'canonical', 'attachment'] as const) test(`P1父接口 fresh scope-v2 核验原独审canonical见证 witness=${witness}`, async t => {
+  const withAttachment = witness === 'attachment', rejectionAttempt = withAttachment ? 2 : 1
+  const formatText = '父接口原格式拒稿 {"verdict":\n\u0000'
+  const parentPath = '.spec/project/spec.md', parentId = 'REQ-PARENT-01'
+  const raw = '重复导出请求必须保留首次结果，具体下载由子叶实现。'
+  const parent = `---\ntitle: 导出上层接口\nstatus: pending\n---\n## raw source\n\n${raw}\n`
+  const parentSource = `${parent.replace('status: pending', 'status: active\ncontract-schema: sync-v1')}\n## expanded spec\n\n### REQ\n\n| id | goal | source | constraints | success | depends-on |\n| --- | --- | --- | --- | --- | --- |\n| ${parentId} | 保留首次导出结果 | user:raw | 重复请求不覆盖 | 可查询首次结果 | - |\n`
+  const leaf = original.slice(0, original.indexOf('## expanded spec')).replace('contract-schema: sync-v1\n', '')
+  const f = await fixture(t, { maxAttempts: rejectionAttempt + 1, maxCalls: 12, maxRepairs: rejectionAttempt, timeoutMs: 120_000 }, false, leaf, 'project', original, {
+    version: 'sync-coordinator-v2', direction: 'spec_to_code', agentWorkflow: 'native-worktree-v1', intentNodeId: 'project', sourcePaths: ['src'],
+    targets: [{ nodeId: 'project', path: parentPath, rawSource: raw }, { nodeId: 'export-contract', path: contractPath }],
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524_288, maxParallel: 1 },
+  }, undefined, 'spec', 'zcode:default', false, { [parentPath]: parent })
+  const commonDir = f.input.source.commonDir, operationId = f.operation.id
+  const first = f.store.claimAttempt({ operationId, source: f.input.source, scope: f.operation.scope, leaseMs: 30_000, expectedMessageId: f.operation.dispatchMessageId })
+  const protocol = { version: 'elaboration-draft-v1', generationGuidance: ELABORATION_GENERATION_GUIDANCE, parentInterfaceReview: true }
+  const resultRef = writeEvidence(commonDir, protocol)
+  const wrapper = writeEvidence(commonDir, { version: 'sync-stage-v1', operationId, attemptId: first.attempt.id, inputId: f.input.id, policyDigest: f.operation.policyDigest, stage: 'elaboration-draft-protocol', resultRef })
+  f.store.checkpoint(first.fence, { ...wrapper, artifacts: syncCheckpointArtifacts(protocol, resultRef) })
+  const rawReview = { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ kind: 'repair', code: 'implementation-review', affectedIds: [parentId], message: '下游叶尚无下载实现', evidence: 'src/export.js#ExportService 尚未实现子叶的下载结果', decision: '请完成子叶下载实现和 tests/export.test.mjs#AC-EXPORT-03' }] }
+  const parentRows = rows(parentSource, parentPath)
+  parentRows.changes[0].nodeId = 'project'
+  parentRows.applicability = ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: false, basis: '完整子叶承接实现和验收，本层仅保留共享义务', affectedIds: [parentId] }))
+  const calls: { attempt: number; owner: string; request: ElaborationSessionRequest }[] = []
+  f.options.runner = async request => {
+    assert.ok(request.purpose === 'elaboration_generate' || request.purpose === 'elaboration_review', request.purpose)
+    const { targets } = nativeTask(request, commonDir) as { targets: { path: string }[] }
+    const owner = targets[0].path, operation = f.store.readOperation(operationId), attempt = f.store.readAttempt(operation.currentAttemptId!)
+    calls.push({ attempt: attempt.number, owner, request })
+    if (owner !== parentPath) throw new StructuredSessionError('unsupported', '已观察父接口续审，在下游执行前停止')
+    const fence = { operationId, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: f.input.source.physicalFingerprint }
+    let transient: NativeRunRecord | null = null
+    return createAttemptRunner(f.store, fence, { pollMs: 2, runtime: {
+      readRecord: id => transient?.session === id ? transient : readRecord(id),
+      cancel: async () => assert.fail('隔离夹具不调用实际原生会话'),
+      run: async actual => {
+        const seed = actual.worktree!, key = actual.sessionCreateKey!, sessionId = sessionIdForCreateKey(key), workspace = join(f.parent, `parent-review-${calls.length}`)
+        const generate = actual.purpose === 'elaboration_generate', oldReview = !generate && attempt.number === rejectionAttempt
+        const formatFailure = withAttachment && !generate && attempt.number === 1
+        if (!generate && attempt.number === 1) assert.match(actual.prompt, /完整子叶独审核实现和验收绑定/)
+        const output = generate ? { summary: '已提交父接口JSON草稿' } : oldReview ? rawReview : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+        const branch = `codex/parent-review-${sessionId}`
+        if (!generate) f.git('worktree', 'add', '-b', branch, workspace, seed.baseCommit)
+        const worktree = generate ? committedDraftFixture(f, actual, adaptElaborationNativeOutput(actual, parentRows), workspace) : nativeWorktreeResult(workspace, seed)
+        if (generate) f.git('-C', workspace, 'switch', '-c', branch)
+        const identity = { threadId: `parent-review-${sessionId}`, turnId: 'turn' }, execution = structuredExecutionPolicy(actual), resultDigest = contentHash(JSON.stringify(output))
+        const prompt = nativeWorktreePrompt(actual.prompt, seed)
+        const rejectedOutput = formatFailure ? rejectedFinalOutput(formatText, prompt, execution, identity) : undefined
+        const errorCode = 'structured_output_format_invalid', error = '父接口独审返回无效的结构化JSON'
+        const record: NativeRunRecord = { session: sessionId, status: formatFailure ? 'error' : 'awaiting', harnessSessionId: identity.threadId, worktreePath: workspace, createRequestId: contentHash(key),
+          createPayloadHash: contentHash(JSON.stringify({ prompt, parent: null, launcher: null, base: seed.baseCommit, structuredExecution: execution })),
+          structuredExecution: { ...execution, ...identity, turnStartRequested: true, ...(formatFailure ? { state: 'failed', errorCode, error, rejectedOutput, failedWorktree: worktree,
+            zcodeNative: { version: 1, root: workspace, sessionId: identity.threadId, inputId: 'parent-review-format-fixture', turnId: identity.turnId, pid: process.pid, receiptFile: join(workspace, 'fixture-process.json') },
+            cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: true, acknowledged: true, nativeStatus: 'stopped' },
+          } : { state: 'completed', output, resultDigest, resultWorktree: worktree }) } }
+        if (oldReview && witness === 'missing') transient = record
+        else {
+          configuredSessionApplication().createSession({ sessionId, status: formatFailure ? 'error' : 'awaiting' })
+          writeRecord({ ...record, governed: true, worktreePath: workspace, base: seed.baseCommit, forkCommit: seed.baseCommit, branch, title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(), harness: 'zcode', runtimeStartToken: null, stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: null, launchOwner: null })
+        }
+        if (formatFailure) throw new StructuredSessionError(errorCode, error, { sessionId, ...identity, rejectedOutput, failedWorktree: worktree })
+        return { sessionId, ...identity, output, resultDigest, worktree }
+      },
+    } })(request)
+  }
+  const previousCwd = process.cwd()
+  process.chdir(f.root)
+  const result = await runSyncOperation(f.store, operationId, f.options).finally(() => process.chdir(previousCwd))
+  const attempts = f.store.listAttempts(operationId), prior = attempts[rejectionAttempt - 1], retry = attempts[rejectionAttempt]
+  assert.equal(attempts.length, rejectionAttempt + 1, JSON.stringify({ failure: result.failure, calls: calls.map(({ attempt, owner, request }) => [attempt, owner, request.purpose]) }))
+  assert.equal(attempts[0].id, first.attempt.id)
+  assert.equal(prior.failure?.kind, 'repairable')
+  const stages = attempts.map(attempt => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(commonDir, ref).toString()) as { stage: string; resultRef: BlobRef }))
+  assert.deepEqual(JSON.parse(readEvidence(commonDir, resultRef).toString()), protocol)
+  const retryStages = stages[rejectionAttempt], fresh = retryStages.filter(entry => entry.stage === 'elaboration-draft-protocol')
+  assert.equal(fresh.length, 1)
+  assert.equal(JSON.parse(readEvidence(commonDir, fresh[0].resultRef).toString()).parentInterfaceReview, 'scope-v2')
+  const priorStages = stages[rejectionAttempt - 1].filter(entry => entry.stage.startsWith('partition:') && entry.stage.endsWith(':elaboration'))
+  assert.equal(priorStages.length, 1)
+  const rejected = JSON.parse(readEvidence(commonDir, priorStages[0].resultRef).toString()) as ElaborationResult
+  const round = rejected.rounds[0], draft = round.draft!
+  assert.equal(rejected.partitionBinding?.interfaceSeed?.parentPath, parentPath)
+  assert.equal(rejected.structurePassed, true)
+  assert.equal(rejected.reviewPassed, false)
+  assert.deepEqual(round.findings.filter(item => item.severity === 'error').map(item => item.code), ['review_implementation_binding'])
+  assert.deepEqual(round.reviewOutput, rawReview)
+  assert.deepEqual(round.traces.map(trace => trace.purpose), ['elaboration_generate', 'elaboration_review'])
+  const reviewDispatch = prior.dispatchPlans.find(item => item.purpose === 'elaboration_review')!
+  const reviewResource = f.store.findResource(prior.id, reviewDispatch.key)!
+  assert.equal(reviewResource.phase, 'removed')
+  const completed = JSON.parse(readEvidence(commonDir, reviewResource.checkpointRef).toString()) as NativeRunCheckpoint
+  assert.equal(completed.nativeState, 'completed')
+  assert.deepEqual(completed.result?.output, rawReview)
+  assert.equal(Boolean(readRecord(round.traces[1].sessionId)), witness !== 'missing')
+  assert.ok(readRecord(round.traces[0].sessionId), '原生成canonical见证在两种模式中均存在')
+  if (witness === 'missing') {
+    assert.equal(result.failure?.code, 'review_retry_binding', JSON.stringify(result.failure))
+    assert.match(result.failure!.message, /父接口拒绝不匹配原只读请求、真实结果及追踪/)
+    assert.deepEqual(retry.dispatchPlans, [])
+    assert.deepEqual(calls.map(call => call.request.purpose), ['elaboration_generate', 'elaboration_review'])
+    assert.equal(result.operation.callsUsed, 2)
+    assert.ok(retryStages.every(entry => !entry.stage.endsWith(':repair-diagnostics-provenance')))
+  } else {
+    const resumed = calls.filter(call => call.attempt === retry.number && call.owner === parentPath)
+    assert.deepEqual(resumed.map(call => call.request.purpose), ['elaboration_review'], JSON.stringify(result.failure))
+    assert.deepEqual(resumed[0].request.worktree, calls[1].request.worktree)
+    assert.ok(resumed[0].request.prompt.includes(JSON.stringify(rawReview)))
+    const provenance = retryStages.find(entry => entry.stage === `${priorStages[0].stage}:repair-diagnostics-provenance`)!
+    assert.deepEqual(JSON.parse(readEvidence(commonDir, provenance.resultRef).toString()), { fromOperationId: operationId, fromAttemptId: prior.id, resultRef: priorStages[0].resultRef })
+    const accepted = JSON.parse(readEvidence(commonDir, retryStages.find(entry => entry.stage === priorStages[0].stage)!.resultRef).toString()) as ElaborationResult
+    assert.equal(accepted.reviewPassed, true)
+    assert.equal(accepted.candidateDigest, rejected.candidateDigest)
+    assert.deepEqual(accepted.rounds[0].traces[0], round.traces[0])
+    assert.notEqual(accepted.rounds[0].traces[1].sessionId, round.traces[1].sessionId)
+    assert.equal(accepted.rounds[0].draft!.oid, draft.oid)
+    if (withAttachment) {
+      assert.deepEqual(calls.filter(call => call.owner === parentPath).map(({ attempt, request }) => [attempt, request.purpose]), [[1, 'elaboration_generate'], [1, 'elaboration_review'], [2, 'elaboration_review'], [3, 'elaboration_review']])
+      const firstSource = stages[0].find(entry => entry.stage === priorStages[0].stage)!.resultRef
+      const formatted = JSON.parse(readEvidence(commonDir, firstSource).toString()) as ElaborationResult
+      const originalRound = formatted.rounds[0], raw = originalRound.rejectedOutput!
+      assert.equal(formatted.failure?.code, 'structured_output_format_invalid')
+      assert.equal(formatted.candidateDigest, accepted.candidateDigest)
+      assert.equal(originalRound.draft!.oid, draft.oid)
+      assert.deepEqual(originalRound.traces, [round.traces[0]])
+      assert.deepEqual(rejected.repairDiagnostics?.resultRef, firstSource)
+      assert.deepEqual(readEvidence(commonDir, raw.ref!), Buffer.from(formatText))
+      const attached = calls[2].request
+      const attachment = `.spex-sync-diagnostics/${raw.sha256}/elaboration-review-rejected.raw`
+      const attachedEntries = readTree(commonDir, attached.worktree!.tree)
+      assert.ok(attached.prompt.includes(attachment))
+      assert.deepEqual(readObject(commonDir, attachedEntries.find(entry => entry.path === attachment)!.oid), Buffer.from(formatText))
+      assert.deepEqual(attachedEntries.filter(entry => entry.path !== attachment), readTree(commonDir, calls[1].request.worktree!.tree))
+      assert.deepEqual(accepted.changes, formatted.changes, 'P1候选交给下游的变更从未包含临时附件')
+      assert.doesNotMatch(resumed[0].request.prompt, /elaboration-review-rejected\.raw/)
+    }
+  }
+  assert.ok(readStageDraft(commonDir, draft, draft).includes(parentId))
+  assert.equal(f.store.listJournals(operationId).length, 0)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
   assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
 
@@ -7566,7 +7708,7 @@ for (const [guidance, purpose] of [
   const commonDir = f.input.source.commonDir
   const expectedProtocol = { version: 'elaboration-draft-v1',
     ...(guidance === 'absent' ? {} : { generationGuidance: guidance }),
-    ...(guidance === ELABORATION_GENERATION_GUIDANCE ? { compactSealDiagnostics: true, citationRepairDiagnostics: 'actionable-v1', defaultExportCitation: true, sharedDraftDiagnostics: true, parentInterfaceReview: true } : {}),
+    ...(guidance === ELABORATION_GENERATION_GUIDANCE ? { compactSealDiagnostics: true, citationRepairDiagnostics: 'actionable-v1', defaultExportCitation: true, sharedDraftDiagnostics: true, parentInterfaceReview: 'scope-v2' } : {}),
   }
   if (guidance !== ELABORATION_GENERATION_GUIDANCE) {
     const value = expectedProtocol, resultRef = writeEvidence(commonDir, value)

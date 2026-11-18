@@ -16,7 +16,7 @@ import type { CodeBehaviorAnalysis, CodeBehaviorEvidence, SyncDecisionInput } fr
 import { adoptedDeliveryPaths, baselineResourceKey, baselineSelectionDigest, extendsWithUninitializedResources, isUtf8Text, readCompositionEvidence, selectedRetiredIds, verifyBaselineSelection } from './composition.js'
 import { readHistoryRequest, readReceiptHistoryRestorations } from './history-input.js'
 import { composeAuthoredInput } from './author-input.js'
-import { elaborate, hasApprovedElaborationReview, elaborationGapRepairFindings, elaborationMaterialContext, freezeElaborationInput, gapBlockedFinding, verifyElaborationDraftCache } from './elaboration.js'
+import { elaborate, hasApprovedElaborationReview, elaborationGapRepairFindings, elaborationMaterialContext, freezeElaborationInput, gapBlockedFinding, isParentInterfaceImplementationReviewRejection, verifyElaborationDraftCache } from './elaboration.js'
 import { outputErrors } from './elaboration-schema.js'
 import type { ElaborationGapReviewCheckpoint, ElaborationGapReviewEvidence, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ElaborationTrace, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ReadonlySpecRepair } from './elaboration-types.js'
 import { claimFileMutex } from './file-mutex.js'
@@ -2688,7 +2688,9 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
       const loadElaborationRepairDiagnostics = (key: string, inputDigest: string, binding?: NonNullable<ElaborationResult['partitionBinding']>): ElaborationRepairDiagnostics | null => {
         const ownerSuffix = `elaborate${binding ? `:partition:${binding.partitionId}` : ''}`
         const hasOwnerGeneration = (origin: SyncAttempt): boolean => origin.dispatchPlans.some(dispatch => dispatch.purpose === 'elaboration_generate' && dispatch.key.startsWith(`sync:${origin.id}:${ownerSuffix}:`))
-        let newerGeneration = hasOwnerGeneration(attempt!)
+        const parentAttempt = binding?.interfaceSeed ? store.readAttempt(attempt!.id) : null
+        const parentReviewScope = parentAttempt && stage<Pick<ElaborationInput, 'parentInterfaceReview'>>(store, operation, parentAttempt, 'elaboration-draft-protocol')?.parentInterfaceReview === 'scope-v2'
+        let newerGeneration = hasOwnerGeneration(parentReviewScope ? parentAttempt : attempt!)
         const carriedGenerations = new Set<string | undefined>()
         for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number).reverse()) {
           if (!['failed', 'superseded', 'settled'].includes(prior.status)) return null
@@ -2706,27 +2708,53 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
               return { requestKey, inputDigest, resultRef: source.resultRef, failure, round, settledReview }
             }
           }
-          if (prior.failure?.kind !== 'repairable') {
-            const errors = round?.findings.filter(issue => issue.severity === 'error') ?? []
-            if (!newerGeneration && source && round?.draft && failure && prior.status === 'superseded' && !prior.failure
-              && source.result.structurePassed && priorElaborationInputMatches(prior, binding)
-              && errors.length && errors.every(issue => issue.code === 'review_scope' || issue.code === 'review_binding')
-              && !store.listResources(prior.id).some(resource => resource.phase !== 'removed')) {
-              const scope = frozenAnalysisScope.getStore()!
-              const review = frozenAnalysisScope.run({ ...scope, readNativeRecord: readRecord }, () => {
-                if (!renderedElaborationSource(operation, prior, key)) return null
-                return authenticatedDraftResult(store, operation, prior, `${requestKey}:${round.index}:elaboration_review`, 'elaboration_review')
-              })
-              const trace = round.traces.find(trace => trace.purpose === 'elaboration_review'), request = review?.request
-              if (!round.review || !review?.result || !trace || trace.sessionId !== review.result.sessionId || trace.threadId !== review.result.threadId
-                || trace.turnId !== review.result.turnId || trace.resultDigest !== review.result.resultDigest
-                || canonical(round.reviewOutput) !== canonical(review.result.output)
-                || request && (trace.inputDigest !== request.inputDigest || request.inputDigest !== elaborationNativeInputDigest(inputDigest, request)
-                  || request.model !== model || request.root !== operation.input.source.canonicalRoot || request.base !== request.worktree?.baseCommit))
-                fail('review_retry_binding', '暂停前被拒独审不匹配原只读请求、真实结果及追踪')
-              saveStage(store, fence!, `${key}:repair-diagnostics-provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef })
-              return { requestKey, inputDigest, resultRef: source.resultRef, failure, round }
+          const errors = round?.findings.filter(issue => issue.severity === 'error') ?? []
+          const paused = prior.status === 'superseded' && !prior.failure
+          const pausedScopeFailure = paused && errors.length > 0 && errors.every(issue => issue.code === 'review_scope' || issue.code === 'review_binding')
+          const parentBindingFailure = parentReviewScope && (paused || prior.failure?.kind === 'repairable')
+            && (!carriedGenerations.size || carriedGenerations.size === 1 && carriedGenerations.has(canonical(round?.traces.find(trace => trace.purpose === 'elaboration_generate'))))
+            && isParentInterfaceImplementationReviewRejection(round?.review, errors)
+          if (!newerGeneration && source && round?.draft && failure && (pausedScopeFailure || parentBindingFailure)
+            && source.result.structurePassed && priorElaborationInputMatches(prior, binding)
+            && !store.listResources(prior.id).some(resource => resource.phase !== 'removed')) {
+            const scope = frozenAnalysisScope.getStore()!
+            const reviewKey = `${requestKey}:${round.index}:elaboration_review`
+            const review = frozenAnalysisScope.run({ ...scope, readNativeRecord: readRecord }, () => {
+              if (!renderedElaborationSource(operation, prior, key)) return null
+              return authenticatedDraftResult(store, operation, prior, reviewKey, 'elaboration_review')
+            })
+            const trace = round.traces.find(trace => trace.purpose === 'elaboration_review'), request = review?.request
+            if (!round.review || !review?.result || !trace || trace.sessionId !== review.result.sessionId || trace.threadId !== review.result.threadId
+              || trace.turnId !== review.result.turnId || trace.resultDigest !== review.result.resultDigest
+              || canonical(round.reviewOutput) !== canonical(review.result.output)
+              || request && (trace.inputDigest !== request.inputDigest || request.inputDigest !== elaborationNativeInputDigest(inputDigest, request)
+                || request.model !== model || request.root !== operation.input.source.canonicalRoot || request.base !== request.worktree?.baseCommit))
+              fail('review_retry_binding', parentBindingFailure ? '父接口拒绝不匹配原只读请求、真实结果及追踪' : '暂停前被拒独审不匹配原只读请求、真实结果及追踪')
+            let settledReview: ElaborationRepairDiagnostics['settledReview']
+            if (parentBindingFailure) {
+              if (!request || request.worktree?.mode !== 'read') fail('review_retry_binding', '父接口越界拒绝缺少原Native只读请求')
+              const diagnostics = source.result.repairDiagnostics, previous = diagnostics?.round.rejectedOutput
+              let previousRejection: NonNullable<ElaborationRepairDiagnostics['settledReview']>['previousRejection']
+              if (diagnostics && previous?.purpose === 'elaboration_review'
+                && request.prompt.includes(`.spex-sync-diagnostics/${previous.sha256}/elaboration-review-rejected.raw`)) {
+                const previousAttempt = store.readAttempt(diagnostics.requestKey.split(':')[1])
+                const origin = partitionElaborationStage(store, operation, previousAttempt, key, binding!, inputDigest)
+                if (previousAttempt.number >= prior.number || !origin || origin.resultRef.sha256 !== diagnostics.resultRef.sha256
+                  || diagnostics.requestKey !== requestKey.replace(`sync:${prior.id}:`, `sync:${previousAttempt.id}:`)
+                  || diagnostics.inputDigest !== inputDigest || diagnostics.round.candidateDigest !== round.candidateDigest
+                  || canonical(diagnostics.round.traces[0]) !== canonical(round.traces[0])
+                  || canonical(diagnostics.failure) !== canonical(origin.result.failure)
+                  || canonical(diagnostics.round) !== canonical(origin.result.rounds.at(-1))
+                  || !settledElaborationReview(store, operation, previousAttempt, diagnostics.requestKey, origin.result, diagnostics.round, diagnostics.failure))
+                  fail('review_retry_binding', '父接口原独审附件缺少同候选Native拒稿原件')
+                previousRejection = { sha256: previous.sha256, text: previous.text }
+              }
+              settledReview = { kind: 'parent-implementation-binding', prompt: request.prompt, schema: request.schema, worktree: request.worktree, ...(previousRejection ? { previousRejection } : {}) }
             }
+            saveStage(store, fence!, `${key}:repair-diagnostics-provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef })
+            return { requestKey, inputDigest, resultRef: source.resultRef, failure, round, ...(settledReview ? { settledReview } : {}) }
+          }
+          if (prior.failure?.kind !== 'repairable') {
             if (source && canRecoverInterruptedElaborationResult(prior, source, binding)) {
               if (failure && round) {
                 const runtimeFailure = source.result.status === 'failed' && source.result.candidateDigest === null && round.candidate === null && round.candidateDigest === null && structuredAnalysisRepairCodes.has(failure.code)
@@ -3714,7 +3742,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         if (operation.phase === 'analyzing') store.startElaboration(fence)
         let protocol = stage<{ version: 'elaboration-draft-v1' } & Pick<ElaborationInput, 'generationGuidance' | 'compactSealDiagnostics' | 'citationRepairDiagnostics' | 'defaultExportCitation' | 'sharedDraftDiagnostics' | 'parentInterfaceReview'>>(store, operation, attempt, 'elaboration-draft-protocol')
         if (!protocol && options.plan.agentWorkflow && !attempt.dispatchPlans.some(dispatch => dispatch.purpose.startsWith('elaboration_'))) {
-          protocol = { version: 'elaboration-draft-v1', generationGuidance: ELABORATION_GENERATION_GUIDANCE, compactSealDiagnostics: true, citationRepairDiagnostics: 'actionable-v1', defaultExportCitation: true, sharedDraftDiagnostics: true, parentInterfaceReview: true }
+          protocol = { version: 'elaboration-draft-v1', generationGuidance: ELABORATION_GENERATION_GUIDANCE, compactSealDiagnostics: true, citationRepairDiagnostics: 'actionable-v1', defaultExportCitation: true, sharedDraftDiagnostics: true, parentInterfaceReview: 'scope-v2' }
           saveStage(store, fence, 'elaboration-draft-protocol', protocol)
         }
         if (protocol && Object.hasOwn(protocol, 'generationGuidance') && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V1 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V2 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V3 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V4 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE) fail('elaboration_generation_guidance_unsupported', '持久P1生成提示版本不受支持；仅字段缺席允许原提示')
