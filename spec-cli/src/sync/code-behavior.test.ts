@@ -2277,6 +2277,89 @@ for (const mode of ['empty', 'shared'] as const) test(`P0 v6 分区changedPaths�
   assert.equal(readStageDraft(commonDir, failedDraft, failedDraft), JSON.stringify(bad))
 })
 
+for (const mode of ['empty', 'nonempty'] as const) test(`P0 v6 独审自检核冻结覆盖 ${mode}`, async t => {
+  const f = await fixture(t), sourcePath = 'src/export.js', contextFile = 'tests/export.test.mjs'
+  const requiredPaths = mode === 'empty' ? [] : [sourcePath]
+  if (requiredPaths.length) writeFileSync(join(f.root, sourcePath), f.source + '\n// checked coverage fixture\n')
+  const prepared = await f.input(), commonDir = prepared.snapshot.source.commonDir
+  const input: CodeBehaviorInput = { ...prepared, draftProtocol: 'code-behavior-draft-v1', contextTransport: 'git-json-v6', origin: 'spec',
+    partition: { id: 'review-coverage', changedPaths: requiredPaths, factSourcePaths: [sourcePath] },
+    plan: { ...prepared.plan, version: 'sync-coordinator-v2', direction: 'spec_to_code', agentWorkflow: 'native-worktree-v1',
+      sourcePaths: ['src'], partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 } },
+  }
+  const foreignIds = ['REQ-EXPORT-01', 'RULE-EXPORT-05']
+  const dispositions = { invalidCheckedPaths: [], missingCheckedPaths: [], missingChangeIds: [], unknownChangeIds: [] }
+  const calls: string[] = []
+  let checkpoint: CodeBehaviorContinuation | null = null
+  let originalReview: { request: ElaborationSessionRequest; schema: Buffer; draft: string; analysisDigest: string } | undefined
+  const checkpoints = { load: () => checkpoint, save: (value: CodeBehaviorContinuation) => { checkpoint = structuredClone(value) } }
+  const dispatch: ElaborationRunner = async request => {
+    calls.push(request.purpose)
+    const seed = request.worktree!, workspace = join(f.root, '..', `review-coverage-${calls.length}`)
+    git(f.root, 'worktree', 'add', '--detach', workspace, seed.baseCommit)
+    const draftPath = /草稿文件=([^\s；]+)/.exec(request.prompt)![1]
+    const schemaPath = join(workspace, draftPath.replace(/\.json$/, '.schema.json')), schema = readFileSync(schemaPath)
+    const draft = join(workspace, draftPath), { task, pendingAnalysis } = readCodeBehaviorContext(request, commonDir)
+    assert.deepEqual(task.requiredChangedPaths, requiredPaths)
+    let output: unknown
+    if (!pendingAnalysis) {
+      assert.equal(request.purpose, 'code_behavior_analyze')
+      assert.doesNotMatch(request.prompt, /SPEX_P0_REVIEW_PATHS/)
+      output = { changes: requiredPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保留原导出结果', previousBehavior: '导出行为一致', sourceBehavior: '导出行为一致', deliveryBehavior: '导出行为一致', evidence: '核对实际源码与完整冻结测试', counterexample: '重复完成不再次发布' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    } else {
+      assert.equal(request.purpose, 'code_behavior_review')
+      const changeIds = pendingAnalysis.analysis.changes.map(item => item.id)
+      assert.equal(changeIds.length, requiredPaths.length)
+      const check = /\nnode - (\S+) (\S+) ([a-f0-9]{40,64}) <<'SPEX_P0_REVIEW_PATHS'\n([\s\S]+?)\nSPEX_P0_REVIEW_PATHS(?:\n|$)/.exec(request.prompt)
+      assert.ok(check)
+      assert.equal(check[1], draftPath.replace(/\.json$/, '.context.json'))
+      assert.equal(check[2], draftPath)
+      const contextPath = join(workspace, check[1]), contextBytes = readFileSync(contextPath)
+      const run = (status: number, expected: object) => {
+        const bytes = readFileSync(draft)
+        const checked = spawnSync(process.execPath, ['-', check[1], check[2], check[3]], { cwd: workspace, input: check[4], encoding: 'utf8' })
+        assert.equal(checked.status, status, `stdout=${checked.stdout} stderr=${checked.stderr}`)
+        assert.deepEqual(JSON.parse(checked.stdout), expected)
+        assert.deepEqual(readFileSync(draft), bytes)
+        assert.deepEqual(readFileSync(contextPath), contextBytes)
+        assert.deepEqual(readFileSync(schemaPath), schema)
+      }
+      const review = { inputDigest: request.inputDigest, analysisDigest: pendingAnalysis.analysisDigest, verdict: 'accept', checkedPaths: [contextFile, ...requiredPaths], checkedChangeIds: changeIds, findings: [] }
+      if (!originalReview) {
+        assert.equal(contentHash(check[4]), '9a9b7fb87c9b331bf74f1d7c392077d72d9a447d9bbcd7fa3a67bb68b5e37cb2', '历史v6自检脚本原字节')
+        output = { ...review, checkedPaths: [contextFile], checkedChangeIds: foreignIds }
+        const invalid = JSON.stringify(output)
+        writeFileSync(draft, invalid)
+        run(0, { invalidCheckedPaths: [] })
+        originalReview = { request, schema, draft: invalid, analysisDigest: pendingAnalysis.analysisDigest }
+      } else {
+        assert.equal(request.inputDigest, originalReview.request.inputDigest)
+        assert.equal(pendingAnalysis.analysisDigest, originalReview.analysisDigest)
+        assert.deepEqual(schema, originalReview.schema)
+        assert.equal(git(workspace, 'rev-parse', `HEAD:${draftPath}`), checkpoints.load()!.drafts.code_behavior_review!.oid)
+        assert.equal(readFileSync(draft, 'utf8'), originalReview.draft)
+        run(1, { ...dispositions, missingCheckedPaths: requiredPaths, missingChangeIds: changeIds, unknownChangeIds: foreignIds })
+        writeFileSync(draft, JSON.stringify(review))
+        run(0, dispositions)
+        output = review
+      }
+    }
+    writeFileSync(draft, JSON.stringify(output))
+    git(workspace, 'add', draftPath); git(workspace, 'commit', '-m', '提交P0覆盖回归草稿')
+    const receipt = { summary: '已提交唯一JSON草稿' }
+    return { sessionId: `coverage-session-${calls.length}`, threadId: `coverage-thread-${calls.length}`, turnId: 'turn', output: receipt, resultDigest: contentHash(JSON.stringify(receipt)), worktree: nativeWorktreeResult(workspace, seed) }
+  }
+  await assert.rejects(analyzeCodeBehavior(input, dispatch, undefined, checkpoints), { code: 'behavior_review_failed', message: 'P0 行为校验未通过' })
+  const failed = checkpoints.load()!, rejected = failed.drafts.code_behavior_review!
+  assert.ok(failed.readyAnalysis)
+  const coverage = { reviewCoveragePreflight: true } as const
+  const accepted = await analyzeCodeBehavior({ ...input, ...coverage, requestKey: 'review-coverage-retry' }, dispatch, undefined, checkpoints)
+  assert.equal(accepted.reviewPassed, true)
+  assert.deepEqual(checkpoints.load()!.readyAnalysis, failed.readyAnalysis)
+  assert.deepEqual(calls, ['code_behavior_analyze', 'code_behavior_review', 'code_behavior_review'])
+  assert.equal(readStageDraft(commonDir, rejected, rejected), originalReview!.draft)
+})
+
 test('AC复合门禁逐项诊断未变规则与不绑定来源，不把多个allowed_change并集授权', async t => {
   const f = await fixture(t); writeFileSync(join(f.root, 'src/export.js'), `${f.source}\n// result count extension\n`)
   const input = await f.input(), source = 'code:src/export.js#ExportService.dispatch'

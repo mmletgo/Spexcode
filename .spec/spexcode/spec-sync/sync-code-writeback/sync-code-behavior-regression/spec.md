@@ -12,6 +12,8 @@ related:
 
 ## expanded spec
 
+P0 Native 独审自检用空及非空冻结变化的真实 Git 草稿回归。旧脚本对合法可读路径且错填需求/规则 ID 的稿返回0，正式校验仍拒。启用原检查的覆盖补充后，在同一评审 Git 稿精确报告未知或漏审的变化 ID 与必审路径；修正才通过同一正式独审。保留旧分析、原评审稿、schema、context 和历史脚本字节，恢复只派独审。
+
 显式 sourcePaths 的真实 Git 回归覆盖 Shell、C、SQL、无扩展名、JSON 和 Markdown，整体与分区分析均要求完整治理并经过独立审查。既有 scalar、目录和 glob 归属由同一规范化匹配器识别，重复新叶仍拒绝。缺席 sourcePaths 的历史计划保持原发现规则，受控 runner 仅证明程序门禁。
 
 产品入口夹具从真实 Todo 已提交 HEAD 使用 no-local 隔离克隆，并创建独立 SQLite；通过 SyncApplication.submit 的正式受控正文编辑冻结四空格→两空格请求，正常 Git 草稿生成与独立审核后到达 P1 派发。注入 runner 仅证明请求、阶段和原件门禁，在 P1 派发时主动停止；副本无旧基线的只读根分区另保 partition_binding 原失败，不授模型语义、P1、V1–V4 或交付通过；不操作原产品 repo、数据库或服务。新副本没有旧 receipt，其 authorChanges 的 null 前态保持，作者四→两变化另由原受控 request before/next Git 对象直接证明，不伪造已验证基线。相同冻结 Todo 输入在原实现与候选中对照缺席及 v1–v5 的分析/独审共 12 份完整请求，prompt、schema、业务摘要、seed/tree 均逐字相同，原 source/index 保持。

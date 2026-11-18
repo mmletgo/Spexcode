@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+writer61 只追加 SELECT 1 marker，保护 [[sync-code-behavior]] 的 P0 独审覆盖自检。升级先停稳并结算旧 writer，保存一致 writer60 online backup 和 Git/CAS 原件。回退使用该备份及配套原件。
+
 writer60 只追加 SELECT 1 marker，保护 [[sync-elaboration]] 的完整叶冷续稿诊断角色。升级先停稳并结算旧 writer，保存一致 writer59 online backup 和 Git/CAS 原件。回退使用该备份及配套原件。
 
 writer59 只追加 SELECT 1 marker，保护 [[sync-partition-execution]] 的冻结父作者影响承接。升级先停稳并结算旧 writer，保存一致 writer58 online backup 和 Git/CAS 原件。回退使用该备份及配套原件。

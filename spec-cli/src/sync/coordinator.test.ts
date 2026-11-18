@@ -9815,7 +9815,7 @@ for (const frozen of ['new', 'v1', 'v2-reserved', 'v3-reserved', 'v4-reserved', 
   const rejectsTransport = ['null', 'empty', 'future'].includes(frozen)
   const v6 = frozen === 'new' || frozen === 'v6-reserved'
   const expectedTransport = v6 ? 'git-json-v6' : frozen === 'v1' ? 'git-json-v1' : frozen === 'v2-reserved' ? 'git-json-v2' : frozen === 'v3-reserved' ? 'git-json-v3' : frozen === 'v4-reserved' ? 'git-json-v4' : frozen === 'v5-reserved' ? 'git-json-v5' : undefined
-  const protocolValue = { version: 'code-behavior-draft-v1', ...(expectedTransport ? { contextTransport: expectedTransport } : rejectsTransport ? { contextTransport: frozen === 'null' ? null : frozen === 'empty' ? '' : 'git-json-future' } : {}), ...(frozen === 'new' ? { exactChangedPathsPreflight: true } : {}) }
+  const protocolValue = { version: 'code-behavior-draft-v1', ...(expectedTransport ? { contextTransport: expectedTransport } : rejectsTransport ? { contextTransport: frozen === 'null' ? null : frozen === 'empty' ? '' : 'git-json-future' } : {}), ...(frozen === 'new' ? { exactChangedPathsPreflight: true, reviewCoveragePreflight: true } : {}) }
   if (frozen !== 'new' && (expectedTransport || frozen === 'legacy-checkpoint' || rejectsTransport)) {
     const value = protocolValue, resultRef = writeEvidence(f.input.source.commonDir, value)
     const ref = writeEvidence(f.input.source.commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: claim.attempt.id, inputId: f.input.id, policyDigest: f.operation.policyDigest, stage: 'behavior-draft-protocol', resultRef })
