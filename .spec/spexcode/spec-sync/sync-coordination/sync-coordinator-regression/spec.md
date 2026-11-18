@@ -239,7 +239,7 @@ unlimited回归用确定性独立模型接缝完成三attempt P1独审及v2两�
 
 A7形状的真实Git/SQLite回归使用native-worktree-v1与真实冻结的旧git-json-v5或当前git-json-v6，经正常Git JSON提交和独立审查保存含无IDcoverage_gap的aggregate。历史对照首轮保旧v5/指导v7，恢复的新attempt真实冻结v6与当前指导，不能只改wrapper制造指导变化却借同输入readyAnalysis跳过新生成。正式pause/resume后，旧指导aggregate/local checkpoint（包括v5 whole与local accept）不能在当前指导下直接复用，必须实际新分析+独审后进入P1；旧failure/ref/输入/预算与失效fence保持。同指导对照必须核真实请求运输及程序analysis/wrapper均自然绑定当前版本，禁止把legacy/v7夹具的wrapper手改为全局版本冒充同指导；其aggregate/local仍零额外Native承接并继续按unbound_behavior_finding阻塞无ID发现，不能免审放行P1。完整applying/receipt恢复不因自动分析指导更新重做生成，旧不可变decision来源仍沿原ref验证。
 
-旧 inline 的混合 V1 引用错误回归使用真实 Git、隔离 SQLite 及受控 runner。首轮真实 P1 扩域后，原 P0 计划和批准保持同一 refs，下一轮只派对应 owner；越权差量遭拒后继续正确返修并重新通过 V1。缺正式扩域或扩域引用失配、非空新增基线、原计划读集/选择/来源或 owner 漂移均在新派发前拒绝。原失败、兄弟批准及源码、测试和 index 字节保持。原生变体由真实 createAttemptRunner 和受控 runtime 产出原派发、canonical 记录及已移除资源，核验缺请求、未移除、模型漂移、冻结读取证据缺席及 scope 退出后的拒绝。
+旧 inline 的混合 V1 引用错误回归使用真实 Git、隔离 SQLite 及受控 runner。首轮真实 P1 扩域后，原 P0 计划和批准保持同一 refs，下一轮只派对应 owner；越权差量遭拒后继续正确返修并重新通过 V1。缺正式扩域或扩域引用失配、非空新增基线、原计划读集/选择/来源或 owner 漂移均在新派发前拒绝。原失败、兄弟批准及源码、测试和 index 字节保持。原生变体由实际 createAttemptRunner 和受控 runtime 产出原派发、会话记录及已移除资源。同操作冻结 P0 用正式 reader 重建有效读取证据并完成返修；P0 分析和独审中任一请求带工作树，或原 whole、owner 指向正式重试祖先，均在新派发前拒绝。缺请求、未移除、模型漂移、冻结读取证据缺席及 scope 退出的拒绝仍核验。
 
 只读全候选V1有效而真实normalized code_review repair的Git/SQLite定向回归先复现零owner调用重复独审，再证明裸Spec路径及正式contract:引用都按实际candidate ID/path回到唯一P1 owner；单区/多区连续修复、兄弟P1拒绝后承接本轮已新独审owner、正式pause/run空generation结算后的精确原repairContext桥均保原ref/failure/预算。其余分区缓存、source/tests的Git对象及index保持，code_generate为零，全图seal/V1及新独审重跑；外来review或无实际owner定位拒绝。新叶错误AC证据表述可按原source=null和raw/facts纠正，既有作者AC不得无授权降义、缺readonly oracle不得靠重写测试通过，本轮稳定ID不得删除或改类。机制接缝在Docker前停止，不宣称真实模型或产品交付。
 

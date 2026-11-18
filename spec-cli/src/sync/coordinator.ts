@@ -815,7 +815,7 @@ function completedNativeStageResult(store: SyncStore, operation: SyncOperation, 
     const proof = checkpoint.result.frozenReadProof
     if (!proof) return null
     assertFrozenBinding(native.request.frozenContext, { requestKey: key, inputDigest: request.inputDigest, attemptId: origin.id, policyDigest: operation.policyDigest })
-    verifyStructuredFrozenReadProof(native.request.frozenContext, proof, trace, native.request.readerRuntime?.version === 2 ? native.request.readerRuntime.toolOutputTokenLimit : undefined, { output })
+    verifyStructuredFrozenReadProof(native.request.frozenContext, proof, { threadId: trace.threadId, turnId: trace.turnId }, native.request.readerRuntime?.version === 2 ? native.request.readerRuntime.toolOutputTokenLimit : undefined, { output })
   }
   const scope = frozenAnalysisScope.getStore(), reader = scope?.active ? scope.readNativeRecord ?? (inline ? readRecord : undefined) : undefined
   if (reader) {
@@ -1491,7 +1491,7 @@ function authenticateApprovedBehaviorPartition(store: SyncStore, source: SyncOpe
       if (resource) {
         const native = JSON.parse(readEvidence(commonDir, resource.plan.planBlob).toString('utf8')) as NativeRunPlan
         const checkpoint = JSON.parse(readEvidence(commonDir, resource.checkpointRef).toString('utf8')) as NativeRunCheckpoint
-        if (!checkpoint.result || native.request.model !== syncModel(source)) return false
+        if (!checkpoint.result || native.request.model !== syncModel(source) || inlineV1RepairScope(source) && native.request.worktree !== undefined) return false
         result = completedNativeStageResult(store, source, origin, native.request, trace, checkpoint.result.output, '') ?? undefined
       } else {
         const injected = stage<{ requestDigest: string; result: ElaborationSessionResult }>(store, source, origin, `injected:${requestKey}`, 'automatic', original)
@@ -1528,8 +1528,12 @@ function* approvedBehaviorPartitionAuthentication(store: SyncStore, operation: S
   const basis = analysisStageBinding(store, operation, whole, readIndex)
   if (!basis || (frozenLegacy ? basis.guidanceContractVersion !== LEGACY_CODE_BEHAVIOR_GUIDANCE_VERSION || whole.guidanceContractVersion !== undefined : !behaviorGuidanceMatches(operation, basis))) return reject('原P0 whole缺少精确原指导、读集及基线wrapper')
   const p0 = store.readAttempt(basis.attemptId), commonDir = operation.input.source.commonDir
+  const inline = options?.inlineV1Repair === true
+  if (inline && p0.operationId !== operation.id) return reject('原inline P0 whole生产者必须属于同operation')
   if (p0.number > attempt.number || p0.composedInput?.contentDigest !== whole.composedDigest) return reject('原P0实际attempt不是同组合输入的更早来源')
   const inherited = stage<{ fromOperationId?: string; fromAttemptId: string; analysisRef: BlobRef }>(store, operation, p0, 'analysis-provenance', 'evidence', readIndex(p0))
+  if (inline && inherited && ((inherited.fromOperationId ?? operation.id) !== operation.id || store.readAttempt(inherited.fromAttemptId).operationId !== operation.id))
+    return reject('原inline P0 whole provenance必须属于同operation')
   if (inherited?.fromOperationId && inherited.fromOperationId !== operation.id) {
     const parent = reviewHandoffParent(store, operation), previous = store.readAttempt(inherited.fromAttemptId)
     if (parent?.id !== inherited.fromOperationId || previous.operationId !== parent.id || inherited.analysisRef.sha256 !== evidence.ref.sha256
@@ -1559,12 +1563,14 @@ function* approvedBehaviorPartitionAuthentication(store: SyncStore, operation: S
       const provenance = stage<{ fromOperationId: string; fromAttemptId: string; resultRef: BlobRef }>(store, ownerOperation, origin, `${key}:provenance`, 'automatic', original)
       if (!provenance) {
         const protocol = frozenLegacy && stage<{ version: string; contextTransport?: CodeBehaviorContextTransport }>(store, ownerOperation, origin, 'behavior-draft-protocol', 'evidence', original)
-        if (options?.inlineV1Repair && protocol !== null) return reject(`原inline P0 owner存在草稿协议: ${owner.partitionId}`)
-        if (frozenLegacy && !options?.inlineV1Repair && (!protocol || protocol.version !== 'code-behavior-draft-v1' || protocol.contextTransport !== 'git-json-v4')) return reject(`原P0 owner真实生产者缺少原v4协议: ${owner.partitionId}`)
+        if (inline && protocol !== null) return reject(`原inline P0 owner存在草稿协议: ${owner.partitionId}`)
+        if (frozenLegacy && !inline && (!protocol || protocol.version !== 'code-behavior-draft-v1' || protocol.contextTransport !== 'git-json-v4')) return reject(`原P0 owner真实生产者缺少原v4协议: ${owner.partitionId}`)
         break
       }
       if (provenance.resultRef.sha256 !== owner.analysisRef.sha256) return reject(`原P0 owner provenance改变local摘要: ${owner.partitionId}`)
       const previous = store.readAttempt(provenance.fromAttemptId)
+      if (inline && (provenance.fromOperationId !== operation.id || previous.operationId !== operation.id))
+        return reject(`原inline P0 owner provenance必须属于同operation: ${owner.partitionId}`)
       if (previous.operationId !== provenance.fromOperationId || !['failed', 'superseded', 'settled'].includes(previous.status)) return reject(`原P0 owner provenance未正式结算: ${owner.partitionId}`)
       if (previous.operationId === ownerOperation.id) {
         if (previous.number >= origin.number) return reject(`原P0 owner provenance不是严格更早来源: ${owner.partitionId}`)
