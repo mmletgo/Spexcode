@@ -92,7 +92,11 @@ raw-only 空关联例外由程序从冻结输入判定：没有成对已验证�
 
 rawlessSpecPaths仅列出本轮changedPaths中的既有Spec节点：作者基准、当前source与composed必须逐字相同；有已验证基线时，verifiedDelivery也必须存在且逐字相同；无基线时delivery角色可以缺席。这些角色均不得含该节点raw，且不得存在当前裁决或生命周期写授权。对这些路径，分析只用facts/changes完整覆盖业务行为并交 [[sync-elaboration]] 初始化，必须保留原Spec字节且不产生任何resolution（包括content:null）；根/上游raw只作为只读上下文，不能填成该叶raw。真实作者/交付正文或raw差异、缺失的基准字节及显式裁决/生命周期授权不进入该列表，继续沿原相容整合、raw保真和逐项删除门禁处理。
 
-冻结 plan.sourcePaths 存在时，它是业务源码角色的唯一依据；同一角色判据约束未治理文件发现、新业务 newNodes 及后置业务归属门。可读/可写的纯测试正文不因 Python 文件名或 helper 形式变成业务源码；实际测试改动仍由 actualTreeDiff 纳入完整分析和独审，读取与写入授权及既有 JS 测试过滤不变。历史计划缺角色字段时保持原发现和归属语义，不从当前配置推断或修改其历史权限。
+冻结 plan.sourcePaths 存在时，它是业务源码角色的唯一依据；同一角色判据约束未治理文件发现、新业务 newNodes 及后置业务归属门，文件扩展名不缩减该冻结角色范围。实际 UTF-8 源码对象均进入同一归属判据，包括已提交且本轮字节未变的实现。可读/可写的纯测试正文不因 Python 文件名或 helper 形式变成业务源码；实际测试改动仍由 actualTreeDiff 纳入完整分析和独审，读取与写入授权及既有 JS 测试过滤不变。历史计划缺角色字段时保持原发现和归属语义，不从当前配置推断或修改其历史权限。
+
+源码角色完整归属使用 code-behavior-guidance-v9，沿现有 git-json-v6 运输与指导身份接缝冻结。版本与完整归属上下文进入同一 inputDigest，新请求重新分析并独审。此前 v8 及更早请求的 schema、context、原稿、finding 和批准原件保留其原指导身份及字节，当前指导的批准复用仍须匹配当前版本和完整摘要。
+
+显式源码角色的既有归属复用 [[sync-governance-owners]] 的冻结匹配口径，包含合法标量、目录、glob 和契约中的真实归属引用。未治理发现与重复叶拒绝使用同一判据，related 仍只提供读取关系。匹配只读取当前冻结的业务 Spec 与契约图。
 
 拒绝诊断以 approved:false 的 JSON 保存当次完整 proposal、尚未批准的 analysis 和 review（在各阶段实际产生时），分列 missingPaths/missingChangeIds/unknownChangeIds、身份摘要或会话不一致、verdict 和 findings；路径错误仍保同次业务证据及反例。AC复合门禁给出目标类型、同一 allowed_change 中缺失的 affectedId、不支撑的 ruleIds、非法规则类型及 source 是否绑定。AC ruleIds 只列本次变化依据，其他未改 covers 义务保持；不得拼接多个 allowed_change 的并集授权。无治理代码归属验证按原判据一次收集全部缺失 disposition 的路径，在同一拒绝的 details.missingCodePaths 与 missingCodePathCount 中返回完整列表及数量；首项仍可作为摘要，任何一项遗漏仍拒绝，空初始化文件、newNodes 和真实 GAP 的门禁不变。既有 failure.message 进入下一轮 repairDiagnostics 供逐项修复，不重复嵌入整个冻结上下文；前轮提案、未通过的 accept 或伪造批准仅是数据，不能产生基线、授权或替代新独审。
 

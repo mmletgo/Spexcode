@@ -1832,6 +1832,136 @@ test('冻结source角色只发现业务根，纯测试helper可读且旧计划�
   }), error => error === stopped)
 })
 
+test('显式source角色完整治理已提交源码，不按文件扩展名缩减归属', async t => {
+  for (const partitioned of [false, true]) await t.test(`partition=${partitioned}`, async sub => {
+    const sources = {
+      'src/run.sh': '#!/bin/sh\nexit 0\n',
+      'src/core.c': 'int run(void) { return 0; }\n',
+      'src/migration.sql': 'select 1;\n',
+      'src/launcher': '#!/usr/bin/env python3\nprint(1)\n',
+      'src/options.json': '{"enabled":true}\n',
+      'src/guide.md': '# 导出工具\n保留现有入口。\n',
+    }
+    const paths = Object.keys(sources).sort()
+    const f = await fixture(sub, undefined, {
+      ...sources,
+      'tests/support.py': 'def fixture_value():\n    return 1\n',
+    })
+    const before = await f.input()
+    const input: CodeBehaviorInput = {
+      ...before,
+      baseline: null,
+      composed: composeInputSnapshots(before.snapshot, null).composed!,
+      plan: {
+        ...before.plan,
+        version: 'sync-coordinator-v2',
+        direction: 'code_to_spec',
+        partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 },
+        sourcePaths: paths,
+        writePaths: ['.spec/export/export-contract'],
+      },
+      ...(partitioned ? {
+        partition: {
+          id: 'explicit-source-role',
+          changedPaths: paths,
+          factSourcePaths: paths,
+        },
+      } : {}),
+    }
+    await assert.rejects(analyzeCodeBehavior(input, runner('refactor')), (error: Error) => {
+      const diagnostic = JSON.parse(error.message) as { details: { missingCodePaths: string[]; missingCodePathCount: number } }
+      assert.deepEqual(diagnostic.details.missingCodePaths, paths)
+      assert.equal(diagnostic.details.missingCodePathCount, paths.length)
+      return true
+    })
+    const complete = runner('refactor', proposal => {
+      proposal.newNodes = paths.map(codePath => ({
+        codePath,
+        parentNodeId: 'export-contract',
+        basis: '导出功能的现有入口由原始需求下的治理叶承接',
+      }))
+    })
+    const analysis = await analyzeCodeBehavior(input, async request => {
+      const context = readFrozenBehaviorContext<{ requiredChangedPaths: string[]; unownedSourcePaths: string[] }>(request)
+      assert.deepEqual(context.requiredChangedPaths, paths)
+      assert.deepEqual(context.unownedSourcePaths, paths)
+      if (request.purpose === 'code_behavior_analyze') {
+        const schema = (request.schema.properties as { newNodes: { items: { properties: { codePath: { enum: string[] } } } } }).newNodes
+        assert.deepEqual(schema.items.properties.codePath.enum, paths)
+      }
+      return complete(request)
+    })
+    assert.equal(analysis.reviewPassed, true)
+    assert.deepEqual(analysis.newNodes.map(node => node.codePath), paths)
+    const captured = new Error('legacy ownership input captured')
+    await assert.rejects(analyzeCodeBehavior(before, async request => {
+      const context = readFrozenBehaviorContext<{ unownedSourcePaths: string[] }>(request)
+      assert.deepEqual(context.unownedSourcePaths, ['tests/support.py'])
+      throw captured
+    }), error => error === captured)
+  })
+})
+
+test('显式source角色复用标量目录和glob既有归属，拒绝重复治理叶', async t => {
+  const declarations = [
+    { name: 'scalar', code: 'code: src/run.sh\n' },
+    { name: 'directory', code: 'code:\n  - src/\n' },
+    { name: 'glob', code: 'code:\n  - src/*.sh\n' },
+  ]
+  for (const declaration of declarations) await t.test(declaration.name, async sub => {
+    const sourcePath = 'src/run.sh'
+    const f = await fixture(sub, () => `---\ntitle: 导出脚本职责\nstatus: pending\n${declaration.code}---\n\n## raw source\n\n脚本入口沿用导出工具的现有职责。\n`, { [sourcePath]: '#!/bin/sh\nexit 0\n' })
+    const before = await f.input()
+    const input: CodeBehaviorInput = {
+      ...before,
+      baseline: null,
+      composed: composeInputSnapshots(before.snapshot, null).composed!,
+      plan: {
+        ...before.plan,
+        version: 'sync-coordinator-v2',
+        direction: 'code_to_spec',
+        partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 },
+        sourcePaths: [sourcePath],
+        writePaths: ['.spec/export/export-contract'],
+      },
+      partition: { id: 'owned-source-role', changedPaths: [sourcePath], factSourcePaths: [sourcePath] },
+    }
+    const analysis = await analyzeCodeBehavior(input, async request => {
+      const context = readFrozenBehaviorContext<{ unownedSourcePaths: string[] }>(request)
+      assert.deepEqual(context.unownedSourcePaths, [])
+      if (request.purpose === 'code_behavior_analyze') {
+        const schema = (request.schema.properties as { newNodes: { maxItems: number } }).newNodes
+        assert.equal(schema.maxItems, 0)
+      }
+      return runner('refactor', proposal => {
+        for (const change of proposal.changes as { affectedIds: string[]; ruleIds: string[] }[]) {
+          change.affectedIds = []
+          change.ruleIds = []
+        }
+      })(request)
+    })
+    assert.equal(analysis.reviewPassed, true)
+    assert.deepEqual(analysis.newNodes, [])
+    assert.ok(input.plan.version === 'sync-coordinator-v2')
+    const writable: CodeBehaviorInput = {
+      ...input,
+      plan: { ...input.plan, direction: 'combined', writePaths: before.plan.writePaths },
+    }
+    await assert.rejects(analyzeCodeBehavior(writable, runner('refactor', proposal => {
+      for (const change of proposal.changes as { affectedIds: string[]; ruleIds: string[] }[]) {
+        change.affectedIds = []
+        change.ruleIds = []
+      }
+      proposal.newNodes = [{ codePath: sourcePath, parentNodeId: 'export-contract', basis: '重复的治理叶' }]
+    })), (error: Error) => {
+      const diagnostic = JSON.parse(error.message) as { message: string; proposal: { newNodes: { codePath: string }[] } }
+      assert.match(diagnostic.message, /newNodes|已治理文件不能重复创建归属节点/)
+      assert.equal(diagnostic.proposal.newNodes[0].codePath, sourcePath)
+      return true
+    })
+  })
+})
+
 test('真实测试改动仍经分析和独审，不要求创建业务治理叶', async t => {
   const f = await fixture(t), path = 'tests/support.py'
   writeFileSync(join(f.root, path), 'def fixture_value():\n    return 1\n'); git(f.root, 'add', path); git(f.root, 'commit', '-m', 'seed test helper')

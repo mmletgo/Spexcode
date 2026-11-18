@@ -10,7 +10,7 @@ code:
 
 ## expanded spec
 
-新 git-json-v6 的程序分析结果显式记录 guidanceContractVersion:code-behavior-guidance-v8，参与分析内容摘要与独审；模型提案不填写该字段。历史运输结果保原字段缺席和字节，协调 wrapper 只能标真实结果指导，不能因当前 writer 已升级而把旧请求结果补签为 v8。分区聚合沿同一冻结协议保留该身份。
+git-json-v6 的程序分析结果显式记录实际冻结的 guidanceContractVersion，源码角色完整归属指导为 code-behavior-guidance-v9，参与分析内容摘要与独审。该字段由程序产生。历史结果保留原 v8 或字段缺席及其字节，协调 wrapper 的指导标记由真实结果派生。分区聚合沿同一冻结协议保留该身份。
 
 行为分析绑定真实新输入、共同成对基线、组合及读集合与政策摘要，保存源码及交付行为、原意、路径、规则、反例和独立会话迹线。分类为重构、合法变化、覆盖缺口或明确冲突；程序给变化及发现生成稳定身份。独审通过才可派生事实、验收更新授权、节点迁移或新节点。裁决输入绑定旧operation/input/analysis及具体findingIds，选择保留原意、采用行为或新规则，不能变更已冻结政策。
 
