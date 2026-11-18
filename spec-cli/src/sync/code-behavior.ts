@@ -50,7 +50,7 @@ export type CodeBehaviorPostGateReview = {
   findings: { finding: ContractFinding; before: ContractItem; after: ContractItem; changedPaths: string[] }[]
   codeDiff: string
 }
-export type CodeBehaviorInput = { contextTransport?: CodeBehaviorContextTransport; exactChangedPathsPreflight?: true; postGateReview?: readonly CodeBehaviorPostGateReview[]; draftProtocol?: 'code-behavior-draft-v1'; partition?: { id: string; changedPaths: readonly string[]; factSourcePaths: readonly string[]; authorizedParentSpecPaths?: readonly string[] }; model?: string; snapshot: InputSnapshot; baseline: BaselinePair | null; baselineSelection?: FrozenBaselineSelection; composed: ComposedInputRef; readSetDigest: string; policyDigest: string; plan: SyncCoordinatorPlan; requestKey: string; timeoutMs: number | null; signal?: AbortSignal; origin?: 'initial' | 'spec' | 'code' | 'combined' | 'reconcile' | 'decision'; decision?: { request: SyncDecisionInput; previous: CodeBehaviorEvidence; previousComposed?: ComposedInputRef; previousReadPaths?: readonly string[] }; repairDiagnostics?: readonly { code: string; message: string }[] }
+export type CodeBehaviorInput = { contextTransport?: CodeBehaviorContextTransport; exactChangedPathsPreflight?: true; reviewCoveragePreflight?: true; postGateReview?: readonly CodeBehaviorPostGateReview[]; draftProtocol?: 'code-behavior-draft-v1'; partition?: { id: string; changedPaths: readonly string[]; factSourcePaths: readonly string[]; authorizedParentSpecPaths?: readonly string[] }; model?: string; snapshot: InputSnapshot; baseline: BaselinePair | null; baselineSelection?: FrozenBaselineSelection; composed: ComposedInputRef; readSetDigest: string; policyDigest: string; plan: SyncCoordinatorPlan; requestKey: string; timeoutMs: number | null; signal?: AbortSignal; origin?: 'initial' | 'spec' | 'code' | 'combined' | 'reconcile' | 'decision'; decision?: { request: SyncDecisionInput; previous: CodeBehaviorEvidence; previousComposed?: ComposedInputRef; previousReadPaths?: readonly string[] }; repairDiagnostics?: readonly { code: string; message: string }[] }
 type BehaviorPurpose = 'code_behavior_analyze' | 'code_behavior_review'
 type CompletedBehaviorDraft = { trace: ElaborationTrace; draftOid: string; resultCommit: string; requestRef: BlobRef; receipt: unknown }
 /** 未批准临时稿只记录真实Git身份；readyAnalysis仅省去独审协议失败后的重复分析，不批准独审。 */
@@ -702,21 +702,26 @@ const invalidAcceptanceBasis = acceptanceChanges.flatMap(({ id, ruleIds, source 
 ` : ''}console.log(JSON.stringify({ missingChangedPaths, missingOwnerPaths${acceptancePreflight ? ', invalidAcceptanceBasis' : ''}${exactChangedPaths ? ', invalidChangedPaths' : ''} }, null, 2))
 if (missingChangedPaths.length || missingOwnerPaths.length${acceptancePreflight ? ' || invalidAcceptanceBasis.length' : ''}${exactChangedPaths ? ' || invalidChangedPaths.length' : ''}) process.exitCode = 1
 SPEX_P0_COVERAGE`
+    const reviewCoverage = input.contextTransport === 'git-json-v6' && input.reviewCoveragePreflight === true
     if ((input.contextTransport === 'git-json-v4' || input.contextTransport === 'git-json-v5' || input.contextTransport === 'git-json-v6') && purpose === 'code_behavior_review') prompt += `
-在续审开头对已有评审稿运行下方只读检查，提交前再次检查。checkedPaths 只记录已实际独立检查的冻结文件。输出中的路径须重新核对，改用真实已检查文件的精确仓库相对路径；只读了目录、临时文件或不存在的路径时，先检查真正相关的文件。全部必审路径、业务证据、拒因和独立审查继续按原要求完成。
+在续审开头对已有评审稿运行下方只读检查，提交前再次检查。checkedPaths 只记录已实际独立检查的冻结文件。输出中的路径须重新核对，改用真实已检查文件的精确仓库相对路径；只读了目录、临时文件或不存在的路径时，先检查真正相关的文件。全部必审路径、业务证据、拒因和独立审查继续按原要求完成。${reviewCoverage ? '\ncheckedChangeIds 精确使用 pendingAnalysis.analysis.changes 中的变化 id。该集合为空时填 []。用输出的缺失及越界项核对原草稿，需求、规则与验收 ID 只作为事实和条款证据。' : ''}
 node - ${contextPath} ${binding.path} ${worktree!.tree} <<'SPEX_P0_REVIEW_PATHS'
 const { readFileSync } = require('node:fs')
 const { execFileSync } = require('node:child_process')
-const { task } = JSON.parse(readFileSync(process.argv[2], 'utf8'))
-const { checkedPaths } = JSON.parse(readFileSync(process.argv[3], 'utf8'))
+const { task${reviewCoverage ? ', pendingAnalysis' : ''} } = JSON.parse(readFileSync(process.argv[2], 'utf8'))
+const { checkedPaths${reviewCoverage ? ', checkedChangeIds' : ''} } = JSON.parse(readFileSync(process.argv[3], 'utf8'))
 const readable = new Set()
 for (const tree of new Set([process.argv[4], ...task.historicalRoles.map(role => role.tree)])) {
   const paths = execFileSync('git', ['--no-replace-objects', 'ls-tree', '-r', '--full-tree', '--name-only', '-z', tree], { encoding: 'utf8', maxBuffer: 128 * 1024 * 1024 })
   for (const path of paths.split(String.fromCharCode(0))) if (path) readable.add(path)
 }
 const invalidCheckedPaths = checkedPaths.filter(path => !readable.has(path))
-console.log(JSON.stringify({ invalidCheckedPaths }, null, 2))
-if (invalidCheckedPaths.length) process.exitCode = 1
+${reviewCoverage ? `const expectedIds = new Set(pendingAnalysis.analysis.changes.map(change => change.id))
+const missingCheckedPaths = task.requiredChangedPaths.filter(path => !checkedPaths.includes(path))
+const missingChangeIds = [...expectedIds].filter(id => !checkedChangeIds.includes(id))
+const unknownChangeIds = checkedChangeIds.filter(id => !expectedIds.has(id))
+` : ''}console.log(JSON.stringify({ invalidCheckedPaths${reviewCoverage ? ', missingCheckedPaths, missingChangeIds, unknownChangeIds' : ''} }, null, 2))
+if (invalidCheckedPaths.length${reviewCoverage ? ' || missingCheckedPaths.length || missingChangeIds.length || unknownChangeIds.length' : ''}) process.exitCode = 1
 SPEX_P0_REVIEW_PATHS`
     const nativeSchema = draftMode ? DRAFT_RECEIPT_SCHEMA : schema
     const request = { root: input.snapshot.source.canonicalRoot, base: seed?.baseCommit ?? input.snapshot.headCommit, ...(seed ? { worktree: seed } : {}), requestKey: `${input.requestKey}:${purpose}`, inputDigest, purpose, prompt, schema: nativeSchema, timeoutMs: input.timeoutMs, signal, model: syncModel(input), effort: 'high' as const, ...(frozenEntries?.length ? { frozenEntries } : {}) }
