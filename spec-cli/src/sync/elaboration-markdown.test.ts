@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
 import { elaborationPatchErrors, projectVerificationTable, renderElaboration, withoutVerificationTables } from './elaboration-markdown.js'
-import type { GeneratedElaboration, GeneratedTables } from './elaboration-markdown.js'
+import type { ContractCell, GeneratedElaboration, GeneratedTables } from './elaboration-markdown.js'
 import { elaborationDigest } from './elaboration.js'
 import type { ElaborationInput } from './elaboration-types.js'
 
@@ -140,6 +140,49 @@ test('只读V1混合引用差量保留原业务正文、AC和可信命令', () =
   }
   assert.deepEqual(elaborationPatchErrors(bareInput, output), [])
   assert.ok(elaborationPatchErrors(bareInput, withSource('code:src/other.js#run')).length > 0)
+})
+
+test('只读V1不支持语言仅可重绑已列source行的既有REQ或RULE', () => {
+  const oldSources = new Map([['STEP-EXPORT-02', 'src/greet.sh#L2'], ['STEP-EXPORT-03', 'src/greet.sh#L3']])
+  const frozen = source.split('\n').map(line => {
+    const id = line.split('|')[1]?.trim() ?? ''
+    const ref = oldSources.get(id)
+    if (!ref) return line
+    const accepted = line.replace('derived:FLOW-EXPORT-01', `code:${ref}`)
+    return id === 'STEP-EXPORT-02' ? accepted.replace(/RULE-EXPORT-03,RULE-EXPORT-04 \|$/, 'RULE-EXPORT-03,REQ-EXPORT-01 |') : accepted
+  }).join('\n')
+  const accepted = parseContract({ nodeId: baseline.nodeId, path, source: frozen }).contract!
+  const ref = { sha256: 'a'.repeat(64) }
+  const findings = [...oldSources].map(([itemId, ref]) => ({
+    code: 'anchor-language-unsupported', severity: 'error' as const, nodeId: baseline.nodeId, path,
+    itemId, citation: { origin: 'source' as const, ref }, message: '冻结Shell文件没有可信语言解析器',
+  }))
+  const repair = { baseInputDigest: ref.sha256, candidateDigest: ref.sha256, generationRef: ref, acceptedRef: ref, changes: [], applicability: [], output: null, review: null, findings }
+  const snapshot: ElaborationInput = { ...input, targets: [{ ...input.targets[0], source: frozen, sourceDigest: elaborationDigest(frozen) }], readonlySpecRepair: repair }
+  const output = patch(), change = output.changes[0]
+  change.tables.STEP = accepted.items.flatMap(item => item.kind === 'STEP' && oldSources.has(item.id) ? [{
+    id: item.id, flow: item.flow, action: item.action, input: item.input, output: item.output, rules: item.rules, next: item.next,
+    source: item.id === 'STEP-EXPORT-02' ? 'rule:RULE-EXPORT-03' : 'derived:RULE-EXPORT-05', 'depends-on': item.dependsOn,
+  }] : [])
+  assert.equal(change.tables.STEP.length, 2)
+  assert.deepEqual(elaborationPatchErrors(snapshot, output), [])
+  assert.equal(renderElaboration(snapshot, output, 'input').changes[0].source,
+    frozen.replace('code:src/greet.sh#L2', 'rule:RULE-EXPORT-03').replace('code:src/greet.sh#L3', 'derived:RULE-EXPORT-05'))
+  const withStep = (row: Record<string, ContractCell>): GeneratedElaboration => ({
+    ...output, changes: [{ ...change, tables: { ...change.tables, STEP: [{ ...change.tables.STEP[0], ...row }, change.tables.STEP[1]] } }],
+  })
+  assert.deepEqual(elaborationPatchErrors(snapshot, withStep({ source: 'user:REQ-EXPORT-01' })), [])
+  for (const source of ['rule:RULE-UNKNOWN-01', 'rule:RULE-EXPORT-01', 'rule:RULE-EXPORT-04', 'derived:FLOW-EXPORT-01', 'user:raw'])
+    assert.ok(elaborationPatchErrors(snapshot, withStep({ source })).some(error => error.includes('STEP-EXPORT-02')), source)
+  for (const finding of [
+    { ...findings[0], code: 'anchor-dead' },
+    { ...findings[0], nodeId: 'other-owner' },
+    { ...findings[0], path: '.spec/other-owner/spec.md' },
+    { ...findings[0], itemId: 'STEP-EXPORT-01' },
+    { ...findings[0], citation: findings[1].citation },
+  ]) assert.ok(elaborationPatchErrors({ ...snapshot, readonlySpecRepair: { ...repair, findings: [finding, findings[1]] } }, output).some(error => error.includes('STEP-EXPORT-02')))
+  assert.ok(elaborationPatchErrors(snapshot, withStep({ action: '改写已审动作' })).some(error => error.includes('STEP-EXPORT-02')))
+  assert.ok(elaborationPatchErrors(snapshot, { ...output, changes: [{ ...change, tables: { ...change.tables, AC: [{ id: 'AC-EXPORT-01', test: 'tests/other.test.mjs' }], VERIFY: [{ id: 'VERIFY-EXPORT-01', command: ['echo', 'changed'] }] } }] }).filter(error => /#(?:AC|VERIFY)-EXPORT-01/.test(error)).length === 2)
 })
 
 test('raw-only旧节点用同一协议首次建立契约，保留原raw及既有说明', () => {

@@ -1,10 +1,11 @@
 import { parseCodeEntry, parseRelation } from '@spexcode/spec-core'
 import { ownerNodesForPath } from './governance-owners.js'
-import { CONTRACT_COLUMNS, contractTableCells, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
+import { CONTRACT_COLUMNS, contractReferences, contractTableCells, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
 import type { ContractFinding, ContractItem, ContractKind, Verification } from '@spexcode/spec-core/contracts'
 import type { Applicability, ElaborationCandidate, ElaborationInput, ElaborationTarget, ReadonlySpecRepair } from './elaboration-types.js'
 import { ELABORATION_GENERATION_GUIDANCE } from './elaboration-types.js'
 import { contractBusinessProse } from './contract-evolution.js'
+import { isUnsupportedSourceCitationFailure } from './frozen-anchors.js'
 import { readTree } from './snapshot.js'
 
 export type ContractCell = string | string[] | boolean | number | null
@@ -133,6 +134,7 @@ function readonlyCitationPatchErrors(input: ElaborationInput, generated: Generat
   const applicability = (items: readonly Applicability[]): string => JSON.stringify(items.map(({ boundary, applies, basis, affectedIds }) => [boundary, applies, basis, affectedIds]))
   if (!repair.applicability || applicability(generated.applicability) !== applicability(repair.applicability)) return ['V1引用返修必须保留原已审适用性及关联ID']
   let inventory: Set<string> | undefined
+  let supportKinds: Map<string, ContractKind> | undefined
   const isFrozenFile = (path: string): boolean => {
     if (input.files?.has(path)) return true
     if (!input.worktree || !input.historyInput) return false
@@ -167,12 +169,26 @@ function readonlyCitationPatchErrors(input: ElaborationInput, generated: Generat
     for (const relation of ['code', 'related'] as const)
       if (node[relation].length !== contract[relation].length || contract[relation].some((ref, index) => !citationChange(relation, ref, node[relation][index])))
         errors.push(`${node.path}: V1引用返修只能将所列 ${relation} 引用逐项修复为相同粒度的冻结路径或声明`)
+    const sourceChange = (item: Exclude<ContractItem, Verification>, after: string): boolean => {
+      if (after.startsWith('code:')) return citationChange('source', item.source.ref, after.slice('code:'.length), item.id)
+      const source = parseCodeEntry(item.source.ref)
+      const ref = source.anchor ? `${source.path}#${source.anchor}` : item.source.ref
+      if (!issues.some(issue => isUnsupportedSourceCitationFailure(issue) && issue.itemId === item.id && issue.citation?.ref === ref)) return false
+      const replacement = /^(rule|derived|user):([^:]+)$/.exec(after)
+      if (!replacement) return false
+      const [, role, id] = replacement
+      supportKinds ??= new Map([...input.targets, ...input.context ?? []].flatMap(source => source.source
+        ? parseContract({ ...source, source: source.source }).contract?.items.map(item => [item.id, item.kind] as const) ?? [] : []))
+      const supportKind = supportKinds.get(id)
+      if (supportKind !== 'RULE' && supportKind !== 'REQ') return false
+      if (role === 'rule' && supportKind !== 'RULE' || role === 'user' && supportKind !== 'REQ') return false
+      return contractReferences(item).some(reference => reference.field === 'depends-on' && reference.id === id && reference.kinds.includes(supportKind))
+    }
     for (const [kind, rows] of Object.entries(node.tables)) for (const row of rows) {
       const item = contract.items.find(item => item.kind === kind && item.id === row.id)
       const old = item && contractRow(item)
       if (!item || !old || Object.entries(old).some(([column, value]) => JSON.stringify(value) !== JSON.stringify(row[column]) && !(column === 'source'
-        && item.kind !== 'VERIFY' && item.source.kind === 'code' && typeof row.source === 'string' && row.source.startsWith('code:')
-        && citationChange('source', item.source.ref, row.source.slice('code:'.length), item.id))))
+        && item.kind !== 'VERIFY' && item.source.kind === 'code' && typeof row.source === 'string' && sourceChange(item, row.source))))
         errors.push(`${node.path}#${row.id}: V1引用返修只允许修复该行所列代码来源，保留其余字段`)
     }
     return errors
