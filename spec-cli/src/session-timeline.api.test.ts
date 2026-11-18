@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { once } from 'node:events'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import net from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -533,6 +533,7 @@ const result = spawnSync(process.env.SPEX_FIXTURE_NODE, [process.env.SPEX_FIXTUR
 process.exit(result.status === null ? 1 : result.status)
 `)
     mkdirSync(join(project, '.spec', 'project'), { recursive: true })
+    const canonicalProject = realpathSync(project)
     writeFileSync(join(project, '.spec', 'project', 'spec.md'), '---\ntitle: project\nstatus: active\n---\n# project\n')
     const piCommand = `${JSON.stringify(process.execPath)} ${JSON.stringify(fakePi)}`
     writeFileSync(join(project, '.spec/spexcode.json'), JSON.stringify({
@@ -589,14 +590,15 @@ process.exit(result.status === null ? 1 : result.status)
     const session = await fetch(`${base}/api/sessions/${id}`).then((r) => r.json() as Promise<{ note?: string }>)
     assert.equal(session.note, 'HEADLESS_CLI_ANSWER')
 
-    const pidPath = join(home, 'projects', project.replace(/[/.]/g, '-'), 'sessions', id, 'agent.pid')
+    const projectKey = canonicalProject.replace(/[/.]/g, '-')
+    const pidPath = join(home, 'projects', projectKey, 'sessions', id, 'agent.pid')
     const controllerPid = Number(readFileSync(pidPath, 'utf8').trim())
     const rendezvous = rvSock(id)
     const closed = await fetch(`${base}/api/sessions/${id}/close`, { method: 'POST' })
     const closedText = await closed.text()
     assert.equal(closed.status, 200, closedText)
     assert.deepEqual(JSON.parse(closedText), { ok: true })
-    const sessionStore = join(home, 'projects', project.replace(/[/.]/g, '-'), 'sessions', id)
+    const sessionStore = join(home, 'projects', projectKey, 'sessions', id)
     assert.equal(existsSync(sessionStore), true, 'close retains the archived session store')
     assert.equal(JSON.parse(readFileSync(join(sessionStore, 'runtime.json'), 'utf8')).archived, true,
       'close marks the retained session record archived')
