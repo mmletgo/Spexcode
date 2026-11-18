@@ -26,7 +26,11 @@ related:
 
 混合候选的冷验计数检查同一真实冻结 Git 树只完整读取一次。原候选、已拒稿及全部独审结论保持完整认证。
 
-旧候选回归用真实历史程序自然产生 git-json-v4 / v7：四组 P0、三个真实 P1 与一个仅分析 owner、合法 repair / accept / 格式失败三组 P2。原轮尚无正式 attempt.candidate，经 SQLite 冷开及 canonical Native/Git 冷验，只新增原格式独审，再仅重派命中 P1；原 v7、全部旧 CAS 和 source/index 不变。另经两次真实正式retry与显式换模型继承原P0及已审P1，保部分P1后的原范围；SQLite冷续同样只补格式审查再返命中owner。逐 owner及祖先控制机会、缺 P0 原件、Native 输出身份/原生产者模型漂移、无retryOf的跨 operation、祖先结算拒绝、缺null扩域证据、缺 P2 outcome、未结算资源及 scope 退出后的普通 v8 门均有反例。旧producer另自然保留needs_input的P1与缺席GAP复核阶段，冷续须保持格式审查、owner返修、新并集GAP复核的先后。该隔离场景在 V3 前硬停，不把受控 Native 输出冒充真实模型或最终交付证据。
+旧候选回归用真实历史程序自然产生 git-json-v4 / v7：四组 P0、三个真实 P1 与一个仅分析 owner、合法 repair / accept / 格式失败三组 P2。原轮尚无正式 attempt.candidate，经 SQLite 冷开及 canonical Native/Git 冷验，只新增原格式独审，再仅重派命中 P1；原 v7、全部旧 CAS 和 source/index 不变。另经两次真实正式retry与显式换模型继承原P0及已审P1，保部分P1后的原范围；SQLite冷续同样只补格式审查再返命中owner。逐 owner及祖先控制机会、缺 P0 原件、Native 输出身份/原生产者模型漂移、无retryOf的跨 operation、祖先结算拒绝、缺null扩域证据、缺 P2 outcome、未结算资源及 scope 退出后的普通指导版本门均有反例。旧producer另自然保留needs_input的P1与缺席GAP复核阶段，冷续须保持格式审查、owner返修、新并集GAP复核的先后。该隔离场景在 V3 前硬停，不把受控 Native 输出冒充真实模型或最终交付证据。
+
+旧 Git 程序和受控 Native 响应共同产生 v8 候选回归原件。code→spec 混合 P2 候选经 SQLite 冷开，同 operation 重新执行当前 P0/P1/P2，保留仅分析分区可见的共享作者意图及原失败、CAS、Native 和 schema 字节。显式换模型交接断言 `review_handoff_binding` 和零派发。spec→code 通过公开 `SyncApplication.submit` 同模型 `retryOf`，分别核对原候选只遇 V3 预检失败时完成新分析、生成、独审与新 runId，以及旧后继已结算 V3 时在派发前返回 `candidate_retry_binding`。两路比较原记录与原件。
+
+已在 applying 的交付对照令原分析 wrapper 缺少指导字段，在真实 Git 提交后中断 journal 结算，经 SQLite 冷开恢复同一 receipt，核对原提交、模型用量、checkpoint 和 source/index。上述交付测试的 V3 由受控驱动提供，Git、SQLite、journal 和 receipt 由实际交付路径生成。
 
 P2 混合失败使用真实 Git/Native 资源记录与 SQLite 冷开：普通 repair 排首、后组 contract-omission、另一组格式失败和一个 accept 同轮结算。冷续只重派原格式稿，保相同 candidate、合法 repair/accept 的原 resultRef；之后只回相应 P1 owner，保未命中原件与旧 CAS。覆盖完整 aggregate 后失租约的 superseded/null、零调用中间 attempt、缺 required outcome 及资源未 removed；不得补旧失败或收据。权限回归另在同 owner 核 ordinary 白名单与 omission 的已接受字段保护，不以并集扩权。
 
@@ -34,7 +38,7 @@ P2 混合失败使用真实 Git/Native 资源记录与 SQLite 冷开：普通 re
 
 同 owner 的后续 GAP 续稿分别覆盖已批准 RULE.basis 事实修正与合法新增 AC。新并集 GAP 独审后再次重开 SQLite，仅命中 owner 沿最新 acceptedRef 和 Git 草稿继续；新输入不携旧普通或遗漏权限，所有非 GAP 项、元数据、raw 与原 checkpoint 字节保持，最后重做 strict seal。回滚事实或丢弃新增 AC 的负例须以 candidate_gap_scope_changed 在独审前拒绝，不靠扩大原 P0 或合并诊断修绿。
 
-当前协议的只读候选续审回归通过真实 Git 草稿取得 P0 v8 和 P1 原件。有限预算、多个格式拒稿、独审缓存和锚点返修均从各阶段的冻结输入与精确 Git seed 检查。冻结上下文旧运输另由历史请求验证。
+当前协议的只读候选续审回归通过真实 Git 草稿取得当前 P0 与 P1 原件。有限预算、多个格式拒稿、独审缓存和锚点返修均从各阶段的冻结输入与精确 Git seed 检查。冻结上下文旧运输另由历史请求验证。
 
 文件规划的续审场景从 raw-only 目标和当前 native-worktree 计划开始，P0/P1 正常提交真实 JSON，P2 再规划并正常提交原先缺席的新源码与新测试，以及获准的 Spec 映射。正式 null 扩域及 V1 通过后，格式失败只续原候选独审，不重派 P0/P1、implementation_plan 或 builder；前后 candidate 和 file-writer 证据相同，作者 HEAD、index、WIP 与新增路径的原缺席保持。该受控 Native 回应夹具在 Docker 前停止，不声称真实模型、验收运行或交付。
 
@@ -79,7 +83,7 @@ P0 历史 ZCode 结果未发布的回归使用真实 Git、私有 SQLite 和正�
 
 新 P0 冷恢复回归校验失败诊断正文缺席于 Git context、Native 请求、continuation 与失败证据。业务返修通过真实原审查的 Git 引用读取拒因，经过中断与承接副本仍须指向原派发。正式 retryOf 的祖先以 unsupported 结束、没有分区失败正文时，同样核对原 owner、完整输入、审核范围与原生身份，拒绝被篡改的审查。原 JSON、已校验分析与兄弟批准来源保持。
 
-新 attempt 在真实 Git 和隔离 SQLite 首次冻结 git-json-v6，保留 v5 分析自检对未变化只读验收来源的定位，并向分析与独审传递相同的当前作者意图规则；真实 v2 计划方向进入 Native task，旧计划无方向时为 null。已有 git-json-v2/v3/v4/v5 检查点与预留记录保持原对象、原选择及对应自检范围，不补 direction 或新指导。v1、缺席与未知传输的回归保持。另以真实旧 v5 和新 v6 正常 Git 生成/独审，先复现旧结果被当前 writer 错贴 v8，再核已审 wrapper 只能标原指导：v5 原 analysis 字段缺席且 wrapper v7，v6 明确 v8；原 P1 派发和结果内容摘要继续绑定。
+新 attempt 在真实 Git 和隔离 SQLite 首次冻结 git-json-v6，保留 v5 分析自检对未变化只读验收来源的定位，并向分析与独审传递相同的当前作者意图规则；真实 v2 计划方向进入 Native task，旧计划无方向时为 null。已有 git-json-v2/v3/v4/v5 检查点与预留记录保持原对象、原选择及对应自检范围，不补 direction 或新指导。v1、缺席与未知传输的回归保持。旧 v5 和新 v6 的正常 Git 生成与独审核对已审 wrapper 如实记录分析时的版本。v5 原 analysis 字段缺席且 wrapper 为 v7，v6 的 analysis 与 wrapper 均标记当前指导。原 P1 派发和结果内容摘要继续绑定。
 
 P0 context运输回归在真实Git/私有SQLite核首次冻结协议、已冻结git-json-v1/v2保持原样、已有checkpoint缺席字段继续legacy，以及reserved原plan与checkpoint原bytes不改。字段存在但null、空串或未知版本在派发前明确unsupported，零runner/零dispatch。旧Native原final迁入下一精确draft，context/schema按各自角色只读；legacy→file、file→file的正式retryOf、后置分类回审、续审及完整业务finding沿同一原件认证，P1任务消费者保持原协议。模型、权限、source/tests/index、业务摘要与独审门保持；受控Native接缝不冒称真实模型或EPIPE修复。
 
@@ -233,7 +237,7 @@ v2生命周期集成回归让旧Spec的`related: [src/helpers/**/*.js]`命中全
 
 unlimited回归用确定性独立模型接缝完成三attempt P1独审及v2两处调用预检，再经真实Docker、正常固定CLI hooks/Git交付；真实commit后结算中断，SQLite重启沿原journal恢复同receipt，无额外模型或commit，期限保持null、用量/source/index与最终验证保持。有限完整交付对照仍核精确alias自己的admission重放，不把原operation预算替换为alias请求身份。该证据不冒充真实Native语义通过。
 
-A7形状的真实Git/SQLite回归使用native-worktree-v1与真实冻结的旧git-json-v5或当前git-json-v6，经正常Git JSON提交和独立审查保存含无IDcoverage_gap的aggregate。历史对照首轮保旧v5/指导v7，恢复的新attempt真实冻结v6/指导v8，不能只改wrapper制造指导变化却借同输入readyAnalysis跳过新生成。正式pause/resume后，旧指导aggregate/local checkpoint（包括v5 whole与local accept）不能在当前v8指导下直接复用，必须实际新分析+独审后进入P1；旧failure/ref/输入/预算与失效fence保持。同指导对照必须核真实请求运输及程序analysis/wrapper均自然绑定v8，禁止把legacy/v7夹具的wrapper手改为全局版本冒充同指导；其aggregate/local仍零额外Native承接并继续按unbound_behavior_finding阻塞无ID发现，不能免审放行P1。完整applying/receipt恢复不因自动分析指导更新重做生成，旧不可变decision来源仍沿原ref验证。
+A7形状的真实Git/SQLite回归使用native-worktree-v1与真实冻结的旧git-json-v5或当前git-json-v6，经正常Git JSON提交和独立审查保存含无IDcoverage_gap的aggregate。历史对照首轮保旧v5/指导v7，恢复的新attempt真实冻结v6与当前指导，不能只改wrapper制造指导变化却借同输入readyAnalysis跳过新生成。正式pause/resume后，旧指导aggregate/local checkpoint（包括v5 whole与local accept）不能在当前指导下直接复用，必须实际新分析+独审后进入P1；旧failure/ref/输入/预算与失效fence保持。同指导对照必须核真实请求运输及程序analysis/wrapper均自然绑定当前版本，禁止把legacy/v7夹具的wrapper手改为全局版本冒充同指导；其aggregate/local仍零额外Native承接并继续按unbound_behavior_finding阻塞无ID发现，不能免审放行P1。完整applying/receipt恢复不因自动分析指导更新重做生成，旧不可变decision来源仍沿原ref验证。
 
 只读全候选V1有效而真实normalized code_review repair的Git/SQLite定向回归先复现零owner调用重复独审，再证明裸Spec路径及正式contract:引用都按实际candidate ID/path回到唯一P1 owner；单区/多区连续修复、兄弟P1拒绝后承接本轮已新独审owner、正式pause/run空generation结算后的精确原repairContext桥均保原ref/failure/预算。其余分区缓存、source/tests的Git对象及index保持，code_generate为零，全图seal/V1及新独审重跑；外来review或无实际owner定位拒绝。新叶错误AC证据表述可按原source=null和raw/facts纠正，既有作者AC不得无授权降义、缺readonly oracle不得靠重写测试通过，本轮稳定ID不得删除或改类。机制接缝在Docker前停止，不宣称真实模型或产品交付。
 

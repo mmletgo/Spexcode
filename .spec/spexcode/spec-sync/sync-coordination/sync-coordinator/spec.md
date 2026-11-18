@@ -21,13 +21,15 @@ related:
 
 长候选的冷恢复逐组核验原分区请求、结果和正式结算，同一次完整认证只读取每棵 Git 树一次。已领取恢复轮在组间检查原控制和租约，取消时停止后续认证。
 
-显式 `retryOf` 与 `inheritRetryBudget` 的模型交接只续审已结算直接父操作的同源 code→spec 候选。原输入、计划、读集、完整 selection/scope、预算族与截止时间须匹配，父操作不得进入验证资源或交付 journal，候选发布沿原 parentCommit/tree 和完整逐路径来源；缺少完整 P0/P1、候选或 required P2 原件时停止，不回退重做 P0/P1。原 P0/P1 与合法 accept/repair 结论沿精确 resultRef 和真实生产者 Native/Git 保留；新独审仅消费原格式失败组。跨模型比较只将当前 P2 输入的 model/requestKey 投影回原值，随后仍逐字重建原请求并核原摘要、输出与身份。新操作持久保存来源引用，冷重启重新认证；全部协议组齐备后才从子操作自身完整 aggregate 派生原 owner 业务返修，普通重试与同操作恢复的模型政策保持。
+显式 `retryOf` 与 `inheritRetryBudget` 的模型交接只续审已结算直接父操作的同源 code→spec 候选。原输入、计划、读集、完整 selection/scope、预算族与截止时间须匹配，父操作不得进入验证资源或交付 journal，候选发布沿原 parentCommit/tree 和完整逐路径来源。P0 须使用当前指导或通过下述 git-json-v4/v7 专用冷验。过时 v8 或缺少完整 P0/P1、候选或 required P2 原件时停止，不回退重做 P0/P1。原 P0/P1 与合法 accept/repair 结论沿精确 resultRef 和真实生产者 Native/Git 保留；新独审仅消费原格式失败组。跨模型比较只将当前 P2 输入的 model/requestKey 投影回原值，随后仍逐字重建原请求并核原摘要、输出与身份。新操作持久保存来源引用，冷重启重新认证；全部协议组齐备后才从子操作自身完整 aggregate 派生原 owner 业务返修，普通重试与同操作恢复的模型政策保持。
 
 候选交接和 [[sync-checkpoint-evidence]] 共用正式直接父操作的授权判据。父操作已批准局部若经正式扩域沿用，接手时仍以父操作原扩域和实际 Native 原件验证其诊断。
 
 候选独审阶段出现原生停止待证时，保留本轮完整分区结果及原失败。正式结算后，新尝试核对候选、全部必要独审组和原生请求，只补原中断组。沿用每个已完成组的 accept 或业务 repair 原件。中断组须有原创建和取消观察、真实停止结算及一致的冻结请求；没有受认证的结果不进入本轮业务诊断。原有格式续稿保留，已停止会话的真实正常提交按 [[sync-generation]] 供同一组继续审查。
 
-同一 operation 的 code_to_spec 已有原冻结候选时，git-json-v4 / v7 的 P0 只可沿该候选专用冷验恢复。原完整计划、读集和基线、P0 每个 owner 的分析及独审、P1 实际生成与独审、仅分析覆盖、候选 Git/CAS 与全部 required P2 原件须一致，Native 成功也核 canonical 请求、输出和身份。正式 freezeCandidate 尚未执行时，原 partition:candidate 与实际独审绑定可证明该既有候选；不能重造候选或补旧 failure。组间交还控制并续原租约，先仅补格式失败，再沿合法发现回精确 P1 owner，随后继续原 V1–V4。资格仅在本轮同 operation/input/source/candidate 范围有效，退出后清除；普通自动复用仍只接受 v8，无正式来源的跨操作、新业务、缺证或漂移不借旧批准。原P0/P1生产者可来自严格更早且正式结算的 retryOf 链；逐跳保原计划、local ref及Git组合内容，null扩域只凭该wrapper原selection/readSet与同次已审whole证明回接。模型按各真实生产者原冻结请求认证，正式重试已换模型不重签旧请求。生成与独审可来自原同操作的不同轮。原 v7 标记、缺席字段、raw、Git/Native 和调用账本保持，不追加数据库协议。
+同一 operation 的 code_to_spec 已有原冻结候选时，git-json-v4 / v7 的 P0 只可沿该候选专用冷验恢复。原完整计划、读集和基线、P0 每个 owner 的分析及独审、P1 实际生成与独审、仅分析覆盖、候选 Git/CAS 与全部 required P2 原件须一致，Native 成功也核 canonical 请求、输出和身份。正式 freezeCandidate 尚未执行时，原 partition:candidate 与实际独审绑定可证明该既有候选；不能重造候选或补旧 failure。组间交还控制并续原租约，先仅补格式失败，再沿合法发现回精确 P1 owner，随后继续原 V1–V4。资格仅在本轮同 operation/input/source/candidate 范围有效，退出后清除；普通自动复用只接受当前指导 v9，无正式来源的跨操作、新业务、缺证或漂移不借旧批准。原P0/P1生产者可来自严格更早且正式结算的 retryOf 链；逐跳保原计划、local ref及Git组合内容，null扩域只凭该wrapper原selection/readSet与同次已审whole证明回接。模型按各真实生产者原冻结请求认证，正式重试已换模型不重签旧请求。生成与独审可来自原同操作的不同轮。原 v7 标记、缺席字段、raw、Git/Native 和调用账本保持，不追加数据库协议。
+
+已结算的未发布 v8 候选沿同一 operation 原模型、输入和预算进入下一 attempt 时，以当前指导重新分析及独审，再做 P1 细化与 P2 候选独审。旧指导下的 P1 批准、候选及组结论、依赖这些批准的返修依据不进入自动批准或续审来源；真实历史 refs、failure、Native 请求、草稿和证据保持原样。此边界不改变已验证、正在 apply 或已交付的真实 Git/journal 恢复。
 
 候选独审的已审来源校验沿 [[sync-input-composition]] 的原 v1 分段摘要核精确冻结选择；大范围共享 pair 时也保持原字节顺序及全部身份。
 
@@ -74,7 +76,7 @@ Grok 完整 P1 细化若在成功终态后逾期退出并正式失败，未 rese
 
 上述观察只从通过原请求和停止身份认证的 ZCode Native root 派生原树槽供 [[content-filter]] 字节核验。共用 filter root 指针不能代替原身份。无可认证树槽时仍要求物理字节匹配 Git 对象。
 
-P0 只在本次 attempt 尚无阶段检查点和 code_behavior saved/reserved 派发时冻结 git-json-v6。已冻结的 git-json-v1/v2/v3/v4/v5、缺席字段及原请求保持精确恢复，未知传输在派发前拒绝。新运输沿 v2 正文和失败状态策略以及 [[sync-code-behavior]] 的只读自检，并在分析自检定位非 user:raw 验收变更的未变化只读来源；新 v6 另冻结真实方向并向分析和独审共享作者当前意图规则。新指导重新分析与独审，旧请求、原草稿及原批准对象保持。已审 wrapper 的指导从程序 analysis 原字段读取，历史字段缺席保持 v7；不能用当前 writer 的 v8 给旧 v5 任务补签新指导批准。真实草稿、审查结果、source/tests 保护及资源结算仍依原门核验。
+P0 只在本次 attempt 尚无阶段检查点和 code_behavior saved/reserved 派发时冻结 git-json-v6。已冻结的 git-json-v1/v2/v3/v4/v5、缺席字段及原请求保持精确恢复，未知传输在派发前拒绝。新运输沿 v2 正文和失败状态策略以及 [[sync-code-behavior]] 的只读自检，并在分析自检定位非 user:raw 验收变更的未变化只读来源；新 v6 另冻结真实方向并向分析和独审共享作者当前意图规则。新指导重新分析与独审，旧请求、原草稿及原批准对象保持。已审 wrapper 的指导从程序 analysis 原字段读取，历史字段缺席保持 v7；原 v8 字段不补签为当前 v9。真实草稿、审查结果、source/tests 保护及资源结算仍依原门核验。
 
 显式 retryOf 只沿正式已结算祖先复用通过独审的局部 P0。冻结来源、输入、原意、计划、读集、业务基线、组合及局部 schema 和范围均一致时，认证原分析与独审、Git 原件和旧模型绑定，保存来源和原 resultRef。新操作只派发未批准分区，允许选择不同模型。原 attempt、调用、草稿及独审不补签。更早祖先因新准入被替代时，仍须重新核对已终结 attempt、活租约、资源和 journal 的结算。当前重新装配完整 P0；P1 仅分析资格及候选续验回到原操作复验该批准，全部当前封口和验证继续执行。
 
@@ -347,6 +349,8 @@ generation 已完整保存、但收尾失租约留下 superseded 且 failure=nul
 正式 `retryOf` 遇到原已冻结完整候选、全部P0/P1/生成及最终独审已认证，而唯一V3 stage在资源登记前以 `verification_unsupported` 结束时，沿原关联操作直接续验。直接父操作必须failed并经正式retryEligibility；同parent重复request仍沿原store幂等归并；正式retryOf最新失败后继时，无candidate的中间记录仅在同input/source/request/origin/model/plan/policy/impact/readSet/selection/scope/composed逐跳一致、所有attempt已结算且零调用/派发/session/candidate/verification/publication、无delivery/journal/live资源或租约并保真实failure时，作为无批准的空后继回溯。失败码不授资格、不建错误码名册，不补candidate或旧checkpoint；最终提供完整生成及独审原件的祖先必须仍是原V3前置unsupported来源，全部Native/Git/P0/P1/P2/V1再冷验。未认证的中间进度或绑定漂移明确拒绝，不静默从P0重做。更早祖先仅允许正常准入沿严格retryOf链派生的superseded，原failure及输入授权保持且重新核无活租约/资源。所有来源attempt已结算，无验证结果、journal、活租约或未removed资源；原unsupported CAS须由该attempt的V3 wrapper和failure精确共同引用，原run从未登记verification资源。input/source/request、origin、requested model、policy/impact/readSet、业务selection/scope、composed和候选Git对象全部一致，ready须完整覆盖scope且无blocked范围。各P0原分析/独审Git与Native身份、P1各owner批准（复用[[sync-elaboration]]的程序批准查询；规范deferred implementation-review可保原repair与reviewPassed，不缩窄为字面accept）及完整计划覆盖、真实builder prepared/Git差量、最终各区与依赖独审原完整输入和覆盖并集均冷验；最终review集合必须由同一implementationGenerationDispatch按已认证完整P1、原全局ready/scope与计划复算，并与原认证partition-generation-budget的review键及aggregate成员精确相等；不能仅凭IDs并集或保留locals省略edge。partial、旧字段缺席或任何失配明确 `candidate_retry_binding`（已有来源认证错误保原code），不悄悄重新生成。
 
 候选续验后继若零模型调用、零派发、唯一attempt已结算且无session/verification aggregate/交付/journal，可承载逐值相同的原候选回溯完整祖先，前提是全部实际资源由只读listResources枚举且均为当前候选、原run/attempt/generation/input精确绑定的verification removed。原export-intent/tree和真实export字节、计划载荷摘要及唯一acceptanceRuns重算的政策须一致；复用runAttemptVerification对已removed检查点的只读路径，禁止driver或checkpoint写入，逐项重解析原Node报告并核完整passed、零退出、无截断、created/terminal原件及原evidence摘要。远端v2另须原attestation、closed排空与所有effect真实settled、cleanup cleaned。业务failed、缺报告、未知/未结算资源或CAS失配明确拒绝；不按根failure文案授信，不把中间记录当新批准，也不补旧V3 stage或verification。新操作仍fresh V1/V3/V4/Git，旧失败及真实报告保持。
+
+同模型正规 `retryOf` 通过原来源链、发布范围、候选 Git 对象及 V3 前置失败原件检查后，若原 P0 whole 与阶段 wrapper 均为过时 v8，改走当前指导的正常 P0/P1/P2 生成与独审，再以本次身份运行 V3。此资格限原候选和续验链都未进入实际 V3 执行，原操作的失败、批准、验证记录及资源不改写。旧 v8 在已有 V3 执行记录的续验链上返回 `candidate_retry_binding`，不派发新模型或 V3；显式继承预算的换模型交接仍按原资格在派发前拒绝。
 
 续验与普通生成共用唯一V3/V4及private delivery路径。新旧publication-base各自先沿原operation/attempt/source、真实metadata父提交唯一parent/tree及原provenance完整认证，再比较实际parentTree/manifest/composed、原frontier/逐path来源与读写闭包；正常本次metadata commit因operation/attempt消息不同而变化，不替代对象或frontier证明。新attempt重新核机械V1与发布父树，创建自己的export、runId、V3/V4证据、verification和正常Git receipt；原P0/P1/V2只引用认证原件，不制造新调用、dispatch、审查或阶段wrapper，不复制旧V3通过。连续前置unsupported的正式retry链继续回到同一原冻结候选，每次仍须当前fence/lease/selection有效。新V3若出现真实行为失败，保实际失败并停止此运输续验，不授修绿或自动重做模型资格。原失败、Native、CAS和Git原件保持。本路径只读取既有持久表示并产生既有四层结果与交付，不新增schema、writer版本或会话/交付系统；完整但未采纳的settled重验仍按下述原政策重新分析与独审。显式新requested model属于用户新选择，沿原正常retry重新生成与独审，不取得旧候选续验资格；同model原件失配仍拒绝。
 
