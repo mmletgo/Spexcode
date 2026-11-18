@@ -23,7 +23,7 @@ function discoverSourcePaths(entries: readonly TreeEntry[], sourcePaths: readonl
     const code = parseFrontmatter(text).fm.code
     return Array.isArray(code) ? code.filter((anchor): anchor is string => typeof anchor === 'string').map(anchor => posix.normalize(anchor.split('#')[0])) : []
   }))
-  return entries.filter(entry => entry.mode !== '120000' && coveredPath(entry.path, sourcePaths) && /\.(?:[cm]?[jt]sx?|py|go|rs|java|rb)$/.test(entry.path) && !/\.(?:test|spec)\./.test(entry.path) && !governed.has(entry.path)).map(entry => entry.path).sort()
+  return entries.filter(entry => entry.mode !== '120000' && coveredPath(entry.path, sourcePaths) && !/\.(?:test|spec)\./.test(entry.path) && !governed.has(entry.path)).map(entry => entry.path).sort()
 }
 
 export type SyncPlanningOptions = { discoverySelection?: FrozenBaselineSelection; direction?: SyncDirection; commitTrigger?: { before: InputSnapshot | null; paths: readonly string[] } }

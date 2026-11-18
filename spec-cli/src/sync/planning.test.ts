@@ -230,6 +230,34 @@ test('冻结source角色参与政策摘要，旧持久JSON保持原摘要', asyn
   assert.equal(syncPlanDigest({ ...legacy, contextVerifications: undefined }), contentHash(legacyJson))
 })
 
+test('initial code_to_spec 以显式sourcePaths读取Shell与其他实现文件而不扩大目标', async t => {
+  const f = await fixture(t), shellPath = 'src/run.sh', phpPath = 'src/run.php'
+  writeFileSync(join(f.root, specA), ['---', 'title: 首次源码纳管', 'status: active', '---', '# 首次源码纳管', '', '## raw source', '从授权的sourcePaths读取已有实现，后续交由规格规划纳管。', ''].join('\n'))
+  f.config.sourcePaths = [shellPath]; f.config.readPaths = []; f.configure()
+  writeFileSync(join(f.root, shellPath), '#!/bin/sh\nprintf "ready\\n"\n')
+  git(f.root, 'add', specA, '.spec/spexcode.json', shellPath)
+  git(f.root, 'commit', '-m', 'seed exact shell source role')
+
+  const committed = await captureInputSnapshot(f.root, { committed: true })
+  const shellPlan = await buildSyncApplicationPlan(committed, 'export-contract', null, { direction: 'code_to_spec' })
+  if (shellPlan.version !== 'sync-coordinator-v2') throw new Error('initial code_to_spec must freeze a v2 plan')
+  assert.equal(shellPlan.partitionPolicy.version, 'sync-partition-policy-v2')
+  assert.deepEqual(shellPlan.sourcePaths, [shellPath])
+  assert.ok(shellPlan.readPaths.includes(shellPath))
+  assert.ok(!shellPlan.executionScope.paths.includes(shellPath))
+  assert.deepEqual(shellPlan.targets, [{ nodeId: 'export-contract', path: specA }])
+
+  f.config.sourcePaths = [phpPath]; f.configure()
+  writeFileSync(join(f.root, phpPath), '<?php echo "ready";\n')
+  const workingTree = await captureInputSnapshot(f.root)
+  const phpPlan = await buildSyncApplicationPlan(workingTree, 'export-contract', null, { direction: 'code_to_spec' })
+  assert.deepEqual(phpPlan.sourcePaths, [phpPath])
+  assert.ok(phpPlan.readPaths.includes(phpPath))
+  assert.ok(!phpPlan.readPaths.includes(shellPath))
+  assert.ok(!phpPlan.executionScope.paths.includes(phpPath))
+  assert.deepEqual(phpPlan.targets, [{ nodeId: 'export-contract', path: specA }])
+})
+
 test('真实store旧政策防删owner规避：整个A节点/VERIFY删除后退役仍保原命令和oracle', async t => {
   const f = await fixture(t), baseline = await settleBaseline(t, f.parent, f.source, f.delivery)
   rmSync(join(f.root, specA))
