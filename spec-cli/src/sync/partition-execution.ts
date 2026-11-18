@@ -361,7 +361,7 @@ export function analysisOnlyPartitionEvidence(commonDir: string, plan: SyncParti
   independentTraces(analysis.traces)
   return candidates.flatMap(partition => {
     const owner = locals.find(item => item.partitionId === partition.id)!, local = owner.analysis
-    if (local.authorChanges?.length || local.rawIntegrations?.length || local.findings.length || local.authorizedChanges.length || local.nodeChanges.length
+    if (local.authorChanges?.some(change => partition.changedPaths.includes(change.path)) || local.rawIntegrations?.length || local.findings.length || local.authorizedChanges.length || local.nodeChanges.length
       || local.newNodes.length || local.resolutions.length || local.decision || local.decisionAuthorities?.length
       || local.changes.some(change => change.kind !== 'refactor' && change.kind !== 'allowed_change' || change.affectedIds.length || change.ruleIds.length)) return []
     if (!local.reviewPassed || local.partitionCoverage || local.partitionEvidence || local.inputId !== analysis.inputId || local.baselinePairId !== analysis.baselinePairId
