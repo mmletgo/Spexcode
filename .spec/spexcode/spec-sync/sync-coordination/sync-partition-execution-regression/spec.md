@@ -11,6 +11,8 @@ code:
 
 ## expanded spec
 
+仅分析分区夹具为显式 source role 的仓库注记提供真实既有 owner，分区读集及 contextNodeIds 包含该只读 Spec，不能用未治理文本冒充无写义务。共享 authorChanges 仍完整可读，写义务只按本分区实际 changedPaths 判断，原派发次数、证据覆盖和越权反例保持。
+
 真实三叶 Git 夹具的单叶局部 P1 原样通过而全图 seal 因兄弟 VERIFY 未登记失败；冻结 contextVerifications 后同例通过。实际两次局部请求仍只有本区文件和验证定义，changes 不含兄弟；旧字段缺席即使实时配置提供全量登记仍失败，错误的冻结 timeout 也继续拒绝。该回归不启动 Native 或 Docker。
 
 真实Git三方输入含A/B两个owner各自的源码冲突，原计划只触发各自Spec，第三owner可共享读取两份源码但没有冲突义务；实际分区请求须只包含本owner真实冲突，原计划/输入不变。foreign change与resolution继续拒绝；零owner、重复owner及仅从聚合移除任一已审finding且没有resolution时必须失败。不同完整输入/旧指导的saved结果不能跳过新分析和独审，其原JSON字节保持；同摘要缓存仍沿原完整输入接缝复用。

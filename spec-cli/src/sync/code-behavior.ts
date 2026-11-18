@@ -1,6 +1,6 @@
 import { captureStageDraft, DRAFT_RECEIPT_INSTRUCTIONS, DRAFT_RECEIPT_SCHEMA, overlayStageTree, readStageDraft, StageDraftCommitMissingError, stageWorktree, STAGE_READING_INSTRUCTIONS, type StageDraftBinding } from './stage-worktree.js'
 import { posix } from 'node:path'
-import { parseCodeEntry, relationClaimsPath } from '@spexcode/spec-core'
+import { parseCodeEntry, parseRelation, relationClaimsPath } from '@spexcode/spec-core'
 import { syncModel } from './model-selection.js'
 import { dependencyClosure, parseContract, parseFrontmatter, parseParts, type ContractFinding, type ContractItem } from '@spexcode/spec-core/contracts'
 import type { AuthorizedContractChange, ElaborationDraft, ElaborationDraftMaterial, ElaborationSessionRequest, ElaborationRunner, ElaborationTrace } from './elaboration-types.js'
@@ -11,6 +11,7 @@ import { validateRawIntegration } from './raw-integration.js'
 import { acceptanceSourceChanged, contractBusinessMeaning, decisionScopeIds, sameContractBusinessMeaning } from './contract-evolution.js'
 import { controlledDecisionIdentity, readControlledChanges, readControlledDecision, renderControlledDecisionRaw } from './request-input.js'
 import { isSyncSpecPath, readFrozenContracts } from './frozen-contracts.js'
+import { ownerNodesForPath } from './governance-owners.js'
 import type { BlobRef, BaselinePair, ComposedInputRef, FrozenBaselineSelection, InputSnapshot } from './operation-types.js'
 import { canonicalSnapshotSource, contentHash, objectGit, readEvidence, readObject, readObjectBatch, readTree, validateRepositoryPath, verifySnapshot, writeEvidence, writeTree } from './snapshot.js'
 import type { TreeEntry, TreeReadCache } from './snapshot.js'
@@ -371,12 +372,24 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     const file = fileViews.controlledBeforeFiles.get(before.path); if (file) fileViews.authorBaseline.set(before.path, { ...file }); else fileViews.authorBaseline.delete(before.path)
   }
   const knownCode = new Set(composed.filter(([path]) => path.startsWith('.spec/') && path.endsWith('/spec.md')).flatMap(([, text]) => { const anchors = parseFrontmatter(text).fm.code; return Array.isArray(anchors) ? anchors.filter((anchor): anchor is string => typeof anchor === 'string').map(anchor => anchor.split('#')[0]) : [] }))
+  const governanceNodes = input.plan.sourcePaths === undefined ? [] : current.nodes.map(node => {
+    const declaredCode = parseFrontmatter(current.files.get(node.path)!).fm.code
+    let codePaths: string[] = []
+    if (typeof declaredCode === 'string' && declaredCode) codePaths = [declaredCode]
+    if (Array.isArray(declaredCode)) codePaths = declaredCode.filter((path): path is string => typeof path === 'string')
+    const code = parseRelation(codePaths, 'code')
+    if (code.problems.length) reject(`既有源码归属声明无效: ${node.path}`, { problems: code.problems })
+    return { id: node.id, path: node.path, code: code.entries }
+  })
+  const hasCodeOwner = (path: string): boolean => input.plan.sourcePaths === undefined
+    ? knownCode.has(path)
+    : ownerNodesForPath(path, current.contracts, governanceNodes).size > 0
   const readonlyCodeToSpec = input.plan.version === 'sync-coordinator-v2' && input.plan.direction === 'code_to_spec' && input.plan.sourcePaths !== undefined
   const sourceRole = (path: string): boolean => input.plan.sourcePaths === undefined || within(path, input.plan.sourcePaths)
   const sourceMap = new Map(source)
   const requiresOwnership = (path: string): boolean => !path.startsWith('.spec/') && sourceMap.has(path)
     && (input.plan.sourcePaths !== undefined || /\.(?:[cm]?[jt]sx?|py|go|rs|java|rb)$/.test(path))
-    && !/\.(?:test|spec)\./.test(path) && sourceRole(path) && !knownCode.has(path)
+    && !/\.(?:test|spec)\./.test(path) && sourceRole(path) && !hasCodeOwner(path)
   const ungoverned = source.filter(([path]) => requiresOwnership(path) && (readonlyCodeToSpec || within(path, input.plan.writePaths)) && (!input.partition || input.partition.changedPaths.includes(path))).map(([path]) => path)
   const authorEntries = new Map(frozenTreeRead(input, oldTree, frozenTreeReads, trees).entries.map(entry => [entry.path, { ...entry }]))
   const deliveryTree = input.baseline?.verifiedDelivery.immutableTree ?? oldTree
@@ -882,8 +895,7 @@ SPEX_P0_REVIEW_PATHS`
     const parent = current.nodes.find(node => node.id === item.parentNodeId)
     const codePathAuthorized = readonlyCodeToSpec ? unownedSourcePaths.includes(item.codePath) : within(item.codePath, input.plan.writePaths) && sourceRole(item.codePath)
     if (!parent?.rawSource || !new Map(source).has(item.codePath) || !codePathAuthorized) reject('新无治理文件没有真实上层需求/授权业务源码')
-    const alreadyOwned = [...new Map(composed)].filter(([path]) => path.startsWith('.spec/') && path.endsWith('/spec.md')).some(([, text]) => { const code = parseFrontmatter(text).fm.code; return Array.isArray(code) && code.some(anchor => typeof anchor === 'string' && anchor.split('#')[0] === item.codePath) })
-    if (alreadyOwned) reject('已治理文件不能重复创建归属节点')
+    if (hasCodeOwner(item.codePath)) reject('已治理文件不能重复创建归属节点')
     const initialId = `sync-code-${contentHash(item.codePath).slice(0, 16)}`
     const unavailable = new Set([...input.plan.retiredIds ?? [], ...input.baseline?.retiredIds ?? [], ...current.nodes.map(node => node.id)])
     let nodeId = initialId, suffix = 1

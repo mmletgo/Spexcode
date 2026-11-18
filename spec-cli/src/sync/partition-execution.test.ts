@@ -1072,6 +1072,9 @@ for (const fails of [false, true]) test(`最后一个分区${fails ? '失败' : 
 
 test('P1仅对真实Spec目标派发，保留独审无写义务的P0分区原件', async t => {
   const prepared = await fixture(t), { input, plan, checkpoints, root } = prepared
+  const metadataOwner = { nodeId: 'metadata-note', path: '.spec/export/metadata-note/spec.md' }
+  mkdirSync(dirname(join(root, metadataOwner.path)), { recursive: true })
+  writeFileSync(join(root, metadataOwner.path), '---\ntitle: 仓库注记\nstatus: active\ncode: docs/sync-note.md\n---\n\n## raw source\n\n仓库注记只记录开发约定。\n')
   const sourceOnly = [
     { id: 'part-metadata', path: 'docs/sync-note.md', kind: 'refactor' },
     { id: 'part-extra-test', path: 'tests/unowned-smoke.test.mjs', kind: 'allowed_change' },
@@ -1079,13 +1082,14 @@ test('P1仅对真实Spec目标派发，保留独审无写义务的P0分区原件
   for (const { id, path } of sourceOnly) {
     mkdirSync(dirname(join(root, path)), { recursive: true })
     writeFileSync(join(root, path), path.endsWith('.md') ? '# Note\n仅记录仓库约定。\n' : 'import test from "node:test"\ntest("smoke", () => {})\n')
-    plan.partitions.splice(1, 0, { ...plan.partitions[0], id, targets: [], readPaths: [path], writePaths: [], sourcePaths: [path], changedPaths: [path], contractIds: [], flowIds: [] })
+    const readPaths = id === 'part-metadata' ? [path, metadataOwner.path] : [path]
+    plan.partitions.splice(1, 0, { ...plan.partitions[0], id, targets: [], readPaths, writePaths: [], sourcePaths: [path], changedPaths: [path], contextNodeIds: id === 'part-metadata' ? [metadataOwner.nodeId] : [], contractIds: [], flowIds: [] })
     plan.expectedPaths.push(path)
   }
   for (const partition of plan.partitions.filter(item => item.targets.length)) partition.readPaths = [...new Set([...partition.readPaths, ...plan.partitions[0].readPaths])]
   plan.digest = contentHash(JSON.stringify({ ...plan, digest: undefined }))
   const git = (...args: string[]): void => { execFileSync('git', ['-C', root, ...args], { stdio: 'pipe' }) }
-  git('add', ...sourceOnly.map(item => item.path)); git('commit', '-m', 'add committed source-only paths')
+  git('add', metadataOwner.path, ...sourceOnly.map(item => item.path)); git('commit', '-m', 'add committed source-only paths')
   const snapshot = await captureInputSnapshot(root, { committed: true }), composed = composeInputSnapshots(snapshot, null).composed!
   const files = new Map(readTree(snapshot.source.commonDir, snapshot.immutableTree).map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString('utf8')]))
   const facts = input.contracts.map(contract => ({ source: `decision:${contract.nodeId.split('-')[0].toUpperCase()}-POLICY`, text: '固定夹具显式业务政策' }))

@@ -96,6 +96,8 @@ rawlessSpecPaths仅列出本轮changedPaths中的既有Spec节点：作者基准
 
 源码角色完整归属使用 code-behavior-guidance-v9，沿现有 git-json-v6 运输与指导身份接缝冻结。版本与完整归属上下文进入同一 inputDigest，新请求重新分析并独审。此前 v8 及更早请求的 schema、context、原稿、finding 和批准原件保留其原指导身份及字节，当前指导的批准复用仍须匹配当前版本和完整摘要。
 
+显式源码角色的既有归属复用 [[sync-governance-owners]] 的冻结匹配口径，包含合法标量、目录、glob 和契约中的真实归属引用。未治理发现与重复叶拒绝使用同一判据，related 仍只提供读取关系。匹配只读取当前冻结的业务 Spec 与契约图。
+
 拒绝诊断以 approved:false 的 JSON 保存当次完整 proposal、尚未批准的 analysis 和 review（在各阶段实际产生时），分列 missingPaths/missingChangeIds/unknownChangeIds、身份摘要或会话不一致、verdict 和 findings；路径错误仍保同次业务证据及反例。AC复合门禁给出目标类型、同一 allowed_change 中缺失的 affectedId、不支撑的 ruleIds、非法规则类型及 source 是否绑定。AC ruleIds 只列本次变化依据，其他未改 covers 义务保持；不得拼接多个 allowed_change 的并集授权。无治理代码归属验证按原判据一次收集全部缺失 disposition 的路径，在同一拒绝的 details.missingCodePaths 与 missingCodePathCount 中返回完整列表及数量；首项仍可作为摘要，任何一项遗漏仍拒绝，空初始化文件、newNodes 和真实 GAP 的门禁不变。既有 failure.message 进入下一轮 repairDiagnostics 供逐项修复，不重复嵌入整个冻结上下文；前轮提案、未通过的 accept 或伪造批准仅是数据，不能产生基线、授权或替代新独审。
 
 Spec resolution沿原path/write/change/mode与完整读取门后，若同path任一真实冻结作者基准/source/composed/delivery可由parseParts解析分节，而nonnull提案完全不可解析，则在逐项语义义务校验前以behavior_analysis_invalid给出分节格式诊断及path、真实换行/字面反斜线n计数，完整原proposal保持。计数不参与拒绝，不反转义、规范化、删除或代写resolution；不要求两节、非空raw或AC数量来判格式。rawless原门优先，null删除、普通单行代码、合法Spec正文内字面反斜线n及真实三方/裁决/生命周期继续原规则。真正未消费交付义务失配时，原sameContractBusinessMeaning谓词不变，details.unconsumedObligation保path/id及contractBusinessMeaning的expected/proposed（缺项null），不把格式破坏误归某个业务ID。修复提示只在无真实整合必要时建议空resolutions/交P1；需要整合仍须保未消费义务，不凭无Git冲突泛禁resolution。

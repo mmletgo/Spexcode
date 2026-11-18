@@ -1839,6 +1839,8 @@ test('显式source角色完整治理已提交源码，不按文件扩展名缩�
       'src/core.c': 'int run(void) { return 0; }\n',
       'src/migration.sql': 'select 1;\n',
       'src/launcher': '#!/usr/bin/env python3\nprint(1)\n',
+      'src/options.json': '{"enabled":true}\n',
+      'src/guide.md': '# 导出工具\n保留现有入口。\n',
     }
     const paths = Object.keys(sources).sort()
     const f = await fixture(sub, undefined, {
@@ -1897,6 +1899,66 @@ test('显式source角色完整治理已提交源码，不按文件扩展名缩�
       assert.deepEqual(context.unownedSourcePaths, ['tests/support.py'])
       throw captured
     }), error => error === captured)
+  })
+})
+
+test('显式source角色复用标量目录和glob既有归属，拒绝重复治理叶', async t => {
+  const declarations = [
+    { name: 'scalar', code: 'code: src/run.sh\n' },
+    { name: 'directory', code: 'code:\n  - src/\n' },
+    { name: 'glob', code: 'code:\n  - src/*.sh\n' },
+  ]
+  for (const declaration of declarations) await t.test(declaration.name, async sub => {
+    const sourcePath = 'src/run.sh'
+    const f = await fixture(sub, () => `---\ntitle: 导出脚本职责\nstatus: pending\n${declaration.code}---\n\n## raw source\n\n脚本入口沿用导出工具的现有职责。\n`, { [sourcePath]: '#!/bin/sh\nexit 0\n' })
+    const before = await f.input()
+    const input: CodeBehaviorInput = {
+      ...before,
+      baseline: null,
+      composed: composeInputSnapshots(before.snapshot, null).composed!,
+      plan: {
+        ...before.plan,
+        version: 'sync-coordinator-v2',
+        direction: 'code_to_spec',
+        partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 },
+        sourcePaths: [sourcePath],
+        writePaths: ['.spec/export/export-contract'],
+      },
+      partition: { id: 'owned-source-role', changedPaths: [sourcePath], factSourcePaths: [sourcePath] },
+    }
+    const analysis = await analyzeCodeBehavior(input, async request => {
+      const context = readFrozenBehaviorContext<{ unownedSourcePaths: string[] }>(request)
+      assert.deepEqual(context.unownedSourcePaths, [])
+      if (request.purpose === 'code_behavior_analyze') {
+        const schema = (request.schema.properties as { newNodes: { maxItems: number } }).newNodes
+        assert.equal(schema.maxItems, 0)
+      }
+      return runner('refactor', proposal => {
+        for (const change of proposal.changes as { affectedIds: string[]; ruleIds: string[] }[]) {
+          change.affectedIds = []
+          change.ruleIds = []
+        }
+      })(request)
+    })
+    assert.equal(analysis.reviewPassed, true)
+    assert.deepEqual(analysis.newNodes, [])
+    assert.ok(input.plan.version === 'sync-coordinator-v2')
+    const writable: CodeBehaviorInput = {
+      ...input,
+      plan: { ...input.plan, direction: 'combined', writePaths: before.plan.writePaths },
+    }
+    await assert.rejects(analyzeCodeBehavior(writable, runner('refactor', proposal => {
+      for (const change of proposal.changes as { affectedIds: string[]; ruleIds: string[] }[]) {
+        change.affectedIds = []
+        change.ruleIds = []
+      }
+      proposal.newNodes = [{ codePath: sourcePath, parentNodeId: 'export-contract', basis: '重复的治理叶' }]
+    })), (error: Error) => {
+      const diagnostic = JSON.parse(error.message) as { message: string; proposal: { newNodes: { codePath: string }[] } }
+      assert.match(diagnostic.message, /newNodes|已治理文件不能重复创建归属节点/)
+      assert.equal(diagnostic.proposal.newNodes[0].codePath, sourcePath)
+      return true
+    })
   })
 })
 
