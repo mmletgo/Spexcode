@@ -2688,8 +2688,9 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
       const loadElaborationRepairDiagnostics = (key: string, inputDigest: string, binding?: NonNullable<ElaborationResult['partitionBinding']>): ElaborationRepairDiagnostics | null => {
         const ownerSuffix = `elaborate${binding ? `:partition:${binding.partitionId}` : ''}`
         const hasOwnerGeneration = (origin: SyncAttempt): boolean => origin.dispatchPlans.some(dispatch => dispatch.purpose === 'elaboration_generate' && dispatch.key.startsWith(`sync:${origin.id}:${ownerSuffix}:`))
-        const parentReviewScope = binding?.interfaceSeed && stage<Pick<ElaborationInput, 'parentInterfaceReview'>>(store, operation, store.readAttempt(attempt!.id), 'elaboration-draft-protocol')?.parentInterfaceReview === 'scope-v2'
-        let newerGeneration = hasOwnerGeneration(attempt!)
+        const parentAttempt = binding?.interfaceSeed ? store.readAttempt(attempt!.id) : null
+        const parentReviewScope = parentAttempt && stage<Pick<ElaborationInput, 'parentInterfaceReview'>>(store, operation, parentAttempt, 'elaboration-draft-protocol')?.parentInterfaceReview === 'scope-v2'
+        let newerGeneration = hasOwnerGeneration(parentReviewScope ? parentAttempt : attempt!)
         const carriedGenerations = new Set<string | undefined>()
         for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number).reverse()) {
           if (!['failed', 'superseded', 'settled'].includes(prior.status)) return null
