@@ -7387,7 +7387,8 @@ test('Native P1草稿跨attempt从真实Git原文件续改，小回执保持成�
   assert.equal(attempts.length, 2); assert.deepEqual(calls.map(call => call.purpose), ['elaboration_generate', 'elaboration_generate', 'elaboration_review'])
   for (const attempt of attempts) {
     const stages = attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
-    assert.ok(stages.some(stage => stage.stage === 'elaboration-draft-protocol'))
+    const protocol = stages.find(stage => stage.stage === 'elaboration-draft-protocol')
+    assert.equal(JSON.parse(readEvidence(f.input.source.commonDir, protocol.resultRef).toString()).parentInterfaceReview, true)
     const wrapper = stages.find(stage => stage.stage === 'elaboration'), saved = JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString()) as ElaborationResult
     assert.deepEqual(saved.rounds[0].output, { summary: '已正常提交草稿' }); assert.equal(saved.rounds[0].rejectedOutput, undefined); assert.ok(saved.rounds[0].draft)
     if (attempt.number === 1) { assert.equal(saved.rounds[0].candidate, null); assert.ok(saved.rounds[0].findings.some(issue => issue.code === 'output_json')) }
@@ -7519,7 +7520,7 @@ for (const [guidance, purpose] of [
   const commonDir = f.input.source.commonDir
   const expectedProtocol = { version: 'elaboration-draft-v1',
     ...(guidance === 'absent' ? {} : { generationGuidance: guidance }),
-    ...(guidance === ELABORATION_GENERATION_GUIDANCE ? { compactSealDiagnostics: true, citationRepairDiagnostics: 'actionable-v1', defaultExportCitation: true, sharedDraftDiagnostics: true } : {}),
+    ...(guidance === ELABORATION_GENERATION_GUIDANCE ? { compactSealDiagnostics: true, citationRepairDiagnostics: 'actionable-v1', defaultExportCitation: true, sharedDraftDiagnostics: true, parentInterfaceReview: true } : {}),
   }
   if (guidance !== ELABORATION_GENERATION_GUIDANCE) {
     const value = expectedProtocol, resultRef = writeEvidence(commonDir, value)

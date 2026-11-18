@@ -84,7 +84,12 @@ test('父接口实际生成和独审请求只承担必要共享接口，不混�
 test('Native P1生成与独审共用来源语义和只读实现边界，interface_seed仍只审父接口', async () => {
   const nativeWorktree = { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'read' as const }
   const full = runner(request => candidate(request, source))
-  const fullResult = await elaborate({ ...input(), worktree: nativeWorktree, implementationWritePaths: [], maxRepairs: 0 }, { runner: full.run })
+  const fullInput = { ...input(), worktree: nativeWorktree, implementationWritePaths: [], maxRepairs: 0 }
+  const fullResult = await elaborate(fullInput, { runner: full.run })
+  const newFull = runner(request => candidate(request, source))
+  const newFullResult = await elaborate({ ...fullInput, parentInterfaceReview: true }, { runner: newFull.run })
+  assert.equal(newFullResult.status, 'complete', JSON.stringify(newFullResult.failure))
+  assert.deepEqual(newFull.calls, full.calls)
   assert.equal(fullResult.status, 'complete', JSON.stringify({ failure: fullResult.failure, findings: fullResult.rounds.flatMap(round => round.findings) }))
   assert.deepEqual(full.calls.map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
   for (const request of full.calls) {
@@ -107,7 +112,8 @@ test('Native P1生成与独审共用来源语义和只读实现边界，interfac
   const before = `---\ntitle: 导出接口\nstatus: pending\n---\n## raw source\n\n${raw}\n`
   const parent = `---\ntitle: 导出接口\nstatus: active\ncontract-schema: sync-v1\n---\n## raw source\n\n${raw}\n\n## expanded spec\n\n父层保留必要共享接口。\n\n### REQ\n\n| id | goal | source | constraints | success | depends-on |\n| --- | --- | --- | --- | --- | --- |\n| REQ-EXPORT-01 | 保留导出任务原意 | user:raw | 由子实现承接流程与验收 | 子实现完整保持原意 | - |\n`
   const seed = runner(request => candidate(request, parent))
-  const seedResult = await elaborate({ ...input(), worktree: nativeWorktree, implementationWritePaths: [], phase: 'interface_seed', intent: { nodeId: 'export-contract', rawSource: raw }, targets: [{ nodeId: 'export-contract', path, source: before, sourceDigest: elaborationDigest(before) }], facts: [], maxRepairs: 0 }, { runner: seed.run })
+  const parentInput: ElaborationInput = { ...input(), worktree: nativeWorktree, implementationWritePaths: [], phase: 'interface_seed', intent: { nodeId: 'export-contract', rawSource: raw }, targets: [{ nodeId: 'export-contract', path, source: before, sourceDigest: elaborationDigest(before) }], facts: [], maxRepairs: 0 }
+  const seedResult = await elaborate(parentInput, { runner: seed.run })
   assert.equal(seedResult.status, 'interface_seed')
   assert.deepEqual(seed.calls.map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
   for (const request of seed.calls) {
@@ -117,6 +123,36 @@ test('Native P1生成与独审共用来源语义和只读实现边界，interfac
     assert.doesNotMatch(request.prompt, /逐项展开可完成主流程、状态处置和AC|每个业务REQ至少由一个主FLOW\.req直接覆盖|重新从用户原意和冻结事实走正常、失败、边界、重试/)
     assert.doesNotMatch(request.prompt, /叶FLOW\.req只引用REQ|实际适用祖先RULE由AC\.covers/)
   }
+
+  const frozenReview = seed.calls[1]
+  assert.match(frozenReview.prompt, /affectedIds必须是当前契约图的真实非空ID.*code或AC\.test/)
+  const current = runner(request => candidate(request, parent))
+  const currentResult = await elaborate({ ...parentInput, parentInterfaceReview: true }, { runner: current.run })
+  assert.equal(currentResult.status, 'interface_seed', JSON.stringify(currentResult.failure))
+  assert.equal(currentResult.inputDigest, seedResult.inputDigest)
+  assert.equal(currentResult.candidateDigest, seedResult.candidateDigest)
+  assert.deepEqual(current.calls[0], seed.calls[0])
+  assert.deepEqual(current.calls[1].schema, frozenReview.schema)
+  assert.match(current.calls[1].prompt, /候选及冻结证据.*必要共享义务/)
+  assert.match(current.calls[1].prompt, /可观察本身不等于重大业务政策/)
+  assert.match(current.calls[1].prompt, /沿用原义务.*具体repair/)
+  assert.match(current.calls[1].prompt, /保留稳定ID、既有精确可信VERIFY/)
+  assert.match(current.calls[1].prompt, /重大未知事实为missing_fact.*互斥原意.*conflict/)
+  assert.match(current.calls[1].prompt, /源代码和测试都是只读证据/)
+  assert.doesNotMatch(current.calls[1].prompt, /受治理.*AC\.test|code或AC\.test|以implementation-review交给|完整测试，逐项核/)
+
+  const invalid = runner(request => candidate(request, parent), () => ({
+    verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{
+      kind: 'repair', code: 'implementation-review', affectedIds: ['REQ-EXPORT-01'],
+      message: '子叶尚未实现', evidence: 'src/export.js:2 缺少子叶入口', decision: '补全子叶实现',
+    }],
+  }))
+  const rejected = await elaborate({ ...parentInput, parentInterfaceReview: true, implementationWritePaths: [path] }, { runner: invalid.run })
+  assert.match(invalid.calls[1].prompt, /源代码和测试都是只读证据/)
+  assert.doesNotMatch(invalid.calls[1].prompt, /三个精确值延后给P2/)
+  assert.equal(rejected.structurePassed, true)
+  assert.equal(rejected.reviewPassed, false)
+  assert.deepEqual(rejected.rounds[0].findings.filter(finding => finding.severity === 'error').map(finding => finding.code), ['review_implementation_binding'])
 })
 
 test('Native P1祖先引用提示分别规定FLOW.req的REQ类型和RULE验收承接', async () => {
