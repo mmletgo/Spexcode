@@ -8,8 +8,13 @@ export type FrozenAnchorEvidence = {
 }
 export type FrozenAnchorResult = { findings: ContractFinding[]; anchors: FrozenAnchorEvidence[] }
 
+export function isUnsupportedSourceCitationFailure(finding: ContractFinding): finding is ContractFinding & { itemId: string; citation: { origin: 'source'; ref: string } } {
+  return finding.severity === 'error' && finding.code === 'anchor-language-unsupported'
+    && finding.citation?.origin === 'source' && Boolean(finding.itemId && finding.citation.ref)
+}
+
 export function isReadonlyCitationFailure(finding: ContractFinding): boolean {
-  return finding.severity === 'error' && (finding.code === 'anchor-dead' || Boolean(finding.citation) &&
+  return isUnsupportedSourceCitationFailure(finding) || finding.severity === 'error' && (finding.code === 'anchor-dead' || Boolean(finding.citation) &&
     ['anchor-ambiguous', 'anchor-parse-error', 'anchor-file-missing', 'anchor-selector-required', 'related-file-missing'].includes(finding.code))
 }
 

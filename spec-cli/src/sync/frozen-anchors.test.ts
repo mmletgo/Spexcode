@@ -100,6 +100,21 @@ test('V1缺失related/source文件、未知语言与不可用解析器不能静�
   assert.deepEqual(await findWholeFileSourcePaths(new Map([['src/export.ts', '']]), ['src/export.ts'], [unavailable]), [])
 })
 
+test('V1不支持语言只将有精确业务行的source诊断交给只读返修', async () => {
+  const path = 'src/greet.sh', ref = path + '#L2'
+  const graph = buildContractGraph([contract([ref], [path + '#L3'], ref)])
+  const result = await validateFrozenAnchors(graph, new Map([[path, '#!/bin/sh\nprintf "hello"\nprintf "done"\n']]))
+  assert.deepEqual(result.findings.map(issue => [issue.code, issue.citation?.origin, isReadonlyCitationFailure(issue)]), [
+    ['anchor-language-unsupported', 'code', false],
+    ['anchor-language-unsupported', 'related', false],
+    ['anchor-language-unsupported', 'source', true],
+  ])
+  const source = result.findings.find(issue => issue.citation?.origin === 'source')!
+  for (const issue of [{ ...source, citation: undefined }, { ...source, itemId: undefined }, { ...source, severity: 'warning' as const }])
+    assert.equal(isReadonlyCitationFailure(issue), false)
+  assert.ok(result.anchors.every(anchor => anchor.unit === null), '返修分流仍保留真实V1失败')
+})
+
 test('V1在异步解析前固定输入，多个锚点共享同一冻结文件解析', async () => {
   const files = new Map([['src/export.ts', 'original']])
   let calls = 0
