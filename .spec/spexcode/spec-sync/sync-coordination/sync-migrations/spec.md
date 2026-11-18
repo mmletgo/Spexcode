@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+writer57 只追加 SELECT 1 marker，保护 [[sync-elaboration]] 的 Native 父接口独审提示冻结。升级先停稳并正式结算旧 writer，保存一致 writer56 online backup 和 Git/CAS 原件。回退使用该备份及配套原件。
+
 writer56 只追加 SELECT 1 marker，保护 [[sync-code-behavior]] 的 P0 变化路径自检提示冻结。升级先停稳并正式结算旧 writer，保存一致 writer55 online backup 和 Git/CAS 原件。回退使用该备份及配套原件。
 
 writer55 只追加 SELECT 1 marker，保护 [[sync-elaboration]] 的 P1 续修诊断提示投影。升级先停稳并正式结算旧 writer，保留一致 writer54 online backup 和 Git/CAS 原件。回退以该备份及对应原件恢复。

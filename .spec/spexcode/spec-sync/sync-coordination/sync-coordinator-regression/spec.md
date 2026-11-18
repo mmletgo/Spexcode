@@ -71,7 +71,7 @@ P0 transport 回归让同一 operation 的三兄弟分别精确已停 EPIPE、�
 
 P1追加A正常Git拒稿→B新物理EPIPE无witness→C原bytes续改并独审，以及旧物理晚观察不盖后来正常Git反向；A完整finding进入C且priorDraft角色清除。parent/新旧诊断的比较另由真实elaborate冻结任务、生产elaborationMaterialContext、原物理observer与新seed回调组合覆盖，原整树比较先fail，精确投影后pass，source/tests/非角色Spec差异配对拒绝；formalNative/stop认证复用前述coordinator真实fixture。此组合不假称现场模型全链验收。
 
-逐值相同的P1草稿及运行诊断经过真实Git与隔离SQLite的分区协调器，在新返修请求只发一组完整发现及第二角色引用。原检查点保留两组原值，短版定位及不合格owner反例继续走各自门禁。稳定派发回归同时核新attempt的提示冻结字段和历史reserved请求。
+逐值相同的P1草稿及运行诊断经过真实Git与隔离SQLite的分区协调器，在新返修请求只发一组完整发现及第二角色引用。原检查点保留两组原值，短版定位及不合格owner反例继续走各自门禁。稳定派发回归同时核新attempt的提示冻结字段和历史reserved请求。 Native 父接口独审标记只在新阶段冻结，旧 reserved 请求的提示、schema 与摘要逐值重放。
 
 新增真实Git/私有SQLite/正式ZCode stop场景：EPIPE前仅有untracked invalidJSON且HEAD==seed，旧clean门重复失败，修复后新seed保原bytes；tracked/staged亦然。核较新physical承接较旧认证稿、旧physical晚观察不覆盖更新Git、review仅续审保ready及原诊断、P1物理稿续改正常commit后独立accept；source/tests/schema/context/index/owner/session/stop/seed/root/fence/CAS反例拒绝。原record/checkpoint/Native文件/raw index/HEAD/源draft逐字保持；只证明受控真实机制，不替代现场模型恢复。
 
