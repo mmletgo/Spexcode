@@ -602,6 +602,114 @@ test('冻结owner的非法repair跨请求只续独审，原Git稿和候选不变
   assert.deepEqual(reviewEntries.filter(entry => !entry.path.startsWith('.spec/')), readTree(f.commonDir, f.snapshot.immutableTree).filter(entry => !entry.path.startsWith('.spec/')), '源码/tests全部path/mode/OID与absence保持')
 })
 
+for (const variant of ['scope-only', 'mixed'] as const) test(`Native纯父接口 scope-v2 续审保留原Git候选 variant=${variant}`, async t => {
+  const f = await fixture(t), parentPath = '.spec/export/spec.md', parentId = 'REQ-PARENT-01'
+  const raw = '重复导出请求必须保留首次结果，具体下载由子叶实现。'
+  const parent = `---\ntitle: 上层接口\n---\n## raw source\n\n${raw}\n`
+  writeFileSync(join(f.root, parentPath), parent)
+  git(f.root, 'add', parentPath); git(f.root, 'commit', '-m', '冻结纯父接口原意')
+  const snapshot = await captureInputSnapshot(f.root)
+  const input: ElaborationInput = {
+    ...f.input, requestKey: 'parent-interface-legacy-review', maxRepairs: 0, phase: 'interface_seed', parentInterfaceReview: true,
+    historyInput: snapshot, worktree: stageWorktree(f.commonDir, snapshot.headCommit, snapshot.immutableTree),
+    intent: { nodeId: 'export', rawSource: raw }, targets: [{ nodeId: 'export', path: parentPath, source: parent, sourceDigest: contentHash(parent) }], context: [],
+  }
+  const built = `${parent.replace('title: 上层接口', 'title: 上层接口\ncontract-schema: sync-v1')}\n## expanded spec\n\n### REQ\n\n| id | goal | source | constraints | success | depends-on |\n| --- | --- | --- | --- | --- | --- |\n| ${parentId} | 导出结果可用 | user:raw | 保留已有导出结果 | 可以查询原结果 | - |\n`
+  const firstText = JSON.stringify(draftRows(built))
+  const issue = { code: 'implementation-review', kind: 'repair', affectedIds: [parentId], message: '子叶的下载实现尚未提交', evidence: 'src/export.js#ExportService 尚未实施候选父层说明的下载效果', decision: '检查子叶的下载实现和 tests/export.test.mjs#AC-EXPORT-03' }
+  const businessIssue = { code: 'parent-missing-repeat-constraint', kind: 'repair', affectedIds: [parentId], message: '父接口漏写重复请求不得覆盖首次结果', evidence: `${parentPath}#raw source 明确要求保留首次结果`, decision: '补全父接口对重复请求的共享约束，保持子叶职责' }
+  const rawReview = { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: variant === 'mixed' ? [issue, businessIssue] : [issue] }
+  const run = f.run(() => firstText)
+  const failed = await elaborate(input, { runner: async request => {
+    const result = await run(request)
+    return request.purpose === 'elaboration_review' ? { ...result, output: rawReview, resultDigest: contentHash(JSON.stringify(rawReview)) } : result
+  } })
+  assert.equal(failed.structurePassed, true, JSON.stringify(failed.rounds[0].findings))
+  assert.equal(failed.status, 'exhausted'); assert.equal(failed.reviewPassed, false)
+  assert.deepEqual(f.requests.map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
+  const originalReviewRequest = f.requests[1], round = failed.rounds[0], draft = round.draft!
+  assert.match(originalReviewRequest.prompt, /完整子叶独审核实现和验收绑定/)
+  assert.deepEqual(round.findings.filter(item => item.severity === 'error').map(item => item.code), variant === 'mixed' ? ['review_implementation_binding', businessIssue.code] : ['review_implementation_binding'])
+  assert.deepEqual(round.reviewOutput, rawReview)
+  assert.equal(round.review!.verdict, 'repair')
+  assert.equal(round.candidateDigest, failed.candidateDigest)
+  assert.equal(round.review!.candidateDigest, round.candidateDigest)
+  assert.deepEqual(round.traces.map(trace => trace.purpose), ['elaboration_generate', 'elaboration_review'])
+  assert.equal(round.traces[1].resultDigest, contentHash(JSON.stringify(rawReview)))
+  assert.equal(readStageDraft(f.commonDir, draft, draft), firstText)
+  const originalResult = JSON.stringify(failed)
+  const repairDiagnostics = { requestKey: input.requestKey, inputDigest: failed.inputDigest, resultRef: writeEvidence(f.commonDir, failed), failure: failed.failure!, round }
+  if (variant === 'scope-only') {
+    const legacy = await elaborate({ ...input, requestKey: 'parent-interface-legacy-retry' }, { draft, repairDiagnostics, runner: f.run(() => {
+      throw Object.assign(new Error('已观测旧协议重新生成'), { code: 'fixture_stop' })
+    }) })
+    assert.equal(legacy.failure?.code, 'fixture_stop')
+    assert.equal(legacy.reviewPassed, false)
+    assert.deepEqual(f.requests.slice(2).map(request => request.purpose), ['elaboration_generate'])
+  }
+  const { prompt, schema, worktree } = originalReviewRequest
+  const completedReviewDiagnostics = {
+    ...repairDiagnostics, settledReview: { kind: 'parent-implementation-binding' as const, prompt, schema, worktree },
+  }
+  const next = { ...input, requestKey: 'parent-interface-scope-v2', parentInterfaceReview: 'scope-v2' as const }
+  const newText = JSON.stringify(draftRows(built.replace('保留已有导出结果', '重复请求时保留首次结果且不得覆盖')))
+  const start = f.requests.length
+  const restored = await elaborate(next, { draft, repairDiagnostics: variant === 'mixed' ? repairDiagnostics : completedReviewDiagnostics, runner: f.run((_request, workspace, draftPath) => {
+    assert.equal(variant, 'mixed', '只有真实父层业务修复才可重派生成')
+    assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), firstText)
+    return newText
+  }) })
+  const requests = f.requests.slice(start)
+  assert.deepEqual(requests.map(request => request.purpose), variant === 'mixed' ? ['elaboration_generate', 'elaboration_review'] : ['elaboration_review'])
+  assert.equal(restored.status, 'interface_seed', JSON.stringify(restored.failure))
+  assert.equal(restored.reviewPassed, true)
+  const newRound = restored.rounds[0], newRequest = requests.at(-1)!
+  assert.equal(newRound.review!.verdict, 'accept')
+  for (const trace of round.traces) {
+    assert.notEqual(newRound.traces[1].sessionId, trace.sessionId)
+    assert.notEqual(newRound.traces[1].threadId, trace.threadId)
+  }
+  const readonlyEntries = (tree: string) => readTree(f.commonDir, tree).filter(entry => entry.path !== parentPath)
+  assert.deepEqual(readonlyEntries(newRequest.worktree!.tree), readonlyEntries(snapshot.immutableTree), '子叶、源码和测试对象逐路径保持')
+  assert.equal(readStageDraft(f.commonDir, draft, draft), firstText)
+  assert.equal(readEvidence(f.commonDir, repairDiagnostics.resultRef).toString('utf8'), originalResult)
+  assert.equal(JSON.stringify(failed), originalResult)
+  if (variant === 'mixed') {
+    assert.notEqual(restored.candidateDigest, failed.candidateDigest)
+    assert.equal(readStageDraft(f.commonDir, newRound.draft!, newRound.draft!), newText)
+    assert.match(restored.changes[0].source, /重复请求时保留首次结果且不得覆盖/)
+    return
+  }
+  assert.deepEqual(newRequest.worktree, originalReviewRequest.worktree)
+  assert.deepEqual(newRequest.schema, originalReviewRequest.schema)
+  assert.ok(newRequest.prompt.includes(JSON.stringify(rawReview)), '新独审核保完整原拒绝JSON')
+  assert.match(newRequest.prompt, /本轮禁止仅因候选中正确的业务义务.*implementation-review或判repair/)
+  assert.doesNotMatch(newRequest.prompt, /必须保留要求并修实现/)
+  assert.equal(restored.candidateDigest, failed.candidateDigest)
+  assert.deepEqual(newRound.candidate, round.candidate)
+  assert.deepEqual(restored.changes, failed.changes)
+  assert.deepEqual(newRound.traces[0], round.traces[0])
+  assert.deepEqual(newRound.draft, { ...draft, errors: newRound.findings })
+  const before = f.requests.length
+  for (const corrupt of ['source', 'draft', 'candidate', 'review-seed'] as const) {
+    const bad = structuredClone(completedReviewDiagnostics)
+    if (corrupt === 'source') bad.round.draft!.sourceInputId = 'foreign-source'
+    else if (corrupt === 'draft') bad.round.draft!.oid = 'e'.repeat(40)
+    else if (corrupt === 'candidate') bad.round.candidateDigest = 'e'.repeat(64)
+    else bad.settledReview.worktree = input.worktree
+    await assert.rejects(elaborate({ ...next, requestKey: `parent-interface-invalid-${corrupt}` }, { draft, repairDiagnostics: bad, runner: f.run(() => assert.fail('失配原件不得派发')) }), corrupt === 'source' ? /source input/ : corrupt === 'draft' ? /草稿Git对象身份/ : { code: 'review_retry_binding' })
+    assert.equal(f.requests.length, before)
+  }
+  const oldReviewer = round.traces[1], review = f.run(() => assert.fail('独审身份复用不得触发生成'))
+  const reused = await elaborate({ ...next, requestKey: 'parent-interface-reused-reviewer' }, { draft, repairDiagnostics: completedReviewDiagnostics, runner: async request => {
+    const result = await review(request)
+    return { ...result, sessionId: oldReviewer.sessionId, threadId: oldReviewer.threadId }
+  } })
+  assert.deepEqual(f.requests.slice(before).map(request => request.purpose), ['elaboration_review'])
+  assert.equal(reused.reviewPassed, false)
+  assert.ok(reused.rounds[0].findings.some(item => item.code === 'review_not_independent'))
+})
+
 test('分区checkpoint按owner承接草稿且跨父输入重派；当前局部accept缓存摘要失配仍拒绝', async t => {
   const { elaborateSyncPartitions } = await import('./partition-execution.js')
   const f = await fixture(t), paths = readTree(f.commonDir, f.snapshot.immutableTree).map(entry => entry.path)
