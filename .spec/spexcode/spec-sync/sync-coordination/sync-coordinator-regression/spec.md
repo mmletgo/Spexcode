@@ -241,6 +241,8 @@ A7形状的真实Git/SQLite回归使用native-worktree-v1与真实冻结的旧gi
 
 旧 inline 的混合 V1 引用错误回归使用真实 Git、隔离 SQLite 及受控 runner。首轮真实 P1 扩域后，原 P0 计划和批准保持同一 refs，下一轮只派对应 owner；越权差量遭拒后继续正确返修并重新通过 V1。缺正式扩域或扩域引用失配、非空新增基线、原计划读集/选择/来源或 owner 漂移均在新派发前拒绝。原失败、兄弟批准及源码、测试和 index 字节保持。原生变体由实际 createAttemptRunner 和受控 runtime 产出原派发、会话记录及已移除资源。同操作冻结 P0 用正式 reader 重建有效读取证据并完成返修；P0 分析和独审中任一请求带工作树，或原 whole、owner 指向正式重试祖先，均在新派发前拒绝。缺请求、未移除、模型漂移、冻结读取证据缺席及 scope 退出的拒绝仍核验。
 
+只读代码来源返修的定向回归用真实 Git/隔离 SQLite 及受控 Native runner 生成两处冻结 Shell 锚点。正式 V1 失败后仅派发原合格 P1 owner，新生成与独审取得原候选、批准和错误引用。真正新叶的两行可换为已有依赖的 REQ 来源。纯重构及另一 owner 有允许变更的混合场景中，旧行更换来源类型均在独审前被拒，恢复原合法代码来源后通过独审及完整 V1。兄弟批准和源码、测试、原意、VERIFY 字节保持。回归止于完整 V1 后的候选审查边界。
+
 只读全候选V1有效而真实normalized code_review repair的Git/SQLite定向回归先复现零owner调用重复独审，再证明裸Spec路径及正式contract:引用都按实际candidate ID/path回到唯一P1 owner；单区/多区连续修复、兄弟P1拒绝后承接本轮已新独审owner、正式pause/run空generation结算后的精确原repairContext桥均保原ref/failure/预算。其余分区缓存、source/tests的Git对象及index保持，code_generate为零，全图seal/V1及新独审重跑；外来review或无实际owner定位拒绝。新叶错误AC证据表述可按原source=null和raw/facts纠正，既有作者AC不得无授权降义、缺readonly oracle不得靠重写测试通过，本轮稳定ID不得删除或改类。机制接缝在Docker前停止，不宣称真实模型或产品交付。
 
 只读候选二次修复回归令新P1增加真实新AC，经正式expandContractScope追加null资源并改变readSet/selection；新whole P2再次repair以及独审原生失败两路，都必须重验旧supplement原basis并承接最新accepted链，不因当前绑定扩展误报unsupported。旧source/ref/failure不改，readonly源码/tests及零code_generate保护保持；绑定改变/删项/非null/source/policy反例仍拒。

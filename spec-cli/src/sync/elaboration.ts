@@ -18,7 +18,7 @@ import { posix } from 'node:path'
 import { buildContractGraph, contractReferences, CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts, projectContractCoverage, validateContractGraph } from '@spexcode/spec-core/contracts'
 import type { Contract, ContractCoverage, ContractFinding, ContractGraph, ContractItem, Gap, Verification } from '@spexcode/spec-core/contracts'
 import { CONTRACT_FLOW_INSTRUCTIONS, CONTRACT_INSTRUCTIONS, CONTRACT_SOURCE_INSTRUCTIONS, CONTRACT_VERIFICATION_INSTRUCTIONS, INTERFACE_SEED_CONTRACT_INSTRUCTIONS, ELABORATION_REVIEW_SCHEMA, elaborationSchema, LEGACY_ELABORATION_DIAGNOSTIC_SCHEMA, LEGACY_ELABORATION_V2_DIAGNOSTIC_SCHEMA, VERIFICATION_REGISTRATION_SCHEMA, outputErrors } from './elaboration-schema.js'
-import { bindElaborationTargets, elaborationPatchErrors, elaborationTargetBindings, hasTypedCitationRepair, renderElaboration, unchangedTargetOutput, withoutVerificationTables, projectVerificationTable, readonlyFactRepairIds, readonlyFactRepairPreservesTarget, targetHasCurrentChanges } from './elaboration-markdown.js'
+import { bindElaborationTargets, elaborationPatchErrors, elaborationTargetBindings, hasTypedCitationRepair, renderElaboration, readonlyNewSourceRebindings, unchangedTargetOutput, withoutVerificationTables, projectVerificationTable, readonlyFactRepairIds, readonlyFactRepairPreservesTarget, targetHasCurrentChanges } from './elaboration-markdown.js'
 import type { GeneratedElaboration, GeneratedTargetElaboration, GeneratedTables } from './elaboration-markdown.js'
 import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE, ELABORATION_GENERATION_GUIDANCE_V1, ELABORATION_GENERATION_GUIDANCE_V2, ELABORATION_GENERATION_GUIDANCE_V3, ELABORATION_GENERATION_GUIDANCE_V4 } from './elaboration-types.js'
 import type { Applicability, ElaborationCandidate, ElaborationChange, ElaborationGapReviewBasis, ElaborationGapReviewCheckpoint, ElaborationGapReviewEvidence, ElaborationInput, ElaborationPartitionSeal, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ElaborationResult, ElaborationReview, ElaborationRound, ElaborationRunner, ElaborationTrace, ElaborationTarget, ElaborationSessionRequest, ElaborationSessionResult, ReadonlySpecRepair } from './elaboration-types.js'
@@ -819,7 +819,11 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
   const defaultExportCitation = input.defaultExportCitation === true
     ? 'JS/TS本地export default的精确Unit.name为default，只有实际导出语句支持该断言才引用同文件#default。核实导出正文，不能用无关声明或只转发的外部别名代替。'
     : ''
-  const citationInstructions = '\n只修任务repair.findings中的具体引用。先读对应repair.baselines文件；source只修列出的itemIds，保留原来源类型与所有其他字段。code保持治理文件，related可纠正错误路径。' + citationGranularity + defaultExportCitation + '标题、描述、raw、prose、所有业务字段、稳定ID、AC.test及VERIFY保持。源码和测试只读，可按需读取。'
+  const rebindings = citationRepair ? readonlyNewSourceRebindings(input) : []
+  const sourceRebinding = rebindings.length
+    ? `仅以下新叶业务行的source可以更改原代码来源类型：${JSON.stringify(rebindings.map(({ finding: { path, itemId }, sources }) => ({ path, itemId, sources })))}。sources按该行原有depends-on已连接的冻结REQ/RULE列出。核对该条定义确实支持原断言；不得猜测或借用同图无关ID，不得新建来源或依赖。该范围仍受本轮契约演进规则约束。其余来源继续保持原类型。`
+    : '保留原来源类型与所有其他字段。'
+  const citationInstructions = '\n只修任务repair.findings中的具体引用。先读对应repair.baselines文件；source只修列出的itemIds，' + sourceRebinding + 'code保持治理文件，related可纠正错误路径。' + citationGranularity + defaultExportCitation + '标题、描述、raw、prose、所有业务字段、稳定ID、AC.test及VERIFY保持。源码和测试只读，可按需读取。'
   const sealRepair = draftMode && input.worktree && input.readonlySpecRepair?.kind === 'partition_seal' ? partitionSealRepairContext(input) : null
   const sealRepairBrief = sealRepair ? { kind: 'partition_seal', owner: input.partitionBinding, candidateDigest: input.readonlySpecRepair!.candidateDigest, generationRef: input.readonlySpecRepair!.generationRef, acceptedRef: input.readonlySpecRepair!.acceptedRef,
     findings: input.readonlySpecRepair!.findings,
