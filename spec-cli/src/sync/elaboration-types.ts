@@ -20,6 +20,7 @@ export type ElaborationFact = { source: string; text: string }
 export type ReadonlySpecRepair = { kind?: 'candidate_review' | 'contract_omission' | 'partition_seal'; reviewEvidence?: { partitionId: string; resultRef: BlobRef }[]; baseInputDigest: string; candidateDigest: string; generationRef: BlobRef; acceptedRef: BlobRef; changes: ElaborationResult['changes']; applicability?: Applicability[]; wholeFileSourcePaths?: string[]; output: unknown; review: ElaborationReview | null; findings: ContractFinding[] }
 export type ElaborationPhase = 'interface_seed' | 'partitioned_final'
 export type ElaborationPartitionBinding = { planDigest: string; partitionId: string; analysisRef?: BlobRef; interfaceSeed?: RawOnlyInterfaceSeedEvidence }
+export type InheritedAuthoredParentScope = Pick<ElaborationTarget, 'nodeId' | 'path'> & { parentResultRef: BlobRef; affectedIds: string[] }
 export type AnalysisOnlyPartitionEvidence = { partitionId: string; analysisRef: BlobRef; wholeAnalysisRef: BlobRef }
 
 export function partitionedElaborationInputDigest(planDigest: string, inputs: readonly string[], analysisOnlyPartitions?: readonly AnalysisOnlyPartitionEvidence[]): string {
@@ -57,6 +58,10 @@ export type ElaborationInput = {
   sharedDraftDiagnostics?: true
   /** 同attempt冻结的Native父接口独审提示，仅限定当前阶段的审查范围。 */
   parentInterfaceReview?: true | 'scope-v2'
+  /** 新Native spec_to_code attempt在P1开始前冻结的分区影响判据。 */
+  propagateAuthoredParentScope?: true
+  /** 仅由分区执行器从已审父原件和冻结叶依赖派生。 */
+  inheritedAuthoredParentScope?: readonly InheritedAuthoredParentScope[]
   /** 仅由分区执行器用于无源码writer的初始或既有纯父接口；结果不是完整P1或实现就绪。 */
   phase?: 'interface_seed'
   /** 原分区计划及后验纯父分类证据，只绑定本区来源，不授予写权限或完成度。 */

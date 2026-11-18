@@ -11,6 +11,8 @@ code:
 
 ## expanded spec
 
+新 Native spec_to_code 的完整叶可承接已审纯父接口中本轮作者修改的明确义务。程序核原分区计划及父P0原件、作者原文前后字节、父P1已审正文和同ID REQ/RULE的实际业务差量。仅当冻结叶已有条目明确引用该义务、属于已认证父接口后代、且本区已有该叶及其源码的精确归属时，才生成该叶的影响证明。局部 P0 已直接影响叶时沿用原资格。证明只给仅承接父义务的叶，绑定父已审结果引用、义务ID和叶node/path，同一份进入局部输入和严格全图seal。封口沿局部资格核验，不从聚合P0重新分类。无交集的叶沿用冻结正文。仅承接父义务的叶按 [[elaboration-markdown]] 保护冻结来源或依赖未命中的既有需求和规则，以及全部既有 AC 与测试绑定。局部P0路径/变更及各项验收授权仍按各自原件核验。
+
 historicalCoverageDigest 只绑定完整 seal 的程序资格，局部输入移除该字段。封口及候选 GAP 复核沿原 checkpoint 接缝取得 [[sync-historical-coverage]] 的逐 ID 冷验回调并传入同一严格候选校验器；有摘要却无可信回调时拒绝，不由模型或局部结果声明历史授信。
 
 composed 全树补入的未选 owner 声明可使用原计划冻结的 contextVerifications 完成最终 seal 登记校验。该字段在局部输入复制时移除；局部模型原 verifications、文件视图、writer 和真实 V3 范围保持。只有完整 seal 合并定义并绑定摘要，不把未选定义迁入当前候选或局部 VERIFY 归属投影。

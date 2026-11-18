@@ -7,6 +7,7 @@ code:
   - spec-cli/src/sync/elaboration-markdown.ts#elaborationPatchErrors
   - spec-cli/src/sync/elaboration-markdown.ts#unchangedTargetOutput
   - spec-cli/src/sync/elaboration-markdown.ts#targetHasCurrentChanges
+  - spec-cli/src/sync/elaboration-markdown.ts#protectedInheritedParentItems
   - spec-cli/src/sync/elaboration-markdown.ts#readonlyFactRepairIds
   - spec-cli/src/sync/elaboration-markdown.ts#readonlyFactRepairPreservesTarget
   - spec-cli/src/sync/elaboration-markdown.ts#elaborationTargetBindings
@@ -24,6 +25,8 @@ related:
 模型不应承担表格语法和摘要计算；业务行必须转为唯一 Markdown 候选，保留冻结原意和来源绑定。
 
 ## expanded spec
+
+当前影响亦可由 [[sync-partition-execution]] 认证的父作者义务证明精确命中本冻结叶node/path。生成、行校验、草稿恢复、独审与严格全图seal共用该影响判据；候选正文或独审发现本身不能提供此证明。只有父影响且无本地变更资格时，既有 REQ/RULE 须沿冻结来源或依赖连到命中的父义务才能改义。其他既有 REQ/RULE 和全部既有 AC 语义及测试绑定按冻结值核验。
 
 contract_omission 与普通事实同 owner 时，事实修正仍只认原 candidate-review-repair 的 relatedIds 和 V5/未变化 owner 资格；遗漏项不能扩大可改 basis 或绕过 unchangedTargetOutput。其余渲染、raw、稳定行和来源绑定规则保持。
 

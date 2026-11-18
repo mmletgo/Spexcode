@@ -7,7 +7,7 @@ import { isHostPrivatePath } from './candidate.js'
 import { isUtf8Text } from './composition.js'
 import { createHash } from 'node:crypto'
 import { mintIds } from '@spexcode/spec-core'
-import { contractAuthorizationErrors, contractBusinessProse, resolvedDecisionGapIds, validateContractEvolution } from './contract-evolution.js'
+import { contractAuthorizationErrors, contractBusinessProse, resolvedDecisionGapIds, sameContractBusinessMeaning, validateContractEvolution } from './contract-evolution.js'
 import { isReadonlyCitationFailure } from './frozen-anchors.js'
 import { contractOmissionBound } from './candidate-review.js'
 import type { GenerationFinding } from './generation-types.js'
@@ -18,7 +18,7 @@ import { posix } from 'node:path'
 import { buildContractGraph, contractReferences, CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts, projectContractCoverage, validateContractGraph } from '@spexcode/spec-core/contracts'
 import type { Contract, ContractCoverage, ContractFinding, ContractGraph, ContractItem, Gap, Verification } from '@spexcode/spec-core/contracts'
 import { CONTRACT_FLOW_INSTRUCTIONS, CONTRACT_INSTRUCTIONS, CONTRACT_SOURCE_INSTRUCTIONS, CONTRACT_VERIFICATION_INSTRUCTIONS, INTERFACE_SEED_CONTRACT_INSTRUCTIONS, ELABORATION_REVIEW_SCHEMA, elaborationSchema, LEGACY_ELABORATION_DIAGNOSTIC_SCHEMA, LEGACY_ELABORATION_V2_DIAGNOSTIC_SCHEMA, VERIFICATION_REGISTRATION_SCHEMA, outputErrors } from './elaboration-schema.js'
-import { bindElaborationTargets, elaborationPatchErrors, elaborationTargetBindings, hasTypedCitationRepair, renderElaboration, readonlyNewSourceRebindings, unchangedTargetOutput, withoutVerificationTables, projectVerificationTable, readonlyFactRepairIds, readonlyFactRepairPreservesTarget, targetHasCurrentChanges } from './elaboration-markdown.js'
+import { bindElaborationTargets, elaborationPatchErrors, elaborationTargetBindings, hasTypedCitationRepair, renderElaboration, readonlyNewSourceRebindings, unchangedTargetOutput, withoutVerificationTables, projectVerificationTable, readonlyFactRepairIds, readonlyFactRepairPreservesTarget, protectedInheritedParentItems, targetHasCurrentChanges } from './elaboration-markdown.js'
 import type { GeneratedElaboration, GeneratedTargetElaboration, GeneratedTables } from './elaboration-markdown.js'
 import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE, ELABORATION_GENERATION_GUIDANCE_V1, ELABORATION_GENERATION_GUIDANCE_V2, ELABORATION_GENERATION_GUIDANCE_V3, ELABORATION_GENERATION_GUIDANCE_V4 } from './elaboration-types.js'
 import type { Applicability, ElaborationCandidate, ElaborationChange, ElaborationGapReviewBasis, ElaborationGapReviewCheckpoint, ElaborationGapReviewEvidence, ElaborationInput, ElaborationPartitionSeal, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ElaborationResult, ElaborationReview, ElaborationRound, ElaborationRunner, ElaborationTrace, ElaborationTarget, ElaborationSessionRequest, ElaborationSessionResult, ReadonlySpecRepair } from './elaboration-types.js'
@@ -35,7 +35,11 @@ function elaborationDraftBinding(input: ElaborationInput, schema: Record<string,
 
 /** 冷接受重核原件及本区范围；范围失效仅撤当前复用资格，不改变旧批准或草稿身份。 */
 export function verifyElaborationDraftCache(input: ElaborationInput, result: Pick<ElaborationResult, 'rounds' | 'inputDigest' | 'candidateDigest' | 'changes' | 'structurePassed' | 'reviewPassed'>, sourceTagged = false): boolean {
-  if (!sourceTagged && !result.rounds.some(round => round.draft)) return result.changes.every(change => {
+  const preservesInheritedScope = (changes: readonly ElaborationChange[]): boolean => !input.inheritedAuthoredParentScope?.length || changes.every(change => {
+    const target = input.targets.find(target => target.nodeId === change.nodeId && target.path === change.path)
+    return !target || inheritedParentScopeFindings(input, target, parseContract(change).contract).length === 0
+  })
+  if (!sourceTagged && !result.rounds.some(round => round.draft)) return preservesInheritedScope(result.changes) && result.changes.every(change => {
     const target = input.targets.find(target => target.nodeId === change.nodeId && target.path === change.path)
     return !target || targetHasCurrentChanges(input, target) || change.source === target.source || readonlyFactRepairPreservesTarget(target, change.source, readonlyFactRepairIds(input, target))
   })
@@ -57,7 +61,7 @@ export function verifyElaborationDraftCache(input: ElaborationInput, result: Pic
   const candidate = renderElaboration(input, generated, result.inputDigest), candidateDigest = digest(candidate)
   if (digest(round.candidate) !== candidateDigest || round.candidateDigest !== candidateDigest || result.candidateDigest !== candidateDigest
     || digest(result.changes) !== digest(candidate.changes.map(change => ({ ...change, contentDigest: elaborationDigest(change.source) })))) throw new Error('已审候选并非当前Git草稿正文的真实渲染结果')
-  return elaborationScopeErrors(input, generated).length === 0
+  return elaborationScopeErrors(input, generated).length === 0 && preservesInheritedScope(candidate.changes)
 }
 const specPath = (path: string): boolean => path.startsWith('.spec/') && path.endsWith('/spec.md') && posix.normalize(path) === path && !path.includes('\\')
 
@@ -132,6 +136,16 @@ export function hasApprovedElaborationReview(result: Pick<ElaborationResult, 'ro
 function finding(input: ElaborationInput, code: string, message: string, itemId?: string): ContractFinding {
   const target = input.targets.find(target => target.nodeId === input.intent.nodeId) ?? input.targets[0]
   return { code, severity: 'error', nodeId: target.nodeId, path: target.path, message, ...(itemId ? { itemId } : {}) }
+}
+
+function inheritedParentScopeFindings(input: ElaborationInput, target: ElaborationTarget, after: Contract | null, before?: Contract): ContractFinding[] {
+  return protectedInheritedParentItems(input, target, before).flatMap(previous => {
+    const next = after?.items.find(item => item.id === previous.id)
+    const acceptance = previous.kind === 'AC'
+    if (next && sameContractBusinessMeaning(previous, next) && (!acceptance || next.kind === 'AC' && next.test === previous.test)) return []
+    const message = acceptance ? '承接父义务须保留既有AC语义和测试绑定' : '父义务改动不影响本条既有需求或规则，必须保持冻结业务语义'
+    return [{ ...finding(input, 'rows_patch', `${message}: ${previous.id}`, previous.id), nodeId: target.nodeId, path: target.path }]
+  })
 }
 
 function frozenState(sources: readonly { nodeId: string; path: string; source: string }[], files?: ReadonlyMap<string, string>): FrozenContracts {
@@ -332,7 +346,7 @@ function checkInput(input: ElaborationInput): void {
 }
 
 export function freezeElaborationInput(input: ElaborationInput): { input: ElaborationInput; inputDigest: string; frozen: Record<string, unknown> & { targets: readonly ElaborationTarget[] } } {
-  const frozen = structuredClone({ ...(['candidate_review', 'contract_omission'].includes(input.readonlySpecRepair?.kind ?? '') && input.generationGuidance === ELABORATION_GENERATION_GUIDANCE ? { generationGuidance: input.generationGuidance } : {}), execution: { root: input.root, base: input.base ?? null, ...(input.worktree ? { worktree: input.worktree } : {}) }, intent: input.intent, targets: input.targets, context: input.context ?? [], facts: input.facts ?? [], ...(input.verifications ? { verifications: input.verifications } : {}), ...(input.contextVerifications ? { contextVerifications: input.contextVerifications } : {}), ...(input.historicalCoverageDigest ? { historicalCoverageDigest: input.historicalCoverageDigest } : {}), ...(input.implementationWritePaths ? { implementationWritePaths: input.implementationWritePaths } : {}), ...(input.readonlyTestPaths ? { readonlyTestPaths: input.readonlyTestPaths } : {}), ...(input.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), authorizedChanges: input.authorizedChanges ?? [], mode: input.mode ?? 'reelaborate', nodeChanges: input.nodeChanges ?? [], analysis: input.analysis, decisionAuthorities: input.decisionAuthorities, refinement: input.refinement, ...(input.readonlySpecRepair ? { readonlySpecRepair: input.readonlySpecRepair } : {}), ...(input.gapRepair ? { gapRepair: input.gapRepair } : {}), retiredIds: input.retiredIds ?? [], historyInput: input.historyInput, files: input.files ? [...input.files].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0) : null, ...(input.phase ? { phase: input.phase } : {}), ...(input.partitionBinding ? { partitionBinding: input.partitionBinding } : {}), ...(input.validationScope ? { validationScope: input.validationScope } : {}), ...(input.draftProtocol ? { draftProtocol: input.draftProtocol } : {}) })
+  const frozen = structuredClone({ ...(['candidate_review', 'contract_omission'].includes(input.readonlySpecRepair?.kind ?? '') && input.generationGuidance === ELABORATION_GENERATION_GUIDANCE ? { generationGuidance: input.generationGuidance } : {}), execution: { root: input.root, base: input.base ?? null, ...(input.worktree ? { worktree: input.worktree } : {}) }, intent: input.intent, targets: input.targets, context: input.context ?? [], facts: input.facts ?? [], ...(input.verifications ? { verifications: input.verifications } : {}), ...(input.contextVerifications ? { contextVerifications: input.contextVerifications } : {}), ...(input.historicalCoverageDigest ? { historicalCoverageDigest: input.historicalCoverageDigest } : {}), ...(input.implementationWritePaths ? { implementationWritePaths: input.implementationWritePaths } : {}), ...(input.readonlyTestPaths ? { readonlyTestPaths: input.readonlyTestPaths } : {}), ...(input.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), authorizedChanges: input.authorizedChanges ?? [], mode: input.mode ?? 'reelaborate', nodeChanges: input.nodeChanges ?? [], analysis: input.analysis, decisionAuthorities: input.decisionAuthorities, refinement: input.refinement, ...(input.readonlySpecRepair ? { readonlySpecRepair: input.readonlySpecRepair } : {}), ...(input.gapRepair ? { gapRepair: input.gapRepair } : {}), retiredIds: input.retiredIds ?? [], historyInput: input.historyInput, files: input.files ? [...input.files].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0) : null, ...(input.phase ? { phase: input.phase } : {}), ...(input.partitionBinding ? { partitionBinding: input.partitionBinding } : {}), ...(input.validationScope ? { validationScope: input.validationScope } : {}), ...(input.inheritedAuthoredParentScope?.length ? { inheritedAuthoredParentScope: input.inheritedAuthoredParentScope } : {}), ...(input.draftProtocol ? { draftProtocol: input.draftProtocol } : {}) })
   return { input: { ...input, ...frozen, files: frozen.files === null ? undefined : new Map(frozen.files) } as ElaborationInput, inputDigest: digest(frozen), frozen: frozen as Record<string, unknown> & { targets: readonly ElaborationTarget[] } }
 }
 
@@ -413,6 +427,7 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
     findings.push(...parsed.findings)
     if (!parsed.contract) { findings.push(finding(input, 'contract_required', `候选必须启用sync-v1: ${change.path}`)); continue }
     const before = target.source === null ? null : parseContract({ nodeId: target.nodeId, path: target.path, source: target.source }).contract
+    if (before) findings.push(...inheritedParentScopeFindings(input, target, parsed.contract, before))
     if (input.phase === 'interface_seed') {
       const originalFrontmatter = target.source ? parseFrontmatter(target.source).fm : {}
       const relation = (value: unknown): string[] => typeof value === 'string' ? [value] : Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
@@ -619,15 +634,16 @@ export function sealPartitionedElaboration(input: ElaborationInput, changes: rea
 
 /** 审查与生成共用当前owner事实；冻结依赖可作证据，但不能独自取得返修权。 */
 export function elaborationReviewScopeErrors(input: ElaborationInput, review: ElaborationReview, graph: ContractGraph): ContractFinding[] {
-  if (!input.analysis || !input.targets.some(target => !targetHasCurrentChanges(input, target)) && !(input.context ?? []).some(source => parseContract(source).contract?.items.length)) return []
+  if (!input.analysis || !input.inheritedAuthoredParentScope?.length && !input.targets.some(target => !targetHasCurrentChanges(input, target)) && !(input.context ?? []).some(source => parseContract(source).contract?.items.length)) return []
   const mutable = elaborationTargetBindings(input).filter(binding => targetHasCurrentChanges(input, input.targets[binding.targetIndex]) || readonlyFactRepairIds(input, input.targets[binding.targetIndex]).size > 0)
+  const protectedIds = new Set(input.targets.flatMap(target => protectedInheritedParentItems(input, target).filter(item => item.kind !== 'AC').map(item => item.id)))
   return review.findings.flatMap(issue => {
     if (issue.kind !== 'repair') return []
     const owners = issue.affectedIds.map(id => graph.owners.get(id))
     const unknown = issue.affectedIds.filter((_, index) => !owners[index])
     const message = !issue.affectedIds.length || unknown.length
       ? `repair必须绑定当前契约图非空且全部存在的affectedIds；未知ID=${JSON.stringify(unknown)}`
-      : !owners.some(owner => mutable.some(target => target.nodeId === owner!.nodeId && target.path === owner!.path))
+      : !owners.some((owner, index) => !protectedIds.has(issue.affectedIds[index]) && mutable.some(target => target.nodeId === owner!.nodeId && target.path === owner!.path))
         ? 'repair仅指向本轮未受影响的冻结owner；其metadata、description、prose、绑定与业务行必须沿用，历史进度/文案不是本轮新增修复授权。若本轮改变造成真实依赖问题，须定位可变owner的具体义务及反例；确需扩域应沿原分析重审与授权流程，不能由review自行扩权。'
         : null
     return message ? [{ ...finding(input, unknown.length || !issue.affectedIds.length ? 'review_binding' : 'review_scope', `${message}；原finding=${JSON.stringify(issue)}`), relatedIds: [...issue.affectedIds] }] : []
@@ -790,8 +806,11 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
     ? `\n以下流程规则适用于本轮可变目标和它实际承接的上游义务。\n${CONTRACT_FLOW_INSTRUCTIONS}\nTR.from、TR.event和非null的TR.to必须引用与TR.object相同对象的STATE/EVENT。只依据raw、facts、已有契约和冻结实现识别对象：每个真实有状态对象须有实际STATE.initial=true和EVENT；每个非终态须有通往另一状态的实际转移出口。不虚构状态、事件或终点，也不靠换object名称或用END跳过真实状态。确属无状态而使用FLOW.terminal=END时，正文解释状态不适用的依据；每个STEP.input、STEP.output与STEP.rules须分别给出实际输入域、可观察输出和已定义的失败或不变量RULE。`
     : ''
   const nativeSourceAnalysisInstructions = input.worktree && input.analysis ? '\n任务analysis为本轮冻结受审P0分析及原件引用，按其changes的kind、paths、affectedIds、ruleIds与evidence核对当前分类及范围，不能视为本轮P1批准。authorizedChanges仅列AC/VERIFY变更、退役及恢复等特殊动作；空数组不禁止依据当前analysis、raw和源码同步已审非冲突明细。历史失败诊断须按当前分析分类重新核实，不能沿用旧refactor限制取代当前allowed_change；preserve_business业务保护、AC/VERIFY及退役逐项授权、目标及只读范围仍保持。' : ''
+  const inheritedScopeInstructions = input.inheritedAuthoredParentScope?.length
+    ? '\n任务inheritedParentObligations列出由已审父接口及本叶既有引用共同证明的当前变更。即使叶P0无直接变更，也要承接这些父义务，按当前证据处理历史冻结范围诊断。仅在本叶细化相关业务、流程及验收。既有REQ/RULE只有冻结source/depends-on沿本叶既有义务连到所列父义务时可改义；其余保持原义。保留既有AC及其测试绑定，按原权限为新行为补充真实验收。VERIFY仍按原登记及逐项授权。'
+    : ''
   const parentSourceBoundary = input.phase === 'interface_seed' ? '\n未由raw/facts确定的普通字段表示、缺省值及等价校验顺序由后续子分区读取实现后细化，不要求父层提前穷举或制造GAP。' : ''
-  const nativeSourceInstructions = input.worktree ? `\n${CONTRACT_SOURCE_INSTRUCTIONS}${nativeSourceAnalysisInstructions}${parentSourceBoundary}` : ''
+  const nativeSourceInstructions = input.worktree ? `\n${CONTRACT_SOURCE_INSTRUCTIONS}${nativeSourceAnalysisInstructions}${parentSourceBoundary}${inheritedScopeInstructions}` : ''
   const strictParentReview = input.worktree && input.phase === 'interface_seed' && input.parentInterfaceReview === 'scope-v2'
   const nativeParentReviewInstructions = strictParentReview
     ? `\nfindings只报告父层声明或共享接口的缺陷。本轮禁止仅因候选中正确的业务义务尚未由子区实现或缺测试，就报implementation-review或判repair。父层声明正确、完整且所有适用性边界均已独立核实时，按schema返回accept与空findings；子区按现有阶段核验实现和测试。raw、冻结事实与权威规则优先，真实源码可佐证现状及普通无冲突的code来源。冻结代码不授予新的业务政策。涉及权限、权益、数据范围、保留删除、不可逆副作用、竞争、重复执行或业务承诺的重要未知事实，以及实际意图冲突，须定位真实影响的父层义务。REQ业务含义变化沿冻结裁决和授权范围，保持其它义务、身份及来源。${nativeSourceAnalysisInstructions}${parentSourceBoundary}`
@@ -853,7 +872,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
   const repairInstructions = (sealRepair ? '\n本轮是跨owner全局封口返修：' + (input.compactSealDiagnostics ? '在repair.diagnosticRoot下按原相对路径打开相关规格，可按ID或状态对象检索冲突双方；' : '读取repair诊断目录中的真实失败并集，按原路径核对冲突双方；') + '它仅为非权威诊断，不是raw、事实、批准或新增写权。只在本owner原意/源码/tests支持下修复所列error；纯父仍只负责接口。仅renameableIds中的本轮未采纳duplicate可同类同义唯一更名并更新本owner全部typed引用，原作者/已采纳及非冲突ID继续保留；旧draft错误不是更名资格裁定。程序与独审诊断副本沿同一原VERIFY技术归属投影替回本区候选，本区原件不重写；核原错误及新增错误后再独审，最后仍须strict全图封口。' : anchorRepair ? '\n本轮是已接受规格的只读V1锚点返修：先读repair.baselines的baselineSpecPath作为原已接受正文，仅修findings定位的code来源选择器；按冻结源码可索引声明Unit.name精确选择，main内局部变量和成员调用不是声明，不猜替代值。原raw、prose和RULE等已接受业务字段保持，禁止顺手重写basis、政策、流程或验收及增删稳定ID；已有草稿若改坏这些字段，须依据baseline自行恢复原prose和finding.itemId对应受保护项。mode=reelaborate与失败诊断不是新增授权。baseline、Spec、源码、全部测试及schema仍只读，只改指定draft并重新独审。' : '') + factRepairInstructions + omissionInstructions + gapRepairInstructions
   const { historicalCoverageDigest: _historicalCoverageDigest, ...modelInput } = frozenInput.frozen
   const snapshot = JSON.stringify(citationRepair ? { repair: anchorRepairBrief, targets: input.targets.map(({ nodeId, path }, targetIndex) => ({ targetIndex, nodeId, path })), relatedSpecs: input.context?.map(({ nodeId, path }) => ({ nodeId, path })), implementationWritePaths: [] }
-    : input.worktree ? { ...(sealRepairBrief || anchorRepairBrief || gapRepairBrief ? { repair: sealRepairBrief ?? anchorRepairBrief ?? gapRepairBrief } : {}), intent: input.intent, targets: input.targets.map((target, targetIndex) => ({ targetIndex, nodeId: target.nodeId, path: target.path, rawSource: target.rawSource })), relatedSpecs: input.context?.map(context => ({ nodeId: context.nodeId, path: context.path })), facts: input.facts, authorizedChanges: input.authorizedChanges, verifications: input.verifications, implementationWritePaths: input.implementationWritePaths, readonlyTestPaths: input.readonlyTestPaths, ...(input.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), retiredIds: input.retiredIds, nodeChanges: input.nodeChanges, mode: input.mode, analysis: input.analysis, partitionBinding: input.partitionBinding, decisionAuthorities: input.decisionAuthorities, refinement: input.refinement } : { ...modelInput, targets: frozenInput.frozen.targets.map((target, targetIndex) => ({ targetIndex, ...target })) })
+    : input.worktree ? { ...(sealRepairBrief || anchorRepairBrief || gapRepairBrief ? { repair: sealRepairBrief ?? anchorRepairBrief ?? gapRepairBrief } : {}), intent: input.intent, targets: input.targets.map((target, targetIndex) => ({ targetIndex, nodeId: target.nodeId, path: target.path, rawSource: target.rawSource })), relatedSpecs: input.context?.map(context => ({ nodeId: context.nodeId, path: context.path })), facts: input.facts, authorizedChanges: input.authorizedChanges, verifications: input.verifications, implementationWritePaths: input.implementationWritePaths, readonlyTestPaths: input.readonlyTestPaths, ...(input.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), retiredIds: input.retiredIds, nodeChanges: input.nodeChanges, mode: input.mode, analysis: input.analysis, partitionBinding: input.partitionBinding, inheritedParentObligations: input.inheritedAuthoredParentScope?.map(({ nodeId, path, affectedIds }) => ({ nodeId, path, affectedIds })), decisionAuthorities: input.decisionAuthorities, refinement: input.refinement } : { ...modelInput, targets: frozenInput.frozen.targets.map((target, targetIndex) => ({ targetIndex, ...target })) })
   const generationSchema = elaborationSchema(input, { purpose: input.phase === 'interface_seed' ? 'interface_seed' : 'generation' })
   const draftBinding = elaborationDraftBinding(input, generationSchema)
   const sourceDraft = options.loadDraft?.(draftBinding.schemaDigest) ?? options.draft
