@@ -10073,7 +10073,7 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
     const current = store.readAttempt(result.operation.currentAttemptId!)
     const completed = stages(current)
     assert.equal(result.failure?.code, handoff ? 'review_handoff_binding' : 'unsupported', JSON.stringify({ failure: result.failure, calls }))
-    assert.deepEqual(store.readAttempt(first.id), first)
+    assert.deepEqual(store.readAttempt(first.id), { ...first, status: handoff ? 'failed' : 'superseded' })
     assert.deepEqual(store.listResources(first.id), originalResources)
     for (const { ref, bytes } of [...originalBlobs, ...originalArtifacts]) assert.deepEqual(readEvidence(f.input.source.commonDir, ref), bytes)
     for (const { sessionId, record } of originalNative) assert.deepEqual(readRecord(sessionId), record)
