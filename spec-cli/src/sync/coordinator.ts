@@ -1850,6 +1850,13 @@ async function verificationRetrySource(store: SyncStore, operation: SyncOperatio
     const elaboration = stage<SavedElaboration>(store, owner, prior, 'elaboration'), analysis = readCurrentSyncAnalysis(store, owner)
     const partitions = reviewPlanStage(store, owner, prior, 'candidate-partition-plan')?.result, originalPlan = reviewPlanStage(store, owner, prior, 'partition-plan')?.result
     if (generation.status !== 'reviewed' || !generation.reviewPassed || !generation.candidateValidated || generation.failure || generation.validationFindings.some(finding => finding.severity === 'error') || canonical(generation.candidate) !== canonical(candidate) || !elaboration?.structurePassed || !elaboration.reviewPassed || elaboration.status !== 'complete' || elaboration.failure || !elaborationComposedBinding(store, owner, prior, elaboration, view.composed) || !analysis || !partitions || !originalPlan || !generation.partitionEvidence?.length || !elaboration.partitionEvidence?.length || !analysis.analysis.partitionEvidence?.length) reject('续验需要完整P0、已审P1、V1及全部最终分区独审原件，旧缺席不补签')
+    const guidance = analysis!.analysis.guidanceContractVersion
+    if (guidance === 'code-behavior-guidance-v8') {
+      if (analysisStageBinding(store, owner, analysis!.analysis)?.guidanceContractVersion !== guidance) reject('旧v8指导与原P0阶段原件失配')
+      if (verifiedCarriers.length || store.listResources(prior.id).some(resource => resource.plan.kind === 'verification')) reject('旧v8指导的候选来源链已有V3执行记录，不能按预检失败重新生成')
+      verifyCandidate(owner.input.source.commonDir, candidate!)
+      return null
+    }
     const p0Owners = analysis!.analysis.partitionEvidence!.map(item => ({ partitionId: item.partitionId, analysisRef: item.analysisRef, wholeAnalysisRef: analysis!.ref }))
     if (!authenticateAnalysisOnlyPartitions(store, owner, prior, originalPlan!, analysis!, p0Owners)) reject('原P0分析与独审的Native/Git/schema或覆盖绑定失配')
     const p1 = elaboration!, p2 = generation, plan = partitions!
