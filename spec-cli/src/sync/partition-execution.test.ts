@@ -197,6 +197,165 @@ test('全图seal保留冻结的独立VERIFY登记，局部请求不扩域且旧�
   assert.ok(rejected.partitionSeal!.findings.some(issue => issue.code === 'verification_registration_mismatch' && issue.itemId === 'VERIFY-IMPORT-01'))
 })
 
+for (const variant of ['inherited', 'sibling', 'same-leaf-unrelated', 'same-leaf-ac-test'] as const) test(`P1已审父作者差量只解锁显式承接叶 variant=${variant}`, async t => {
+  const prepared = await fixture(t), root = prepared.root, parentPath = '.spec/export/spec.md', parentId = 'REQ-PARENT-EXPORT'
+  const [leaf, sibling] = prepared.input.contracts
+  const beforeRaw = '导出任务完成后可下载首次结果。'
+  const afterRaw = '导出任务完成后只有当前所有者可下载首次结果。'
+  const beforeConstraint = '已完成任务可下载', afterConstraint = '已完成任务仅当前所有者可下载首次结果'
+  const parentSource = `---\ntitle: 导出上层接口\ncontract-schema: sync-v1\n---\n\n## raw source\n\n${beforeRaw}\n\n## expanded spec\n\n### REQ\n\n| id | goal | source | constraints | success | depends-on |\n| --- | --- | --- | --- | --- | --- |\n| ${parentId} | 下载首次导出结果 | user:raw | ${beforeConstraint} | 可下载首次结果 | - |\n`
+  writeFileSync(join(root, parentPath), parentSource)
+  const idempotencyReqId = 'REQ-EXPORT-IDEMPOTENCY'
+  const childSource = prepared.input.files.get(leaf.path)!
+    .replace('## expanded spec', '同一所有者用同一键和参数重试时复用原任务。\n\n## expanded spec')
+    .replace('user:raw | 遵守显式演示政策 | 成功任务可由所有者下载首次发布结果 | - |', `derived:${parentId} | 遵守显式演示政策 | 成功任务可由所有者下载首次发布结果 | ${parentId} |`)
+    .replace('\n### RULE', `| ${idempotencyReqId} | 重试提交保持相同任务 | user:raw | 同一所有者、键和参数 | 返回原任务ID | - |\n\n### RULE`)
+    .replace('| FLOW-EXPORT-01 | REQ-EXPORT-01 |', `| FLOW-EXPORT-01 | REQ-EXPORT-01,${parentId},${idempotencyReqId} |`)
+    .replace('| AC-EXPORT-01 | REQ-EXPORT-01,RULE-EXPORT-02 |', `| AC-EXPORT-01 | REQ-EXPORT-01,RULE-EXPORT-02,${idempotencyReqId} |`)
+    .replace('| AC-EXPORT-03 | RULE-EXPORT-01 |', `| AC-EXPORT-03 | ${parentId},RULE-EXPORT-01 |`)
+    .replace(/^(\| RULE-EXPORT-02 .* \|) REQ-EXPORT-01 \|$/m, `$1 ${idempotencyReqId} |`)
+  const child = parseContract({ nodeId: leaf.nodeId, path: leaf.path, source: childSource }).contract!
+  const childReq = child.items.find(item => item.kind === 'REQ')!
+  assert.deepEqual(childReq.source, { kind: 'derived', ref: parentId })
+  assert.deepEqual(childReq.dependsOn, [parentId])
+  assert.ok(child.items.some(item => item.kind === 'FLOW' && item.req.includes(parentId)))
+  assert.ok(child.items.some(item => item.kind === 'AC' && item.covers.includes(parentId)))
+  const unrelatedRule = child.items.find(item => item.id === 'RULE-EXPORT-02')
+  assert.ok(unrelatedRule?.kind === 'RULE')
+  assert.deepEqual(unrelatedRule.source, { kind: 'decision', ref: 'EXPORT-POLICY' })
+  assert.deepEqual(unrelatedRule.dependsOn, [idempotencyReqId])
+  const idempotency = child.items.find(item => item.id === idempotencyReqId)
+  assert.ok(idempotency?.kind === 'REQ')
+  assert.deepEqual(idempotency.source, { kind: 'user', ref: 'raw' })
+  assert.deepEqual(idempotency.dependsOn, [])
+  assert.ok(child.items.some(item => item.kind === 'AC' && item.covers.includes(unrelatedRule.id)), '规则的原验收覆盖继续保留')
+  const acceptance = child.items.find(item => item.id === 'AC-EXPORT-03'), otherAcceptance = child.items.find(item => item.id === 'AC-EXPORT-02')
+  assert.ok(acceptance?.kind === 'AC' && otherAcceptance?.kind === 'AC')
+  assert.equal(acceptance.command, otherAcceptance.command)
+  const verification = child.items.find(item => item.id === acceptance.command)
+  assert.ok(verification?.kind === 'VERIFY')
+  assert.deepEqual(verification.command, ['node', '--test', 'tests/export.test.mjs'])
+  for (const { test } of [acceptance, otherAcceptance]) {
+    const [testPath, caseId] = test.split('#')
+    assert.ok(prepared.input.files.get(testPath)!.includes(`test('${caseId} `))
+  }
+  writeFileSync(join(root, leaf.path), childSource)
+  const commit = (message: string) => {
+    execFileSync('git', ['-C', root, 'add', parentPath, leaf.path], { stdio: 'pipe' })
+    execFileSync('git', ['-C', root, 'commit', '-m', message], { stdio: 'pipe' })
+  }
+  commit('冻结父接口与真实子契约引用')
+  const before = await captureInputSnapshot(root)
+  const authored = parentSource.replace(beforeRaw, afterRaw).replace(beforeConstraint, afterConstraint)
+  writeFileSync(join(root, parentPath), authored)
+  commit('作者只修改父层下载义务')
+  const snapshot = await captureInputSnapshot(root), commonDir = snapshot.source.commonDir
+  const baseline: BaselinePair = { id: 'parent-author-before', repositoryId: snapshot.source.repositoryId, source: snapshot.source, sourceInput: before, verifiedDelivery: before, coveredScope: { paths: ['.spec', 'src', 'tests'], contractIds: [], flowIds: [] }, receiptId: 'fixture-parent-baseline', settledAtMs: 1 }
+  const composed = composeInputSnapshots(snapshot, baseline).composed!
+  const files = new Map(readTree(commonDir, composed.tree).map(entry => [entry.path, readObject(commonDir, entry.oid).toString('utf8')]))
+  const selected = [{ nodeId: 'export', path: parentPath }, ...prepared.input.contracts.map(({ nodeId, path }) => ({ nodeId, path }))]
+  const contracts = selected.map(target => parseContract({ ...target, source: files.get(target.path)! }).contract!)
+  const policy: SyncCoordinatorPlan = { version: 'sync-coordinator-v2', direction: 'spec_to_code', intentNodeId: 'export', targets: selected, readPaths: ['.spec', 'src', 'tests'], writePaths: ['.spec', 'src'], sourcePaths: ['src'], facts: [], verifications: [], mandatoryTests: [], partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 48_000, maxParallel: 1 } }
+  const plan = planSyncPartitions({ plan: policy, files, contracts, changedPaths: [parentPath], maxReadBytes: 48_000 })
+  const owner = (path: string) => plan.partitions.find(partition => partition.targets.some(target => target.path === path))!
+  assert.notEqual(owner(leaf.path).id, owner(sibling.path).id)
+  assert.ok(owner(leaf.path).writePaths.includes(leaf.path))
+  assert.deepEqual(owner(leaf.path).sourcePaths, ['src/export.js'])
+  const classify: CodeBehaviorInput = { snapshot, baseline, composed, readSetDigest: 'ancestor-readset', policyDigest: 'ancestor-policy', requestKey: 'parent-author-p0', timeoutMs: 30000, origin: 'spec', plan: policy }
+  let ordinal = 0
+  const response = (output: unknown) => ({ sessionId: `parent-author-session-${++ordinal}`, threadId: `parent-author-thread-${ordinal}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) })
+  const analysis = await analyzeSyncPartitions(classify, plan, 1, async request => {
+    const task = readFrozenBehaviorContext<{ changedPaths: string[] }>(request)
+    if (request.purpose === 'code_behavior_analyze') return response({
+      changes: task.changedPaths.map(path => ({ kind: 'allowed_change', paths: [path], affectedIds: [parentId], ruleIds: [parentId], originalIntent: beforeRaw, previousBehavior: beforeConstraint, sourceBehavior: afterConstraint, deliveryBehavior: beforeConstraint, evidence: '冻结父raw和REQ的真实提交差量', counterexample: '已完成任务不能将结果交给非所有者' })),
+      facts: [], acceptanceChanges: [], newNodes: [], resolutions: [],
+    })
+    const review = JSON.parse(request.prompt.split('待审分析:\n')[1]) as { analysisDigest: string; analysis: CodeBehaviorAnalysis }
+    return response({ inputDigest: request.inputDigest, analysisDigest: review.analysisDigest, verdict: 'accept', checkedPaths: task.changedPaths, checkedChangeIds: review.analysis.changes.map(change => change.id), findings: [] })
+  }, prepared.checkpoints)
+  const exactAuthor = [{ nodeId: 'export', path: parentPath, beforeRaw, afterRaw, changedIds: [parentId] }]
+  assert.equal(analysis.reviewPassed, true)
+  assert.deepEqual(analysis.authorChanges, exactAuthor)
+  const parentP0 = analysis.partitionEvidence!.find(member => member.partitionId === owner(parentPath).id)!
+  const leafP0 = analysis.partitionEvidence!.find(member => member.partitionId === owner(leaf.path).id)!
+  assert.deepEqual(parentP0.analysis.changes.map(({ kind, affectedIds, paths }) => ({ kind, affectedIds, paths })), [{ kind: 'allowed_change', affectedIds: [parentId], paths: [parentPath] }])
+  assert.deepEqual(leafP0.analysis.changes, [])
+  const leafP0Bytes = readEvidence(commonDir, leafP0.analysisRef)
+  const targets = selected.map(target => {
+    const source = target.path === parentPath ? parentSource : files.get(target.path)!
+    return { ...target, source, sourceDigest: contentHash(source) }
+  })
+  const verifications = contracts.flatMap(contract => contract.items.flatMap(item => item.kind === 'VERIFY' ? [{ id: item.id, command: item.command, cwd: item.cwd, timeoutMs: item.timeoutMs }] : []))
+  const activation = { propagateAuthoredParentScope: true } as const
+  const input: ElaborationInput = { ...activation, root, historyInput: snapshot, requestKey: 'parent-author-p1', intent: { nodeId: 'export', rawSource: afterRaw }, targets, files, verifications, analysis: { ref: writeEvidence(commonDir, analysis), analysis }, maxRepairs: 0 }
+  const reviewedPaths: string[] = []
+  const changedPath = variant === 'sibling' ? sibling.path : leaf.path
+  const result = await elaborateSyncPartitions(input, plan, 1, prepared.checkpoints, async request => {
+    const task = JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as Pick<ElaborationInput, 'targets' | 'context' | 'phase' | 'analysis'>
+    const target = task.targets[0], parent = target.path === parentPath
+    if (!parent) {
+      assert.ok(reviewedPaths.includes(parentPath), '读取父接口前须先独审通过')
+      assert.match(task.context!.find(entry => entry.path === parentPath)!.source, /仅当前所有者可下载首次结果/)
+      assert.deepEqual(task.analysis!.analysis.changes, [], '叶仍使用自己的未变P0原件')
+    }
+    if (request.purpose === 'elaboration_review') {
+      reviewedPaths.push(target.path)
+      return response({ verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] })
+    }
+    assert.equal(task.phase, parent ? 'interface_seed' : undefined)
+    const contract = parseContract({ ...target, source: target.source! }).contract!
+    const tables = emptyElaborationTables()
+    if (parent || target.path === changedPath) {
+      const req = contract.items.find(item => item.kind === 'REQ')!
+      tables.REQ = [{ id: req.id, goal: req.goal, source: `${req.source.kind}:${req.source.ref}`, constraints: afterConstraint, success: req.success, 'depends-on': req.dependsOn }]
+    }
+    if (variant === 'same-leaf-unrelated' && target.path === leaf.path) {
+      tables.RULE = [{ id: unrelatedRule.id, scope: unrelatedRule.scope, constraint: '同一actor/key/filter的重复请求必须创建新任务', basis: unrelatedRule.basis, authority: unrelatedRule.authority, source: `${unrelatedRule.source.kind}:${unrelatedRule.source.ref}`, 'depends-on': unrelatedRule.dependsOn }]
+    }
+    if (variant === 'same-leaf-ac-test' && target.path === leaf.path) {
+      const { id, covers, preconditions, action, assertion, source, dependsOn, command } = acceptance
+      tables.AC = [{ id, covers, preconditions, action, assertion, source: `${source.kind}:${source.ref}`, 'depends-on': dependsOn, command, test: otherAcceptance.test }]
+    }
+    const output: GeneratedTargetElaboration = { version: 'elaboration-target-rows-v3', changes: Object.values(tables).some(rows => rows.length) ? [{ targetIndex: 0, title: String(parseFrontmatter(target.source!).fm.title), description: '', code: contract.code, related: contract.related, prose: null, tables, removeIds: [] }] : [], applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: !parent, basis: '保留冻结导出契约的既有义务', affectedIds: [contract.items[0].id] })) }
+    return response(output)
+  }, composed)
+  const parentP1 = prepared.checkpoints.load<ElaborationResult>(`partition:${owner(parentPath).id}:elaboration`)!
+  assert.equal(parentP1.status, 'interface_seed')
+  assert.equal(parentP1.reviewPassed, true)
+  assert.equal(parentP1.rounds[0].review?.verdict, 'accept')
+  assert.equal(parentP1.changes[0].beforeDigest, contentHash(parentSource))
+  assert.equal(parseParts(parentP1.changes[0].source)!.rawSource, afterRaw)
+  assert.deepEqual(readEvidence(commonDir, leafP0.analysisRef), leafP0Bytes)
+  if (variant === 'sibling') {
+    assert.equal(result.structurePassed, false)
+    assert.ok(result.rounds.flatMap(round => round.findings).some(finding => finding.code === 'rows_patch' && finding.message.includes(sibling.path)), JSON.stringify(result.rounds.map(round => round.findings)))
+    assert.ok(!reviewedPaths.includes(sibling.path))
+    return
+  }
+  if (variant === 'same-leaf-unrelated' || variant === 'same-leaf-ac-test') {
+    const itemId = variant === 'same-leaf-unrelated' ? unrelatedRule.id : acceptance.id
+    const candidateRow = result.changes.find(change => change.path === leaf.path)?.source.split('\n').find(line => line.startsWith(`| ${itemId} |`))
+    assert.equal(result.structurePassed, false, JSON.stringify({ candidateRow, reviewPassed: result.reviewPassed, reviewedLeaf: reviewedPaths.includes(leaf.path) }))
+    const errors = result.rounds.flatMap(round => round.findings).filter(finding => finding.severity === 'error')
+    const rejected = errors.find(finding => finding.code === 'rows_patch' && finding.path === leaf.path && finding.itemId === itemId)
+    assert.ok(rejected, JSON.stringify(errors))
+    if (variant === 'same-leaf-ac-test') assert.match(rejected.message, /AC\.test|测试绑定/)
+    assert.ok(!reviewedPaths.includes(leaf.path), '同稿合法继承不授无关规则或验收绑定改写权，必须在独审前拒绝')
+    return
+  }
+  assert.equal(result.partitionSeal?.passed, true, JSON.stringify({ local: result.rounds.flatMap(round => round.findings).filter(item => item.severity === 'error'), seal: result.partitionSeal?.findings.filter(item => item.severity === 'error') }))
+  assert.equal(result.reviewPassed, true)
+  const changedLeaf = result.changes.find(change => change.path === leaf.path)!
+  assert.match(changedLeaf.source, /已完成任务仅当前所有者可下载首次结果/)
+  const obligations = (source: string) => source.split('\n').filter(line => /^\| (AC|VERIFY)-/.test(line))
+  assert.deepEqual(obligations(changedLeaf.source), obligations(childSource))
+  assert.equal(result.changes.find(change => change.path === sibling.path)?.source, files.get(sibling.path))
+  const replay = await elaborateSyncPartitions(input, plan, 1, prepared.checkpoints, async request => assert.fail(`应沿同一父批准及叶影响证明承接 ${request.requestKey}`), composed)
+  assert.equal(replay.inputDigest, result.inputDigest)
+  assert.deepEqual(replay.partitionSeal, result.partitionSeal)
+  assert.deepEqual(replay.partitionEvidence, result.partitionEvidence)
+})
+
 test('局部分区最终封口读取composed全树承接，真实缺失仍由strict门拒绝', async t => {
   const prepared = await fixture(t), parentPath = '.spec/export/spec.md'
   const parent = `---

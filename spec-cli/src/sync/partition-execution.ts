@@ -8,8 +8,9 @@ import type { CodeBehaviorApprovalBinding, CodeBehaviorInput, CodeBehaviorContin
 import { elaborationSchema, outputErrors } from './elaboration-schema.js'
 import { elaborate, freezeElaborationInput, inspectElaborationGaps, verifyElaborationDraftCache, projectElaborationFlowReadiness, sealPartitionedElaboration, partitionSealRepairContext } from './elaboration.js'
 import type { Contract, ContractFinding, Verification } from '@spexcode/spec-core/contracts'
+import { sameContractBusinessMeaning } from './contract-evolution.js'
 import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE, partitionedElaborationCoverageMatches, partitionedElaborationInputDigest } from './elaboration-types.js'
-import type { AnalysisOnlyPartitionEvidence, Applicability, ElaborationGapRepair, ElaborationGapReviewCheckpoint, ElaborationGapReviewEvidence, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationTrace, ElaborationSessionRequest, ElaborationChange, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ReadonlySpecRepair, VerificationOwnershipProjection } from './elaboration-types.js'
+import type { AnalysisOnlyPartitionEvidence, Applicability, ElaborationGapRepair, ElaborationGapReviewCheckpoint, ElaborationGapReviewEvidence, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationTrace, ElaborationSessionRequest, ElaborationChange, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, InheritedAuthoredParentScope, ReadonlySpecRepair, VerificationOwnershipProjection } from './elaboration-types.js'
 import { elaborationTargetBindings, projectVerificationTable, withoutVerificationTables, readonlyFactRepairPreservesTarget, targetHasCurrentChanges } from './elaboration-markdown.js'
 import { actualTreeDiff, isHostPrivatePath, verifyCandidate } from './candidate.js'
 import type { CandidateChanges } from './candidate.js'
@@ -142,6 +143,46 @@ function interfaceSeedPartitions(input: ElaborationInput, plan: SyncPartitionPla
     if (evidence) seeds.set(partition.id, evidence)
   }
   return { seeds, descendants }
+}
+
+type AuthoredParentImpact = { seed: RawOnlyInterfaceSeedEvidence; resultRef: BlobRef; changedIds: Set<string> }
+
+/** Only the reviewed parent owner can tie an actual contract delta to the author's frozen raw edit. */
+function authoredParentImpact(input: ElaborationInput, partition: SyncPartition, seed: RawOnlyInterfaceSeedEvidence, result: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>): AuthoredParentImpact | undefined {
+  const commonDir = input.historyInput!.source.commonDir
+  const evidence = input.analysis!
+  const owner = evidence.analysis.partitionEvidence?.find(owner => owner.partitionId === partition.id)
+  if (!owner?.changedPaths.includes(seed.parentPath) || !partition.changedPaths.includes(seed.parentPath)
+    || result.phase !== 'interface_seed' || result.status !== 'interface_seed' || result.failure) return undefined
+  const target = input.targets.find(target => target.nodeId === seed.parentNodeId && target.path === seed.parentPath)
+  const accepted = result.changes.find(change => change.nodeId === seed.parentNodeId && change.path === seed.parentPath)
+  if (!target?.source || !accepted || accepted.beforeDigest !== target.sourceDigest || accepted.contentDigest !== contentHash(accepted.source)) return undefined
+  const analysis = partitionAnalysisEvidence(commonDir, evidence, partition.id)!.analysis
+  const author = analysis.authorChanges?.find(change => change.nodeId === target.nodeId && change.path === target.path)
+  if (!author || author.beforeRaw === author.afterRaw || author.beforeRaw !== parseParts(target.source)?.rawSource || author.afterRaw !== parseParts(accepted.source)?.rawSource) return undefined
+  const allowedIds = new Set(analysis.changes.filter(change => change.kind === 'allowed_change' && change.paths.includes(target.path)).flatMap(change => [...change.affectedIds, ...change.ruleIds]))
+  const before = parseContract({ ...target, source: target.source }).contract?.items ?? []
+  const after = new Map(parseContract(accepted).contract?.items.map(item => [item.id, item]))
+  const changedIds = new Set(before.filter(item => {
+    if (item.kind !== 'REQ' && item.kind !== 'RULE' || !allowedIds.has(item.id) || !author.changedIds.includes(item.id)) return false
+    const next = after.get(item.id)
+    return next?.kind === item.kind && !sameContractBusinessMeaning(item, next)
+  }).map(item => item.id))
+  return changedIds.size ? { seed, resultRef: writeEvidence(commonDir, result), changedIds } : undefined
+}
+
+function inheritedParentScope(partition: SyncPartition, targets: ElaborationInput['targets'], parents: readonly AuthoredParentImpact[]): InheritedAuthoredParentScope[] {
+  if (!parents.length) return []
+  return targets.flatMap(target => {
+    if (!target.source || !partition.writePaths.includes(target.path) || !partition.targets.some(owner => owner.nodeId === target.nodeId && owner.path === target.path)) return []
+    const references = unique(parseContract({ ...target, source: target.source }).contract?.items.flatMap(item => contractReferences(item).map(reference => reference.id)) ?? [])
+    return parents.flatMap(({ seed, resultRef, changedIds }) => {
+      if (!within(seed.parentPath, partition.readPaths) || !seed.descendants.some(descendant => descendant.nodeId === target.nodeId && descendant.path === target.path
+        && descendant.codePaths.some(path => partition.sourcePaths.includes(path)))) return []
+      const affectedIds = references.filter(id => changedIds.has(id))
+      return affectedIds.length ? [{ nodeId: target.nodeId, path: target.path, parentResultRef: resultRef, affectedIds }] : []
+    })
+  })
 }
 
 function partitionApplicability(results: readonly Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>[]): Applicability[] {
@@ -406,6 +447,10 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
   const writers = plan.partitions.filter(partition => !analysisOnlyPartitions.some(owner => owner.partitionId === partition.id))
 
   const settledSources = new Map<string, string>(), factBaselines = new Map<string, string>()
+  const parents: AuthoredParentImpact[] = [], inherited = new Map<string, InheritedAuthoredParentScope[]>()
+  const behavior = input.analysis?.analysis
+  const propagate = input.propagateAuthoredParentScope && behavior?.reviewPassed && behavior.partitionCoverage?.planDigest === plan.digest
+    && behavior.inputId === input.historyInput!.id && contentHash(JSON.stringify(behavior)) === input.analysis!.ref.sha256
   const run = async (partition: SyncPartition): Promise<Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>> => {
     const interfaceSeed = seeds.get(partition.id)
     const partitionBinding = { planDigest: plan.digest, partitionId: partition.id, ...(input.analysis ? { analysisRef: input.analysis.ref } : {}), ...(interfaceSeed ? { interfaceSeed } : {}) }
@@ -425,6 +470,7 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
       contextVerifications: undefined,
       historicalCoverageDigest: undefined,
       partitionBinding,
+      inheritedAuthoredParentScope: undefined,
       files: new Map([...input.files ?? []].filter(([path]) => within(path, readPaths)).map(([path, source]) => [path, settledSources.get(path) ?? source])), analysis,
       validationScope: 'partition_local',
       facts: [...input.facts ?? []].filter(fact => (!fact.source.startsWith('code:') || within(fact.source.slice(5).split('#')[0], readPaths)) && (!fact.source.startsWith('derived:') || ids.has(fact.source.slice(8)))),
@@ -433,6 +479,13 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
       implementationWritePaths: input.implementationWritePaths?.length === 0 ? [] : partition.writePaths, readonlyTestPaths: input.readonlyTestPaths?.filter(path => within(path, readPaths)),
       phase: interfaceSeed ? 'interface_seed' : undefined,
       recordUnverifiedCoverage: interfaceSeed ? undefined : input.recordUnverifiedCoverage,
+    }
+    if (parents.length) {
+      const inheritedScope = inheritedParentScope(partition, targets.filter(target => !targetHasCurrentChanges(localInput, target)), parents)
+      if (inheritedScope.length) {
+        inherited.set(partition.id, inheritedScope)
+        localInput.inheritedAuthoredParentScope = inheritedScope
+      }
     }
     let cacheDraft: ElaborationDraft | undefined
     const reusableCache = (cachedInput: ElaborationInput, cached: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>): boolean => {
@@ -527,7 +580,13 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
     for (let index = 0; index < layer.length; index++) byPartition.set(layer[index].id, results[index])
     const failed = primaryPartitionFailure(results.filter(result => !result.structurePassed || !result.reviewPassed))
     if (failed) return { ...failed, contracts: [], graph: null, coverage: null, partitionEvidence: writers.filter(partition => byPartition.has(partition.id)).map(partition => ({ partitionId: partition.id, resultRef: writeEvidence(commonDir, byPartition.get(partition.id)!) })) }
-    for (const result of results) for (const change of result.changes) settledSources.set(change.path, change.source)
+    for (const [index, result] of results.entries()) {
+      for (const change of result.changes) settledSources.set(change.path, change.source)
+      if (propagate) {
+        const partition = layer[index], impact = authoredParentImpact(input, partition, seeds.get(partition.id)!, result)
+        if (impact) parents.push(impact)
+      }
+    }
     pending = pending.filter(partition => !byPartition.has(partition.id))
   }
   const remaining = writers.filter(partition => !byPartition.has(partition.id))
@@ -545,7 +604,9 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
   const candidateChanges = (projection?.changes ?? reviewedChanges).map(({ nodeId, path, beforeDigest, source }) => ({ nodeId, path, beforeDigest, source }))
   const changes = candidateChanges.map(change => ({ ...change, contentDigest: contentHash(change.source) }))
   const applicability = partitionApplicability(results)
-  const seal = sealPartitionedElaboration(sealInput, candidateChanges, applicability, results.flatMap(result => result.readonlySpecRepair && ['candidate_review', 'contract_omission'].includes(result.readonlySpecRepair.kind ?? '') ? [result.readonlySpecRepair] : []), factBaselines, input.historicalCoverageDigest ? checkpoints.historicalCoverage?.(input.historicalCoverageDigest) : undefined)
+  const inheritedAuthoredParentScope = writers.flatMap(partition => inherited.get(partition.id) ?? [])
+  const scopedSealInput = inheritedAuthoredParentScope.length ? { ...sealInput, inheritedAuthoredParentScope } : sealInput
+  const seal = sealPartitionedElaboration(scopedSealInput, candidateChanges, applicability, results.flatMap(result => result.readonlySpecRepair && ['candidate_review', 'contract_omission'].includes(result.readonlySpecRepair.kind ?? '') ? [result.readonlySpecRepair] : []), factBaselines, input.historicalCoverageDigest ? checkpoints.historicalCoverage?.(input.historicalCoverageDigest) : undefined)
   const readiness = seal.seal.passed ? projectElaborationFlowReadiness(seal.graph, seal.coverage) : { readyFlowIds: [], blockedFlows: [] }
   const gaps = seal.contracts.flatMap(contract => contract.items.filter((item): item is import('@spexcode/spec-core/contracts').Gap => item.kind === 'GAP'))
   const localStructurePassed = results.every(result => result.structurePassed)

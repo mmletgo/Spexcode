@@ -1,7 +1,7 @@
 import { parseCodeEntry, parseRelation } from '@spexcode/spec-core'
 import { ownerNodesForPath } from './governance-owners.js'
 import { CONTRACT_COLUMNS, contractReferences, contractTableCells, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
-import type { ContractFinding, ContractItem, ContractKind, Verification } from '@spexcode/spec-core/contracts'
+import type { Contract, ContractFinding, ContractItem, ContractKind, Verification } from '@spexcode/spec-core/contracts'
 import type { Applicability, ElaborationCandidate, ElaborationInput, ElaborationTarget, ReadonlySpecRepair } from './elaboration-types.js'
 import { ELABORATION_GENERATION_GUIDANCE } from './elaboration-types.js'
 import { contractBusinessProse } from './contract-evolution.js'
@@ -60,9 +60,31 @@ export function targetHasCurrentChanges(input: ElaborationInput, target: Elabora
   if (input.nodeChanges?.some(change => change.from.nodeId === target.nodeId && change.from.path === target.path)
     || input.authorizedChanges?.some(change => ids.has(change.id))
     || analysis.authorChanges?.some(change => change.nodeId === target.nodeId && change.path === target.path)
+    || input.inheritedAuthoredParentScope?.some(scope => scope.nodeId === target.nodeId && scope.path === target.path)
     || raw !== undefined && raw !== parseParts(target.source)?.rawSource) return true
   return analysis.changes.some(change => [...change.affectedIds, ...change.ruleIds].some(id => ids.has(id))
     || change.paths.some(path => ownerNodesForPath(path, [contract], [{ id: target.nodeId, path: target.path, code: parseRelation(contract.code, 'code').entries }]).has(target.nodeId)))
+}
+
+/** 只承接父义务的目标保留既有验收与无关的需求、规则。 */
+export function protectedInheritedParentItems(input: ElaborationInput, target: ElaborationTarget, original?: Contract): ContractItem[] {
+  const scopes = input.inheritedAuthoredParentScope?.filter(scope => scope.nodeId === target.nodeId && scope.path === target.path)
+  if (!scopes?.length || !target.source || hasTypedCitationRepair(input.readonlySpecRepair)) return []
+  const contract = original ?? parseContract({ ...target, source: target.source }).contract
+  if (!contract) return []
+  const affected = new Set(scopes.flatMap(scope => scope.affectedIds))
+  const obligations = contract.items.filter(item => item.kind === 'REQ' || item.kind === 'RULE')
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const item of obligations) {
+      if (!affected.has(item.id) && contractReferences(item).some(reference => affected.has(reference.id))) {
+        affected.add(item.id)
+        changed = true
+      }
+    }
+  }
+  return contract.items.filter(item => item.kind === 'AC' || (item.kind === 'REQ' || item.kind === 'RULE') && !affected.has(item.id))
 }
 
 /** 只消费已认证独审的结构化affected IDs；外owner仅作证据，未知或缺席绑定不授事实修正权。 */

@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+writer59 只追加 SELECT 1 marker，保护 [[sync-partition-execution]] 的冻结父作者影响承接。升级先停稳并结算旧 writer，保存一致 writer58 online backup 和 Git/CAS 原件。回退使用该备份及配套原件。
+
 writer58 只追加 SELECT 1 marker，保护 [[sync-elaboration]] 的新父接口同候选续审。升级先停稳并结算旧 writer，保存一致 writer57 online backup 和 Git/CAS 原件。回退使用该备份及配套原件。
 
 writer57 只追加 SELECT 1 marker，保护 [[sync-elaboration]] 的 Native 父接口独审提示冻结。升级先停稳并正式结算旧 writer，保存一致 writer56 online backup 和 Git/CAS 原件。回退使用该备份及配套原件。
