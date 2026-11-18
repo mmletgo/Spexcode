@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
 import { elaborationPatchErrors, projectVerificationTable, renderElaboration, withoutVerificationTables } from './elaboration-markdown.js'
 import type { ContractCell, GeneratedElaboration, GeneratedTables } from './elaboration-markdown.js'
 import { elaborationDigest } from './elaboration.js'
 import type { ElaborationInput } from './elaboration-types.js'
+import { captureInputSnapshot } from './snapshot.js'
 
 const path = '.spec/export/export-contract/spec.md'
 const source = readFileSync(new URL('../../test/fixtures/spec-sync/export-repo/' + path, import.meta.url), 'utf8')
@@ -142,7 +146,18 @@ test('只读V1混合引用差量保留原业务正文、AC和可信命令', () =
   assert.ok(elaborationPatchErrors(bareInput, withSource('code:src/other.js#run')).length > 0)
 })
 
-test('只读V1不支持语言仅可重绑已列source行的既有REQ或RULE', () => {
+test('只读V1不支持语言仅可重绑有真实原输入缺席证明的新source行', async t => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'frozen-source-repair-')))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const git = (...args: string[]) => execFileSync('git', ['-C', root, '-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', ...args], { stdio: 'pipe' })
+  git('init', '-b', 'main')
+  git('commit', '--allow-empty', '-m', 'initial author snapshot has no business IDs')
+  const author = await captureInputSnapshot(root)
+  mkdirSync(join(root, '.spec/history/old-owner'), { recursive: true })
+  writeFileSync(join(root, '.spec/history/old-owner/spec.md'), source)
+  git('add', '.')
+  git('commit', '-m', 'a different owner already defines the stable IDs')
+  const otherOwner = await captureInputSnapshot(root)
   const oldSources = new Map([['STEP-EXPORT-02', 'src/greet.sh#L2'], ['STEP-EXPORT-03', 'src/greet.sh#L3']])
   const frozen = source.split('\n').map(line => {
     const id = line.split('|')[1]?.trim() ?? ''
@@ -157,8 +172,16 @@ test('只读V1不支持语言仅可重绑已列source行的既有REQ或RULE', ()
     code: 'anchor-language-unsupported', severity: 'error' as const, nodeId: baseline.nodeId, path,
     itemId, citation: { origin: 'source' as const, ref }, message: '冻结Shell文件没有可信语言解析器',
   }))
-  const repair = { baseInputDigest: ref.sha256, candidateDigest: ref.sha256, generationRef: ref, acceptedRef: ref, changes: [], applicability: [], output: null, review: null, findings }
-  const snapshot: ElaborationInput = { ...input, targets: [{ ...input.targets[0], source: frozen, sourceDigest: elaborationDigest(frozen) }], readonlySpecRepair: repair }
+  const changes = [{ nodeId: baseline.nodeId, path, beforeDigest: null, source: frozen, contentDigest: elaborationDigest(frozen) }]
+  const repair = { baseInputDigest: ref.sha256, candidateDigest: ref.sha256, generationRef: ref, acceptedRef: ref, changes, applicability: [], output: null, review: null, findings }
+  const analysis: NonNullable<ElaborationInput['analysis']>['analysis'] = {
+    version: 'code-behavior-v1', inputId: author.id, composedDigest: author.contentDigest, baselinePairId: null,
+    readSetDigest: ref.sha256, inputDigest: ref.sha256, policyDigest: ref.sha256, reviewPassed: true, traces: [],
+    changes: [], findings: [], facts: [], authorizedChanges: [], nodeChanges: [], resolutions: [],
+    newNodes: [{ nodeId: baseline.nodeId, path, codePath: 'src/greet.sh', rawSource: baseline.rawSource }],
+  }
+  const snapshot: ElaborationInput = { ...input, targets: [{ ...input.targets[0], source: frozen, sourceDigest: elaborationDigest(frozen) }],
+    historyInput: author, analysis: { ref, analysis }, readonlySpecRepair: repair }
   const output = patch(), change = output.changes[0]
   change.tables.STEP = accepted.items.flatMap(item => item.kind === 'STEP' && oldSources.has(item.id) ? [{
     id: item.id, flow: item.flow, action: item.action, input: item.input, output: item.output, rules: item.rules, next: item.next,
@@ -181,6 +204,13 @@ test('只读V1不支持语言仅可重绑已列source行的既有REQ或RULE', ()
     { ...findings[0], itemId: 'STEP-EXPORT-01' },
     { ...findings[0], citation: findings[1].citation },
   ]) assert.ok(elaborationPatchErrors({ ...snapshot, readonlySpecRepair: { ...repair, findings: [finding, findings[1]] } }, output).some(error => error.includes('STEP-EXPORT-02')))
+  for (const unproven of [
+    { ...snapshot, historyInput: undefined },
+    { ...snapshot, analysis: { ref, analysis: { ...analysis, composedDigest: otherOwner.contentDigest } } },
+    { ...snapshot, analysis: { ref, analysis: { ...analysis, newNodes: [] } } },
+    { ...snapshot, readonlySpecRepair: { ...repair, changes: [{ ...changes[0], beforeDigest: elaborationDigest(frozen) }] } },
+    { ...snapshot, historyInput: otherOwner, analysis: { ref, analysis: { ...analysis, inputId: otherOwner.id, composedDigest: otherOwner.contentDigest } } },
+  ]) assert.ok(elaborationPatchErrors(unproven, output).some(error => error.includes('STEP-EXPORT-02')), '不能在缺证、原视图不一致或另一个原owner已有同一稳定ID时改来源类型')
   assert.ok(elaborationPatchErrors(snapshot, withStep({ action: '改写已审动作' })).some(error => error.includes('STEP-EXPORT-02')))
   assert.ok(elaborationPatchErrors(snapshot, { ...output, changes: [{ ...change, tables: { ...change.tables, AC: [{ id: 'AC-EXPORT-01', test: 'tests/other.test.mjs' }], VERIFY: [{ id: 'VERIFY-EXPORT-01', command: ['echo', 'changed'] }] } }] }).filter(error => /#(?:AC|VERIFY)-EXPORT-01/.test(error)).length === 2)
 })

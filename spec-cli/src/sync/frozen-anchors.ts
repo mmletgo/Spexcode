@@ -8,7 +8,7 @@ export type FrozenAnchorEvidence = {
 }
 export type FrozenAnchorResult = { findings: ContractFinding[]; anchors: FrozenAnchorEvidence[] }
 
-export function isUnsupportedSourceCitationFailure(finding: ContractFinding): boolean {
+export function isUnsupportedSourceCitationFailure(finding: ContractFinding): finding is ContractFinding & { itemId: string; citation: { origin: 'source'; ref: string } } {
   return finding.severity === 'error' && finding.code === 'anchor-language-unsupported'
     && finding.citation?.origin === 'source' && Boolean(finding.itemId && finding.citation.ref)
 }

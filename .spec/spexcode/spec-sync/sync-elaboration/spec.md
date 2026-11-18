@@ -84,7 +84,7 @@ P1草稿与旧Native材料在本轮业务schema计算完成后才通过进程内
 
 显式draft-v1的只读V1引用返修沿既有未定义kind分支，把精确引用定位、原candidate/accepted/generation引用及真实baselineSpecPath同时交给生成与独审；重复诊断的归并保留实际路径、引用角色及全部受影响业务行，不把mode=reelaborate误当重新细化授权。baseline只从当前acceptedRef核验的真实owner完整正文复制为只读诊断文件，独审候选overlay不能覆盖它；文件不成为raw、事实、新义务或写权限。Agent依据该正文自行恢复坏草稿中被改写的prose及已接受RULE等业务字段，仅修finding定位的引用，选择冻结源码真实可索引声明或实际存在的related文件，不猜局部变量或调用符号，不顺手改basis、政策、流程/验收和稳定ID。原草稿字节、错误及trace不改写，schema、单一draft写范围、源码/tests对象与absence、契约演进及锚点门保持；candidate_review、partition_seal和旧无草稿请求不取得此V1任务。提示或seed改变不能为旧同attempt reserved请求重签，冷切换须在原请求结算后通过新attempt冻结。
 
-生成和独审共用精确 `anchor-language-unsupported` 的 source 诊断，按 [[elaboration-markdown]] 核对原行的既有 REQ/RULE 支撑与其语义，随后重新独审与完整 V1。
+生成、独审和差量校验按 [[elaboration-markdown]] 共用精确 `anchor-language-unsupported` 新叶行及可换来源列表。旧业务行继续纠正原类型内的代码定位，合格新行可核对所列冻结 REQ/RULE 对原断言的支撑。新结果仍须重新独审与完整 V1。
 
 只读引用返修按本轮冻结的无命名声明文件路径授权文件级代码来源。生成与独审读取同一原文件并核对整文件足以支持该业务项；只允许命中诊断的来源行保留原文件路径。已有命名声明的裸来源按正式诊断补同文件的精确声明。冻结了默认导出提示的新阶段可核对 JS 族真实的本地 `#default`；独审确认导出正文实际支持该断言。已批准的旧返修继续沿原输入和 schema 复验；已提交的同任务旧草稿可作为未批准材料进入新 schema。停止物理材料先核原 seed 的业务 schema 与当前摘要，同 schema 继续精确核对只读覆盖层。
 
