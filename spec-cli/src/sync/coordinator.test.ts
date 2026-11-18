@@ -6970,6 +6970,7 @@ for (const mode of ['format', 'format-restart', 'format-pause', 'format-pause-re
 })
 
 for (const mode of ['live', 'restart', 'precise', 'readset', 'missing-readset', 'selection', 'foreign-operation', 'foreign-provenance', 'raw', 'context', 'authorization', 'policy', 'plan', 'analysis', 'descendants', 'failed', 'unreviewed', 'global-seal'] as const) test(`v2跨attempt承接 ${mode} 已接受父接口的严格边界`, async t => {
+  const precise = ['precise', 'readset', 'selection', 'foreign-provenance'].includes(mode)
   const parentPath = '.spec/project/spec.md', parentId = 'REQ-PARENT-01'
   const raw = '保留当前导出契约，由现有导出服务完成请求及结果下载。'
   const parentBefore = `---\ntitle: 导出上层接口\nstatus: pending\n---\n## raw source\n\n${raw}\n`
@@ -6977,23 +6978,26 @@ for (const mode of ['live', 'restart', 'precise', 'readset', 'missing-readset', 
   const parentSource = `---\ntitle: 导出上层接口\nstatus: active\ncontract-schema: sync-v1\n---\n## raw source\n\n${raw}\n\n## expanded spec\n\n父层声明原意，由现有服务承接。\n\n### REQ\n\n| id | goal | source | constraints | success | depends-on |\n| --- | --- | --- | --- | --- | --- |\n| ${parentId} | 保留现有导出行为 | user:raw | 不改变原政策 | 既有导出流程及验收完成 | - |\n`
   const f = await fixture(t, { maxAttempts: 2, maxCalls: 16, maxRepairs: 1, timeoutMs: 120000 }, false, leafBefore, 'project', original, {
     version: 'sync-coordinator-v2', direction: 'spec_to_code', intentNodeId: 'project',
+    ...(precise ? { agentWorkflow: 'native-worktree-v1' } : {}),
     targets: [{ nodeId: 'project', path: parentPath, rawSource: raw }, { nodeId: 'export-contract', path: contractPath }],
     partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 2 }, sourcePaths: ['src'],
-  }, undefined, 'spec', undefined, ['precise', 'readset', 'selection', 'foreign-provenance'].includes(mode), { [parentPath]: parentBefore })
+  }, undefined, 'spec', precise ? 'claude:default' : undefined, precise, { [parentPath]: parentBefore })
   let store = f.store
   const shouldReuse = ['live', 'restart', 'precise'].includes(mode)
   let firstParentInput: ElaborationInput | undefined
+  let firstNativeParentRequest: ElaborationSessionRequest | undefined
   const calls: { attempt: number; purpose: string; parent: boolean }[] = []
   f.transform((output, request) => {
     const attempt = store.readAttempt(store.readOperation(f.operation.id).currentAttemptId!)
     if (request.purpose.startsWith('elaboration_')) {
-      const frozen = JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as { targets: { path: string }[]; context: { path: string; source: string }[] }
+      const frozen = JSON.parse(request.prompt.split(precise ? '任务:\n' : '冻结业务输入:\n')[1].split('\n')[0]) as { targets: { path: string }[]; context: { path: string; source: string }[] }
       const parent = frozen.targets[0].path === parentPath
       calls.push({ attempt: attempt.number, purpose: request.purpose, parent })
       if (parent && attempt.number > 1 && shouldReuse) throw Object.assign(new Error('已接受父接口不得在叶修复attempt重新生成或独审'), { code: 'unsupported' })
       if (request.purpose === 'elaboration_generate') {
         if (parent) {
-          if (attempt.number === 1) {
+          if (attempt.number === 1 && precise) firstNativeParentRequest = request
+          if (attempt.number === 1 && !precise) {
             const frozen = JSON.parse(request.prompt.split('冻结业务输入:\n')[1].split('\n')[0]) as Omit<ElaborationInput, 'root' | 'base' | 'files' | 'targets'> & { execution: { root: string; base: string }; files: [string, string][]; targets: (ElaborationInput['targets'][number] & { targetIndex: number })[] }
             firstParentInput = { ...frozen, ...frozen.execution, targets: frozen.targets.map(({ targetIndex: _targetIndex, ...target }) => target), files: new Map(frozen.files), requestKey: request.requestKey }
           }
@@ -7002,7 +7006,11 @@ for (const mode of ['live', 'restart', 'precise', 'readset', 'missing-readset', 
           value.applicability = ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: false, basis: '父接口由叶实现各边界', affectedIds: [parentId] }))
           return value
         }
-        assert.ok(frozen.context.find(source => source.path === parentPath)?.source.includes(parentId), '叶必须读取已独审父接口全文')
+        const commonDir = f.input.source.commonDir
+        const settledParentSource = request.worktree
+          ? readObject(commonDir, readTree(commonDir, request.worktree.tree).find(entry => entry.path === parentPath)!.oid).toString('utf8')
+          : frozen.context.find(source => source.path === parentPath)?.source
+        assert.ok(settledParentSource?.includes(parentId), '叶必须读取已独审父接口全文')
         const child = rows(original)
         for (const row of child.changes[0].tables.FLOW) { assert.ok(Array.isArray(row.req)); row.req = [...row.req, parentId] }
         for (const row of child.changes[0].tables.AC) { assert.ok(Array.isArray(row.covers)); row.covers = [...row.covers, parentId] }
@@ -7014,6 +7022,34 @@ for (const mode of ['live', 'restart', 'precise', 'readset', 'missing-readset', 
     if (request.purpose === 'code_review') throw Object.assign(new Error('机制回归在Docker前停止'), { code: 'unsupported' })
     return output
   })
+  if (precise) {
+    const inlineRunner = f.options.runner!
+    f.options.runner = async request => {
+      if (request.purpose === 'code_review') {
+        f.calls.push(request)
+        throw Object.assign(new Error('机制回归在Docker前停止'), { code: 'unsupported' })
+      }
+      const seed = request.worktree!
+      const workspace = join(f.parent, `precise-parent-${contentHash(request.requestKey).slice(0, 16)}`)
+      if (request.purpose === 'code_generate') {
+        f.calls.push(request)
+        f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
+        execFileSync('/usr/bin/git', ['-C', workspace, 'commit', '--allow-empty', '-m', '保留冻结实现'], { stdio: 'pipe' })
+        const attempt = store.readAttempt(store.readOperation(f.operation.id).currentAttemptId!)
+        const dispatch = attempt.dispatchPlans.find(item => item.key === request.requestKey)!
+        const output = { summary: '已正常提交，冻结实现保持' }
+        return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `generation-${request.requestKey}`, turnId: 'turn-1', output, resultDigest: contentHash(JSON.stringify(output)), worktree: nativeWorktreeResult(workspace, seed) }
+      }
+      const produced = await inlineRunner(request.purpose.startsWith('code_behavior_') ? { ...request, prompt: inlineBehaviorPrompt(request, f.input.source.commonDir) } : request)
+      if (/草稿文件=/.test(request.prompt)) {
+        const worktree = committedDraftFixture(f, request, produced.output, workspace)
+        const output = { summary: '已正常提交唯一阶段JSON草稿' }
+        return { ...produced, output, resultDigest: contentHash(JSON.stringify(output)), worktree }
+      }
+      f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
+      return { ...produced, worktree: nativeWorktreeResult(workspace, seed) }
+    }
+  }
   const checkpoint = store.checkpoint.bind(store)
   store.checkpoint = (fence, ref) => {
     const value = JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())
@@ -7040,7 +7076,11 @@ for (const mode of ['live', 'restart', 'precise', 'readset', 'missing-readset', 
       assert.ok(parent, JSON.stringify(issue))
       const prior = JSON.parse(readEvidence(f.input.source.commonDir, parent.resultRef).toString()) as ElaborationResult
       assert.equal(prior.structurePassed, true); assert.equal(prior.reviewPassed, true)
-      assert.equal(freezeElaborationInput(firstParentInput!).inputDigest, prior.inputDigest)
+      if (precise) {
+        assert.ok(firstNativeParentRequest)
+        const { purpose, prompt, schema, worktree, inputDigest } = firstNativeParentRequest
+        assert.equal(contentHash(JSON.stringify({ inputDigest: prior.inputDigest, purpose, prompt, schema, worktree })), inputDigest)
+      } else assert.equal(freezeElaborationInput(firstParentInput!).inputDigest, prior.inputDigest)
       if (!shouldReuse && !['readset', 'missing-readset', 'selection', 'foreign-operation', 'foreign-provenance'].includes(mode)) {
         const changed = structuredClone(firstParentInput!)
         if (mode === 'raw') changed.intent.rawSource += ' 本轮原意变化'
@@ -7091,6 +7131,12 @@ for (const mode of ['live', 'restart', 'precise', 'readset', 'missing-readset', 
     : [[1, 'elaboration_generate'], [1, 'elaboration_review'], [2, 'elaboration_generate'], [2, 'elaboration_review']])
   assert.deepEqual(calls.filter(call => !call.parent).map(call => [call.attempt, call.purpose]), [[1, 'elaboration_generate'], [2, 'elaboration_generate'], [2, 'elaboration_review']])
   const stages = attempts.map(attempt => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())))
+  if (precise) {
+    const analysis = stages[0].find(stage => stage.stage === 'analysis')
+    assert.equal(analysis.guidanceContractVersion, CODE_BEHAVIOR_GUIDANCE_VERSION)
+    assert.deepEqual(stages[1].find(stage => stage.stage === 'analysis').resultRef, analysis.resultRef)
+    assert.deepEqual(attempts[1].dispatchPlans.filter(dispatch => dispatch.purpose.startsWith('code_behavior_')), [])
+  }
   const parentStage = stages[0].find(stage => stage.stage?.startsWith('partition:') && stage.stage.endsWith(':elaboration') && JSON.parse(readEvidence(f.input.source.commonDir, stage.resultRef).toString()).phase === 'interface_seed')
   assert.ok(parentStage)
   const prior = JSON.parse(readEvidence(f.input.source.commonDir, parentStage.resultRef).toString()) as ElaborationResult
