@@ -2186,6 +2186,97 @@ test('P0 v5 在原 v4 草稿即时定位 AC 的未变化只读来源', async t =
   assert.equal(readCodeBehaviorContext(v4Request!, commonDir).errors.length, 0)
 })
 
+for (const mode of ['empty', 'shared'] as const) test(`P0 v6 分区changedPaths按冻结路径自检 ${mode}`, async t => {
+  const f = await fixture(t), prepared = await f.input()
+  const requiredPaths = mode === 'empty' ? [] : ['.spec/export/export-contract/spec.md']
+  const shared = 'tests/export.test.mjs', future = 'src/next step.js'
+  const input: CodeBehaviorInput = {
+    ...prepared, draftProtocol: 'code-behavior-draft-v1', contextTransport: 'git-json-v6', origin: 'spec',
+    partition: { id: 'exact-paths', changedPaths: requiredPaths, factSourcePaths: ['src/export.js'] },
+    plan: { ...prepared.plan, version: 'sync-coordinator-v2', direction: 'spec_to_code', agentWorkflow: 'native-worktree-v1',
+      sourcePaths: ['src'], partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 } },
+  }
+  const preflight = { exactChangedPathsPreflight: true } as const
+  const marked = { ...input, ...preflight }
+  const commonDir = input.snapshot.source.commonDir
+  const change = (paths: string[]) => ({
+    kind: 'refactor', paths, affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '导出结果与原规则一致',
+    previousBehavior: '返回既有导出结果', sourceBehavior: '保留导出结果', deliveryBehavior: '相同导出结果',
+    evidence: '复核导出规则和原测试', counterexample: '重复导出不能重复发布',
+  })
+  const good = { changes: requiredPaths.map(path => change([path])), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+  const bad = { ...good, changes: [...good.changes, change([shared, future]), change([shared])] }
+  const checkedGroups = { missingChangedPaths: [], missingOwnerPaths: [], invalidAcceptanceBasis: [] }
+  const stop = new Error('仅读取未标记的历史 v6 请求')
+  let history: { request: ElaborationSessionRequest; schema: Buffer } | undefined
+  let checkpoint: CodeBehaviorContinuation | null = null
+  const checkpoints = { load: () => checkpoint, save: (value: CodeBehaviorContinuation) => { checkpoint = structuredClone(value) } }
+  const calls: string[] = []
+  const dispatch: ElaborationRunner = async request => {
+    calls.push(request.purpose)
+    const seed = request.worktree!, workspace = join(f.root, '..', `exact-paths-${calls.length}`)
+    git(f.root, 'worktree', 'add', '--detach', workspace, seed.baseCommit)
+    const draft = /草稿文件=([^\s；]+)/.exec(request.prompt)![1]
+    const schemaPath = draft.replace(/\.json$/, '.schema.json')
+    const schema = readFileSync(join(workspace, schemaPath))
+    const context = readCodeBehaviorContext(request, commonDir)
+    assert.deepEqual(context.task.requiredChangedPaths, requiredPaths)
+    let output: unknown
+    if (request.purpose === 'code_behavior_analyze') {
+      const check = /\nnode - (\S+) (\S+) <<'SPEX_P0_COVERAGE'\n([\s\S]+?)\nSPEX_P0_COVERAGE(?:\n|$)/.exec(request.prompt)
+      assert.ok(check)
+      assert.equal(check[2], draft)
+      const sidecar = readFileSync(join(workspace, check[1]))
+      const originalOID = checkpoints.load()?.drafts.code_behavior_analyze?.oid
+      if (originalOID) assert.equal(git(workspace, 'rev-parse', `HEAD:${draft}`), originalOID)
+      const run = (proposal: typeof good, status: number) => {
+        const bytes = JSON.stringify(proposal)
+        writeFileSync(join(workspace, draft), bytes)
+        const checked = spawnSync(process.execPath, ['-', check[1], check[2]], { cwd: workspace, input: check[3], encoding: 'utf8' })
+        assert.equal(checked.status, status, `冻结范围=${JSON.stringify(requiredPaths)} stdout=${checked.stdout} stderr=${checked.stderr}`)
+        assert.equal(readFileSync(join(workspace, draft), 'utf8'), bytes)
+        assert.deepEqual(readFileSync(join(workspace, check[1])), sidecar)
+        assert.deepEqual(readFileSync(join(workspace, schemaPath)), schema)
+        return JSON.parse(checked.stdout) as typeof checkedGroups & { invalidChangedPaths?: string[] }
+      }
+      if (!history) {
+        assert.doesNotMatch(request.prompt, /invalidChangedPaths/)
+        assert.deepEqual(run(bad, 0), checkedGroups)
+        history = { request, schema }
+        throw stop
+      }
+      assert.equal(request.inputDigest, history.request.inputDigest)
+      assert.deepEqual(schema, history.schema)
+      assert.equal(behaviorMaterialTaskMatches(history.request, request, commonDir), true)
+      const { invalidChangedPaths, ...groups } = run(bad, 1)
+      assert.deepEqual(groups, checkedGroups)
+      assert.deepEqual(invalidChangedPaths?.sort(), [future, shared])
+      assert.deepEqual(run(good, 0), { ...checkedGroups, invalidChangedPaths: [] })
+      if (mode === 'empty') assert.match(request.prompt, /changes["']?:\s*\[\]/)
+      output = originalOID ? good : bad
+    } else {
+      assert.equal(request.inputDigest, history!.request.inputDigest)
+      assert.doesNotMatch(request.prompt, /invalidChangedPaths|SPEX_P0_COVERAGE/)
+      assert.match(request.prompt, /SPEX_P0_REVIEW_PATHS/)
+      const pending = context.pendingAnalysis!
+      output = { inputDigest: request.inputDigest, analysisDigest: pending.analysisDigest, verdict: 'accept', checkedPaths: requiredPaths, checkedChangeIds: pending.analysis.changes.map(item => item.id), findings: [] }
+    }
+    writeFileSync(join(workspace, draft), JSON.stringify(output))
+    git(workspace, 'add', draft); git(workspace, 'commit', '-m', '提交唯一阶段JSON草稿')
+    const receipt = { summary: '已提交阶段JSON草稿' }
+    return { sessionId: `path-session-${calls.length}`, threadId: `path-thread-${calls.length}`, turnId: 'turn', output: receipt, resultDigest: contentHash(JSON.stringify(receipt)), worktree: nativeWorktreeResult(workspace, seed) }
+  }
+  await assert.rejects(analyzeCodeBehavior(input, dispatch), stop)
+  await assert.rejects(analyzeCodeBehavior(marked, dispatch, undefined, checkpoints), { code: 'behavior_analysis_invalid', message: 'P0 行为校验未通过' })
+  const failedDraft = checkpoints.load()!.drafts.code_behavior_analyze!
+  assert.equal(readStageDraft(commonDir, failedDraft, failedDraft), JSON.stringify(bad))
+  const accepted = await analyzeCodeBehavior(marked, dispatch, undefined, checkpoints)
+  assert.equal(accepted.reviewPassed, true)
+  assert.deepEqual(accepted.changes.flatMap(item => item.paths), requiredPaths)
+  assert.deepEqual(calls, ['code_behavior_analyze', 'code_behavior_analyze', 'code_behavior_analyze', 'code_behavior_review'])
+  assert.equal(readStageDraft(commonDir, failedDraft, failedDraft), JSON.stringify(bad))
+})
+
 test('AC复合门禁逐项诊断未变规则与不绑定来源，不把多个allowed_change并集授权', async t => {
   const f = await fixture(t); writeFileSync(join(f.root, 'src/export.js'), `${f.source}\n// result count extension\n`)
   const input = await f.input(), source = 'code:src/export.js#ExportService.dispatch'
