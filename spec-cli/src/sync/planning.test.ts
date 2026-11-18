@@ -258,6 +258,41 @@ test('initial code_to_spec 以显式sourcePaths读取Shell与其他实现文件�
   assert.deepEqual(phpPlan.targets, [{ nodeId: 'export-contract', path: specA }])
 })
 
+test('正常规划以scalar、目录和glob的冻结owner排除sourcePaths内已治理源码', async t => {
+  const f = await fixture(t), sourcePath = 'src/other.js', unexpected: string[] = []
+  f.config.sourcePaths = ['src']; f.config.readPaths = []; f.configure()
+  for (const owner of [
+    { kind: 'scalar', rows: ['code: src/other.js'] },
+    { kind: 'directory', rows: ['code:', '  - src'] },
+    { kind: 'glob', rows: ['code:', '  - src/*.js'] },
+  ]) {
+    const lines = readFileSync(join(f.root, specB), 'utf8').split('\n')
+    const index = lines.findIndex(line => /^code:\s*/.test(line))
+    assert.notEqual(index, -1, lines.slice(0, 12).join('\n'))
+    let end = index + 1
+    while (lines[index].trim() === 'code:' && lines[end]?.trimStart().startsWith('- ')) end++
+    lines.splice(index, end - index, ...owner.rows)
+    writeFileSync(join(f.root, specB), lines.join('\n'))
+    const snapshot = await captureInputSnapshot(f.root)
+    const plan = await buildSyncApplicationPlan(snapshot, 'export-contract')
+    assert.ok(plan.readPaths.includes('src/export.js'))
+    assert.deepEqual(plan.targets.map(target => target.nodeId), ['export-contract'])
+    assert.ok(!plan.targets.some(target => target.nodeId === 'other-contract'))
+    if (plan.readPaths.includes(sourcePath)) unexpected.push(`${owner.kind}:${sourcePath}`)
+  }
+  assert.deepEqual(unexpected, [], '已冻结owner的文件不得因sourcePaths目录自动再读入')
+})
+
+test('源码发现仅纳入普通UTF-8文件且先排除宿主私有路径', async t => {
+  const f = await fixture(t)
+  f.config.sourcePaths = ['src']; f.config.readPaths = []; f.configure()
+  writeFileSync(join(f.root, 'src/.env'), '')
+  writeFileSync(join(f.root, 'src/archive.bin'), Buffer.from([0, 0xff]))
+  const plan = await buildSyncApplicationPlan(await captureInputSnapshot(f.root), 'export-contract')
+  assert.ok(plan.readPaths.includes('src/export.js'))
+  assert.deepEqual({ privatePath: plan.readPaths.includes('src/.env'), binaryPath: plan.readPaths.includes('src/archive.bin') }, { privatePath: false, binaryPath: false })
+})
+
 test('真实store旧政策防删owner规避：整个A节点/VERIFY删除后退役仍保原命令和oracle', async t => {
   const f = await fixture(t), baseline = await settleBaseline(t, f.parent, f.source, f.delivery)
   rmSync(join(f.root, specA))
