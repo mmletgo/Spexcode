@@ -80,6 +80,8 @@ Grok 完整 P1 细化若在成功终态后逾期退出并正式失败，未 rese
 
 P0 只在本次 attempt 尚无阶段检查点和 code_behavior saved/reserved 派发时冻结 git-json-v6。已冻结的 git-json-v1/v2/v3/v4/v5、缺席字段及原请求保持精确恢复，未知传输在派发前拒绝。新运输沿 v2 正文和失败状态策略以及 [[sync-code-behavior]] 的只读自检，并在分析自检定位非 user:raw 验收变更的未变化只读来源；新 v6 另冻结真实方向并向分析和独审共享作者当前意图规则。新指导重新分析与独审，旧请求、原草稿及原批准对象保持。已审 wrapper 的指导从程序 analysis 原字段读取，历史字段缺席保持 v7；原 v8 字段不补签为当前 v9。真实草稿、审查结果、source/tests 保护及资源结算仍依原门核验。
 
+新 P0 attempt 在首次冻结原 behavior-draft-protocol 时登记 exactChangedPathsPreflight，启用 [[sync-code-behavior]] 的分区分析越界路径自检。已冻结协议或已有 saved/reserved 派发时沿原冻结值，历史缺席保持。该标记只改变新分区分析请求的自检提示，原任务、草稿 schema、业务摘要和独审继续沿原绑定，重新派发的同 owner 可接续已认证原草稿。[[sync-migrations]] writer56 保护提示冻结。
+
 显式 retryOf 只沿正式已结算祖先复用通过独审的局部 P0。冻结来源、输入、原意、计划、读集、业务基线、组合及局部 schema 和范围均一致时，认证原分析与独审、Git 原件和旧模型绑定，保存来源和原 resultRef。新操作只派发未批准分区，允许选择不同模型。原 attempt、调用、草稿及独审不补签。更早祖先因新准入被替代时，仍须重新核对已终结 attempt、活租约、资源和 journal 的结算。当前重新装配完整 P0；P1 仅分析资格及候选续验回到原操作复验该批准，全部当前封口和验证继续执行。
 
 正式 retryOf 同样可保留尚未完成全图 P1 时已经独审 accept 的完整叶与父接口分区。沿既有已结算失败、取消及正式 superseded 祖先核对冻结计划、source、readSet、业务 selection、scope、组合树和完整局部输入；父接口分类及父子上下文必须相同。批准仍由原模型的实际生成与独立只读审查、完整请求摘要和 Git 草稿证明，原物理工作树已回收时从保活对象冷读。只保存原 resultRef 与真实来源，未批准 owner 使用本次模型继续；当前 schema、正文渲染及全图 seal 仍须重新核验。同 owner 较新的候选拒绝、错误或只读返修诊断阻止回退旧 accept，未采纳 settled 重验不得跨过去继承旧批准。历史字段、旧请求、调用及失败结论保持。
