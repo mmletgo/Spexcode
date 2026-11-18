@@ -3,11 +3,12 @@ import { loadSpecs, parseCodeEntry, parseRelation, relationClaimsPath } from '@s
 import { contractImpact, contractReferences, parseContract, parseFrontmatter } from '@spexcode/spec-core/contracts'
 import type { SyncCoordinatorPlan, SyncDirection } from './coordinator-types.js'
 import type { BaselinePair, BaselineResource, FrozenBaselineSelection, InputSnapshot, SyncScope } from './operation-types.js'
-import { adoptedDeliveryPaths, selectedRetiredIds, verifyBaselineSelection } from './composition.js'
+import { adoptedDeliveryPaths, isUtf8Text, selectedRetiredIds, verifyBaselineSelection } from './composition.js'
 import { isSyncSpecPath, readFrozenContracts } from './frozen-contracts.js'
 import { readEvidence, readObjectBatch, readTree, verifySnapshot, type TreeEntry } from './snapshot.js'
 import { controlledDecisionIdentity } from './request-input.js'
 import { readDecisionAuthority } from './code-behavior.js'
+import { isHostPrivatePath } from './candidate.js'
 import type { CodeBehaviorAnalysis, SyncDecisionInput } from './writeback-types.js'
 import { coveredPath, readSyncSettings, SyncApplicationError } from './settings.js'
 import { ownerNodesForPath } from './governance-owners.js'
@@ -15,15 +16,28 @@ import { ownedObligationPaths } from './prior-context.js'
 
 /** 授权范围只枚举实际未治理源码；当前及真实交付治理均排除，发现不授予归属或执行范围。 */
 export function discoverSyncSourcePaths(snapshot: InputSnapshot, sourcePaths: readonly string[], governanceFiles: Iterable<string>): string[] {
-  return discoverSourcePaths(verifySnapshot(snapshot), sourcePaths, governanceFiles)
+  const governanceNodes = [...governanceFiles].map((text, index) => discoveryGovernanceNode(`governance-${index}`, text))
+  return discoverSourcePaths(snapshot.source.commonDir, verifySnapshot(snapshot), sourcePaths, [], governanceNodes)
 }
 
-function discoverSourcePaths(entries: readonly TreeEntry[], sourcePaths: readonly string[], governanceFiles: Iterable<string>): string[] {
-  const governed = new Set([...governanceFiles].flatMap(text => {
-    const code = parseFrontmatter(text).fm.code
-    return Array.isArray(code) ? code.filter((anchor): anchor is string => typeof anchor === 'string').map(anchor => posix.normalize(anchor.split('#')[0])) : []
-  }))
-  return entries.filter(entry => entry.mode !== '120000' && coveredPath(entry.path, sourcePaths) && /\.(?:[cm]?[jt]sx?|py|go|rs|java|rb)$/.test(entry.path) && !/\.(?:test|spec)\./.test(entry.path) && !governed.has(entry.path)).map(entry => entry.path).sort()
+function discoveryGovernanceNode(id: string, text: string, path = '') {
+  const rawCode = parseFrontmatter(text).fm.code
+  const code = typeof rawCode === 'string' ? [rawCode] : Array.isArray(rawCode) ? rawCode.filter((entry): entry is string => typeof entry === 'string') : []
+  return { id, path, code: parseRelation(code, 'code').entries }
+}
+
+function discoverSourcePaths(
+  commonDir: string,
+  entries: readonly TreeEntry[],
+  sourcePaths: readonly string[],
+  contracts: Parameters<typeof ownerNodesForPath>[1],
+  governanceNodes: Parameters<typeof ownerNodesForPath>[2],
+): string[] {
+  const readable = entries.filter(entry => entry.mode !== '120000' && !isHostPrivatePath(entry.path)
+    && coveredPath(entry.path, sourcePaths) && !/\.(?:test|spec)\./.test(entry.path)
+    && ownerNodesForPath(entry.path, contracts, governanceNodes).size === 0)
+  const bytes = readObjectBatch(commonDir, readable.map(entry => entry.oid))
+  return readable.filter(entry => isUtf8Text(bytes.get(entry.oid)!)).map(entry => entry.path).sort()
 }
 
 export type SyncPlanningOptions = { discoverySelection?: FrozenBaselineSelection; direction?: SyncDirection; commitTrigger?: { before: InputSnapshot | null; paths: readonly string[] } }
@@ -116,10 +130,7 @@ async function buildPlan(snapshot: InputSnapshot, nodeId: string, baseline: Base
   const intent = currentIntent ?? nodes.find(node => previousIntent && (oldFrozen.contracts.find(contract => contract.nodeId === previousIntent.id)?.items.some(item => frozen.contracts.find(contract => contract.nodeId === node.id)?.items.some(next => next.id === item.id)) || previousIntent.rawSource === node.parts?.rawSource)) ?? nodes.filter(node => previousIntent && previousIntent.path.startsWith(`${posix.dirname(node.path)}/`) && node.parts?.rawSource).sort((a, b) => b.path.length - a.path.length)[0] ?? previousIntent
   if (!intent) throw new SyncApplicationError('sync_node_unknown', `不存在 Spec 节点 ${nodeId}`, 404)
   const views = [frozen, oldFrozen, ...protectedGraphs]
-  const governanceNodes = views.flatMap(view => view.nodes.map(node => {
-    const code = parseFrontmatter(view.files.get(node.path)!).fm.code
-    return { ...node, code: parseRelation(Array.isArray(code) ? code.filter((entry): entry is string => typeof entry === 'string') : [], 'code').entries }
-  }))
+  const governanceNodes = views.flatMap(view => view.nodes.map(node => discoveryGovernanceNode(node.id, view.files.get(node.path)!, node.path)))
   const readinessSelection = options.discoverySelection
   const readinessPairs = new Map((readinessSelection?.bindings ?? []).flatMap(binding => { const pair = 'bytePair' in binding ? binding.bytePair : binding.intentPair; return pair ? [[pair.id, pair] as const] : [] }))
   const adopted = new Map([...readinessPairs.values()].map(pair => [pair.id, before ? reads.adopted(before, pair) : new Set<string>()]))
@@ -221,8 +232,9 @@ async function buildPlan(snapshot: InputSnapshot, nodeId: string, baseline: Base
     const entry = reads.snapshot(binding.bytePair.verifiedDelivery).byPath.get(binding.resource.path)
     return entry && entry.mode !== '120000' ? [reads.specText(entry)] : []
   })
-  const discoveryGovernance = [...files.values(), ...oldFiles.values(), ...discoveryOwnerFiles]
-  const discoveryPaths = [...new Set([entries, ...beforeTree ? [beforeTree.entries] : []].flatMap(input => discoverSourcePaths(input, settings.sourcePaths, discoveryGovernance)))].filter(path => !before || options.commitTrigger!.paths.includes(path))
+  const discoveryNodes = [...governanceNodes, ...discoveryOwnerFiles.map((text, index) => discoveryGovernanceNode(`discovery-owner-${index}`, text))]
+  const discoveryContracts = views.flatMap(view => view.contracts)
+  const discoveryPaths = [...new Set([entries, ...beforeTree ? [beforeTree.entries] : []].flatMap(input => discoverSourcePaths(snapshot.source.commonDir, input, settings.sourcePaths, discoveryContracts, discoveryNodes)))].filter(path => !before || options.commitTrigger!.paths.includes(path))
   const executionScope: SyncScope = { paths: [...new Set([...targets.map(target => target.path), ...priorTargets.map(target => target.path), ...[...codePaths, ...impact.testPaths].filter(path => coveredPath(path, writable) && !settings.mandatoryTests.some(test => test.testPath === path))])].sort(), contractIds: [...selectedContractIds].filter(id => !graphs.some(graph => graph.items.get(id)?.kind === 'FLOW')).sort(), flowIds: [...selectedContractIds].filter(id => graphs.some(graph => graph.items.get(id)?.kind === 'FLOW')).sort() }
   const initialDiscovery = options.direction === 'code_to_spec' && !before && pairs.length === 0 && readinessPairs.size === 0
   return {

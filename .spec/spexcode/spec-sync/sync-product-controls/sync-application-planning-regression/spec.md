@@ -37,3 +37,5 @@ raw-only冷启动即使没有AC.test，也把settings.testPaths内的现有pytes
 行为输入接缝从完整runner request还原body-entry-v2正文，正文可位于独立或必读共享entry；规划输出、原授权范围、requiredChangedPaths与完整引用字节继续逐项核对，不用运输元数据替代业务覆盖。
 
 真实Git提交回归证明，只有完整 settled baseline 的真实delivery已由 before HEAD 采纳、且完整 discovery selection 为相关bootstrap Spec及业务ID提供精确头、治理路径另有原精确头或严格只读验证证明时，单叶源码提交才能只规划其真实owners及共享/contract依赖影响闭包。三轮 freeze 保留同一完整 discovery selection；即使完整 BaselinePair 存在，只要discovery selection缺少某一精确Spec/业务ID binding仍须回到全树；未写源码的缺binding/null不能被误当业务ID缺失。首次、before缺失、未完成/未采纳基线、根意图变更和未治理源码提交保持完整纳管；move/delete 使用真实 before owner 与旧原意，不能漏差量或把失败 admission 当成已消费。
+
+源码角色发现回归通过正式 `buildSyncApplicationPlan` 入口验证：将冻结 Spec 的 `code` 声明分别设为scalar、目录和glob，三者均通过共享的规范化路径归属判定排除已治理源码，且不把独立 B 纳入目标。空 `.env` 与二进制 `archive.bin` fixture 验证私有路径及非UTF-8对象均不进入 `readPaths`，普通 UTF-8 源码仍可读取。
