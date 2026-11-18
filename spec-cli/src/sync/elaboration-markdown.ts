@@ -1,11 +1,13 @@
 import { parseCodeEntry, parseRelation } from '@spexcode/spec-core'
 import { ownerNodesForPath } from './governance-owners.js'
-import { CONTRACT_COLUMNS, contractTableCells, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
+import { CONTRACT_COLUMNS, contractReferences, contractTableCells, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
 import type { ContractFinding, ContractItem, ContractKind, Verification } from '@spexcode/spec-core/contracts'
 import type { Applicability, ElaborationCandidate, ElaborationInput, ElaborationTarget, ReadonlySpecRepair } from './elaboration-types.js'
 import { ELABORATION_GENERATION_GUIDANCE } from './elaboration-types.js'
 import { contractBusinessProse } from './contract-evolution.js'
-import { readTree } from './snapshot.js'
+import { isUnsupportedSourceCitationFailure } from './frozen-anchors.js'
+import { isSyncSpecPath } from './frozen-contracts.js'
+import { readObjectBatch, readTree, verifySnapshot } from './snapshot.js'
 
 export type ContractCell = string | string[] | boolean | number | null
 export type GeneratedTables = Record<ContractKind, Record<string, ContractCell>[]>
@@ -126,6 +128,48 @@ export function elaborationPatchErrors(input: ElaborationInput, generated: Gener
   }).concat(readonlyCitationPatchErrors(input, generated))
 }
 
+/** 在同一原作者/组合视图中证明新叶和业务行缺席，沿用已审P0、P1输入身份。 */
+export function readonlyNewSourceRebindings(input: ElaborationInput): { finding: ContractFinding; sources: string[] }[] {
+  const repair = input.readonlySpecRepair, original = input.historyInput, analysis = input.analysis?.analysis
+  if (!hasTypedCitationRepair(repair) || !original || !analysis?.reviewPassed
+    || analysis.inputId !== original.id || analysis.composedDigest !== original.contentDigest) return []
+  const eligible = repair.findings.flatMap(finding => {
+    if (!isUnsupportedSourceCitationFailure(finding)
+      || !analysis.newNodes.some(node => node.nodeId === finding.nodeId && node.path === finding.path)) return []
+    const change = repair.changes.find(change => change.nodeId === finding.nodeId && change.path === finding.path)
+    const target = input.targets.find(target => target.nodeId === finding.nodeId && target.path === finding.path)
+    if (!change || change.beforeDigest !== null || target?.source !== change.source) return []
+    const item = parseContract(change).contract?.items.find(item => item.id === finding.itemId)
+    if (!item || item.kind === 'VERIFY' || item.source.kind !== 'code') return []
+    const source = parseCodeEntry(item.source.ref)
+    return finding.citation.ref === (source.anchor ? `${source.path}#${source.anchor}` : item.source.ref) ? [{ finding, item }] : []
+  })
+  if (!eligible.length) return []
+  const entries = verifySnapshot(original).filter(entry => isSyncSpecPath(entry.path))
+  const paths = new Set(entries.map(entry => entry.path))
+  const appearing = eligible.filter(({ finding }) => !paths.has(finding.path))
+  if (!appearing.length || entries.some(entry => entry.mode === '120000')) return []
+  const objects = readObjectBatch(original.source.commonDir, entries.map(entry => entry.oid))
+  const priorIds = new Set<string>()
+  for (const entry of entries) {
+    const parsed = parseContract({ nodeId: entry.path, path: entry.path, source: objects.get(entry.oid)!.toString('utf8') })
+    if (parsed.findings.some(finding => finding.severity === 'error')) return []
+    for (const item of parsed.contract?.items ?? []) priorIds.add(item.id)
+  }
+  const supportKinds = new Map([...input.targets, ...input.context ?? []].flatMap(source => source.source
+    ? parseContract({ ...source, source: source.source }).contract?.items.map(item => [item.id, item.kind] as const) ?? [] : []))
+  return appearing.flatMap(({ finding, item }) => {
+    if (priorIds.has(finding.itemId)) return []
+    const sources = contractReferences(item).filter(reference => reference.field === 'depends-on').flatMap(({ id }) => {
+      const kind = supportKinds.get(id)
+      if (kind === 'RULE') return [`rule:${id}`, `derived:${id}`]
+      if (kind === 'REQ') return [`user:${id}`, `derived:${id}`]
+      return []
+    })
+    return sources.length ? [{ finding, sources }] : []
+  })
+}
+
 /** 原P1正文仍是权威；只接受精确V1引用差量，未提供的行由既有渲染器保留。 */
 function readonlyCitationPatchErrors(input: ElaborationInput, generated: GeneratedElaboration): string[] {
   const repair = input.readonlySpecRepair
@@ -133,6 +177,7 @@ function readonlyCitationPatchErrors(input: ElaborationInput, generated: Generat
   const applicability = (items: readonly Applicability[]): string => JSON.stringify(items.map(({ boundary, applies, basis, affectedIds }) => [boundary, applies, basis, affectedIds]))
   if (!repair.applicability || applicability(generated.applicability) !== applicability(repair.applicability)) return ['V1引用返修必须保留原已审适用性及关联ID']
   let inventory: Set<string> | undefined
+  let rebindings: ReturnType<typeof readonlyNewSourceRebindings> | undefined
   const isFrozenFile = (path: string): boolean => {
     if (input.files?.has(path)) return true
     if (!input.worktree || !input.historyInput) return false
@@ -167,12 +212,16 @@ function readonlyCitationPatchErrors(input: ElaborationInput, generated: Generat
     for (const relation of ['code', 'related'] as const)
       if (node[relation].length !== contract[relation].length || contract[relation].some((ref, index) => !citationChange(relation, ref, node[relation][index])))
         errors.push(`${node.path}: V1引用返修只能将所列 ${relation} 引用逐项修复为相同粒度的冻结路径或声明`)
+    const sourceChange = (item: Exclude<ContractItem, Verification>, after: string): boolean => {
+      if (after.startsWith('code:')) return citationChange('source', item.source.ref, after.slice('code:'.length), item.id)
+      rebindings ??= readonlyNewSourceRebindings(input)
+      return rebindings.some(({ finding, sources }) => issues.includes(finding) && finding.itemId === item.id && sources.includes(after))
+    }
     for (const [kind, rows] of Object.entries(node.tables)) for (const row of rows) {
       const item = contract.items.find(item => item.kind === kind && item.id === row.id)
       const old = item && contractRow(item)
       if (!item || !old || Object.entries(old).some(([column, value]) => JSON.stringify(value) !== JSON.stringify(row[column]) && !(column === 'source'
-        && item.kind !== 'VERIFY' && item.source.kind === 'code' && typeof row.source === 'string' && row.source.startsWith('code:')
-        && citationChange('source', item.source.ref, row.source.slice('code:'.length), item.id))))
+        && item.kind !== 'VERIFY' && item.source.kind === 'code' && typeof row.source === 'string' && sourceChange(item, row.source))))
         errors.push(`${node.path}#${row.id}: V1引用返修只允许修复该行所列代码来源，保留其余字段`)
     }
     return errors
