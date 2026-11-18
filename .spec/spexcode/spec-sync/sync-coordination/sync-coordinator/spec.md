@@ -176,6 +176,8 @@ P1 已审结构结果登记所有未来业务 ID，包括 GAP/partial FLOW；rea
 
 同一operation的局部纯父接口已通过结构校验及独立accept时，后代失败的新attempt只可承接较早已终结attempt的该interface_seed原件。原stage读取仍严格绑定所属attempt；专用承接须核同operation/input/policy、精确readSet/基线选择、完整partitionBinding及当前局部输入的唯一freezeElaborationInput摘要全部相同，且seed无failure、phase/status正确并保有独审accept。新interface_seed checkpoint即使没有基线选择也记录真实readSetDigest；缺失该绑定的旧局部原件不能跨attempt承接。失败/未审seed、旧全局seal及其他operation不取得局部承接权；在当前fence登记原resultRef及fromAttempt provenance，原review/traces不改写。所有子区继续读取已审接口，最终strict全局seal及V1–V4仍重做；局部证据不是raw、作者事实或全局批准。
 
+新 Native attempt 的 P1 协议一并冻结 `draftRepairDisposition`。完整叶在正式恢复已有草稿时沿 [[sync-elaboration]] 投影程序已允许的后续实现诊断。已有协议及已预留派发继续按原冻结提示恢复。
+
 新 Native spec_to_code attempt 的 P1 协议冻结 `propagateAuthoredParentScope`，由 [[sync-partition-execution]] 在实际独审完成后逐叶派生影响证明。已冻结历史请求按原协议恢复；同一候选的正式续审沿原已审 P1 的政策重建，不将新资格补签给旧候选。
 
 首次保存新 Native `elaboration-draft-protocol` 时冻结 `parentInterfaceReview: scope-v2`。旧 `true` 或缺字段仍按原冻结请求恢复。纯父接口沿新协议续审时，只在原分区、业务输入、候选、schema、Git、Native 生成及只读独审完整身份与已结算资源逐值闭合时承接。原独审必须全部为规范实现发现且正式错误全部为父层绑定拒绝。原只读树如有拒稿附件，只能沿同候选原 Native 失败认证的精确材料复核。后续真实生成派发挡住原候选承接。完整叶、旧批准和最终门沿原件证明。

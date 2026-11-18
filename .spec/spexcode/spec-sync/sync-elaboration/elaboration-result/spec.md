@@ -29,6 +29,8 @@ partitioned_final的analysisOnlyPartitions仅在存在无写义务的已审P0分
 
 draft.errors保留每项原finding的code/message及实际存在的severity、nodeId、path、line、itemId、relatedIds；原生运行失败可仅有code/message，不补造缺席定位。既有较短历史错误不回写，已认证repairDiagnostics.round的完整findings作为新请求诊断另行传递，不能借此升级旧批准或原始需求。 新attempt可据原失败诊断和当前冻结登记派生 [[sync-elaboration]] 的局部共享VERIFY位置提示，提示只影响新请求摘要，不进入原草稿、诊断或业务输入摘要。
 
+可选 `draftRepairDisposition` 冻结 [[sync-elaboration]] 的 Native 完整叶冷续稿诊断角色。`deferToImplementation` 仅匹配冷验原候选的独审前结构 finding，`deferredImplementationPolicy` 说明该角色；二者仅进入新生成请求，不进入业务输入摘要、Git 稿、持久 finding 或批准。
+
 可选 `sharedDraftDiagnostics` 只选择 [[sync-elaboration]] 的提示投影。两组原诊断继续保存在各自对象中，若同序原值完全相等，提示可共用一份内容。业务输入摘要、原失败记录、候选和独审资格保持。
 
 可选 `parentInterfaceReview` 选择 [[sync-elaboration]] 的 Native 纯父接口独审提示。历史 `true` 重放原字节，新 attempt 选择 `scope-v2`。业务输入与候选摘要保持。Native 实际请求摘要绑定冻结提示和独审诊断。认证已完成原独审的 `settledReview.kind` 只用于当次输入前重建，其完整原报告、拒绝和原件引用沿原诊断持久化。
