@@ -9207,8 +9207,8 @@ for (const transport of ['git-json-v5', 'git-json-v6'] as const) test(`P0已审w
   const wrapper = readSyncCheckpoints(f.store, f.store.readOperation(f.operation.id), f.store.readAttempt(claimed.attempt.id)).json.map(({ value }) => value as { stage?: string; resultRef: { sha256: string }; guidanceContractVersion?: string }).find(value => value.stage === 'analysis')!
   const analysis = JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString()) as { reviewPassed: boolean; guidanceContractVersion?: string }
   assert.equal(analysis.reviewPassed, true)
-  assert.equal(wrapper.guidanceContractVersion, transport === 'git-json-v6' ? 'code-behavior-guidance-v8' : 'code-behavior-guidance-v7', 'wrapper必须从原analysis取指导，不能按当前writer版本补签')
-  assert.equal(analysis.guidanceContractVersion, transport === 'git-json-v6' ? 'code-behavior-guidance-v8' : undefined, '旧analysis字段缺席保持')
+  assert.equal(wrapper.guidanceContractVersion, transport === 'git-json-v6' ? CODE_BEHAVIOR_GUIDANCE_VERSION : 'code-behavior-guidance-v7', 'wrapper必须从原analysis取指导，不能按当前writer版本补签')
+  assert.equal(analysis.guidanceContractVersion, transport === 'git-json-v6' ? CODE_BEHAVIOR_GUIDANCE_VERSION : undefined, '旧analysis字段缺席保持')
 })
 
 for (const frozen of ['new', 'v1', 'v2-reserved', 'v3-reserved', 'v4-reserved', 'v5-reserved', 'legacy-checkpoint', 'reserved', 'null', 'empty', 'future'] as const) test(`P0 context传输只在首次冻结选择，${frozen}保留旧字段缺席与请求绑定`, async t => {

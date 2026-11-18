@@ -33,7 +33,7 @@ export function codeBehaviorReviewSchema(inputDigest: string, analysisDigest: st
   return schema
 }
 export type CodeBehaviorApprovalBinding = { analysisSchemaDigest: string; changedPaths: readonly string[] }
-export const CODE_BEHAVIOR_GUIDANCE_VERSION = 'code-behavior-guidance-v8'
+export const CODE_BEHAVIOR_GUIDANCE_VERSION = 'code-behavior-guidance-v9'
 export const LEGACY_CODE_BEHAVIOR_GUIDANCE_VERSION = 'code-behavior-guidance-v7'
 export const CODE_BEHAVIOR_FAILURE_STATUS = 'P0 行为校验未通过'
 export const CODE_BEHAVIOR_DRAFT_COMMIT_MISSING = 'behavior_draft_commit_missing'
@@ -374,7 +374,9 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   const readonlyCodeToSpec = input.plan.version === 'sync-coordinator-v2' && input.plan.direction === 'code_to_spec' && input.plan.sourcePaths !== undefined
   const sourceRole = (path: string): boolean => input.plan.sourcePaths === undefined || within(path, input.plan.sourcePaths)
   const sourceMap = new Map(source)
-  const requiresOwnership = (path: string): boolean => !path.startsWith('.spec/') && sourceMap.has(path) && /\.(?:[cm]?[jt]sx?|py|go|rs|java|rb)$/.test(path) && !/\.(?:test|spec)\./.test(path) && sourceRole(path) && !knownCode.has(path)
+  const requiresOwnership = (path: string): boolean => !path.startsWith('.spec/') && sourceMap.has(path)
+    && (input.plan.sourcePaths !== undefined || /\.(?:[cm]?[jt]sx?|py|go|rs|java|rb)$/.test(path))
+    && !/\.(?:test|spec)\./.test(path) && sourceRole(path) && !knownCode.has(path)
   const ungoverned = source.filter(([path]) => requiresOwnership(path) && (readonlyCodeToSpec || within(path, input.plan.writePaths)) && (!input.partition || input.partition.changedPaths.includes(path))).map(([path]) => path)
   const authorEntries = new Map(frozenTreeRead(input, oldTree, frozenTreeReads, trees).entries.map(entry => [entry.path, { ...entry }]))
   const deliveryTree = input.baseline?.verifiedDelivery.immutableTree ?? oldTree

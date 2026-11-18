@@ -1832,6 +1832,74 @@ test('冻结source角色只发现业务根，纯测试helper可读且旧计划�
   }), error => error === stopped)
 })
 
+test('显式source角色完整治理已提交源码，不按文件扩展名缩减归属', async t => {
+  for (const partitioned of [false, true]) await t.test(`partition=${partitioned}`, async sub => {
+    const sources = {
+      'src/run.sh': '#!/bin/sh\nexit 0\n',
+      'src/core.c': 'int run(void) { return 0; }\n',
+      'src/migration.sql': 'select 1;\n',
+      'src/launcher': '#!/usr/bin/env python3\nprint(1)\n',
+    }
+    const paths = Object.keys(sources).sort()
+    const f = await fixture(sub, undefined, {
+      ...sources,
+      'tests/support.py': 'def fixture_value():\n    return 1\n',
+    })
+    const before = await f.input()
+    const input: CodeBehaviorInput = {
+      ...before,
+      baseline: null,
+      composed: composeInputSnapshots(before.snapshot, null).composed!,
+      plan: {
+        ...before.plan,
+        version: 'sync-coordinator-v2',
+        direction: 'code_to_spec',
+        partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 },
+        sourcePaths: paths,
+        writePaths: ['.spec/export/export-contract'],
+      },
+      ...(partitioned ? {
+        partition: {
+          id: 'explicit-source-role',
+          changedPaths: paths,
+          factSourcePaths: paths,
+        },
+      } : {}),
+    }
+    await assert.rejects(analyzeCodeBehavior(input, runner('refactor')), (error: Error) => {
+      const diagnostic = JSON.parse(error.message) as { details: { missingCodePaths: string[]; missingCodePathCount: number } }
+      assert.deepEqual(diagnostic.details.missingCodePaths, paths)
+      assert.equal(diagnostic.details.missingCodePathCount, paths.length)
+      return true
+    })
+    const complete = runner('refactor', proposal => {
+      proposal.newNodes = paths.map(codePath => ({
+        codePath,
+        parentNodeId: 'export-contract',
+        basis: '导出功能的现有入口由原始需求下的治理叶承接',
+      }))
+    })
+    const analysis = await analyzeCodeBehavior(input, async request => {
+      const context = readFrozenBehaviorContext<{ requiredChangedPaths: string[]; unownedSourcePaths: string[] }>(request)
+      assert.deepEqual(context.requiredChangedPaths, paths)
+      assert.deepEqual(context.unownedSourcePaths, paths)
+      if (request.purpose === 'code_behavior_analyze') {
+        const schema = (request.schema.properties as { newNodes: { items: { properties: { codePath: { enum: string[] } } } } }).newNodes
+        assert.deepEqual(schema.items.properties.codePath.enum, paths)
+      }
+      return complete(request)
+    })
+    assert.equal(analysis.reviewPassed, true)
+    assert.deepEqual(analysis.newNodes.map(node => node.codePath), paths)
+    const captured = new Error('legacy ownership input captured')
+    await assert.rejects(analyzeCodeBehavior(before, async request => {
+      const context = readFrozenBehaviorContext<{ unownedSourcePaths: string[] }>(request)
+      assert.deepEqual(context.unownedSourcePaths, ['tests/support.py'])
+      throw captured
+    }), error => error === captured)
+  })
+})
+
 test('真实测试改动仍经分析和独审，不要求创建业务治理叶', async t => {
   const f = await fixture(t), path = 'tests/support.py'
   writeFileSync(join(f.root, path), 'def fixture_value():\n    return 1\n'); git(f.root, 'add', path); git(f.root, 'commit', '-m', 'seed test helper')
