@@ -9619,14 +9619,15 @@ for (const transport of ['git-json-v5', 'git-json-v6'] as const) test(`P0已审w
   assert.equal(analysis.guidanceContractVersion, transport === 'git-json-v6' ? CODE_BEHAVIOR_GUIDANCE_VERSION : undefined, '旧analysis字段缺席保持')
 })
 
-for (const frozen of ['new', 'v1', 'v2-reserved', 'v3-reserved', 'v4-reserved', 'v5-reserved', 'legacy-checkpoint', 'reserved', 'null', 'empty', 'future'] as const) test(`P0 context传输只在首次冻结选择，${frozen}保留旧字段缺席与请求绑定`, async t => {
+for (const frozen of ['new', 'v1', 'v2-reserved', 'v3-reserved', 'v4-reserved', 'v5-reserved', 'v6-reserved', 'legacy-checkpoint', 'reserved', 'null', 'empty', 'future'] as const) test(`P0 context传输只在首次冻结选择，${frozen}保留旧字段缺席与请求绑定`, async t => {
   const f = await fixture(t, { maxAttempts: 1, maxCalls: 8, maxRepairs: 0, timeoutMs: 120_000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, 'code', 'claude:default')
   const claim = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30_000, expectedMessageId: f.operation.dispatchMessageId })
   let originalProtocol: { ref: { sha256: string }; bytes: Buffer } | undefined
   const rejectsTransport = ['null', 'empty', 'future'].includes(frozen)
-  const expectedTransport = frozen === 'new' ? 'git-json-v6' : frozen === 'v1' ? 'git-json-v1' : frozen === 'v2-reserved' ? 'git-json-v2' : frozen === 'v3-reserved' ? 'git-json-v3' : frozen === 'v4-reserved' ? 'git-json-v4' : frozen === 'v5-reserved' ? 'git-json-v5' : undefined
-  const protocolValue = { version: 'code-behavior-draft-v1', ...(expectedTransport ? { contextTransport: expectedTransport } : rejectsTransport ? { contextTransport: frozen === 'null' ? null : frozen === 'empty' ? '' : 'git-json-future' } : {}) }
-  if (frozen === 'legacy-checkpoint' || frozen === 'v1' || frozen === 'v2-reserved' || frozen === 'v3-reserved' || frozen === 'v4-reserved' || frozen === 'v5-reserved' || rejectsTransport) {
+  const v6 = frozen === 'new' || frozen === 'v6-reserved'
+  const expectedTransport = v6 ? 'git-json-v6' : frozen === 'v1' ? 'git-json-v1' : frozen === 'v2-reserved' ? 'git-json-v2' : frozen === 'v3-reserved' ? 'git-json-v3' : frozen === 'v4-reserved' ? 'git-json-v4' : frozen === 'v5-reserved' ? 'git-json-v5' : undefined
+  const protocolValue = { version: 'code-behavior-draft-v1', ...(expectedTransport ? { contextTransport: expectedTransport } : rejectsTransport ? { contextTransport: frozen === 'null' ? null : frozen === 'empty' ? '' : 'git-json-future' } : {}), ...(frozen === 'new' ? { exactChangedPathsPreflight: true } : {}) }
+  if (frozen !== 'new' && (expectedTransport || frozen === 'legacy-checkpoint' || rejectsTransport)) {
     const value = protocolValue, resultRef = writeEvidence(f.input.source.commonDir, value)
     const ref = writeEvidence(f.input.source.commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: claim.attempt.id, inputId: f.input.id, policyDigest: f.operation.policyDigest, stage: 'behavior-draft-protocol', resultRef })
     f.store.checkpoint(claim.fence, { ...ref, artifacts: syncCheckpointArtifacts(value, resultRef) })
@@ -9639,10 +9640,11 @@ for (const frozen of ['new', 'v1', 'v2-reserved', 'v3-reserved', 'v4-reserved', 
     captured = true
     const task = JSON.parse(request.prompt.split('\n任务:\n')[1].split('\n草稿文件=')[0])
     assert.equal(task.contextTransport, expectedTransport)
-    assert.equal(request.prompt.includes('SPEX_P0_COVERAGE'), frozen === 'new' || frozen === 'v3-reserved' || frozen === 'v4-reserved' || frozen === 'v5-reserved')
-    assert.equal(request.prompt.includes('invalidAcceptanceBasis'), frozen === 'new' || frozen === 'v5-reserved')
-    assert.equal(request.prompt.includes('当前作者意图：'), frozen === 'new')
-    assert.equal(readCodeBehaviorContext(request, f.input.source.commonDir).task.direction, frozen === 'new' ? null : undefined)
+    assert.equal(request.prompt.includes('SPEX_P0_COVERAGE'), v6 || frozen === 'v3-reserved' || frozen === 'v4-reserved' || frozen === 'v5-reserved')
+    assert.equal(request.prompt.includes('invalidAcceptanceBasis'), v6 || frozen === 'v5-reserved')
+    assert.equal(request.prompt.includes('当前作者意图：'), v6)
+    assert.doesNotMatch(request.prompt, /invalidChangedPaths/, '非分区任务保留原自检')
+    assert.equal(readCodeBehaviorContext(request, f.input.source.commonDir).task.direction, v6 ? null : undefined)
     assert.equal(request.worktree!.mode, frozen === 'reserved' ? 'read' : 'edit')
     const contexts = readTree(f.input.source.commonDir, request.worktree!.tree).filter(entry => entry.path.endsWith('.context.json'))
     assert.equal(contexts.length, expectedTransport ? 1 : 0)
