@@ -104,6 +104,8 @@ P1草稿与旧Native材料在本轮业务schema计算完成后才通过进程内
 
 历史未启用草稿协议的同owner已结算原生格式/schema失败可通过既有repairDiagnostics传递round.rejectedOutput完整文本及原文ref/SHA，提示明确untrusted prior failed output。原生边界先认证final与停止，资源桥再核原请求；本轮call重核请求摘要/schema/purpose/身份后才保诊断。它不是业务输出、候选、raw/facts或批准，所有JSON/schema/引用/业务/独审门不变，旧缺席不补。
 
+同一 operation 经 [[sync-coordinator]] 显式恢复已结算的 ZCode provider 独审失败时，沿既有只续审接缝重新核验原 Git 草稿、业务 JSON、渲染候选、原生成追踪和当前只读 seed/schema。新会话须独立于原生成和失败审查。原失败回执不作为 review 输出，候选必须经新独审才获得批准。
+
 当前native-worktree操作的新P1草稿生成使用[[sync-stage-worktree]]的真实edit seed，独审仍使用真实只读seed，允许按需读取完整仓库。生成seed为原composed加已审祖先接口；独审seed另覆盖本轮渲染的完整Spec候选及真实move/retire。提示只给相关Spec路径、targetIndex/首次必建indices、真实raw差量、事实、技术范围/不可改oracle、精确授权与失败诊断，schema仍规范业务行；不重复完整树或强制逐字读取运输。程序按实际seed对象补足契约引用验证所需代码/测试，不把files投影当读取权限。完整业务输入、实际seed/tree及prompt/schema参与摘要；原raw/ID/演进/全图seal、独审与预算门均保留。下文受限frozen读取说明仅用于无worktree的历史操作与旧单测。
 
 首次P1原生草稿协议登记且没有既有P1派发时，本attempt的`elaboration-draft-protocol`冻结`generationGuidance`。`ac-test-binding-v1`仅在完整生成提示说明`AC.test`使用仓库相对测试路径#稳定用例ID，引用现有测试必须读取其真实声明并核对用例覆盖本条断言。裸路径、pytest `::`等框架选择器、自然语言后缀、伪造ID或无关测试均不得作为绑定。`AC.command`引用可信登记中实际执行该用例的VERIFY-ID。包装测试须有真实稳定ID且执行确实覆盖本条断言，套件登记本身不构成绑定。code→spec的源码及全部测试保持只读，缺失证据仍由现有校验门阻断。

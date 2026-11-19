@@ -98,6 +98,8 @@ P1权限/绑定非法的独审沿[[sync-elaboration]]现有同owner repairDiagno
 
 同一operation的P1已通过结构但未获得独审输出，若原独审因 ZCode `session/events` 超时或 Grok 超过原生退出观察期限并正式结算，现有 repairDiagnostics 只重开独审。单体及分区均冷验原检查点、完整冻结输入、组合树、readSet与selection；分区同时核原计划及owner。原Native生成请求、summary及Git草稿须精确绑定同一候选。失败独审须有原只读请求、canonical 失败及逐值匹配的正式 removed 和停止原件。ZCode 核已启动的精确 session/thread/turn。Grok 核原未发布的 session、正式派发、原生启动和停止原件、归档的原只读种子，thread/turn 保持缺席。原失败保留，当前fence只沿现有provenance引用原resultRef。全局失败记录前暂停时，恢复须有同owner局部原件及同样完整的结算证明。较新生成派发或不同生成来源阻止旧候选优先，同一生成的只读续审被暂停仍可续审。其他方法超时、生成失败、业务repair、未知停止及跨operation按原准入处理。当前独审仍使用冻结提示政策，原请求和检查点无需补字段。
 
+ZCode 已结算的 provider 拒绝保留原 `unsupported` 结论。操作员显式暂停再恢复同一 operation 后，结构通过且尚未审定的 P1 Git 候选可沿同一接缝只续独审。除原失败派发、canonical 会话、removed/stop 和候选冻结绑定外，必须由 [[zcode-structured-runtime]] 冷验原只读终态归因。原件缺失或身份、结算、候选绑定失配时以 `review_retry_binding` 停在新派发前。新独审绑定同一候选、控制范围和模型，原失败、请求、Git 稿及生成追踪保持。此路径不获得自动重试、跨 operation 或切换模型资格。
+
 P1的whole缓存沿[[sync-elaboration]]同时核身份与当前owner范围。分区whole不直接继承ready，必须回原local input逐owner核缓存资格并重新严格seal；单体的当前saved与历史accepted入口均须消费资格结果。scope失效只放弃当前ready复用，优先沿既有草稿来源，必要时用已冷验缓存末轮Git稿继续，不丢JSON或改原reviewPassed/trace/ref，重新生成及独审后才保存新结果。
 
 最终分区独审的程序字段格式失败沿现有reviewRepair续审同一候选。旧Native completed而程序曾接受的无效定位也只在原dispatch、request/input、plan、candidate、输出digest/trace及removed终态完整认证后作为未批准材料读取；不改旧status/resultDigest，不伪造rejectedOutput或Native失败。待处理只读发现必须先取得合法位置，格式错误先续该review组，已accept兄弟按原完整输入及原件严格复用；新稿校验通过的真实repair再回原唯一P1。缺原件、身份/候选失配、未知/重复affectedIds或错误path/ID不得因草稿续修扩大业务权限。原失败请求冷重建及已accept组来源重验从既有aggregate的p2SpecWritePaths恢复同一瞬态写范围，再调用共享请求构造接缝，不将可写owner套入只读定位约束。复用同一stage-worktree临时稿与现有refs，无DB版本或持久字段变更。

@@ -49,7 +49,7 @@ import { assertFrozenBinding, readFrozenManifest, readFrozenRange } from '../fro
 import { verifyStructuredFrozenReadProof } from '../structured-frozen-evidence.js'
 import { assertClaudeStoppedDraftSource, isClaudeFailedAnalysisDraftSource, observeClaudeStoppedWorktreeFailure } from '../claude-structured.js'
 import { assertGrokUnpublishedExitSource, GROK_NATIVE_EXIT_DEADLINE_FAILURE, isGrokNativeExitFailure } from '../grok-structured.js'
-import { assertZCodeStoppedDraftSource, isZCodeEventsRpcTimeout, type ZCodeStructuredExecution } from '../zcode-structured.js'
+import { assertZCodeSettledProviderReview, assertZCodeStoppedDraftSource, isZCodeEventsRpcTimeout, type ZCodeStructuredExecution } from '../zcode-structured.js'
 import { NATIVE_PERIODIC_OBSERVATION_FAILURE, NATIVE_PROCESS_OBSERVATION_PENDING, nativeWorktreePrompt, nativeWorktreeResult } from '../native-worktree-runtime.js'
 import { readRecord } from '../session-record.js'
 import { structuredExecutionPolicy, StructuredSessionError } from '../session-structured-policy.js'
@@ -439,9 +439,11 @@ function assertGrokArchiveTree(commonDir: string, sessionId: string, headCommit:
 }
 
 function settledElaborationReview(store: SyncStore, operation: SyncOperation, prior: SyncAttempt, ownerKey: string, result: SavedElaboration, round: ElaborationResult['rounds'][number], failure: NonNullable<ElaborationResult['failure']>): ElaborationRepairDiagnostics['settledReview'] {
-  if (result.status !== 'failed' || !result.structurePassed || result.reviewPassed || !round.draft || !round.candidate || round.review !== null || round.reviewOutput !== null) return
+  const providerReview = result.status === 'unsupported'
+  if ((!providerReview && result.status !== 'failed') || !result.structurePassed || result.reviewPassed || !round.draft || !round.candidate || round.review !== null || round.reviewOutput !== null) return
   const rejection = round.rejectedOutput, grokExit = !rejection && isGrokNativeExitFailure(failure)
-  if (rejection ? !reviewFormatRepairCodes.has(failure.code) || rejection.purpose !== 'elaboration_review' || !rejection.ref || rejection.ownerRequestKey !== ownerKey || rejection.ownerInputDigest !== result.inputDigest : !grokExit && (failure.code !== 'native_rpc_timeout' || !isZCodeEventsRpcTimeout({ state: 'failed', errorCode: failure.code, error: failure.message }))) return
+  if (providerReview && (rejection || failure.code !== 'unsupported')) return
+  if (!providerReview && (rejection ? !reviewFormatRepairCodes.has(failure.code) || rejection.purpose !== 'elaboration_review' || !rejection.ref || rejection.ownerRequestKey !== ownerKey || rejection.ownerInputDigest !== result.inputDigest : !grokExit && (failure.code !== 'native_rpc_timeout' || !isZCodeEventsRpcTimeout({ state: 'failed', errorCode: failure.code, error: failure.message })))) return
   const key = `${ownerKey}:${round.index}:elaboration_review`
   const resource = store.findResource(prior.id, key)
   if (!resource || resource.phase !== 'removed' || prior.dispatchPlans.some(dispatch => store.findResource(prior.id, dispatch.key)?.phase !== 'removed')) fail('review_retry_binding', '独审失败缺少原正式资源及结算证明')
@@ -473,7 +475,7 @@ function settledElaborationReview(store: SyncStore, operation: SyncOperation, pr
     ? state.state === 'failed' && (request.model?.startsWith('zcode:') && record.harness === 'zcode' || request.model?.startsWith('claude:') && record.harness === 'claude'
       || request.model?.startsWith('grok:') && record.harness === 'grok-structured' && state.grokNative?.sessionId === session.threadId && state.grokNative?.turnId === session.turnId
       || request.model?.startsWith('cursor:') && record.harness === 'cursor-structured' && state.cursorNative?.sessionId === session.threadId && state.cursorNative?.requestId === session.turnId)
-    : request.model?.startsWith('zcode:') && isZCodeEventsRpcTimeout(state) && record.harness === 'zcode' && state.zcodeNative?.sessionId === session.threadId && state.zcodeNative.turnId === session.turnId && !state.rejectedOutput)
+    : request.model?.startsWith('zcode:') && (providerReview ? request.model === operation.model : isZCodeEventsRpcTimeout(state)) && record.harness === 'zcode' && state.zcodeNative?.sessionId === session.threadId && state.zcodeNative.turnId === session.turnId && !state.rejectedOutput)
   const publishedIdentity = checkpoint.nativeStarted && !!session.threadId && !!session.turnId
   if (resource.attemptId !== prior.id || resource.generation !== prior.generation || plan.schemaVersion !== 1 || checkpoint.schemaVersion !== 1
     || request.purpose !== 'elaboration_review' || request.worktree?.mode !== 'read' || request.frozenContext || !transportMatches || request.inputDigest !== elaborationNativeInputDigest(result.inputDigest, request)
@@ -483,6 +485,7 @@ function settledElaborationReview(store: SyncStore, operation: SyncOperation, pr
     || canonical(prior.dispatchPlans.find(dispatch => dispatch.key === key)?.session) !== canonical(session)
     || canonical(checkpoint.failure) !== canonical({ code: failure.code, message: failure.message, ...(rejection ? { rejectedOutput: checkpoint.failure?.rejectedOutput } : {}), ...(failedWorktree ? { failedWorktree } : {}) })
     || record.harnessSessionId !== session.threadId || state.resultWorktree || state.output !== undefined || state.resultDigest !== undefined) fail('review_retry_binding', '独审失败缺少同owner原只读请求及精确已结算的Native失败身份')
+  if (providerReview) assertZCodeSettledProviderReview(record.session, nativeWorktreePrompt(request.prompt, request.worktree), state as ZCodeStructuredExecution, record.worktreePath)
   const generation = elaborationGenerationSource(store, operation, prior, round)
   const generationOwner = generation && ownerKey.replace(`sync:${prior.id}:`, `sync:${generation.attempt.id}:`)
   if (!generation?.request || !generation.key.startsWith(`${generationOwner}:`) || generation.request.inputDigest !== elaborationNativeInputDigest(result.inputDigest, generation.request)
@@ -2695,19 +2698,30 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number).reverse()) {
           if (!['failed', 'superseded', 'settled'].includes(prior.status)) return null
           const saved = stage<SavedElaboration>(store, operation, prior, key)
+          const providerReview = !newerGeneration && operation.model?.startsWith('zcode:') && prior.status === 'superseded'
+            && prior.failure?.kind === 'unsupported' && prior.failure.code === 'unsupported' && saved?.status === 'unsupported'
+            && saved.structurePassed && !saved.reviewPassed && saved.phase !== 'partitioned_final'
           const source = binding ? partitionElaborationStage(store, operation, prior, key, binding, inputDigest) : partitionStage<SavedElaboration>(store, operation, prior, key)
+          if (providerReview && (!source || saved.inputDigest !== inputDigest || !priorElaborationInputMatches(prior, binding)))
+            fail('review_retry_binding', 'ZCode 原独审失败不匹配当前冻结输入或owner')
           if (saved && (!source || saved.inputDigest !== inputDigest || saved.phase === 'partitioned_final' || saved.reviewPassed)) return null
           const failure = source?.result.failure, round = source?.result.rounds.at(-1), requestKey = `sync:${prior.id}:${ownerSuffix}`
           if (!newerGeneration && source && round && failure
             && (!carriedGenerations.size || carriedGenerations.size === 1 && carriedGenerations.has(canonical(round.traces.find(trace => trace.purpose === 'elaboration_generate'))))
-            && (prior.failure?.kind === 'repairable' || prior.status === 'superseded' && !prior.failure)
-            && (failure.code === 'native_rpc_timeout' || reviewFormatRepairCodes.has(failure.code) || isGrokNativeExitFailure(failure)) && priorElaborationInputMatches(prior, binding)) {
-            const settledReview = settledElaborationReview(store, operation, prior, requestKey, source.result, round, failure)
+            && (providerReview || (prior.failure?.kind === 'repairable' || prior.status === 'superseded' && !prior.failure)
+              && (failure.code === 'native_rpc_timeout' || reviewFormatRepairCodes.has(failure.code) || isGrokNativeExitFailure(failure)) && priorElaborationInputMatches(prior, binding))) {
+            let settledReview: ElaborationRepairDiagnostics['settledReview']
+            try { settledReview = settledElaborationReview(store, operation, prior, requestKey, source.result, round, failure) }
+            catch (error) {
+              if (!providerReview || error instanceof SyncCoordinatorError && error.code === 'review_retry_binding') throw error
+              fail('review_retry_binding', 'ZCode 原独审失败缺少精确只读派发、Git候选或已结算Native原件')
+            }
             if (settledReview) {
               saveStage(store, fence!, `${key}:repair-diagnostics-provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef })
               return { requestKey, inputDigest, resultRef: source.resultRef, failure, round, settledReview }
             }
           }
+          if (providerReview) fail('review_retry_binding', 'ZCode 原独审失败没有可认证的同候选结构及审查身份')
           const errors = round?.findings.filter(issue => issue.severity === 'error') ?? []
           const paused = prior.status === 'superseded' && !prior.failure
           const interruptedPartition = !!binding && ['failed', 'superseded'].includes(prior.status)
