@@ -2710,11 +2710,14 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           }
           const errors = round?.findings.filter(issue => issue.severity === 'error') ?? []
           const paused = prior.status === 'superseded' && !prior.failure
-          const pausedScopeFailure = paused && errors.length > 0 && errors.every(issue => issue.code === 'review_scope' || issue.code === 'review_binding')
+          const interruptedPartition = !!binding && ['failed', 'superseded'].includes(prior.status)
+            && prior.failure?.code === 'cancellation_pending' && prior.failure.kind === 'unsupported'
+            && (!carriedGenerations.size || carriedGenerations.size === 1 && carriedGenerations.has(canonical(round?.traces.find(trace => trace.purpose === 'elaboration_generate'))))
+          const scopeFailure = (paused || interruptedPartition) && errors.length > 0 && errors.every(issue => issue.code === 'review_scope' || issue.code === 'review_binding')
           const parentBindingFailure = parentReviewScope && (paused || prior.failure?.kind === 'repairable')
             && (!carriedGenerations.size || carriedGenerations.size === 1 && carriedGenerations.has(canonical(round?.traces.find(trace => trace.purpose === 'elaboration_generate'))))
             && isParentInterfaceImplementationReviewRejection(round?.review, errors)
-          if (!newerGeneration && source && round?.draft && failure && (pausedScopeFailure || parentBindingFailure)
+          if (!newerGeneration && source && round?.draft && failure && (scopeFailure || parentBindingFailure)
             && source.result.structurePassed && priorElaborationInputMatches(prior, binding)
             && !store.listResources(prior.id).some(resource => resource.phase !== 'removed')) {
             const scope = frozenAnalysisScope.getStore()!
@@ -2726,6 +2729,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
             const trace = round.traces.find(trace => trace.purpose === 'elaboration_review'), request = review?.request
             if (!round.review || !review?.result || !trace || trace.sessionId !== review.result.sessionId || trace.threadId !== review.result.threadId
               || trace.turnId !== review.result.turnId || trace.resultDigest !== review.result.resultDigest
+              || interruptedPartition && request?.worktree?.mode !== 'read'
               || canonical(round.reviewOutput) !== canonical(review.result.output)
               || request && (trace.inputDigest !== request.inputDigest || request.inputDigest !== elaborationNativeInputDigest(inputDigest, request)
                 || request.model !== model || request.root !== operation.input.source.canonicalRoot || request.base !== request.worktree?.baseCommit))
