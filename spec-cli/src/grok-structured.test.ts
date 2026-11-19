@@ -17,7 +17,7 @@ const sha256 = (text: string): string => createHash('sha256').update(text).diges
 
 type Scenario = 'success' | 'wrong-session' | 'wrong-cwd' | 'missing-request' | 'duplicate-terminal' | 'missing-terminal' | 'wrong-format' | 'bad-schema' | 'hang' | 'read' | 'periodic' | 'split-settlement-window' | 'cancel-during-settlement' | 'inherited-stdout' | 'inherited-stdout-trailing' | 'parent-awaits-owned-child' | 'parent-restarts-owned-child' | 'natural-child-shutdown' | 'short-lived-terminal-parent' | 'unowned-stdout' | 'terminal-exit-timeout' | 'terminal-timeout-unowned-stdout'
 
-function fixture(t: TestContext, scenario: Scenario, model = 'grok:default', purpose = 'grok-fixture') {
+function fixture(t: TestContext, scenario: Scenario, model = 'grok:default', purpose = 'grok-fixture', stderrChunks: readonly string[] = []) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'spex-grok-fixture-')))
   const bin = join(root, 'bin'), cli = join(bin, 'grok'), source = join(root, 'source'), workspace = join(root, 'workspace')
   const realm = join(root, 'realm'), sessionRoot = join(realm, 'dispatch'), started = join(sessionRoot, 'fixture-started.json')
@@ -149,7 +149,18 @@ if (scenario === 'split-settlement-window' || scenario === 'cancel-during-settle
     clearInterval(poll)
     finish()
   }, 20)
-} else if (scenario !== 'hang') finish()
+} else if (scenario !== 'hang') {
+  const chunks = ${JSON.stringify(stderrChunks)}
+  function writeStderr(index) {
+    if (index < chunks.length) {
+      process.stderr.write(chunks[index], () => setTimeout(writeStderr, 10, index + 1))
+      return
+    }
+    if (scenario === 'missing-terminal' && chunks.length) process.exitCode = 1
+    finish()
+  }
+  writeStderr(0)
+}
 `, { mode: 0o700 })
 
   const prompt = nativeWorktreePrompt('保留原始输入\n\n第二行 \t ', worktree)
@@ -236,12 +247,13 @@ test('Grok default uses native config, explicit alias bytes are preserved and bl
 })
 
 test('Grok runs once in the exact worktree and replays original result and stop evidence after close', async t => {
-  const f = fixture(t, 'success')
+  const f = fixture(t, 'success', 'grok:default', 'grok-fixture', ['HTTP 429: usage balance exhausted\n'])
   const warn = t.mock.method(console, 'warn', () => {})
   const result = await f.run()
   assert.deepEqual(result, { threadId: f.state().grokNative?.sessionId, turnId: f.requestId, text: finalText })
   assert.deepEqual(JSON.parse(readFileSync(join(f.sessionRoot, 'settlement.json'), 'utf8')).exit, { code: 0, signal: null })
   assert.equal(warn.mock.callCount(), 0)
+  assert.equal(existsSync(join(f.sessionRoot, 'missing-terminal-diagnostic.json')), false)
   assert.equal(f.state().grokNative?.turnId, f.requestId)
   const invocation = JSON.parse(readFileSync(f.started, 'utf8')) as { args: string[]; prompt: string }
   assert.deepEqual(invocation.args, ['--cwd', f.workspace, '--session-id', result.threadId, '--prompt-file', join(f.sessionRoot, 'prompt.txt'), '--output-format', 'streaming-json', '--permission-mode', 'bypassPermissions'])
@@ -530,6 +542,43 @@ for (const scenario of ['wrong-session', 'wrong-cwd', 'missing-request', 'duplic
     assert.equal(existsSync(join(f.sessionRoot, 'settlement.json')), false)
     await assert.rejects(f.run(f.state(), replayCallbacks), { code: 'cancellation_pending' })
     assert.deepEqual(await stopGrokStructuredTurn(f.state()), { nativeStopped: true, acknowledged: false, nativeStatus: 'stopped' })
+  })
+}
+
+for (const [label, chunks, statuses, exhausted, oversizedLine] of [
+  ['empty', [], [], false, false],
+  ['split HTTP and quota evidence', ['Error: HT', 'TP 429: usage balance exhausted\n', 'Authorization: Bearer FAKE_SECRET_CANARY\n', 'HTTP/1.1 503 Service Unavailable\r\n'], [429, 503], true, false],
+  ['oversized and credential-shaped lines', ['x'.repeat(12_000) + ' HTTP 429\n', 'Authorization: Bearer FAKE_SECRET_CANARY HTTP 429\n', 'Error: usage balance exhausted? no\n', 'HTTP status: 402'], [402], false, true],
+] as const) {
+  test(`Grok records safe missing-terminal stderr diagnostics for ${label}`, async t => {
+    const f = fixture(t, 'missing-terminal', 'grok:default', 'grok-fixture', chunks)
+    await assert.rejects(f.run(), { code: 'cancellation_pending', message: 'Grok native stream closed without its original terminal' })
+    const root = f.sessionRoot
+    const read = (name: string): string => readFileSync(join(root, name), 'utf8')
+    const observedStop = read('process-stop-observations.jsonl').trimEnd().split('\n').at(-1)!
+    assert.equal(JSON.parse(observedStop).nativeStopped, true)
+    const saved = read('missing-terminal-diagnostic.json')
+    assert.ok(!/Authorization|FAKE_SECRET_CANARY/.test(saved))
+    assert.deepEqual(JSON.parse(saved), {
+      version: 1,
+      launchDigest: sha256(read('launch.json')),
+      planDigest: sha256(read('plan.json')),
+      stopDigest: sha256(observedStop),
+      exit: { code: chunks.length ? 1 : 0, signal: null },
+      stderr: {
+        bytes: Buffer.byteLength(chunks.join('')),
+        sha256: sha256(chunks.join('')),
+        ended: true,
+        oversizedLine,
+        readError: false,
+        httpStatuses: statuses,
+        usageBalanceExhausted: exhausted,
+      },
+    })
+    assert.equal(statSync(join(root, 'missing-terminal-diagnostic.json')).mode & 0o777, 0o400)
+    assert.equal(f.state().turnId, undefined)
+    assert.equal(existsSync(join(root, 'result.json')), false)
+    assert.equal(existsSync(join(root, 'settlement.json')), false)
   })
 }
 
