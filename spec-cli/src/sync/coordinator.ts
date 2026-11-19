@@ -2713,9 +2713,11 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
             let settledReview: ElaborationRepairDiagnostics['settledReview']
             try { settledReview = settledElaborationReview(store, operation, prior, requestKey, source.result, round, failure) }
             catch (error) {
-              const code = (error as NodeJS.ErrnoException | null)?.code
+              const { code, syscall } = (error as NodeJS.ErrnoException | null) ?? {}
+              const evidenceReadError = (syscall === 'open' || syscall === 'read')
+                && ['ENOENT', 'ENOTDIR', 'EISDIR', 'EACCES', 'EPERM', 'EIO', 'ELOOP'].includes(code ?? '')
               const evidenceError = error instanceof SyntaxError || error instanceof StructuredSessionError && error.code === 'stale_result'
-                || ['checkpoint_artifact_binding', 'evidence_blob_missing', 'evidence_blob_mismatch', 'ENOENT', 'ENOTDIR', 'EISDIR', 'EACCES', 'EPERM', 'EIO', 'ELOOP'].includes(code ?? '')
+                || ['checkpoint_artifact_binding', 'evidence_blob_missing', 'evidence_blob_mismatch'].includes(code ?? '') || evidenceReadError
               if (!providerReview || !evidenceError) throw error
               fail('review_retry_binding', 'ZCode 原独审失败缺少精确只读派发、Git候选或已结算Native原件')
             }

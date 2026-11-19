@@ -7851,7 +7851,7 @@ for (const witness of ['missing', 'canonical', 'attachment'] as const) test(`P1�
   assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
 
-for (const tamper of ['none', 'attribution', 'turn', 'stop', 'source', 'unrelated', 'bad-json', 'bad-shape', 'missing', 'program-error', 'cas-missing', 'cas-mismatch', 'cold-provenance', 'cold-reserved'] as const) test(`P1已结算ZCode provider独审失败仅显式恢复同Git候选 tamper=${tamper}`, async t => {
+for (const tamper of ['none', 'attribution', 'turn', 'stop', 'source', 'unrelated', 'bad-json', 'bad-shape', 'missing', 'program-error', 'bare-errno', 'git-errno', 'cas-missing', 'cas-mismatch', 'cold-provenance', 'cold-reserved'] as const) test(`P1已结算ZCode provider独审失败仅显式恢复同Git候选 tamper=${tamper}`, async t => {
   const parentPath = '.spec/project/spec.md', parentId = 'REQ-PARENT-01'
   const raw = '重复导出请求必须保留首次结果，具体下载由子叶实现。'
   const parent = `---\ntitle: 导出上层接口\nstatus: pending\n---\n## raw source\n\n${raw}\n`
@@ -7994,8 +7994,11 @@ for (const tamper of ['none', 'attribution', 'turn', 'stop', 'source', 'unrelate
   if (tamper === 'bad-json') writeFileSync(join(nativeRoot, 'terminal.json'), '{')
   if (tamper === 'bad-shape') writeFileSync(join(nativeRoot, 'events.json'), 'null')
   if (tamper === 'missing') rmSync(join(nativeRoot, 'send.json'))
-  const programmingError = new TypeError('fixture invariant unexpectedly failed')
-  if (tamper === 'program-error' || tamper === 'cas-missing' || tamper === 'cas-mismatch') {
+  const unexpected = tamper === 'program-error' ? { error: new TypeError('fixture invariant unexpectedly failed'), code: 'coordinator_failed' }
+    : tamper === 'bare-errno' ? { error: Object.assign(new Error('fixture untyped ENOENT'), { code: 'ENOENT' }), code: 'ENOENT' }
+    : tamper === 'git-errno' ? { error: Object.assign(new Error('fixture Git executable unavailable'), { code: 'ENOENT', syscall: 'spawnSync git' }), code: 'ENOENT' }
+    : undefined
+  if (unexpected || tamper === 'cas-missing' || tamper === 'cas-mismatch') {
     const findResource = f.store.findResource.bind(f.store)
     const key = prior.dispatchPlans.find(dispatch => dispatch.purpose === 'elaboration_review')!.key
     const badRef = tamper === 'cas-mismatch' ? writeEvidence(commonDir, { fixture: 'wrong CAS bytes' }) : { sha256: '0'.repeat(64) }
@@ -8003,7 +8006,7 @@ for (const tamper of ['none', 'attribution', 'turn', 'stop', 'source', 'unrelate
     f.store.findResource = (attemptId, requestKey) => {
       const found = findResource(attemptId, requestKey)
       if (!found || attemptId !== prior.id || requestKey !== key || f.store.readOperation(operationId).currentAttemptId === prior.id) return found
-      if (tamper === 'program-error') throw programmingError
+      if (unexpected) throw unexpected.error
       return { ...found, checkpointRef: badRef }
     }
   }
@@ -8055,8 +8058,8 @@ for (const tamper of ['none', 'attribution', 'turn', 'stop', 'source', 'unrelate
     assert.deepEqual(attempts[1].dispatchPlans.map(dispatch => dispatch.purpose), ['elaboration_generate', 'elaboration_review'])
     assert.equal(replay.operation.callsUsed, originalRun.operation.callsUsed + 2)
   } else {
-    assert.equal(replay.failure?.code, tamper === 'program-error' ? 'coordinator_failed' : 'review_retry_binding', JSON.stringify(replay.failure))
-    if (tamper === 'program-error') assert.equal(replay.failure?.message, programmingError.message)
+    assert.equal(replay.failure?.code, unexpected?.code ?? 'review_retry_binding', JSON.stringify(replay.failure))
+    if (unexpected) assert.equal(replay.failure?.message, unexpected.error.message)
     assert.deepEqual(resumed, []); assert.deepEqual(attempts[1].dispatchPlans, [])
     assert.equal(replay.operation.callsUsed, originalRun.operation.callsUsed)
   }
