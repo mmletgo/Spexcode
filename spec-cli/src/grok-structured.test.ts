@@ -237,8 +237,11 @@ test('Grok default uses native config, explicit alias bytes are preserved and bl
 
 test('Grok runs once in the exact worktree and replays original result and stop evidence after close', async t => {
   const f = fixture(t, 'success')
+  const warn = t.mock.method(console, 'warn', () => {})
   const result = await f.run()
   assert.deepEqual(result, { threadId: f.state().grokNative?.sessionId, turnId: f.requestId, text: finalText })
+  assert.deepEqual(JSON.parse(readFileSync(join(f.sessionRoot, 'settlement.json'), 'utf8')).exit, { code: 0, signal: null })
+  assert.equal(warn.mock.callCount(), 0)
   assert.equal(f.state().grokNative?.turnId, f.requestId)
   const invocation = JSON.parse(readFileSync(f.started, 'utf8')) as { args: string[]; prompt: string }
   assert.deepEqual(invocation.args, ['--cwd', f.workspace, '--session-id', result.threadId, '--prompt-file', join(f.sessionRoot, 'prompt.txt'), '--output-format', 'streaming-json', '--permission-mode', 'bypassPermissions'])
@@ -347,6 +350,7 @@ test('Grok settles when the original CLI starts another owned child during termi
 for (const externallyCancelled of [false, true]) {
   test(`Grok settles ${externallyCancelled ? 'external cancellation' : 'a failed native exit'} after the successful terminal window expires`, { timeout: 35_000 }, async t => {
     const f = fixture(t, 'terminal-exit-timeout'), controller = new AbortController()
+    const warn = t.mock.method(console, 'warn', () => {})
     const flight = f.run(f.state(), { ...f.callbacks, signal: controller.signal })
     const rejected = assert.rejects(flight, externallyCancelled ? { code: 'cancelled' }
       : { code: 'failed', message: 'Grok native exit was not observed before the settlement deadline' })
@@ -359,6 +363,23 @@ for (const externallyCancelled of [false, true]) {
       assert.equal(existsSync(join(f.sessionRoot, 'settlement.json')), false)
       const observations = readFileSync(join(f.sessionRoot, 'process-stop-observations.jsonl'), 'utf8').trim().split('\n')
       assert.equal(JSON.parse(observations.at(-1)!).nativeStopped, true)
+      assert.equal(warn.mock.callCount(), 1)
+      const [label, payload] = warn.mock.calls[0]!.arguments
+      assert.equal(label, 'spex grok native exit deadline')
+      assert.doesNotMatch(payload, /CANARY|保留原始输入|终态|fixture-native-model|--prompt-file/)
+      const diagnostic = JSON.parse(payload)
+      assert.equal(diagnostic.decision.exitObserved, false)
+      assert.equal(diagnostic.decision.exitCode, null)
+      assert.equal(diagnostic.decision.signalCode, null)
+      assert.equal(diagnostic.decision.stdoutEnded, false)
+      assert.equal(diagnostic.stderr, 'ignored')
+      assert.ok(diagnostic.terminalAtMs <= diagnostic.deadlineAtMs)
+      assert.ok(typeof diagnostic.timerFiredAtMs === 'number' && diagnostic.timerFiredAtMs <= diagnostic.decision.atMs)
+      assert.equal(diagnostic.timerLatenessMs, Math.max(0, diagnostic.timerFiredAtMs - diagnostic.deadlineAtMs))
+      assert.ok(diagnostic.exitAtMs > diagnostic.decision.atMs)
+      assert.equal(diagnostic.cleanup.processGroupStopped, true)
+      assert.equal(diagnostic.cleanup.stdoutEnded, true)
+      assert.equal(diagnostic.cleanup.settled, true)
     } finally {
       clearTimeout(abortTimer)
       await delay(900)
@@ -367,15 +388,30 @@ for (const externallyCancelled of [false, true]) {
   })
 }
 
-test('Grok rejects a late exit observed before the overdue timer callback', { timeout: 35_000 }, async t => {
+test('Grok rejects a late exit while the overdue timer callback is deferred', { timeout: 35_000 }, async t => {
   const f = fixture(t, 'terminal-exit-timeout')
-  const flight = assert.rejects(f.run(), { code: 'failed', message: 'Grok native exit was not observed before the settlement deadline' })
-  await waitForFixture(f.started)
-  await delay(14_200)
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2_000)
-  await flight
+  const warn = t.mock.method(console, 'warn', () => {})
+  const schedule = globalThis.setTimeout
+  let deferred = false
+  t.mock.method(globalThis, 'setTimeout', (callback: () => void, ms?: number, ...args: unknown[]) => {
+    if (ms !== 15_000 || deferred) return schedule(callback, ms, ...args)
+    deferred = true
+    return schedule(callback, 60_000, ...args)
+  })
+  await assert.rejects(f.run(), { code: 'failed', message: 'Grok native exit was not observed before the settlement deadline' })
+  assert.equal(deferred, true)
   assert.equal(existsSync(join(f.sessionRoot, 'result.json')), false)
   assert.equal(existsSync(join(f.sessionRoot, 'settlement.json')), false)
+  assert.equal(warn.mock.callCount(), 1)
+  const [label, payload] = warn.mock.calls[0]!.arguments
+  assert.equal(label, 'spex grok native exit deadline')
+  const diagnostic = JSON.parse(payload)
+  assert.equal(diagnostic.decision.exitObserved, true)
+  assert.equal(diagnostic.decision.exitCode, 0)
+  assert.ok(diagnostic.exitAtMs > diagnostic.deadlineAtMs)
+  assert.ok(typeof diagnostic.decision.exitOverdueMs === 'number' && diagnostic.decision.exitOverdueMs >= 0)
+  assert.equal(diagnostic.timerFiredAtMs, null)
+  assert.equal(diagnostic.timerLatenessMs, null)
 })
 
 test('Grok keeps the expired exit unsettled when an unowned writer holds stdout', { timeout: 40_000 }, async t => {
