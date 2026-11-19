@@ -100,16 +100,34 @@ function terminalMatches(terminal: Terminal, plan: NativePlan): boolean {
     && terminal.models.every(model => typeof model === 'string' && !!model.trim())
 }
 
+function nativeHttpStatus(text: string): { code: number; message: string } | null {
+  const prefix = /^(?:error:[ \t]*)?HTTP(?:\/[1-3](?:\.[01])?)?[ \t]+/i.exec(text)
+  if (!prefix) return null
+  let value = text.slice(prefix[0].length)
+  const label = /^(?:status(?: code)?|error)([ \t]*)([:=]?)/i.exec(value)
+  if (label) {
+    value = value.slice(label[0].length)
+    if (label[2]) {
+      const gap = /^[ \t]+/.exec(value)
+      if (!gap) return null
+      value = value.slice(gap[0].length)
+    } else if (!label[1]) return null
+  }
+  const status = /^[45]\d{2}(?=[ \t:]|$)/.exec(value)
+  return status ? { code: Number(status[0]), message: value.slice(status[0].length) } : null
+}
+
 function observeNativeStderr(stderr: Readable) {
   const hash = createHash('sha256'), line = Buffer.alloc(STDERR_LINE_LIMIT), httpStatuses = new Set<number>()
   let bytes = 0, lineBytes = 0, discardLine = false, oversizedLine = false, usageBalanceExhausted = false, readError = false
   const finishLine = (): void => {
     if (!discardLine) {
       const text = line.toString('utf8', 0, lineBytes).trim()
-      const status = /^(?:error:[ \t]*)?HTTP(?:\/[1-3](?:\.[01])?)?(?:[ \t]+(?:status(?: code)?|error)[ \t]*[:=]?)?[ \t]+([45]\d{2})(?=[ \t:]|$)/i.exec(text)
-      if (status) httpStatuses.add(Number(status[1]))
-      const message = status ? text.slice(status[0].length) : text.replace(/^error:[ \t]*/i, '')
-      if (/^\s*:?\s*usage balance exhausted[.!]?\s*$/i.test(message)) usageBalanceExhausted = true
+      const status = nativeHttpStatus(text)
+      if (status) httpStatuses.add(status.code)
+      const body = (status?.message ?? text.replace(/^error:[ \t]*/i, '')).trimStart()
+      const message = body.startsWith(':') ? body.slice(1).trimStart() : body
+      if (/^usage balance exhausted[.!]?$/i.test(message)) usageBalanceExhausted = true
     }
     lineBytes = 0
     discardLine = false
@@ -501,7 +519,10 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
           stopDigest: stopObservation(root, launchBinding), exit: observedExit, stderr: stderrDiagnostic(),
         })
       } catch (diagnosticError) {
-        if (!(diagnosticError instanceof StructuredSessionError || diagnosticError instanceof SyntaxError || (diagnosticError as NodeJS.ErrnoException).code)) throw diagnosticError
+        const io = diagnosticError as NodeJS.ErrnoException
+        const fileIO = diagnosticError instanceof Error && Number.isInteger(io.errno) && ['open', 'fstat', 'read', 'write', 'close', 'rename'].includes(io.syscall ?? '')
+        const invalidStopEvidence = diagnosticError instanceof SyntaxError || diagnosticError instanceof StructuredSessionError && diagnosticError.code === 'stale_result'
+        if (!fileIO && !invalidStopEvidence) throw diagnosticError
         console.warn('spex grok native missing-terminal diagnostic unavailable')
       }
     }

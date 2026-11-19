@@ -2,7 +2,7 @@ import test, { type TestContext } from 'node:test'
 import assert from 'node:assert/strict'
 import childProcess, { execFileSync, type SpawnOptions } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
@@ -545,10 +545,16 @@ for (const scenario of ['wrong-session', 'wrong-cwd', 'missing-request', 'duplic
   })
 }
 
+const stderrPadding = ' \t'.repeat(2_000)
 for (const [label, chunks, statuses, exhausted, oversizedLine] of [
   ['empty', [], [], false, false],
   ['split HTTP and quota evidence', ['Error: HT', 'TP 429: usage balance exhausted\n', 'Authorization: Bearer FAKE_SECRET_CANARY\n', 'HTTP/1.1 503 Service Unavailable\r\n'], [429, 503], true, false],
   ['oversized and credential-shaped lines', ['x'.repeat(12_000) + ' HTTP 429\n', 'Authorization: Bearer FAKE_SECRET_CANARY HTTP 429\n', 'Error: usage balance exhausted? no\n', 'HTTP status: 402'], [402], false, true],
+  ['padded nonmatches and strict HTTP separators', [
+    'HTTP status' + stderrPadding + 'other\nHTTP 401' + stderrPadding + 'Other message\n',
+    'HTTP status  code 429\nHTTP status:429\nHTTP/2.2 429\nHTTP/3.0 status code' + stderrPadding + '=\t503\n',
+    'Error: HTTP/2 error' + stderrPadding + '402 : usage balance exhausted? no\n',
+  ], [401, 402, 503], false, false],
 ] as const) {
   test(`Grok records safe missing-terminal stderr diagnostics for ${label}`, async t => {
     const f = fixture(t, 'missing-terminal', 'grok:default', 'grok-fixture', chunks)
@@ -581,6 +587,31 @@ for (const [label, chunks, statuses, exhausted, oversizedLine] of [
     assert.equal(existsSync(join(root, 'settlement.json')), false)
   })
 }
+
+test('Grok preserves missing-terminal failure only for expected diagnostic I/O or evidence faults', async t => {
+  for (const [label, injected, isFileIO] of [
+    ['filesystem denial', Object.assign(new Error('fixture rename denied'), { code: 'EACCES', errno: -13, syscall: 'rename' }), true],
+    ['unexpected failure with a code', Object.assign(new Error('fixture unexpected failure'), { code: 'ERR_INVALID_ARG_TYPE' }), false],
+  ] as const) await t.test(label, async subtest => {
+    const f = fixture(subtest, 'missing-terminal')
+    const originalRename = fs.renameSync
+    subtest.mock.method(fs, 'renameSync', (from: fs.PathLike, to: fs.PathLike) => {
+      if (to === join(f.sessionRoot, 'missing-terminal-diagnostic.json')) throw injected
+      originalRename(from, to)
+    })
+    const warn = subtest.mock.method(console, 'warn', () => {})
+    syncBuiltinESMExports()
+    subtest.after(() => { subtest.mock.restoreAll(); syncBuiltinESMExports() })
+    if (isFileIO) {
+      await assert.rejects(f.run(), { code: 'cancellation_pending', message: 'Grok native stream closed without its original terminal' })
+      assert.deepEqual(warn.mock.calls.map(call => call.arguments), [['spex grok native missing-terminal diagnostic unavailable']])
+    } else {
+      await assert.rejects(f.run(), error => error === injected)
+      assert.equal(warn.mock.callCount(), 0)
+    }
+    assert.equal(existsSync(join(f.sessionRoot, 'settlement.json')), false)
+  })
+})
 
 for (const scenario of ['wrong-format', 'bad-schema'] as const) {
   test(`Grok binds ${scenario} output and its stopped Git draft to the exact request`, async t => {
