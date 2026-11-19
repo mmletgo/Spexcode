@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+writer62 追加 SELECT 1 marker，保护 [[sync-coordinator]] 在 P0 新请求 reserve 前冻结的 Claude 物理草稿。旧 writer 在写入或派发前拒绝新库。升级停稳并结算旧 writer，保存一致 writer61 SQLite online backup 和配套 Git/CAS 原件。回滚先停稳并结算新 writer，再恢复该备份与配套原件。既有 SQL、迁移 checksum 及请求记录逐字保留。
+
 writer61 只追加 SELECT 1 marker，保护 [[sync-code-behavior]] 的 P0 独审覆盖自检。升级先停稳并结算旧 writer，保存一致 writer60 online backup 和 Git/CAS 原件。回退使用该备份及配套原件。
 
 writer60 只追加 SELECT 1 marker，保护 [[sync-elaboration]] 的完整叶冷续稿诊断角色。升级先停稳并结算旧 writer，保存一致 writer59 online backup 和 Git/CAS 原件。回退使用该备份及配套原件。

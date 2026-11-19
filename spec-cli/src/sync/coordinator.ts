@@ -47,7 +47,7 @@ import { sessionIdForCreateKey, withArchivedStructuredWorktree } from '../sessio
 import { withoutSessionApplicationExecutionWake } from '../session-application.js'
 import { assertFrozenBinding, readFrozenManifest, readFrozenRange } from '../frozen-context.js'
 import { verifyStructuredFrozenReadProof } from '../structured-frozen-evidence.js'
-import { assertClaudeStoppedDraftSource, observeClaudeStoppedWorktreeFailure } from '../claude-structured.js'
+import { assertClaudeStoppedDraftSource, isClaudeFailedAnalysisDraftSource, observeClaudeStoppedWorktreeFailure } from '../claude-structured.js'
 import { assertGrokUnpublishedExitSource, GROK_NATIVE_EXIT_DEADLINE_FAILURE, isGrokNativeExitFailure } from '../grok-structured.js'
 import { assertZCodeStoppedDraftSource, isZCodeEventsRpcTimeout, type ZCodeStructuredExecution } from '../zcode-structured.js'
 import { NATIVE_PERIODIC_OBSERVATION_FAILURE, NATIVE_PROCESS_OBSERVATION_PENDING, nativeWorktreePrompt, nativeWorktreeResult } from '../native-worktree-runtime.js'
@@ -2887,17 +2887,28 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           if (contentHash(source) !== frozen.draftSha256) fail('behavior_draft_material_binding', '已冻结的P0提交草稿与原字节摘要不匹配')
           return { source, errors: frozen.committedDraft.errors, sourceKind: 'git_draft' }
         }
-        const allowCommitted = purpose === 'code_behavior_analyze' && !attempt!.dispatchPlans.some(dispatch => dispatch.key === `sync:${attempt!.id}:analysis${suffix}:${purpose}`)
+        const physicalMaterialKey = `${key}:${purpose}:stopped-physical-material-provenance`
+        const observedPhysical = purpose === 'code_behavior_analyze' ? stage<{
+          sourceKind: string; approved: boolean; observationKind: string; fromOperationId: string; fromAttemptId: string
+          nativePlanRef: BlobRef; checkpointRef: BlobRef; canonicalRecordSha256: string; materialRef: BlobRef; draftSha256: string
+          schemaDigest: string; originalInputDigest: string; currentInputDigest: string
+        }>(store, operation, attempt!, physicalMaterialKey) : null
+        const observedClaude = observedPhysical?.observationKind === 'native-failure'
+          && (JSON.parse(readEvidence(commonDir, observedPhysical.nativePlanRef).toString()) as NativeRunPlan).request.model?.startsWith('claude:')
+          ? JSON.parse(readEvidence(commonDir, observedPhysical.checkpointRef).toString()) as NativeRunCheckpoint : null
+        const frozenClaude = observedClaude?.status === 'failed' && observedClaude.nativeState === 'failed' && observedClaude.stop?.state === 'failed' ? observedPhysical : null
+        const unreservedAnalysis = purpose === 'code_behavior_analyze' && !attempt!.dispatchPlans.some(dispatch => dispatch.key === `sync:${attempt!.id}:analysis${suffix}:${purpose}`)
         const sources = readBehaviorDraftSources()
-        const existingIndex = existingDraft ? sources.findIndex(({ owner, prior }) => {
+        const existingIndex = existingDraft && !frozenClaude ? sources.findIndex(({ owner, prior }) => {
           const saved = partitionStage<CodeBehaviorContinuation>(store, owner, prior, `${key}:continuation`)?.result.drafts[purpose as keyof CodeBehaviorContinuation['drafts']]
           return !!saved && canonical(p0StatusOnly ? codeBehaviorDraftStatus(saved) : saved) === canonical(p0StatusOnly ? codeBehaviorDraftStatus(existingDraft) : existingDraft)
             && authenticatedDraftResult(store, owner, prior, `sync:${prior.id}:analysis${suffix}:${purpose}`, purpose, saved)
         }) : -1
         for (const [sourceIndex, { owner, prior }] of sources.entries()) {
-          if (existingDraft && (existingIndex < 0 || sourceIndex >= existingIndex)) continue
+          if (frozenClaude && (frozenClaude.fromOperationId !== owner.id || frozenClaude.fromAttemptId !== prior.id)) continue
+          if (!frozenClaude && existingDraft && (existingIndex < 0 || sourceIndex >= existingIndex)) continue
           if (owner.id === operation.id && (prior.baselineSelectionDigest ?? null) !== (operation.baselineSelection?.digest ?? null) || canonical(prior.composedInput) !== canonical(view.composed) || planDigest && partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan')?.result.digest !== planDigest) continue
-          const continuation = partitionStage<CodeBehaviorContinuation>(store, owner, prior, `${key}:continuation`)
+          const continuation = frozenClaude ? null : partitionStage<CodeBehaviorContinuation>(store, owner, prior, `${key}:continuation`)
           const original = continuation?.result.readyAnalysis, draft = continuation?.result.drafts.code_behavior_analyze
           if (!existingDraft && purpose === 'code_behavior_analyze' && postGateReview.some(diagnostic => diagnostic.partitionId === (key === 'analysis' ? undefined : key.slice('partition:'.length, -':analysis'.length))) && original && draft && draft.schemaDigest === schemaDigest) {
             const previousRequest = JSON.parse(readEvidence(operation.input.source.commonDir, original.requestRef).toString('utf8')) as ElaborationSessionRequest
@@ -2935,6 +2946,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           const suffix = key === 'analysis' ? '' : `:partition:${key.slice('partition:'.length, -':analysis'.length)}`
           const requestKey = `sync:${prior.id}:analysis${suffix}:${purpose}`, resource = store.findResource(prior.id, requestKey)
           if (!resource || resource.phase !== 'removed' || resource.plan.inputId !== operation.input.id) continue
+          if (frozenClaude && (frozenClaude.nativePlanRef.sha256 !== resource.plan.planBlob.sha256 || frozenClaude.checkpointRef.sha256 !== resource.checkpointRef.sha256)) fail('behavior_draft_material_binding', '已冻结的Claude物理稿缺少精确原生资源引用')
           const native = JSON.parse(readEvidence(operation.input.source.commonDir, resource.plan.planBlob).toString()) as NativeRunPlan
           const checkpoint = JSON.parse(readEvidence(operation.input.source.commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
           const grok = native.request.model?.startsWith('grok:') === true
@@ -2944,11 +2956,24 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
             const completedEventsRpc = zcode && !!state && isZCodeEventsRpcTimeout(state)
             const stoppedTransport = zcode && state?.state === 'failed' && state.errorCode === 'native_turn_transport_failed'
             if (!state || !state.cancellation?.nativeStopped) continue
+            const claudeFailed = !zcode && !grok && purpose === 'code_behavior_analyze' && isClaudeFailedAnalysisDraftSource(state)
+            if (claudeFailed && !unreservedAnalysis && !frozenClaude || frozenClaude && !claudeFailed) continue
             if (grok) {
-              if (!allowCommitted || !record?.archived || state.state !== 'failed' || state.error !== GROK_NATIVE_EXIT_DEADLINE_FAILURE
+              if (!unreservedAnalysis || !record?.archived || state.state !== 'failed' || state.error !== GROK_NATIVE_EXIT_DEADLINE_FAILURE
                 || owner.id !== operation.id && !settledApprovalSource(store, owner)) continue
-            } else if (state.state !== 'cancelled' && !(zcode && state.state === 'failed') || !(zcode ? state.zcodeNative : state.claudeNative) || !state.threadId || !state.turnId || !checkpoint.session.threadId || !checkpoint.session.turnId || state.failedWorktree || state.resultWorktree || state.rejectedOutput || state.errorCode && !completedEventsRpc && !stoppedTransport) continue
+            } else if (state.state !== 'cancelled' && !(zcode && state.state === 'failed') && !claudeFailed || !(zcode ? state.zcodeNative : state.claudeNative) || !state.threadId || !state.turnId || !checkpoint.session.threadId || !checkpoint.session.turnId || state.failedWorktree || state.resultWorktree || state.rejectedOutput || state.errorCode && !completedEventsRpc && !stoppedTransport) continue
             const proof = authenticateNativeFailure(store, owner, prior, requestKey, { code: completedEventsRpc ? 'native_rpc_timeout' : stoppedTransport ? 'native_turn_transport_failed' : 'failed', message: state.state === 'failed' ? state.error! : prior.failure?.message ?? '', sessionId: checkpoint.session.sessionId, threadId: checkpoint.session.threadId ?? undefined, turnId: checkpoint.session.turnId ?? undefined }, readRecord, true)
+            if (claudeFailed) {
+              const { checkpoint: failed, record: original, state: originalState } = proof
+              if (!isClaudeFailedAnalysisDraftSource(originalState) || failed.status !== 'failed' || failed.nativeState !== 'failed'
+                || failed.stop?.nativeStatus !== 'processGroupGone' || failed.stop.acknowledged !== false || failed.stop.error !== undefined
+                || !failed.nativeStarted || !failed.nativeCallRequested || failed.result || failed.creationTermination
+                || proof.plan.request.root !== owner.input.source.canonicalRoot || proof.plan.request.base !== native.request.worktree.baseCommit
+                || failed.failure?.code !== 'failed' || failed.failure.message !== originalState.error || failed.failure.failedWorktree || failed.failure.rejectedOutput
+                || originalState.output !== undefined || originalState.resultDigest !== undefined || originalState.failedWorktree || originalState.resultWorktree || originalState.rejectedOutput
+                || resource.generation !== prior.generation || original.harnessSessionId !== failed.session.threadId || canonical(prior.dispatchPlans.find(dispatch => dispatch.key === requestKey)?.session) !== canonical(failed.session)) fail('stale_result', 'Claude P0物理草稿缺少原完整派发、失败与正式停止原件')
+              if (original.archived) continue
+            }
             if (grok) assertUnpublishedGrokFailure(operation, prior, resource, proof)
             if (completedEventsRpc) assertStoppedEventsRpcDraft(prior, requestKey, proof)
             const seedEntries = readTree(operation.input.source.commonDir, native.request.worktree.tree)
@@ -2966,11 +2991,21 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
               const zcodeFailed = zcode ? assertZCodeStoppedDraftSource(prompt, (completedEventsRpc ? proof.state : state) as ZCodeStructuredExecution, proof.record.worktreePath, allowUnpublishedCompletion) : undefined
               if (zcode && zcodeFailed === null) return null
               if (grok) assertGrokUnpublishedExitSource(proof.record.session, prompt, state, proof.record.worktreePath, 'code_behavior_analyze')
-              else if (!zcode) assertClaudeStoppedDraftSource(prompt, state, proof.record.worktreePath)
+              else if (!zcode) assertClaudeStoppedDraftSource(prompt, proof.state, proof.record.worktreePath)
               assertMaterialFence()
+              if (frozenClaude) {
+                const packet = JSON.parse(readEvidence(commonDir, frozenClaude.materialRef).toString()) as { version: string; path: string; source: string }
+                if (frozenClaude.sourceKind !== 'physical_draft' || frozenClaude.approved !== false
+                  || frozenClaude.schemaDigest !== schemaDigest || frozenClaude.originalInputDigest !== native.request.inputDigest || frozenClaude.currentInputDigest !== inputDigest
+                  || frozenClaude.canonicalRecordSha256 !== contentHash(JSON.stringify(proof.record))
+                  || packet.version !== 'stopped-physical-draft-v1' || packet.path !== binding.path || typeof packet.source !== 'string' || contentHash(packet.source) !== frozenClaude.draftSha256)
+                  fail('behavior_draft_material_binding', '已冻结的Claude物理稿与本轮owner、请求或原字节摘要不匹配')
+                const context = readCodeBehaviorContext(native.request, commonDir)
+                return { source: packet.source, errors: [...context.errors], repairDiagnostics: context.repairDiagnostics, sourceKind: 'physical_draft' }
+              }
               let physical: ReturnType<typeof readStoppedPhysicalDraft>
               try {
-                physical = completedEventsRpc ? null : readStoppedPhysicalDraft(commonDir, proof.record.worktreePath, native.request.worktree!, binding, { allowCommitted })
+                physical = completedEventsRpc ? null : readStoppedPhysicalDraft(commonDir, proof.record.worktreePath, native.request.worktree!, binding, { allowCommitted: unreservedAnalysis && !claudeFailed })
               } catch (error) {
                 if (purpose !== 'code_behavior_review' || !(error instanceof StoppedPhysicalDraftStatusError)) throw error
                 saveStage(store, fence!, `${key}:${purpose}:stopped-physical-material-rejection`, { reason: 'outside-owner-status', fromOperationId: owner.id, fromAttemptId: prior.id, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef })
@@ -2981,9 +3016,10 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
                 if (zcode && !zcodeFailed) fail('stale_result', 'ZCode物理草稿没有原精确失败终态')
                 const context = readCodeBehaviorContext(native.request, operation.input.source.commonDir)
                 const materialRef = writeEvidence(operation.input.source.commonDir, { version: 'stopped-physical-draft-v1', path: binding.path, source: physical.source })
-                saveStage(store, fence!, `${key}:${purpose}:stopped-physical-material-provenance`, { sourceKind: 'physical_draft', approved: false, observationKind: zcode || proof.observedFailure ? 'native-failure' : 'pause', observedAt: Date.now(), fromOperationId: owner.id, fromAttemptId: prior.id, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef, originalFailure: p0StatusOnly && prior.failure ? { code: prior.failure.code, kind: prior.failure.kind } : prior.failure, canonicalRecordSha256: contentHash(JSON.stringify(proof.record)), observedHeadCommit: physical.observedHeadCommit, observedTree: physical.observedTree, indexSha256: physical.indexSha256, materialRef, draftSha256: contentHash(physical.source), schemaDigest, originalInputDigest: native.request.inputDigest, currentInputDigest: inputDigest })
+                saveStage(store, fence!, physicalMaterialKey, { sourceKind: 'physical_draft', approved: false, observationKind: zcode || proof.observedFailure ? 'native-failure' : 'pause', observedAt: Date.now(), fromOperationId: owner.id, fromAttemptId: prior.id, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef, originalFailure: p0StatusOnly && prior.failure ? { code: prior.failure.code, kind: prior.failure.kind } : prior.failure, canonicalRecordSha256: contentHash(JSON.stringify(proof.record)), observedHeadCommit: physical.observedHeadCommit, observedTree: physical.observedTree, indexSha256: physical.indexSha256, materialRef, draftSha256: contentHash(physical.source), schemaDigest, originalInputDigest: native.request.inputDigest, currentInputDigest: inputDigest })
                 return { source: physical.source, errors: [...context.errors], repairDiagnostics: context.repairDiagnostics, sourceKind: 'physical_draft' }
               }
+              if (claudeFailed) return null
               const worktree = native.request.worktree!
               const witness = physical?.committedOid
                 ? { baseCommit: worktree.baseCommit, baseTree: worktree.tree, headCommit: physical.observedHeadCommit, tree: physical.observedTree, worktreePath: proof.record.worktreePath }
@@ -3027,6 +3063,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           saveStage(store, fence!, `${key}:${purpose}:native-material-provenance`, { fromOperationId: owner.id, fromAttemptId: prior.id, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef, rejectedSha256: packet.sha256, schemaDigest, originalInputDigest: native.request.inputDigest, currentInputDigest: inputDigest })
           return { source: packet.text, errors: [{ code: failure.code, message: failure.message }] }
         }
+        if (frozenClaude) fail('behavior_draft_material_binding', '已冻结的Claude物理稿缺少仍可认证的原owner和停止来源')
         return null
       }
       const loadBehaviorContinuation = (key: string, inputDigest: string, planDigest?: string): CodeBehaviorContinuation | null => {

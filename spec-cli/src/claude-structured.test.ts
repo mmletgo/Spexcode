@@ -1359,6 +1359,16 @@ test('native configuration schema exhaustion authenticates per-request wire mode
     assert.throws(() => observeClaudeWorktreeMissingFinal(prompt, stopped, workspace), { code: 'stale_result' }, '原精准missing-final资格不扩展到exit1/error')
     assert.deepEqual(['plan.json', 'init.json', 'user-echo.json', 'result.json', 'exit.json'].map(name => readFileSync(join(root, name))), beforeFailureObservation)
     assert.equal(existsSync(join(root, 'public-history.json')), false); assert.equal(existsSync(join(root, 'native-protocol.jsonl')), false, '冷观察不补安全诊断或sealed原件')
+
+    const failed: StructuredExecution = { ...stopped, purpose: 'code_behavior_analyze', state: 'failed', error: 'Claude native execution exited unsuccessfully: code=1, signal=null, result.is_error=true' }
+    const failedPolicy = structuredExecutionPolicy(failed)
+    writeFileSync(join(root, 'plan.json'), JSON.stringify({ ...editPlan, policyDigest: hash(failedPolicy), requestDigest: hash({ prompt, policy: failedPolicy }) }))
+    assertClaudeStoppedDraftSource(prompt, failed, workspace)
+    assert.throws(() => assertClaudeStoppedDraftSource(prompt, { ...failed, error: 'Claude emitted more than one native init identity' }, workspace), { code: 'stale_result' })
+    writeFileSync(join(root, 'result.json'), JSON.stringify({ ...errorResult, structured_output: {} }))
+    assert.throws(() => assertClaudeStoppedDraftSource(prompt, failed, workspace), { code: 'stale_result' })
+    assert.equal(existsSync(join(root, 'public-history.json')), false)
+    assert.equal(existsSync(join(root, 'native-protocol.jsonl')), false)
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
 
