@@ -287,11 +287,14 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
 
   const env: NodeJS.ProcessEnv = { ...process.env, TMPDIR: tmp }
   for (const key of sessionIdentityEnvVars()) delete env[key]
+  const launchedAt = performance.now()
   const child = spawn('/bin/sh', ['-c', 'IFS= read -r ready && [ "$ready" = start ] || exit 1; exec "$@"', 'spex-grok-launch', launch.command, ...launch.args, ...args], { cwd: worktreePath, env, detached: true, stdio: ['pipe', 'pipe', 'ignore'] })
   let exitObserved = false
+  let exitAtMs: number | null = null
   const exited = new Promise<Exit & { observedAt: number }>(resolve => child.once('exit', (code, signal) => {
     const observedAt = Date.now()
     exitObserved = true
+    exitAtMs = performance.now() - launchedAt
     armStop()
     resolve({ code, signal, observedAt })
   }))
@@ -300,6 +303,7 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
   let owned: OwnedLaunch | undefined
   let deadline: number | undefined, stopTimer: ReturnType<typeof setTimeout> | undefined
   let census: ReturnType<typeof setInterval> | undefined
+  let terminalAtMs: number | undefined, deadlineAtMs: number | undefined, timerFiredAtMs: number | null = null
   let timedOut = false, observerFailure: unknown, timeoutFailure: unknown
   let stopPhase = 'native-exit-or-terminal'
   let expire!: () => void
@@ -308,7 +312,11 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
     if (deadline !== undefined) return
     deadline = Date.now() + STOP_MS
     clearInterval(census)
-    stopTimer = setTimeout(expire, STOP_MS)
+    deadlineAtMs = performance.now() - launchedAt + STOP_MS
+    stopTimer = setTimeout(() => {
+      timerFiredAtMs = performance.now() - launchedAt
+      expire()
+    }, STOP_MS)
   }
   const interrupt = (): void => {
     armStop()
@@ -322,6 +330,7 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
   const terminalSeen = new Promise<void>(resolve => { notifyTerminal = resolve })
   const observed = observeNativeOutput(child.stdout, plan, value => {
     terminal = value
+    terminalAtMs = performance.now() - launchedAt
     armStop()
     notifyTerminal()
   }).catch(error => {
@@ -337,6 +346,11 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
     void callbacks.onTimeout?.().catch(error => { timeoutFailure = error })
   })
   let exitWindowFailure: StructuredSessionError | undefined
+  let deadlineDecision: {
+    atMs: number; exitObserved: boolean; exitCode: Exit['code']; signalCode: Exit['signal']
+    exitOverdueMs: number | null; stdoutEnded: boolean; signaledDescendants: number
+  } | undefined
+  let cleanupProcessGroupStopped: boolean | null = null
   let stopped = false
   try {
     if (!child.pid) throw pending('Grok launch PID is unavailable')
@@ -358,6 +372,7 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
     }), 250)
     const terminalOrStream = Promise.race([terminalSeen, observed])
     let reapTimer: ReturnType<typeof setTimeout> | undefined
+    const signaled = new Map<number, string>()
     let exit: Exit
     try {
       const ended = await Promise.race([terminalOrStream.then(async () => {
@@ -366,7 +381,6 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
           const stillWaiting = (): boolean => Date.now() < exitDeadline && !exitObserved && !timedOut && !observerFailure && !processFailed
             && !callbacks.signal?.aborted && !existsSync(join(root, 'cancel.json')) && sha256(readFileSync(receiptFile)) === binding.receiptDigest
           const signalAfter = exitDeadline - STOP_MS + NATIVE_SHUTDOWN_GRACE_MS
-          const signaled = new Map<number, string>()
           while (stillWaiting()) {
             await Promise.race([exited, new Promise<void>(resolve => { reapTimer = setTimeout(resolve, 500) })])
             clearTimeout(reapTimer)
@@ -380,6 +394,11 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
       }), expiry])
       if (!ended || terminal?.stopReason === 'end_turn' && ended.observedAt >= deadline!) {
         if (terminal?.stopReason === 'end_turn' && !timedOut && !callbacks.signal?.aborted && !observerFailure) {
+          deadlineDecision = {
+            atMs: performance.now() - launchedAt, exitObserved, exitCode: child.exitCode, signalCode: child.signalCode,
+            exitOverdueMs: ended ? ended.observedAt - deadline! : null,
+            stdoutEnded: child.stdout.readableEnded, signaledDescendants: signaled.size,
+          }
           exitWindowFailure = new StructuredSessionError('failed', GROK_NATIVE_EXIT_DEADLINE_FAILURE)
           throw exitWindowFailure
         }
@@ -416,6 +435,7 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
       if (owned && exitWindowFailure && error === exitWindowFailure) {
         const cleanupDeadline = Date.now() + STOP_MS
         stopped = await waitForStop(owned, cleanupDeadline, true)
+        cleanupProcessGroupStopped = stopped
         if (stopped && !child.stdout.readableEnded) {
           let markEof!: (ended: boolean) => void
           const eof = new Promise<boolean>(resolve => { markEof = resolve })
@@ -442,5 +462,13 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
     clearTimeout(timer); clearTimeout(stopTimer); clearInterval(census)
     callbacks.signal?.removeEventListener('abort', abort)
     child.stdin.destroy(); child.stdout.destroy(); child.unref()
+    if (deadlineDecision) {
+      console.warn('spex grok native exit deadline', JSON.stringify({
+        pid: child.pid, terminalAtMs, deadlineAtMs, exitAtMs, timerFiredAtMs,
+        timerLatenessMs: timerFiredAtMs === null ? null : Math.max(0, timerFiredAtMs - deadlineAtMs!),
+        stderr: 'ignored', decision: deadlineDecision,
+        cleanup: { atMs: performance.now() - launchedAt, processGroupStopped: cleanupProcessGroupStopped, stdoutEnded: child.stdout.readableEnded, settled: stopped },
+      }))
+    }
   }
 }
