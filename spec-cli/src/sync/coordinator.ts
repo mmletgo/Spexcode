@@ -2899,14 +2899,14 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         const frozenClaude = observedClaude?.status === 'failed' && observedClaude.nativeState === 'failed' && observedClaude.stop?.state === 'failed' ? observedPhysical : null
         const unreservedAnalysis = purpose === 'code_behavior_analyze' && !attempt!.dispatchPlans.some(dispatch => dispatch.key === `sync:${attempt!.id}:analysis${suffix}:${purpose}`)
         const sources = readBehaviorDraftSources()
-        const existingIndex = existingDraft ? sources.findIndex(({ owner, prior }) => {
+        const existingIndex = existingDraft && !frozenClaude ? sources.findIndex(({ owner, prior }) => {
           const saved = partitionStage<CodeBehaviorContinuation>(store, owner, prior, `${key}:continuation`)?.result.drafts[purpose as keyof CodeBehaviorContinuation['drafts']]
           return !!saved && canonical(p0StatusOnly ? codeBehaviorDraftStatus(saved) : saved) === canonical(p0StatusOnly ? codeBehaviorDraftStatus(existingDraft) : existingDraft)
             && authenticatedDraftResult(store, owner, prior, `sync:${prior.id}:analysis${suffix}:${purpose}`, purpose, saved)
         }) : -1
         for (const [sourceIndex, { owner, prior }] of sources.entries()) {
           if (frozenClaude && (frozenClaude.fromOperationId !== owner.id || frozenClaude.fromAttemptId !== prior.id)) continue
-          if (existingDraft && (existingIndex < 0 || sourceIndex >= existingIndex)) continue
+          if (!frozenClaude && existingDraft && (existingIndex < 0 || sourceIndex >= existingIndex)) continue
           if (owner.id === operation.id && (prior.baselineSelectionDigest ?? null) !== (operation.baselineSelection?.digest ?? null) || canonical(prior.composedInput) !== canonical(view.composed) || planDigest && partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan')?.result.digest !== planDigest) continue
           const continuation = frozenClaude ? null : partitionStage<CodeBehaviorContinuation>(store, owner, prior, `${key}:continuation`)
           const original = continuation?.result.readyAnalysis, draft = continuation?.result.drafts.code_behavior_analyze

@@ -20,7 +20,7 @@ import { checkGenerationContractIntent, readFrozenContracts } from './frozen-con
 import type { ElaborationDraft, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ReadonlySpecRepair } from './elaboration-types.js'
 import { buildSyncApplicationPlan } from './planning.js'
 import { restoreGenerationInput } from './generation.js'
-import { CODE_BEHAVIOR_DRAFT_COMMIT_MISSING, CODE_BEHAVIOR_GUIDANCE_VERSION } from './code-behavior.js'
+import { CODE_BEHAVIOR_DRAFT_COMMIT_MISSING, CODE_BEHAVIOR_GUIDANCE_VERSION, type CodeBehaviorContinuation } from './code-behavior.js'
 import { SyncApplication } from './application.js'
 import * as continuationCoordinator from './coordinator.js'
 import { acceptedCandidateReviewSource, isSyncInputCurrent, prepareSyncAdmission, readCurrentSyncAnalysis, readonlySpecRepairStalled, recoverSyncOperationResources, runSyncOperation, syncPlanDigest } from './coordinator.js'
@@ -245,14 +245,15 @@ const zcodeP1CompletedRpcCases = (['none', 'partition', 'rpc-method', 'null-disp
 const zcodeP1CommittedCases = (['none', 'ordinary-ignored', 'older-physical'] as const).map(defect => ['zcode-p1-transport-committed', defect] as const)
 const zcodeP0CommittedCase = ['zcode-new', 'ordinary-ignored'] as const
 const zcodeMaterialCases = [...(['zcode-old', 'zcode-new'] as const).flatMap(mode => (['none', 'prior-draft', 'session', 'send', 'turn', 'input', 'query', 'message', 'model', 'worktree', 'stop', 'seed', 'source', 'tests', 'schema', 'scope', 'request', 'exit', 'terminal', 'no-progress-cancelled', 'progress-cancelled', 'fence'] as const).map(defect => [mode, defect] as const)), ['zcode-old', 'no-progress-empty-commit-cancelled'] as const, ...(['sealed-unpublished', 'sealed-tampered', 'sealed-missing-exit', 'sealed-unobserved'] as const).map(defect => ['zcode-old', defect] as const), ['zcode-new', 'failed-observation'] as const, ...(['none', 'no-commit', 'provider-code'] as const).map(defect => ['zcode-transport-git', defect] as const), ['zcode-p1-transport-dirty', 'none'] as const, ...zcodeP1CommittedCases, ...zcodeP1CompletedRpcCases, ...zcodeCompletedRpcCases, ...(['none', 'prior-draft', 'older-physical', 'staged', 'review', 'review-foreign-path', 'session', 'stop', 'seed', 'source', 'tests', 'schema', 'context', 'index', 'scope', 'worktree', 'fence', 'cas', 'missing-exit'] as const).map(defect => ['zcode-dirty', defect] as const), ...(['none', 'prior-draft', 'older-physical', 'missing-exit'] as const).map(defect => ['zcode-p1-dirty', defect] as const)]
-const claudeFailedPhysicalCases = (['none', 'no-new-commit', 'cold-before-reserve', 'cold-after-reserve', 'v61-reserved', 'v61-planned', 'duplicate-init', 'session', 'user', 'failed-observation', 'known-stop', 'source', 'schema', 'index', 'fence'] as const).map(defect => ['claude-failed-physical', defect] as const)
+const claudeFailedPhysicalCases = (['none', 'no-new-commit', 'cold-before-reserve', 'cold-after-reserve', 'cold-after-draft', 'v61-reserved', 'v61-planned', 'duplicate-init', 'session', 'user', 'failed-observation', 'known-stop', 'source', 'schema', 'index', 'fence'] as const).map(defect => ['claude-failed-physical', defect] as const)
 for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'], ['native-failure', 'archived'], ['zcode-p1-transport-committed', 'archived'], ['native-failure', 'no-progress-143'], ['native-failure', 'no-progress-143-foreign'], ['native-failure', 'no-progress-143-stop'], ['native-failure', 'no-progress-143-process'], ['native-failure', 'progress-143'], ['native-failure', 'none'], ['native-failure', 'prior-draft'], ['native-failure', 'session'], ['native-failure', 'user'], ['native-failure', 'exit'], ['native-failure', 'unknown'], ['native-failure', 'source'], ['native-failure', 'tests'], ['native-failure', 'stop'], ['missing-final', 'none'], ['pause', 'none'], ['pause', 'prior-draft'], ['missing-final', 'prior-draft'], ['pause', 'older-pause'], ['pause', 'not-started'], ['pause', 'no-commit'], ['missing-final', 'session'], ['missing-final', 'user'], ['missing-final', 'exit'], ['missing-final', 'unknown'], ['missing-final', 'completed'], ['pause', 'source'], ['pause', 'tests'], ['pause', 'scope'], ['pause', 'seed'], ['pause', 'thread'], ['pause', 'turn'], ['pause', 'schema'], ['pause', 'worktree'], ['pause', 'stop'], ['pause', 'request'], ...zcodeMaterialCases, zcodeP0CommittedCase] as const) test(`旧Native无typed witness的新attempt仅观察最新Git材料，旧原件不补签 mode=${mode}/${defect}`, async t => {
   const completedP1Rpc = mode === 'zcode-p1-completed-rpc', completedRpc = mode === 'zcode-completed-rpc' || completedP1Rpc
   const rpcFailure = `ZCode native RPC timeout (${defect === 'rpc-method' ? 'session/messages' : 'session/events'})`
   const committedP1 = mode === 'zcode-p1-transport-committed' || completedP1Rpc
   const typedTransport = mode === 'zcode-transport-git' || mode === 'zcode-p1-transport-dirty' || mode === 'zcode-p1-transport-committed'
   const claudeFailed = mode === 'claude-failed-physical'
-  const coldClaude = claudeFailed && (defect === 'cold-before-reserve' || defect === 'cold-after-reserve')
+  const coldAfterDraft = claudeFailed && defect === 'cold-after-draft'
+  const coldClaude = claudeFailed && (defect === 'cold-before-reserve' || defect === 'cold-after-reserve' || coldAfterDraft)
   const oldClaudeRequest = claudeFailed && (defect === 'v61-reserved' || defect === 'v61-planned')
   const p1 = mode === 'zcode-p1-dirty' || mode === 'zcode-p1-transport-dirty' || committedP1, dirty = claudeFailed || mode === 'zcode-dirty' || p1 && !committedP1, freshZCode = mode === 'zcode-new' || dirty && !claudeFailed || completedRpc || typedTransport
   const zcode = mode === 'zcode-old' || freshZCode, older = defect === 'older-pause' || defect === 'older-physical'
@@ -284,6 +285,16 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
     }
   }
   const originalRunner = f.options.runner!
+  const completeNativeWorktree = (operation: SyncOperation, attempt: SyncAttempt, request: ElaborationSessionRequest, result: ElaborationSessionResult) => {
+    const fence = { operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }
+    return createAttemptRunner(f.store, fence, { pollMs: 2, runtime: { readRecord, cancel: cancelStructuredSession, run: async actual => {
+      const { sessionId: session, threadId, turnId, output, resultDigest, worktree } = result, execution = structuredExecutionPolicy(actual)
+      const seed = actual.worktree!, prompt = nativeWorktreePrompt(actual.prompt, seed)
+      configuredSessionApplication().createSession({ sessionId: session, status: 'awaiting' })
+      writeRecord({ session, governed: true, worktreePath: worktree!.worktreePath, base: seed.baseCommit, forkCommit: seed.baseCommit, branch: null, title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(), harness: 'zcode', harnessSessionId: threadId, runtimeStartToken: null, status: 'awaiting', stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: null, launchOwner: null, createRequestId: contentHash(actual.sessionCreateKey!), createPayloadHash: contentHash(JSON.stringify({ prompt, parent: null, launcher: null, base: seed.baseCommit, structuredExecution: execution })), structuredExecution: { ...execution, threadId, turnId, turnStartRequested: true, state: 'completed', output, resultDigest, resultWorktree: worktree } })
+      return result
+    } } })(request)
+  }
   if (completedRpc || typedTransport && !p1) {
     const recordFailure = f.store.recordFailure.bind(f.store)
     f.store.recordFailure = (fence, issue) => {
@@ -327,15 +338,7 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
       execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '-m', 'ready original analysis'], { stdio: 'pipe' })
       const output = { summary: '原分析正常提交并等待独审' }
       const result = { ...produced, output, resultDigest: contentHash(JSON.stringify(output)), worktree: nativeWorktreeResult(workspace, seed) }
-      if (!partitionedP1) return result
-      const fence = { operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }
-      return createAttemptRunner(f.store, fence, { pollMs: 2, runtime: { readRecord, cancel: cancelStructuredSession, run: async actual => {
-        const { sessionId: session, threadId, turnId, resultDigest, worktree } = result, execution = structuredExecutionPolicy(actual)
-        const prompt = nativeWorktreePrompt(actual.prompt, actual.worktree!)
-        configuredSessionApplication().createSession({ sessionId: session, status: 'awaiting' })
-        writeRecord({ session, governed: true, worktreePath: workspace, base: seed.baseCommit, forkCommit: seed.baseCommit, branch: null, title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(), harness: 'zcode', harnessSessionId: threadId, runtimeStartToken: null, status: 'awaiting', stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: null, launchOwner: null, createRequestId: contentHash(actual.sessionCreateKey!), createPayloadHash: contentHash(JSON.stringify({ prompt, parent: null, launcher: null, base: seed.baseCommit, structuredExecution: execution })), structuredExecution: { ...execution, threadId, turnId, turnStartRequested: true, state: 'completed', output, resultDigest, resultWorktree: worktree } })
-        return result
-      } } })(request)
+      return partitionedP1 ? completeNativeWorktree(operation, attempt, request, result) : result
     }
     assert.equal(request.purpose, p1 ? 'elaboration_generate' : onlyReview ? 'code_behavior_review' : 'code_behavior_analyze')
     const path = /草稿文件=([^\s；]+)/.exec(request.prompt)![1], workspace = join(f.parent, `observed-${claudeFailed && operation.retryOf ? 'retry-' : ''}${attempt.number}${coldReserved && reservedRequest && !reservedReplayed ? '-cold' : ''}`), seed = request.worktree!
@@ -387,6 +390,7 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
       }
       if (!materialExpected) { assert.equal(existsSync(join(workspace, path)), false, '不合格或无稿的旧记录不能向新seed投影正文'); restartedWithoutMaterial = true; throw Object.assign(new Error('反例安全进入新派发且无旧材料'), { code: 'unsupported' }) }
       if (claudeFailed) {
+        if (coldAfterDraft) assert.equal(repairedCommit, undefined, '冷续必须读取原 Native 结果，无新分析执行')
         assert.ok(existsSync(join(workspace, path)), '正式retry的新分析seed缺少原物理草稿')
         assert.deepEqual(readObject(f.input.source.commonDir, f.git('rev-parse', '--verify', `${seed.baseCommit}:${path}`)), Buffer.from(latest), '新seed必须引用原物理稿的精确Git blob')
         assert.deepEqual(readFileSync(join(workspace, path)), Buffer.from(latest), '原截断UTF-8字节逐字进入新seed')
@@ -413,7 +417,8 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
         if (defect !== 'no-new-commit') repairedCommit = worktree.headCommit
         analysisSession = analysis.sessionId
         continued = true
-        return { ...analysis, output, resultDigest: contentHash(JSON.stringify(output)), worktree }
+        const result = { ...analysis, output, resultDigest: contentHash(JSON.stringify(output)), worktree }
+        return coldAfterDraft ? completeNativeWorktree(operation, attempt, request, result) : result
       }
       if (completedRpc) assert.equal(existsSync(join(workspace, path)), true, 'exact completed的已结算session/events RPC失败须把正常Git稿续入新seed')
       assert.equal(contentHash(readFileSync(join(workspace, path))), contentHash(older ? priorText : latest), '必须取最新normal Git正文SHA，不能回原seed或旧59010字节')
@@ -742,6 +747,19 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
     assert.equal(dispatch.purpose, 'code_behavior_analyze')
     throw Object.assign(new Error('新物理稿已冻结、dispatch reserve前冷停'), { code: 'SYNC_FENCE_EXPIRED' })
   }
+  const checkpoint = f.store.checkpoint.bind(f.store)
+  if (coldAfterDraft) f.store.checkpoint = (fence, ref) => {
+    const saved = checkpoint(fence, ref)
+    const wrapper = JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as { stage: string; resultRef: BlobRef }
+    if (wrapper.stage.endsWith(':analysis:continuation')) {
+      const continuation = JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString()) as CodeBehaviorContinuation
+      if (continuation.drafts.code_behavior_analyze) {
+        assert.equal(continuation.readyAnalysis, undefined)
+        throw Object.assign(new Error('分析Git稿已持久化、ready前冷停'), { code: 'SYNC_FENCE_EXPIRED' })
+      }
+    }
+    return saved
+  }
   const listAttempts = f.store.listAttempts.bind(f.store)
   if (completedRpcResource && ['missing-dispatch-session', 'null-dispatch-thread', 'null-dispatch-turn'].includes(defect)) f.store.listAttempts = operationId => listAttempts(operationId).map(attempt => attempt.id !== completedRpcResource.attemptId ? attempt : { ...attempt, dispatchPlans: attempt.dispatchPlans.map(dispatch => {
     if (dispatch.key !== completedRpcResource.plan.key) return dispatch
@@ -759,7 +777,7 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
   }
   let result = await runSyncOperation(f.store, activeOperation.id, f.options).finally(() => {
     f.store.findResource = readResource; f.store.listAttempts = listAttempts
-    f.store.reserveDispatch = reserveDispatch; f.store.planResource = planResource
+    f.store.reserveDispatch = reserveDispatch; f.store.planResource = planResource; f.store.checkpoint = checkpoint
   })
   if (coldClaude || oldClaudeRequest) {
     assert.equal(result.status, 'recovery_required', JSON.stringify(result.failure))
@@ -767,7 +785,25 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
     const reserved = interrupted.dispatchPlans.find(dispatch => dispatch.purpose === 'code_behavior_analyze')
     const planned = reserved ? f.store.findResource(interrupted.id, reserved.key) : null
     assert.equal(!!reserved, defect !== 'cold-before-reserve')
-    assert.equal(!!planned, defect === 'v61-planned')
+    assert.equal(!!planned, defect === 'v61-planned' || coldAfterDraft)
+    if (coldAfterDraft) {
+      assert(reserved && planned && repairedCommit)
+      assert.equal(planned.phase, 'removed')
+      const completion = JSON.parse(readEvidence(f.input.source.commonDir, planned.checkpointRef).toString()) as NativeRunCheckpoint
+      const plan = JSON.parse(readEvidence(f.input.source.commonDir, planned.plan.planBlob).toString()) as NativeRunPlan
+      assert.equal(completion.status, 'completed')
+      assert.equal(completion.result?.worktree?.headCommit, repairedCommit)
+      assert.equal(completion.result?.worktree?.baseCommit, plan.request.worktree?.baseCommit)
+      assert.equal(plan.requestDigest, reserved.requestDigest)
+      assert.equal(reserved.session?.sessionId, analysisSession)
+      assert.equal(result.operation.callsUsed, 1)
+      assert(interrupted.expiresAtMs > Date.now(), '保留有效租约才覆盖同attempt重放')
+      const saved = interrupted.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).find(wrapper => wrapper.stage.endsWith(':analysis:continuation'))
+      assert(saved)
+      const previous = JSON.parse(readEvidence(f.input.source.commonDir, saved.resultRef).toString()) as CodeBehaviorContinuation
+      assert.equal(previous.drafts.code_behavior_analyze?.resultCommit, repairedCommit)
+      assert.equal(previous.readyAnalysis, undefined)
+    }
     const provenanceRefs = interrupted.checkpointRefs.filter(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()).stage.endsWith(':stopped-physical-material-provenance'))
     assert.equal(provenanceRefs.length, coldClaude ? 1 : 0)
     if (oldClaudeRequest) f.protocol.withTransaction(tx => tx.exec('DELETE FROM schema_migrations WHERE component=? AND version=?', SYNC_COMPONENT, SYNC_MIGRATIONS.length))
@@ -783,7 +819,14 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
     if (reserved) assert.equal(recovered.dispatchPlans.find(dispatch => dispatch.key === reserved.key)?.requestDigest, reserved.requestDigest)
     if (planned) assert.deepEqual(f.store.findResource(interrupted.id, reserved!.key), planned)
     assert.deepEqual(recovered.checkpointRefs.filter(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()).stage.endsWith(':stopped-physical-material-provenance')), provenanceRefs)
-    if (defect !== 'cold-before-reserve') assert.equal(reservedReplayed, true, JSON.stringify(result.failure))
+    if (coldAfterDraft) {
+      assert.equal(result.operation.callsUsed, 3, JSON.stringify(result.failure))
+      const saved = recovered.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())).filter(wrapper => wrapper.stage.endsWith(':analysis:continuation')).at(-1)
+      assert(saved)
+      const ready = JSON.parse(readEvidence(f.input.source.commonDir, saved.resultRef).toString()) as CodeBehaviorContinuation
+      assert.equal(ready.readyAnalysis?.resultCommit, repairedCommit)
+      assert.equal(ready.readyAnalysis?.trace.sessionId, analysisSession)
+    } else if (defect !== 'cold-before-reserve') assert.equal(reservedReplayed, true, JSON.stringify(result.failure))
   }
   if (claudeFailed) {
     assert.equal(continued, materialExpected, JSON.stringify({ result: result.failure, attempts: f.store.listAttempts(activeOperation.id).map(attempt => attempt.dispatchPlans.map(dispatch => dispatch.purpose)) }))
