@@ -25,6 +25,8 @@ type StopResult = { nativeStopped: boolean; acknowledged: false; nativeStatus?: 
 
 const STOP_MS = 15_000
 const NATIVE_SHUTDOWN_GRACE_MS = 5_000
+const STDERR_LINE_LIMIT = 4_096
+const MISSING_TERMINAL = 'Grok native stream closed without its original terminal'
 export const GROK_NATIVE_EXIT_DEADLINE_FAILURE = 'Grok native exit was not observed before the settlement deadline'
 export const isGrokNativeExitFailure = ({ code, message }: { code: string; message: string }): boolean =>
   code === 'failed' && message === GROK_NATIVE_EXIT_DEADLINE_FAILURE
@@ -98,6 +100,56 @@ function terminalMatches(terminal: Terminal, plan: NativePlan): boolean {
     && terminal.models.every(model => typeof model === 'string' && !!model.trim())
 }
 
+function nativeHttpStatus(text: string): { code: number; message: string } | null {
+  const prefix = /^(?:error:[ \t]*)?HTTP(?:\/[1-3](?:\.[01])?)?[ \t]+/i.exec(text)
+  if (!prefix) return null
+  let value = text.slice(prefix[0].length)
+  const label = /^(?:status(?: code)?|error)([ \t]*)([:=]?)/i.exec(value)
+  if (label) {
+    value = value.slice(label[0].length)
+    if (label[2]) {
+      const gap = /^[ \t]+/.exec(value)
+      if (!gap) return null
+      value = value.slice(gap[0].length)
+    } else if (!label[1]) return null
+  }
+  const status = /^[45]\d{2}(?=[ \t:]|$)/.exec(value)
+  return status ? { code: Number(status[0]), message: value.slice(status[0].length) } : null
+}
+
+function observeNativeStderr(stderr: Readable) {
+  const hash = createHash('sha256'), line = Buffer.alloc(STDERR_LINE_LIMIT), httpStatuses = new Set<number>()
+  let bytes = 0, lineBytes = 0, discardLine = false, oversizedLine = false, usageBalanceExhausted = false, readError = false
+  const finishLine = (): void => {
+    if (!discardLine) {
+      const text = line.toString('utf8', 0, lineBytes).trim()
+      const status = nativeHttpStatus(text)
+      if (status) httpStatuses.add(status.code)
+      const body = (status?.message ?? text.replace(/^error:[ \t]*/i, '')).trimStart()
+      const message = body.startsWith(':') ? body.slice(1).trimStart() : body
+      if (/^usage balance exhausted[.!]?$/i.test(message)) usageBalanceExhausted = true
+    }
+    lineBytes = 0
+    discardLine = false
+  }
+  stderr.on('data', (chunk: Buffer) => {
+    bytes += chunk.length
+    hash.update(chunk)
+    let start = 0
+    while (start < chunk.length) {
+      const newline = chunk.indexOf(0x0a, start), end = newline < 0 ? chunk.length : newline
+      if (end - start > line.length - lineBytes) discardLine = oversizedLine = true
+      if (!discardLine) lineBytes += chunk.copy(line, lineBytes, start, end)
+      if (newline < 0) break
+      finishLine()
+      start = newline + 1
+    }
+  })
+  stderr.once('end', finishLine)
+  stderr.once('error', () => { readError = true })
+  return () => ({ bytes, sha256: hash.digest('hex'), ended: stderr.readableEnded, oversizedLine, readError, httpStatuses: [...httpStatuses].sort((a, b) => a - b), usageBalanceExhausted })
+}
+
 async function observeNativeOutput(stdout: Readable, plan: NativePlan, onEnd: (terminal: Terminal) => void): Promise<NativeOutput> {
   const lines = createInterface({ input: stdout, crlfDelay: Infinity })
   const chunks: string[] = []
@@ -121,7 +173,7 @@ async function observeNativeOutput(stdout: Readable, plan: NativePlan, onEnd: (t
       }
     }
   } finally { lines.close() }
-  if (!terminal) throw pending('Grok native stream closed without its original terminal')
+  if (!terminal) throw pending(MISSING_TERMINAL)
   return { terminal, text: chunks.join('') }
 }
 
@@ -288,12 +340,13 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
   const env: NodeJS.ProcessEnv = { ...process.env, TMPDIR: tmp }
   for (const key of sessionIdentityEnvVars()) delete env[key]
   const launchedAt = performance.now()
-  const child = spawn('/bin/sh', ['-c', 'IFS= read -r ready && [ "$ready" = start ] || exit 1; exec "$@"', 'spex-grok-launch', launch.command, ...launch.args, ...args], { cwd: worktreePath, env, detached: true, stdio: ['pipe', 'pipe', 'ignore'] })
-  let exitObserved = false
+  const child = spawn('/bin/sh', ['-c', 'IFS= read -r ready && [ "$ready" = start ] || exit 1; exec "$@"', 'spex-grok-launch', launch.command, ...launch.args, ...args], { cwd: worktreePath, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
+  const stderrDiagnostic = observeNativeStderr(child.stderr)
+  let observedExit: Exit | undefined
   let exitAtMs: number | null = null
   const exited = new Promise<Exit & { observedAt: number }>(resolve => child.once('exit', (code, signal) => {
     const observedAt = Date.now()
-    exitObserved = true
+    observedExit = { code, signal }
     exitAtMs = performance.now() - launchedAt
     armStop()
     resolve({ code, signal, observedAt })
@@ -301,6 +354,7 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
   let processFailed = false
   child.stdin.once('error', () => { processFailed = true })
   let owned: OwnedLaunch | undefined
+  let launchBinding: NativeLaunch | undefined
   let deadline: number | undefined, stopTimer: ReturnType<typeof setTimeout> | undefined
   let census: ReturnType<typeof setInterval> | undefined
   let terminalAtMs: number | undefined, deadlineAtMs: number | undefined, timerFiredAtMs: number | null = null
@@ -357,6 +411,7 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
     try { writeDetachedRuntimeReceipt(child.pid, receiptFile) }
     catch (error) { throw Object.assign(pending('Grok detached process ownership could not be recorded'), { cause: error }) }
     const binding = { planDigest: digest(plan), pid: child.pid, receiptFile, receiptDigest: sha256(readFileSync(receiptFile)) }
+    launchBinding = binding
     const ownedLaunch = { ...plan, ...binding }
     owned = ownedLaunch
     writeEvidence(root, 'launch.json', binding)
@@ -376,9 +431,9 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
     let exit: Exit
     try {
       const ended = await Promise.race([terminalOrStream.then(async () => {
-        if (terminal?.stopReason === 'end_turn' && deadline !== undefined && !exitObserved && !observerFailure) {
+        if (terminal?.stopReason === 'end_turn' && deadline !== undefined && !observedExit && !observerFailure) {
           const exitDeadline = deadline
-          const stillWaiting = (): boolean => Date.now() < exitDeadline && !exitObserved && !timedOut && !observerFailure && !processFailed
+          const stillWaiting = (): boolean => Date.now() < exitDeadline && !observedExit && !timedOut && !observerFailure && !processFailed
             && !callbacks.signal?.aborted && !existsSync(join(root, 'cancel.json')) && sha256(readFileSync(receiptFile)) === binding.receiptDigest
           const signalAfter = exitDeadline - STOP_MS + NATIVE_SHUTDOWN_GRACE_MS
           while (stillWaiting()) {
@@ -395,7 +450,7 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
       if (!ended || terminal?.stopReason === 'end_turn' && ended.observedAt >= deadline!) {
         if (terminal?.stopReason === 'end_turn' && !timedOut && !callbacks.signal?.aborted && !observerFailure) {
           deadlineDecision = {
-            atMs: performance.now() - launchedAt, exitObserved, exitCode: child.exitCode, signalCode: child.signalCode,
+            atMs: performance.now() - launchedAt, exitObserved: observedExit !== undefined, exitCode: child.exitCode, signalCode: child.signalCode,
             exitOverdueMs: ended ? ended.observedAt - deadline! : null,
             stdoutEnded: child.stdout.readableEnded, signaledDescendants: signaled.size,
           }
@@ -457,16 +512,30 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
     }
     if (!stopped) throw Object.assign(pending(`Grok native stop remains unproven (${stopPhase})`), { cause: error })
     if (exitWindowFailure && error === exitWindowFailure && (callbacks.signal?.aborted || timedOut || existsSync(join(root, 'cancel.json')))) throw cancelled(timedOut)
+    if (error instanceof StructuredSessionError && error.code === 'cancellation_pending' && error.message === MISSING_TERMINAL && launchBinding && observedExit) {
+      try {
+        writeEvidence(root, 'missing-terminal-diagnostic.json', {
+          version: 1, launchDigest: digest(launchBinding), planDigest: launchBinding.planDigest,
+          stopDigest: stopObservation(root, launchBinding), exit: observedExit, stderr: stderrDiagnostic(),
+        })
+      } catch (diagnosticError) {
+        const io = diagnosticError as NodeJS.ErrnoException
+        const fileIO = diagnosticError instanceof Error && Number.isInteger(io.errno) && ['open', 'fstat', 'read', 'write', 'close', 'rename'].includes(io.syscall ?? '')
+        const invalidStopEvidence = diagnosticError instanceof SyntaxError || diagnosticError instanceof StructuredSessionError && diagnosticError.code === 'stale_result'
+        if (!fileIO && !invalidStopEvidence) throw diagnosticError
+        console.warn('spex grok native missing-terminal diagnostic unavailable')
+      }
+    }
     throw error
   } finally {
     clearTimeout(timer); clearTimeout(stopTimer); clearInterval(census)
     callbacks.signal?.removeEventListener('abort', abort)
-    child.stdin.destroy(); child.stdout.destroy(); child.unref()
+    child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy(); child.unref()
     if (deadlineDecision) {
       console.warn('spex grok native exit deadline', JSON.stringify({
         pid: child.pid, terminalAtMs, deadlineAtMs, exitAtMs, timerFiredAtMs,
         timerLatenessMs: timerFiredAtMs === null ? null : Math.max(0, timerFiredAtMs - deadlineAtMs!),
-        stderr: 'ignored', decision: deadlineDecision,
+        stderr: 'metadata-only', decision: deadlineDecision,
         cleanup: { atMs: performance.now() - launchedAt, processGroupStopped: cleanupProcessGroupStopped, stdoutEnded: child.stdout.readableEnded, settled: stopped },
       }))
     }
