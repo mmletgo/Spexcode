@@ -325,7 +325,7 @@ test('真实Node测试导入别名保留静态标题，注释和字符串不能�
   ]) {
     fake.set('tests/export.test.mjs', source)
     assert.ok(!validateContractGraph(graph, { files: fake }).some((finding) => finding.code === 'missing-test-case' && finding.itemId === 'AC-EXPORT-01'))
-    const output = execFileSync(process.execPath, ['--input-type=module', '-e', source], {
+    const output = execFileSync(process.execPath, ['--test-reporter=tap', '--input-type=module', '-e', source], {
       encoding: 'utf8', env: { ...process.env, NODE_TEST_CONTEXT: undefined },
     })
     assert.match(output, /ok 1 - AC-EXPORT-01 创建并完成/)
