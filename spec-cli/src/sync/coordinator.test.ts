@@ -7851,7 +7851,7 @@ for (const witness of ['missing', 'canonical', 'attachment'] as const) test(`P1�
   assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
 
-for (const tamper of ['none', 'attribution', 'turn', 'stop', 'source'] as const) test(`P1已结算ZCode provider独审失败仅显式恢复同Git候选 tamper=${tamper}`, async t => {
+for (const tamper of ['none', 'attribution', 'turn', 'stop', 'source', 'unrelated', 'bad-json', 'bad-shape', 'missing', 'program-error', 'cas-missing', 'cas-mismatch', 'cold-provenance', 'cold-reserved'] as const) test(`P1已结算ZCode provider独审失败仅显式恢复同Git候选 tamper=${tamper}`, async t => {
   const parentPath = '.spec/project/spec.md', parentId = 'REQ-PARENT-01'
   const raw = '重复导出请求必须保留首次结果，具体下载由子叶实现。'
   const parent = `---\ntitle: 导出上层接口\nstatus: pending\n---\n## raw source\n\n${raw}\n`
@@ -7865,7 +7865,7 @@ for (const tamper of ['none', 'attribution', 'turn', 'stop', 'source'] as const)
     partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524_288, maxParallel: 1 },
   }, undefined, 'spec', 'zcode:bigmodel-api/GLM-5.3-Flash', false, { [parentPath]: parent })
   const commonDir = f.input.source.commonDir, operationId = f.operation.id
-  const failureCode = 'unsupported', error = 'ZCode provider rejected the native turn (retryable=false)'
+  const failureCode = 'unsupported', error = tamper === 'unrelated' ? 'ZCode actual ModelRequest identity or toolCount differs' : 'ZCode provider rejected the native turn (retryable=false)'
   const calls: { attempt: number; request: ElaborationSessionRequest }[] = []
   const hash = (value: unknown): string => contentHash(JSON.stringify(value))
   f.options.runner = async request => {
@@ -7942,15 +7942,37 @@ for (const tamper of ['none', 'attribution', 'turn', 'stop', 'source'] as const)
 
   assert.equal(f.store.requestControl(operationId, 'pause').phase, 'paused')
   f.closeForRestart()
-  const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
+  const database = join(f.parent, 'sync.sqlite')
+  let protocol = openProtocol(database)
+  t.after(() => protocol.close())
   f.store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) }); f.useStore(f.store)
-  const checkpoint = f.store.checkpoint.bind(f.store)
-  f.store.checkpoint = (fence, ref) => {
-    const saved = checkpoint(fence, ref)
-    const wrapper = JSON.parse(readEvidence(commonDir, ref).toString()) as { stage: string; resultRef: BlobRef }
-    if (wrapper.stage === originalStage.key && (JSON.parse(readEvidence(commonDir, wrapper.resultRef).toString()) as ElaborationResult).reviewPassed)
-      throw new StructuredSessionError('unsupported', '夹具在父接口独审已持久化后停止')
-    return saved
+  const cold = tamper === 'cold-provenance' || tamper === 'cold-reserved'
+  const interrupted = Object.assign(new Error('夹具在正式持久化边界冷停'), { code: 'SYNC_FENCE_EXPIRED' })
+  let cut = false
+  const observeCheckpoint = (store: SyncStore, coldProvenance: boolean) => {
+    const checkpoint = store.checkpoint.bind(store)
+    store.checkpoint = (fence, ref) => {
+      if (cut) throw interrupted
+      const saved = checkpoint(fence, ref)
+      const wrapper = JSON.parse(readEvidence(commonDir, ref).toString()) as { stage: string; resultRef: BlobRef }
+      if (coldProvenance && wrapper.stage === `${originalStage.key}:repair-diagnostics-provenance`) {
+        cut = true
+        throw interrupted
+      }
+      if (wrapper.stage === originalStage.key && (JSON.parse(readEvidence(commonDir, wrapper.resultRef).toString()) as ElaborationResult).reviewPassed)
+        throw new StructuredSessionError('unsupported', '夹具在父接口独审已持久化后停止')
+      return saved
+    }
+  }
+  observeCheckpoint(f.store, tamper === 'cold-provenance')
+  if (tamper === 'cold-reserved') {
+    const reserveDispatch = f.store.reserveDispatch.bind(f.store)
+    f.store.reserveDispatch = (fence, dispatch) => {
+      assert.equal(dispatch.purpose, 'elaboration_review')
+      reserveDispatch(fence, dispatch)
+      cut = true
+      throw interrupted
+    }
   }
   assert.equal(f.store.readOperation(operationId).phase, 'paused')
   assert.deepEqual(f.store.readAttempt(prior.id).failure, prior.failure)
@@ -7959,9 +7981,9 @@ for (const tamper of ['none', 'attribution', 'turn', 'stop', 'source'] as const)
     const path = join(nativeRoot, name), value = JSON.parse(readFileSync(path, 'utf8')) as T
     edit(value); writeFileSync(path, JSON.stringify(value))
   }
-  if (tamper === 'attribution' || tamper === 'turn') {
+  if (tamper === 'attribution' || tamper === 'unrelated' || tamper === 'turn') {
     const edit = (terminal: { turnId: string; payload: { error: { attribution: { source: string } } } }) => {
-      if (tamper === 'attribution') terminal.payload.error.attribution.source = 'runtime'
+      if (tamper === 'attribution' || tamper === 'unrelated') terminal.payload.error.attribution.source = 'runtime'
       else terminal.turnId = 'different-turn'
     }
     changeProof('terminal.json', edit)
@@ -7969,14 +7991,54 @@ for (const tamper of ['none', 'attribution', 'turn', 'stop', 'source'] as const)
   }
   if (tamper === 'stop') changeProof<{ stopped: boolean }>('exit.json', value => { value.stopped = false })
   if (tamper === 'source') changeProof<{ inputId: string }>('send.json', value => { value.inputId = 'different-input' })
+  if (tamper === 'bad-json') writeFileSync(join(nativeRoot, 'terminal.json'), '{')
+  if (tamper === 'bad-shape') writeFileSync(join(nativeRoot, 'events.json'), 'null')
+  if (tamper === 'missing') rmSync(join(nativeRoot, 'send.json'))
+  const programmingError = new TypeError('fixture invariant unexpectedly failed')
+  if (tamper === 'program-error' || tamper === 'cas-missing' || tamper === 'cas-mismatch') {
+    const findResource = f.store.findResource.bind(f.store)
+    const key = prior.dispatchPlans.find(dispatch => dispatch.purpose === 'elaboration_review')!.key
+    const badRef = tamper === 'cas-mismatch' ? writeEvidence(commonDir, { fixture: 'wrong CAS bytes' }) : { sha256: '0'.repeat(64) }
+    if (tamper === 'cas-mismatch') writeFileSync(join(commonDir, 'spexcode/evidence', badRef.sha256), '{}')
+    f.store.findResource = (attemptId, requestKey) => {
+      const found = findResource(attemptId, requestKey)
+      if (!found || attemptId !== prior.id || requestKey !== key || f.store.readOperation(operationId).currentAttemptId === prior.id) return found
+      if (tamper === 'program-error') throw programmingError
+      return { ...found, checkpointRef: badRef }
+    }
+  }
   assert.equal(f.store.requestControl(operationId, 'run').phase, 'queued')
-  const replay = await runSyncOperation(f.store, operationId, f.options)
+  let replay = await runSyncOperation(f.store, operationId, f.options)
+  if (cold) {
+    assert.equal(replay.status, 'recovery_required', JSON.stringify(replay.failure))
+    assert.equal(cut, true)
+    const active = f.store.readAttempt(replay.operation.currentAttemptId!)
+    assert.equal(active.failure, null)
+    assert.ok(active.expiresAtMs > Date.now())
+    assert.ok(active.checkpointRefs.some(ref => (JSON.parse(readEvidence(commonDir, ref).toString()) as { stage: string }).stage === `${originalStage.key}:repair-diagnostics-provenance`))
+    assert.deepEqual(active.dispatchPlans.map(plan => plan.purpose), tamper === 'cold-reserved' ? ['elaboration_review'] : [])
+    const reserved = active.dispatchPlans[0]
+    if (reserved) { assert.equal(reserved.session, null); assert.equal(f.store.findResource(active.id, reserved.key), null) }
+    assert.equal(calls.length, 2)
+    protocol.close(); protocol = openProtocol(database)
+    assert.throws(() => applyComponentMigrations(protocol, SYNC_COMPONENT, SYNC_MIGRATIONS.slice(0, 62)), { code: 'PROTOCOL_SCHEMA_GENERATION_UNSUPPORTED' })
+    f.store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) }); f.useStore(f.store)
+    assert.deepEqual(f.store.readAttempt(active.id), active)
+    cut = false
+    observeCheckpoint(f.store, false)
+    replay = await runSyncOperation(f.store, operationId, f.options)
+    assert.equal(replay.operation.currentAttemptId, active.id)
+    if (reserved) {
+      const { session: _reservedSession, ...expected } = reserved
+      assert.deepEqual(f.store.readAttempt(active.id).dispatchPlans.map(({ session: _session, ...plan }) => plan), [expected])
+    }
+  }
   const attempts = f.store.listAttempts(operationId)
   assert.equal(attempts.length, 2); assert.ok(attempts[1].generation > prior.generation)
   assert.deepEqual(attempts[0].failure, prior.failure)
   assert.deepEqual(resultFor(attempts[0]), originalStage)
   const resumed = calls.filter(call => call.attempt === 2).map(call => call.request)
-  if (tamper === 'none') {
+  if (tamper === 'none' || cold) {
     assert.deepEqual(resumed.map(request => request.purpose), ['elaboration_review'], JSON.stringify(replay.failure))
     assert.deepEqual(resumed[0].worktree, calls[1].request.worktree)
     const { result: accepted } = resultFor(attempts[1]), acceptedRound = accepted.rounds[0]
@@ -7988,8 +8050,13 @@ for (const tamper of ['none', 'attribution', 'turn', 'stop', 'source'] as const)
     assert.notEqual(acceptedRound.traces[1].sessionId, originalResult.failure?.sessionId)
     assert.notEqual(acceptedRound.traces[1].sessionId, originalRound.traces[0].sessionId)
     assert.equal(replay.operation.callsUsed, originalRun.operation.callsUsed + 1)
+  } else if (tamper === 'unrelated') {
+    assert.deepEqual(resumed.map(request => request.purpose), ['elaboration_generate', 'elaboration_review'], JSON.stringify(replay.failure))
+    assert.deepEqual(attempts[1].dispatchPlans.map(dispatch => dispatch.purpose), ['elaboration_generate', 'elaboration_review'])
+    assert.equal(replay.operation.callsUsed, originalRun.operation.callsUsed + 2)
   } else {
-    assert.equal(replay.failure?.code, 'review_retry_binding', JSON.stringify(replay.failure))
+    assert.equal(replay.failure?.code, tamper === 'program-error' ? 'coordinator_failed' : 'review_retry_binding', JSON.stringify(replay.failure))
+    if (tamper === 'program-error') assert.equal(replay.failure?.message, programmingError.message)
     assert.deepEqual(resumed, []); assert.deepEqual(attempts[1].dispatchPlans, [])
     assert.equal(replay.operation.callsUsed, originalRun.operation.callsUsed)
   }
