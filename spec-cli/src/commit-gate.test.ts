@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
+import { historyEventCachePathForTests } from '@spexcode/spec-core'
 import { tsxBin } from './tsx-bin.js'
 
 const SRC = dirname(fileURLToPath(import.meta.url))
@@ -95,6 +96,36 @@ test('a candidate that only adds unclaimed source is allowed, but the skip names
   const doc = fx.commit('-m', 'edit the readme')
   assert.equal(doc.status, 0, `${doc.stdout}${doc.stderr}`)
   assert.doesNotMatch(`${doc.stdout}${doc.stderr}`, /claimed by no spec/)
+})
+
+test('the prepared gate accepts an empty commit under an unprovable history ledger lock and still rejects anchor debt', () => {
+  const fx = fixture()
+  const seed = fx.git('rev-parse', 'HEAD')
+  const ledger = historyEventCachePathForTests(fx.root)
+  const lock = `${ledger}.lock`
+  const owner = join(lock, 'owner.json')
+  const sentinel = '{"probe":"unprovable"}\n'
+  mkdirSync(lock, { recursive: true })
+  writeFileSync(owner, sentinel)
+
+  const stamp = fx.commitEnv({ SPEXCODE_GATE_TRACE: '1' }, '--allow-empty', '-m', 'record the tracked draft')
+  const output = `${stamp.stdout}${stamp.stderr}`
+  assert.equal(stamp.status, 0, output)
+  const head = fx.git('rev-parse', 'HEAD')
+  assert.notEqual(head, seed)
+  assert.equal(fx.git('show', '-s', '--format=%P', head), seed)
+  assert.equal(fx.git('rev-parse', 'HEAD^{tree}'), fx.git('rev-parse', `${seed}^{tree}`))
+  assert.ok(output.includes(`lint_rc=0 candidate=${head}`), output)
+
+  writeFileSync(join(fx.root, 'src', 'calc.py'), SOURCE(2))
+  fx.git('add', 'src/calc.py')
+  const rejected = fx.commit('-m', 'introduce anchor debt')
+  const rejectedOutput = `${rejected.stdout}${rejected.stderr}`
+  assert.notEqual(rejected.status, 0, rejectedOutput)
+  assert.match(rejectedOutput, /anchor-drift.*src\/calc\.py#apply_rate/)
+  assert.equal(fx.git('rev-parse', 'HEAD'), head)
+  assert.equal(readFileSync(owner, 'utf8'), sentinel)
+  assert.equal(existsSync(ledger), false)
 })
 
 test('new anchored drift is rejected before the branch ref advances', () => {

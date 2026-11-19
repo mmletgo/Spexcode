@@ -44,10 +44,16 @@ cold review payload's real lint consumer, while the post-observer generation and
 derivation. List, summary, and export all inherit that policy, and a replay that needs no ledger fact never consults an
 unrelated writer lock.
 
-This is one read policy over one ledger format and one derivation engine. It adds no cache, generation, timeout,
-path class, or background priority. Contention changes only who may persist newly derived immutable facts. A later
-uncontended read still writes them through the ordinary transaction, so foreground availability does not turn the
-durable ledger into a permanently read-only fast path.
+An immutable pending candidate in [[spec-lint]] explicitly opens the same snapshot in read-only mode. It
+takes no lock and needs no claimant or owner identity, including in a sandbox that cannot read process-start
+tokens. History and hunk misses use the same strict Git derivation and interpretation recheck. Nested consumers
+in the same Git common directory share the read-only snapshot while its interpretation still matches. A new
+interpretation retries the outer read-only build before any nested consumer can open a writer. An explicit
+read-only build inside a writer opens its own snapshot. The candidate discards its additions, even with a cold
+or malformed snapshot. Filesystem errors other than a missing ledger and Git derivation failures still surface.
+
+Both read paths share the ledger format and derivation engine. An uncontended foreground demand still writes
+newly derived immutable facts through the ordinary writer transaction.
 
 ## what the ledger holds and what a build costs
 
