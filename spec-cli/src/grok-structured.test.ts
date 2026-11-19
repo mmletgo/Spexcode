@@ -384,7 +384,7 @@ for (const externallyCancelled of [false, true]) {
       assert.equal(diagnostic.decision.exitCode, null)
       assert.equal(diagnostic.decision.signalCode, null)
       assert.equal(diagnostic.decision.stdoutEnded, false)
-      assert.equal(diagnostic.stderr, 'ignored')
+      assert.equal(diagnostic.stderr, 'metadata-only')
       assert.ok(diagnostic.terminalAtMs <= diagnostic.deadlineAtMs)
       assert.ok(typeof diagnostic.timerFiredAtMs === 'number' && diagnostic.timerFiredAtMs <= diagnostic.decision.atMs)
       assert.equal(diagnostic.timerLatenessMs, Math.max(0, diagnostic.timerFiredAtMs - diagnostic.deadlineAtMs))
