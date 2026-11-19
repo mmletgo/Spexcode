@@ -65,8 +65,8 @@ export const sourceGit = (root: string, args: string[]): Buffer => execFileSync(
 export function writeEvidence(commonDir: string, value: unknown): BlobRef { return { sha256: putBlob(Buffer.from(JSON.stringify(value)), evidenceDir(commonDir)) } }
 export function readEvidence(commonDir: string, ref: BlobRef): Buffer {
   const bytes = /^[a-f0-9]{64}$/.test(ref.sha256) ? getBlob(ref.sha256, evidenceDir(commonDir)) : null
-  if (!bytes) throw new Error(`缺失证据 ${ref.sha256}`)
-  if (contentHash(bytes) !== ref.sha256) throw new Error(`证据摘要不匹配 ${ref.sha256}`)
+  if (!bytes) throw Object.assign(new Error(`缺失证据 ${ref.sha256}`), { code: 'evidence_blob_missing' })
+  if (contentHash(bytes) !== ref.sha256) throw Object.assign(new Error(`证据摘要不匹配 ${ref.sha256}`), { code: 'evidence_blob_mismatch' })
   return bytes
 }
 export function validateRepositoryPath(path: string): string {

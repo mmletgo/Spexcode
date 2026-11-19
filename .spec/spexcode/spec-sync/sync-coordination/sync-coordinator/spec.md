@@ -98,6 +98,8 @@ P1权限/绑定非法的独审沿[[sync-elaboration]]现有同owner repairDiagno
 
 同一operation的P1已通过结构但未获得独审输出，若原独审因 ZCode `session/events` 超时或 Grok 超过原生退出观察期限并正式结算，现有 repairDiagnostics 只重开独审。单体及分区均冷验原检查点、完整冻结输入、组合树、readSet与selection；分区同时核原计划及owner。原Native生成请求、summary及Git草稿须精确绑定同一候选。失败独审须有原只读请求、canonical 失败及逐值匹配的正式 removed 和停止原件。ZCode 核已启动的精确 session/thread/turn。Grok 核原未发布的 session、正式派发、原生启动和停止原件、归档的原只读种子，thread/turn 保持缺席。原失败保留，当前fence只沿现有provenance引用原resultRef。全局失败记录前暂停时，恢复须有同owner局部原件及同样完整的结算证明。较新生成派发或不同生成来源阻止旧候选优先，同一生成的只读续审被暂停仍可续审。其他方法超时、生成失败、业务repair、未知停止及跨operation按原准入处理。当前独审仍使用冻结提示政策，原请求和检查点无需补字段。
 
+ZCode 已结算的 provider 拒绝保留原 `unsupported` 结论。操作员显式暂停再恢复同一 operation 后，结构通过且尚未审定的 P1 Git 候选可沿同一接缝只续独审。[[zcode-structured-runtime]] 的固定公开错误投影只定位待核记录，其他 `unsupported` 沿既有流程。须同时核原只读原生终态归因、失败派发、canonical 会话、removed/stop 和候选冻结绑定。原件缺失、文件读取或解码失败，及身份、结算、候选绑定失配时以 `review_retry_binding` 停在新派发前。Git 进程启动失败和程序异常沿既有错误处理保留原诊断。新独审绑定同一候选、控制范围和模型，原失败、请求、Git 稿及生成追踪保持。此路径仅用于同 operation、同模型的显式恢复。
+
 P1的whole缓存沿[[sync-elaboration]]同时核身份与当前owner范围。分区whole不直接继承ready，必须回原local input逐owner核缓存资格并重新严格seal；单体的当前saved与历史accepted入口均须消费资格结果。scope失效只放弃当前ready复用，优先沿既有草稿来源，必要时用已冷验缓存末轮Git稿继续，不丢JSON或改原reviewPassed/trace/ref，重新生成及独审后才保存新结果。
 
 最终分区独审的程序字段格式失败沿现有reviewRepair续审同一候选。旧Native completed而程序曾接受的无效定位也只在原dispatch、request/input、plan、candidate、输出digest/trace及removed终态完整认证后作为未批准材料读取；不改旧status/resultDigest，不伪造rejectedOutput或Native失败。待处理只读发现必须先取得合法位置，格式错误先续该review组，已accept兄弟按原完整输入及原件严格复用；新稿校验通过的真实repair再回原唯一P1。缺原件、身份/候选失配、未知/重复affectedIds或错误path/ID不得因草稿续修扩大业务权限。原失败请求冷重建及已accept组来源重验从既有aggregate的p2SpecWritePaths恢复同一瞬态写范围，再调用共享请求构造接缝，不将可写owner套入只读定位约束。复用同一stage-worktree临时稿与现有refs，无DB版本或持久字段变更。
@@ -177,6 +179,8 @@ P1 只把实际目标正文及其已审代码/可写验收路径、业务 ID 加
 准入和当前性复核沿 [[sync-input-snapshot]] 批读冻结目标与授权读集的对象。批读仍按原路径顺序装配正文，逐项保留原模式、缺席和对象校验。重复对象只在当次批次去重，独立测试绑定及读集摘要保持。
 
 operation 独立本机 kernel mutex 防双 coordinator；紧凑 stage checkpoint 只保存 refs、独立结果及诊断，不复制整张契约图。当前 attempt 在独占证明下重入稳定 requestKey，派发前原子计费、持久资源意图，完整真实结果/hash/独立身份保存后重放。lease heartbeat 贯穿原生长调用，控制/总deadline触发 Abort；旧 generation 只能结算真实资源证据。历史未removed资源精确恢复，未知终态保留 recovery_required，不假释放容量。
+
+同一运行进入下一轮时，若当前fence对应的attempt已failed、superseded或settled，必须在任何异步资源恢复或后继认领前停止其旧heartbeat。活跃attempt的续租贯穿资源检查，实际失权、外部替换或取消仍沿原Abort门禁；不以清理旧timer恢复已失效authority，不改变租约、心跳、预算或未知资源阻断规则。
 
 P1 已审结构结果登记所有未来业务 ID，包括 GAP/partial FLOW；ready/blocked 分区只隔离业务 ID，共享 paths 留 ready。无可执行 ready AC 不生成或写半成品；V1 仅容许已审 GAP 精确解释的缺口。未读继承 GAP 必须来自本轮已通过 partitionSeal 的同义原项和精确 finding，复用原 GAP 闭包分类；GAP及完整 affected 闭包不得涉及 ready 声明或 FLOW 步骤，其全部 owner 不属于本轮 accepted，且 Spec、治理源码、AC.test 等冻结义务在已审 composed、baseTree 与 candidate 的 path/mode/OID/absence 完全一致。缺证明、新增、改变或涉及本轮依赖的 GAP 仍阻断，不扩 scope/blocked/验证登记。generation 硬门禁保护 raw/全局REQ/AC/VERIFY、实际diff与独立oracle，V2使用不同会话；V3仅执行 ready AC 和 mandatoryTests 的固定命令/镜像；V4复采完整source、当前可信plan/readset与物理身份，一致才可交付，并于 beginApply 前再核。完整V1–V4 pass才 recordVerification(pass)，范围精确ready声明/完整FLOW，不包含blocked。
 

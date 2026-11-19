@@ -18,7 +18,7 @@ import { withoutVerificationTables } from './elaboration-markdown.js'
 import type { GeneratedTables, GeneratedTargetElaboration } from './elaboration-markdown.js'
 import type { GenerationInput, GenerationResult } from './generation-types.js'
 import { freezeGenerationInput, generationReviewRequest, restoreGenerationInput } from './generation.js'
-import { analyzeSyncPartitions, completeSyncPartitionPlan, elaborateSyncPartitions, generateSyncPartitions, implementationGenerationDispatch, implementationPartitionSelection, inspectPartitionedElaborationGaps, mapSyncPartitions, partitionSealRepairOwners, projectPartitionVerificationOwnership } from './partition-execution.js'
+import { analysisOnlyPartitionEvidence, analyzeSyncPartitions, completeSyncPartitionPlan, elaborateSyncPartitions, generateSyncPartitions, implementationGenerationDispatch, implementationPartitionSelection, inspectPartitionedElaborationGaps, mapSyncPartitions, partitionSealRepairOwners, projectPartitionVerificationOwnership } from './partition-execution.js'
 import type { PartitionCheckpoints } from './partition-execution.js'
 import { planSyncPartitions } from './partitioning.js'
 import type { SyncPartitionPlan } from './partitioning.js'
@@ -1229,7 +1229,7 @@ for (const fails of [false, true]) test(`最后一个分区${fails ? '失败' : 
 
 
 
-test('P1仅对真实Spec目标派发，保留独审无写义务的P0分区原件', async t => {
+test('P1仅对真实Spec目标派发，保留独审无写义务的源码与入口配置分区原件', async t => {
   const prepared = await fixture(t), { input, plan, checkpoints, root } = prepared
   const metadataOwner = { nodeId: 'metadata-note', path: '.spec/export/metadata-note/spec.md' }
   mkdirSync(dirname(join(root, metadataOwner.path)), { recursive: true })
@@ -1237,12 +1237,13 @@ test('P1仅对真实Spec目标派发，保留独审无写义务的P0分区原件
   const sourceOnly = [
     { id: 'part-metadata', path: 'docs/sync-note.md', kind: 'refactor' },
     { id: 'part-extra-test', path: 'tests/unowned-smoke.test.mjs', kind: 'allowed_change' },
+    { id: 'part-sync-settings', path: '.spec/spexcode.json', kind: 'refactor' },
   ] as const
   for (const { id, path } of sourceOnly) {
     mkdirSync(dirname(join(root, path)), { recursive: true })
-    writeFileSync(join(root, path), path.endsWith('.md') ? '# Note\n仅记录仓库约定。\n' : 'import test from "node:test"\ntest("smoke", () => {})\n')
+    writeFileSync(join(root, path), path.endsWith('.json') ? '{}' : path.endsWith('.md') ? '# Note\n仅记录仓库约定。\n' : 'import test from "node:test"\ntest("smoke", () => {})\n')
     const readPaths = id === 'part-metadata' ? [path, metadataOwner.path] : [path]
-    plan.partitions.splice(1, 0, { ...plan.partitions[0], id, targets: [], readPaths, writePaths: [], sourcePaths: [path], changedPaths: [path], contextNodeIds: id === 'part-metadata' ? [metadataOwner.nodeId] : [], contractIds: [], flowIds: [] })
+    plan.partitions.splice(1, 0, { ...plan.partitions[0], id, targets: [], readPaths, writePaths: [], sourcePaths: id === 'part-sync-settings' ? [] : [path], changedPaths: [path], contextNodeIds: id === 'part-metadata' ? [metadataOwner.nodeId] : [], contractIds: [], flowIds: [] })
     plan.expectedPaths.push(path)
   }
   for (const partition of plan.partitions.filter(item => item.targets.length)) partition.readPaths = [...new Set([...partition.readPaths, ...plan.partitions[0].readPaths])]
@@ -1290,6 +1291,7 @@ test('P1仅对真实Spec目标派发，保留独审无写义务的P0分区原件
       return original?.reviewPassed && contentHash(JSON.stringify(original)) === owner.analysisRef.sha256
     })
   } }
+  const frozenPlanBytes = JSON.stringify(plan), frozenAnalysisBytes = JSON.stringify(analysis)
   const result = await elaborateSyncPartitions(p1Input, plan, 1, mixedCheckpoints, runner, composed)
   assert.equal(result.structurePassed, true, JSON.stringify(result.partitionSeal?.findings))
   assert.equal(result.reviewPassed, true)
@@ -1301,10 +1303,65 @@ test('P1仅对真实Spec目标派发，保留独审无写义务的P0分区原件
   })))
   assert.equal(result.rounds.length, 3)
   assert.equal(analysis.facts.some(fact => fact.source === 'code:docs/sync-note.md#Note'), true)
+  const settingsId = 'part-sync-settings', settingsPath = '.spec/spexcode.json', commonDir = snapshot.source.commonDir
+  const obligations: [string, (local: CodeBehaviorAnalysis) => void][] = [
+    ['affected ID', local => local.changes[0].affectedIds.push('REQ-EXPORT-01')],
+    ['rule ID', local => local.changes[0].ruleIds.push('RULE-EXPORT-01')],
+    ['acceptance authorization', local => local.authorizedChanges.push({ id: 'AC-EXPORT-03', action: 'update_acceptance', source: 'user:raw', reason: '明确作者验收变化', ruleIds: [] })],
+    ['local author change', local => { local.authorChanges = [{ nodeId: 'export-contract', path: settingsPath, beforeRaw: '旧作者原意', afterRaw: '新作者原意', changedIds: [] }] }],
+    ['new node', local => local.newNodes.push({ nodeId: 'new-owner', path: '.spec/export/new-owner/spec.md', codePath: settingsPath, rawSource: '新增业务义务' })],
+  ]
+  for (const [label, mutate] of obligations) await t.test(`入口配置带${label}仍须真实细化`, () => {
+    const modified = structuredClone(analysis), owner = modified.partitionEvidence!.find(item => item.partitionId === settingsId)!
+    mutate(owner.analysis)
+    owner.analysisRef = writeEvidence(commonDir, owner.analysis)
+    modified.changes = modified.partitionEvidence!.flatMap(item => item.analysis.changes)
+    modified.authorizedChanges = modified.partitionEvidence!.flatMap(item => item.analysis.authorizedChanges)
+    modified.authorChanges = modified.partitionEvidence!.flatMap(item => item.analysis.authorChanges ?? [])
+    modified.newNodes = modified.partitionEvidence!.flatMap(item => item.analysis.newNodes)
+    assert.ok(!analysisOnlyPartitionEvidence(commonDir, plan, { analysis: modified, ref: writeEvidence(commonDir, modified) }).some(owner => owner.partitionId === settingsId))
+  })
+  const wrongPartitions: [string, (partition: SyncPartitionPlan['partitions'][number], frozen: SyncPartitionPlan) => void][] = [
+    ['local config', partition => { partition.changedPaths = ['.spec/spexcode.local.json'] }],
+    ['other metadata', partition => { partition.changedPaths = ['.spec/other.json'] }],
+    ['business Spec', partition => { partition.changedPaths = ['.spec/export/new-owner/spec.md'] }],
+    ['existing business Spec', partition => { partition.changedPaths = [input.contracts[0].path] }],
+    ['root Spec', partition => { partition.changedPaths = ['.spec/root/spec.md'] }],
+    ['configuration plus another path', partition => partition.changedPaths.push('docs/other.md')],
+    ['mixed source change', partition => { partition.sourcePaths = ['src/export.js']; partition.changedPaths.push('src/export.js') }],
+    ['lost source membership', partition => { partition.sourcePaths = ['src/export.js'] }],
+    ['configuration posing as source', partition => { partition.sourcePaths = [settingsPath] }],
+    ['write path', partition => partition.writePaths.push(settingsPath)],
+    ['target', partition => { partition.targets = [...partition.targets, { nodeId: 'export-contract', path: input.contracts[0].path }] }],
+    ['contract role', partition => partition.contractIds.push('REQ-EXPORT-01')],
+    ['flow role', partition => partition.flowIds.push('FLOW-EXPORT-01')],
+    ['dependency', (partition, frozen) => frozen.dependencies.push({ from: partition.id, to: frozen.partitions[0].id, paths: [settingsPath], contractIds: [] })],
+    ['missing expected path', (_partition, frozen) => { frozen.expectedPaths = frozen.expectedPaths.filter(path => path !== settingsPath) }],
+    ['duplicate owner', (_partition, frozen) => frozen.partitions.find(owner => owner.targets.length)!.changedPaths.push(settingsPath)],
+  ]
+  for (const [label, mutate] of wrongPartitions) await t.test(`入口配置不绕过${label}门`, () => {
+    const frozen = structuredClone(plan)
+    mutate(frozen.partitions.find(partition => partition.id === settingsId)!, frozen)
+    assert.ok(!analysisOnlyPartitionEvidence(commonDir, frozen, { analysis, ref: wholeRef }).some(owner => owner.partitionId === settingsId))
+  })
+  await t.test('入口配置仍核全局与局部原始CAS', () => {
+    const modified = structuredClone(analysis)
+    modified.partitionEvidence!.find(item => item.partitionId === settingsId)!.analysisRef = writeEvidence(commonDir, { invalid: true })
+    assert.throws(() => analysisOnlyPartitionEvidence(commonDir, plan, { analysis: modified, ref: writeEvidence(commonDir, modified) }), /真实已审P0原件/)
+    assert.throws(() => analysisOnlyPartitionEvidence(commonDir, plan, { analysis: { ...analysis, reviewPassed: false }, ref: wholeRef }), /精确全局P0/)
+    assert.throws(() => analysisOnlyPartitionEvidence(commonDir, plan, { analysis, ref: writeEvidence(commonDir, { invalid: true }) }), /精确全局P0/)
+  })
+  await t.test('全局新叶仍阻止入口配置成为仅分析分区', () => {
+    const modified = structuredClone(analysis)
+    modified.newNodes.push({ nodeId: 'settings-owner', path: '.spec/export/settings-owner/spec.md', codePath: settingsPath, rawSource: '真实新叶义务' })
+    assert.ok(!analysisOnlyPartitionEvidence(commonDir, plan, { analysis: modified, ref: writeEvidence(commonDir, modified) }).some(owner => owner.partitionId === settingsId))
+  })
   assert.deepEqual(await elaborateSyncPartitions(p1Input, plan, 1, mixedCheckpoints, async () => { throw new Error('无新派发') }, composed), result)
   await assert.rejects(elaborateSyncPartitions(p1Input, plan, 1, { ...mixedCheckpoints, authenticateAnalysisOnly: () => false }, runner, composed), /缺少原正式P0/)
   const lostTarget = { ...p1Input, targets: p1Input.targets.slice(1) }
   await assert.rejects(elaborateSyncPartitions(lostTarget, plan, 1, mixedCheckpoints, runner, composed), /缺少可写细化目标/)
+  assert.equal(JSON.stringify(plan), frozenPlanBytes)
+  assert.equal(JSON.stringify(analysis), frozenAnalysisBytes, '配置分区不改写全局P0事实或局部原件')
 
 })
 

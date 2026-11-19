@@ -113,6 +113,8 @@ Grok P1 只读独审退出超时以真实 SQLite、Git、原生资源桥和受�
 
 同一受控 CLI 另覆盖分析退出超时。新 attempt 在同 operation 逐字读取原 Git 草稿，重新提交新分析，并由另一个会话独审。原失败保持无批准、原草稿归档和作者源码/索引保持，结果证据只引用新分析和新独审。
 
+ZCode P1 父接口用真实 Git、SQLite 和受控 Native 资源桥保存原结构通过候选与独审 `unsupported`。验证首次失败后没有自动派发，显式暂停、关闭重开数据库和恢复后，新 fence 仅派发一个独立只读审查。原失败、候选、草稿对象、生成追踪和源索引保持。固定公开失败投影一致时，篡改 provider 归因、turn、停止或原发送输入，以及原件缺失、CAS 摘要不符和 JSON 损坏，均在新调用前以 `review_retry_binding` 停止。其他 `unsupported` 走原恢复流程。注入程序异常、只有 errno 码的错误和 Git 进程启动失败均保留原诊断和零派发。对已持久化候选来源及已保留独审派发两处分别冷重启，旧 writer62 均拒绝，新 writer63 在同 fence 仅重开精确独审。测试在父接口审查结果持久化后停止。
+
 另一路让接续的分析会话仅返回正常回执并保持原 seed。核其 Native 资源成功结算、原 Git 书证没有新提交、程序不产生批准，原 attempt 留缺少新提交的失败类别。下一 attempt 逐字续原草稿，正常提交后才开启独审；最终分析不得引用上轮无提交的回执。
 
 Native P0单体与分区使用真实临时worktree、Git提交和SQLite检查点，分析/独审syntax或schema拒绝后沿同operation/原预算续原草稿，独审格式拒绝不重跑已校验分析。独审accept的change.id尾字抄错须先持久拒绝并关闭重开SQLite，下一attempt只新派review，原JSON/schema字节及OID、完整missing/unknown诊断与分析trace/OID保持；原accept不成为批准。完整合法业务repair仍按analyze→review→analyze→review续原分析，新review不带旧稿；三attempt兄弟已审原件及各自provenance保持。旧reserved只读派发不补协议，其认证Native错误/CAS原bytes通过原资源桥进入下一真实草稿seed，记录native-material provenance；旧原件保持，不造历史Git witness或业务批准。只读源码/tests及原index保持，回归在P1前明确停止，不调用真实模型、Docker或采纳。
@@ -178,6 +180,8 @@ raw-only 冲突/GAP 以真实 Git/SQLite 和明确 native 接缝回归：空旧/
 AC-SYNC-02/03使用真实已有详细契约，分别经readonly prepareSpecBodyEdit+requestBlob修改高层raw和具体TR，source/index全程不写。独立模型会话返回固定业务表并检查新意图和旧验收对照；真实V1保护accepted新契约，V3 Docker运行新/旧实际断言，固定CLI hooks/Git交付，receipt覆盖新验收。未受影响作者prose与原ID行保留，旧oracle文件不可改，不把成功从空Spec用例当修改既有契约证据。
 
 真实受控编辑首次30秒租约在连续同步Git/结构微任务阶段过期并返回recovery_required；默认120秒及持权阶段让步后，用未显式指定lease的同一AC02/03场景验证完整Docker/Git交付。已有1500ms短lease/50ms heartbeat取消用例保持，默认调整不放宽过期fence或总deadline。
+
+attempt心跳生命周期回归只控制setInterval，不伪造Date或延长原30秒租约、1秒心跳：先证明活跃fence真实续租，再在已持久失败的旧attempt资源恢复窗口触发timer，后继attempt须实际派发且signal未被旧timer中止。当前执行期间真实失权或外部cancel仍Abort并禁止后继派发；原短租约长调用取消与三项父接口fresh scope-v2断言保持，未知资源仍阻断新attempt。
 
 受控model夹具按原生strict wire返回每个changes行mode:null（沿用或默认100644），包含新文件和既有文件，不以省略optional域掩盖原生服务schema拒绝；业务断言与预算不变。
 

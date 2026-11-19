@@ -7,7 +7,7 @@ import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readF
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { withWorktreeRegistryLock } from '../session-record-lock.js'
-import { captureInputSnapshot, contentHash, identifyWorktree, readEvidence, readObject, readTree, UnstableSnapshotError, verifySnapshot, withReadonlySnapshotQuery, writeObject, writeTree } from './snapshot.js'
+import { captureInputSnapshot, contentHash, identifyWorktree, readEvidence, readObject, readTree, UnstableSnapshotError, verifySnapshot, withReadonlySnapshotQuery, writeEvidence, writeObject, writeTree } from './snapshot.js'
 import { composeInputSnapshots } from './composition.js'
 import { exportCandidate, freezeCandidate, verifyCandidate } from './candidate.js'
 import type { BaselinePair, InputSnapshot, SyncScope } from './operation-types.js'
@@ -25,6 +25,16 @@ const scope = (...paths: string[]): SyncScope => ({ paths, contractIds: ['REQ-TE
 const files = (snapshot: InputSnapshot): Map<string, string> => new Map(readTree(snapshot.source.commonDir, snapshot.immutableTree).map(entry => [entry.path, readObject(snapshot.source.commonDir, entry.oid).toString()]))
 const change = (snapshot: InputSnapshot, path: string, content: string | null, mode?: '100644' | '100755'): object => { const entry = verifySnapshot(snapshot).find(entry => entry.path === path); return { path, beforeDigest: entry?.digest ?? null, beforeMode: entry?.mode ?? null, content, ...(mode ? { mode } : {}) } }
 const pair = (sourceInput: InputSnapshot, verifiedDelivery: InputSnapshot): BaselinePair => ({ id: 'baseline-1', repositoryId: sourceInput.source.repositoryId, source: sourceInput.source, sourceInput, verifiedDelivery, receiptId: 'verified-receipt', coveredScope: scope('file.ts', 'generated.ts'), settledAtMs: Date.now() })
+
+test('CAS读取区分原件缺失和字节摘要失配并保留原诊断', t => {
+  const commonDir = join(repo(t), '.git'), value = { review: '冻结候选证据' }
+  const missing = { sha256: '0'.repeat(64) }
+  assert.throws(() => readEvidence(commonDir, missing), { code: 'evidence_blob_missing', message: `缺失证据 ${missing.sha256}` })
+  const ref = writeEvidence(commonDir, value)
+  assert.deepEqual(readEvidence(commonDir, ref), Buffer.from(JSON.stringify(value)))
+  writeFileSync(join(commonDir, 'spexcode/evidence', ref.sha256), '{}')
+  assert.throws(() => readEvidence(commonDir, ref), { code: 'evidence_blob_mismatch', message: `证据摘要不匹配 ${ref.sha256}` })
+})
 
 for (const format of ['sha1', 'sha256'] as const) {
   test(`${format} 真实批量对象保留二进制、UTF-8特殊路径、空文件与mode，每轮只启动一个写入和读取进程`, async t => {

@@ -6,13 +6,13 @@ import { createHash } from 'node:crypto'
 import { syncBuiltinESMExports } from 'node:module'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { processStartToken, verifyDetachedRuntime, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
 import { freezeContext, frozenReadTool, readFrozenRange } from './frozen-context.js'
 import { ZCODE_FROZEN_TOOL, type ZCodeFrozenWitness, type ZCodeNativeEvent } from './zcode-frozen-evidence.js'
-import { structuredExecutionPolicy, type StructuredExecution } from './session-structured-policy.js'
+import { structuredExecutionPolicy, structuredRealmRoot, type StructuredExecution } from './session-structured-policy.js'
 import { sampleNativeWorktreeProcesses } from './native-worktree-runtime.js'
-import { assertZCodeModelSnapshot, assertZCodeStoppedDraftSource, decodeZCodeStructuredText, stopZCodeStructuredTurn, zcodeCapability, zcodeIdleObservation, zcodeNativeConfigModel, zcodeNativeConfigSelection, zcodeNativeModel, zcodeNativeSelection, zcodeProofEvent, zcodeRuntimeConfiguration, zcodeStructuredPrompt, zcodeStructuredTurn, ZCodeNativeTurnFailedError, type ZCodeStructuredExecution } from './zcode-structured.js'
+import { assertZCodeModelSnapshot, assertZCodeSettledProviderReview, assertZCodeStoppedDraftSource, decodeZCodeStructuredText, stopZCodeStructuredTurn, zcodeCapability, zcodeIdleObservation, zcodeNativeConfigModel, zcodeNativeConfigSelection, zcodeNativeModel, zcodeNativeSelection, zcodeProofEvent, zcodeRuntimeConfiguration, zcodeStructuredPrompt, zcodeStructuredTurn, ZCodeNativeTurnFailedError, type ZCodeStructuredExecution } from './zcode-structured.js'
 
 test('Native failure diagnostics expose only safe errno codes and exact turn identity', () => {
   for (const code of ['EPIPE', 'UNTRUSTED_PROVIDER_BODY', '__proto__', null, { message: 'UNTRUSTED_PROVIDER_BODY' }]) {
@@ -299,18 +299,22 @@ test('cli-config-v1 forwards opaque provider/model and effort to SDK readback', 
   assert.throws(() => assertZCodeModelSnapshot(wrongEffort, selection, true), { code: 'unsupported' })
 })
 
-for (const profile of ['cli-config-v1-explicit', 'cli-config-v1-default', 'legacy-v2'] as const) test(`ZCode completed cold replay binds its original runtime identity and model selection: ${profile}`, async () => {
-  const directory = mkdtempSync(join(tmpdir(), 'spex-zcode-runtime-snapshot-')), realm = join(directory, 'realm'), root = join(realm, 'native')
-  mkdirSync(join(root, 'runtime'), { recursive: true })
+for (const profile of ['cli-config-v1-explicit', 'cli-config-v1-default', 'cli-config-v1-review', 'legacy-v2'] as const) test(`ZCode completed cold replay binds its original runtime identity and model selection: ${profile}`, async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'spex-zcode-runtime-snapshot-'))
+  const providerReview = profile === 'cli-config-v1-review'
   try {
     const hash = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
-    const generic = profile !== 'legacy-v2', defaultModel = profile === 'cli-config-v1-default'
+    const generic = profile !== 'legacy-v2', defaultModel = profile === 'cli-config-v1-default' || providerReview
     const modelRoute = defaultModel ? 'zcode:default' : generic ? 'zcode:anthropic/claude-sonnet-4:custom+context' : 'zcode:bigmodel-api/GLM-5.3-Flash'
     const effort = profile === 'cli-config-v1-explicit' ? 'xhigh' as const : profile === 'legacy-v2' ? 'high' as const : undefined
-    const zcodeToolPolicy = profile === 'legacy-v2' ? { version: 1 as const, toolDenylist: ['ExitPlanMode'] as const } : undefined
+    const zcodeToolPolicy = profile === 'legacy-v2' || providerReview ? { version: 1 as const, toolDenylist: ['ExitPlanMode'] as const } : undefined
     const schema = { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false }, prompt = 'Return the completed response.'
-    const worktree = { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: profile === 'legacy-v2' ? 'read' as const : 'edit' as const }
-    const policy = structuredExecutionPolicy({ schema, inputDigest: 'snapshot-input', purpose: 'runtime-snapshot', timeoutMs: 1000, model: modelRoute, ...(effort ? { effort } : {}), worktree, ...(zcodeToolPolicy ? { zcodeToolPolicy } : {}), ...(generic ? { nativeConfiguration: 'cli-config-v1' as const } : {}) })
+    const worktree = { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: zcodeToolPolicy ? 'read' as const : 'edit' as const }
+    const policy = structuredExecutionPolicy({ schema, inputDigest: 'snapshot-input', purpose: providerReview ? 'elaboration_review' : 'runtime-snapshot', timeoutMs: 1000, model: modelRoute, ...(effort ? { effort } : {}), worktree, ...(zcodeToolPolicy ? { zcodeToolPolicy } : {}), ...(generic ? { nativeConfiguration: 'cli-config-v1' as const } : {}) })
+    const realm = providerReview ? structuredRealmRoot(policy)! : join(directory, 'realm')
+    const nativeId = providerReview ? basename(directory) : 'native', root = join(realm, nativeId)
+    mkdirSync(join(root, 'runtime'), { recursive: true })
+    if (providerReview) t.after(() => rmSync(root, { recursive: true, force: true }))
     const requested = generic ? zcodeNativeConfigSelection(modelRoute, effort) : zcodeNativeSelection(modelRoute, effort)
     const selectedModel = defaultModel ? { providerId: 'configured-provider', modelId: 'configured-default', options: { reasoningLevel: 'medium', providerOption: 'retained' } }
       : generic ? { ...requested.model!, options: { ...(requested.model!.options ?? {}), providerOption: 'retained' } } : requested.model!
@@ -337,12 +341,12 @@ for (const profile of ['cli-config-v1-explicit', 'cli-config-v1-default', 'legac
     const completed = { plan, terminal, events, messages, exit, send, result }
     for (const [name, value] of Object.entries({ 'plan.json': plan, 'model-snapshot.json': modelSnapshot, 'events.json': events, 'messages.json': messages, 'terminal.json': terminal, 'exit.json': exit, 'send.json': send, 'completed.json': completed })) writeFileSync(join(root, name), JSON.stringify(value))
     const callbacks = { onThread: async () => assert.fail('cold replay must not create a session'), onTurn: async () => assert.fail('cold replay must not send a turn'), onNative: async () => assert.fail('cold replay must not start a CLI') }
-    const replay = await zcodeStructuredTurn(realm, 'native', prompt, execution, callbacks, workspace)
+    const replay = await zcodeStructuredTurn(realm, nativeId, prompt, execution, callbacks, workspace)
     assert.deepEqual(replay, result)
     assert.equal(replay.frozenReadProof, undefined)
     const planBytes = readFileSync(join(root, 'plan.json'))
     writeFileSync(join(root, 'plan.json'), JSON.stringify({ ...plan, cliSha256: 'f'.repeat(64) }))
-    await assert.rejects(zcodeStructuredTurn(realm, 'native', prompt, execution, callbacks, workspace), { code: 'stale_result' })
+    await assert.rejects(zcodeStructuredTurn(realm, nativeId, prompt, execution, callbacks, workspace), { code: 'stale_result' })
     writeFileSync(join(root, 'plan.json'), planBytes)
     if (generic) {
       mkdirSync(workspace); mkdirSync(tmp)
@@ -362,6 +366,24 @@ for (const profile of ['cli-config-v1-explicit', 'cli-config-v1-default', 'legac
         const stop = await stopZCodeStructuredTurn(stoppedExecution)
         assert.equal(stop.nativeStopped, true)
         stoppedExecution.cancellation = { reason: 'cancelled', requestedAt: Date.now(), ...stop }
+        if (providerReview) {
+          const review: ZCodeStructuredExecution = { ...stoppedExecution, errorCode: 'unsupported', turnStartRequested: true }
+          const attribution = { source: 'provider', exceptionKind: 'provider_business', retryable: false, errorPhase: 'stream' }
+          const rejected = { ...failed, payload: { inputId, turnPhase: 'processing_input', error: { code: 'EPIPE', attribution } } }
+          const saveTerminal = (event: typeof rejected) => {
+            writeFileSync(join(root, 'events.json'), JSON.stringify([...events.slice(0, -1), event]))
+            writeFileSync(join(root, 'terminal.json'), JSON.stringify(event))
+          }
+          saveTerminal(rejected)
+          assert.doesNotThrow(() => assertZCodeSettledProviderReview(nativeId, prompt, review, workspace))
+          assert.throws(() => assertZCodeSettledProviderReview('different-session', prompt, review, workspace), { code: 'stale_result' })
+          assert.throws(() => assertZCodeSettledProviderReview(nativeId, prompt, { ...review, state: 'cancelled' }, workspace), { code: 'stale_result' })
+          saveTerminal({ ...rejected, payload: { ...rejected.payload, turnPhase: 'other' } })
+          assert.throws(() => assertZCodeSettledProviderReview(nativeId, prompt, review, workspace), { code: 'stale_result' })
+          saveTerminal({ ...rejected, payload: { ...rejected.payload, error: { code: 'EPIPE', attribution: { ...attribution, retryable: true } } } })
+          assert.throws(() => assertZCodeSettledProviderReview(nativeId, prompt, review, workspace), { code: 'stale_result' })
+          return
+        }
         const originalFiles = readdirSync(root, { withFileTypes: true }).filter(entry => entry.isFile()).map(entry => ({ path: join(root, entry.name), bytes: readFileSync(join(root, entry.name)) }))
         assert.equal(assertZCodeStoppedDraftSource(prompt, stoppedExecution, workspace), true, 'v3 explicit/default原失败不用messages或success身份取得未批准材料源认证')
         assert.equal(assertZCodeStoppedDraftSource(prompt, { ...stoppedExecution, state: 'cancelled' }, workspace), true)

@@ -11,13 +11,15 @@
 - P2 混合结果先保同候选已认证结论，仅续审格式拒稿，不插入GAP复核/续稿；随后按精确 owner 处理普通与契约遗漏发现并逐值保GAP，新并集strict seal后才独审GAP。writer51 围栏保护新增持久判别值；冷升级先停稳、结算与 online backup，回滚恢复一致 v50 库及原证据。
 - writer52 保护候选 GAP 独审与 owner 续稿的原件引用。停稳并结算后由原组件迁移保存一致 online backup，回滚恢复 v51 库、证据和 Git 引用。
 - 共享分区调度每项结束均须真正让出事件循环，缓存、末项与失败亦然；让原心跳与控制运行，不延长租约或弱化fence。P1只按最近有真实P1派发的已结算观测故障收紧下一次返修，故障消失后恢复冻结并发；无派发或仅复用检查点的控制重启不消耗或重置该次返修。
+- attempt 结束后在异步资源恢复前撤旧心跳，活跃 fence 的真实失权和外部取消继续阻止派发。
 - 每阶段绑定真实 seed commit/tree：分析使用 composed，细化包含已审祖先，构建包含已审 Spec，独审使用实际候选。缓存同时核验实际可见 tree；不能只传原 HEAD 而漏掉受控 Spec 修改，也不能混入提交后的 index/WIP。
 - 实现 Agent 在工作树真实修改、测试并正常提交；候选从实际 Git 对象差量导入。程序检查写范围、CAS、原测试和契约演进，生成摘要或自报补丁不能替代实际修改。
 - 模型临时业务行由 `CONTRACT_COLUMNS` 渲染唯一 Markdown；raw/摘要由程序复制，JSON 仅是执行证据。
 - 生成和独立评审使用不同会话。输入、候选和检查结果均按内容摘要绑定；未决 GAP 只阻塞依赖闭包。
 - P1候选GAP只复核同operation新提议的code/derived missing_fact；原aggregate/local/Native refs冷验后只让命中owner续原Git稿、新独审及strict seal，其他业务字段与源码/tests保持。新checkpoint仅留refs和身份，诊断现读；真实未知及已处理负例不反复派发，旧批准不改签。
 - P1 V5完整叶只读事实返修只消费原candidate_review认证诊断的typed relatedIds与冻结owner交集：仅desc/expanded及命中RULE.basis可变，其余业务列/raw/绑定/AC/VERIFY严格保持；旧缺席不补写、不从message或草稿errors授信，局部与strict seal共用。
-- P1独审共用生成侧owner范围；仅要求冻结owner改写的repair或未知ID绑定须给具体拒因重审。原JSON/Git稿、候选与原Native生成身份冷验相同后只续独审；域内语义repair仍续生成。已结算的 ZCode session/events 超时与 Grok 独审退出逾期均可仅续审。沿同一 operation 冷验原只读请求、canonical 失败和正式 removed/stop。Grok 另核原生启动与停止原件和只读 Git 归档。保留原失败及未批准状态。旧请求字段不追补。
+- P1独审共用生成侧owner范围；仅要求冻结owner改写的repair或未知ID绑定须给具体拒因重审。原JSON/Git稿、候选与原Native生成身份冷验相同后只续独审；域内语义repair仍续生成。已结算的 ZCode session/events 超时与 Grok 独审退出逾期均可仅续审。沿同一 operation 冷验原只读请求、canonical 失败和正式 removed/stop。Grok 另核原生启动与停止原件和只读 Git 归档。ZCode provider EPIPE 仅在同一 operation 显式暂停恢复后，凭 adapter 认证的原只读终态和正式结算只续审。保留原失败及未批准状态。旧请求字段不追补。
+- writer63 保护已结算 ZCode P1 续审来源、已保留的只读派发及规范入口配置的仅分析承接。升级前停稳并结算旧 writer，保存一致 v62 SQLite online backup 和配套 enabled、Git/CAS。回滚先停稳并结算新 writer，再恢复整套备份。
 - 新 Native P0 独审按 `reviewCoveragePreflight` 只读检查原任务的必审路径与实际变化ID，沿原Git稿续审及完整正式门。writer61 升级停稳、结算并保存一致 v60 online backup 及配套 Git/CAS。
 - 跨 attempt 的新增完整叶 Native 草稿提示按 `draftRepairDisposition` 标记后续实现诊断。原 Git 及 findings 逐字保留，P1 只读/结构门和 V3 原执行保持。writer60 升级停稳、结算并保存一致 v59 online backup 及配套 Git/CAS。
 - 新 Native spec_to_code 的冻结父作者 REQ/RULE 差量按原 P0、独审父接口与显式叶引用证明，精确影响既选叶目标；局部与 strict seal 共用，既有验收授权和同候选冷复核保持。writer59 升级停稳、结算并保存一致 v58 online backup 及配套 Git/CAS。
@@ -78,6 +80,7 @@
 - P1完整生成v2/v3在本owner reserve前可认证同一已停来源的真实单稿提交，要求完整index与两次读取的全部受控物理模式和字节匹配HEAD，允许草稿命名空间外的ignored。仅 canonical 托管路径可以用原冻结seed的隔离materialize全文件重建证明，旧runtime slot不作证。冻结`stopped_git_draft`未批准原bytes、原诊断和Git/Native身份，已冻结的请求冷重放按同一材料。其他已reserved、历史v1、P0与物理未提交路径沿原门，writer30围栏v2，writer31围栏v3。
 
 - 全局P1仅分析分区沿正式P0原件和同一冻结计划认证。真实P1与仅分析P0证据分别保存并完全覆盖原计划，封口返修和V1复用重核来源。writer28只追加SELECT1，升级须停稳旧writer、正式结算资源和租约并先做一致online backup；回滚恢复v27一致库及原evidence/Git refs。
+- 仅规范入口配置变更的独立分区须由原冻结 P0 独审证明无写义务，正式交付仍执行 V1–V4。
 
 - writer33保护P1 V5事实资格；旧V1–V4/缺席、saved/reserved请求不补升级。升级先停稳旧writer/结算资源并做32一致online backup，回滚停新writer并恢复32库及配套evidence/Git refs，禁止删marker。旧批准owner按原source protocol冷验，新返修才绑定V5。
 
