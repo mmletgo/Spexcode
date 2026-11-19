@@ -355,11 +355,14 @@ export function assertZCodeStoppedDraftSource(prompt: string, execution: ZCodeSt
   const nonSuccess = completedEventsRpc && (terminal.type !== 'turn.completed' || terminal.payload.resultType === 'cancelled' && typeof terminal.payload.response === 'string')
   const exitMatches = nonSuccess ? exit.stopped === true && (exit.code === null || Number.isSafeInteger(exit.code) && exit.code >= 0)
     && (exit.signal === null || exit.code === null && typeof exit.signal === 'string' && Object.hasOwn(constants.signals, exit.signal)) : !!exit.stopped && exit.code === 0 && exit.signal === null
+  const unfinishedFailureExit = !sealed && execution.state === 'failed' && execution.errorCode === undefined && terminal.type === 'turn.failed'
+    && exit.code === null && exit.signal === null && exit.stopped === false && exit.acknowledged === false && exit.idle === false && exit.closed === false
   if (digest(send) !== digest(nativeSend(plan, prompt, execution)) || !plan.turnId || typeof plan.model?.providerId !== 'string' || !plan.model.providerId || typeof plan.model.modelId !== 'string' || !plan.model.modelId || snapshot.sessionId !== plan.sessionId || digest(snapshot.model) !== digest(plan.model) || starts.length !== 1 || starts[0].payload.inputId !== plan.inputId || starts[0].payload.queryId !== plan.queryId || typeof starts[0].payload.messageId !== 'string' || !starts[0].payload.messageId
     || events.some(event => event.sessionId !== plan.sessionId || event.turnId !== plan.turnId || !Number.isSafeInteger(event.seq) || typeof event.eventId !== 'string') || new Set(events.map(event => event.eventId)).size !== events.length
     || !requests.length || requests.some(event => event.payload.providerId !== plan.model?.providerId || event.payload.modelId !== plan.model?.modelId)
-    || terminals.length !== 1 || digest(terminals[0]) !== digest(terminal) || terminal.sessionId !== plan.sessionId || terminal.turnId !== plan.turnId || terminal.payload.inputId !== plan.inputId || !exitMatches)
+    || terminals.length !== 1 || digest(terminals[0]) !== digest(terminal) || terminal.sessionId !== plan.sessionId || terminal.turnId !== plan.turnId || terminal.payload.inputId !== plan.inputId || !(exitMatches || unfinishedFailureExit))
     throw new StructuredSessionError('stale_result', 'stopped ZCode draft lost its original model/input/terminal/exit identity')
+  if (unfinishedFailureExit) return null
   if (sealed) {
     const messages = read('messages.json') as NativeMessage[]
     const { completed } = verifyWorktreeCompletion(plan, plan.model, prompt, execution, { terminal, events, messages, exit, send }, true)
