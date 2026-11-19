@@ -4443,7 +4443,7 @@ for (const target of ['code_behavior_analyze', 'elaboration_generate'] as const)
   assert.equal(f.calls.some(call => call.purpose === 'code_generate'), false)
 })
 
-for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read-witness', 'format-read-witness-twice', 'format-wrong-witness', 'format-formal-retry', 'format-wrong-packet', 'format-wrong-candidate', 'legacy-review', 'v3-review', 'paused', 'paused-review', 'newer-generation', 'wrong-stop', 'wrong-candidate', 'wrong-task'] as const) test(`P1已结算${mode.startsWith('format') ? '格式失败独审' : 'session/events独审超时'}只重审同一Git候选 ${mode}`, async t => {
+for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read-witness', 'format-read-witness-twice', 'format-wrong-witness', 'format-formal-retry', 'format-wrong-packet', 'format-wrong-candidate', 'legacy-review', 'v3-review', 'paused', 'paused-review', 'newer-generation', 'wrong-stop', 'wrong-candidate', 'wrong-task', 'partition-settled-interrupted-review'] as const) test(`P1已结算${mode.startsWith('format') ? '格式失败独审' : mode === 'partition-settled-interrupted-review' ? '中断前独审绑定拒绝' : 'session/events独审超时'}只重审同一Git候选 ${mode}`, async t => {
   const formatFailure = mode.startsWith('format')
   const formatTwice = mode === 'format-twice' || mode === 'format-read-witness-twice'
   const readWitness = mode === 'format-read-witness' || mode === 'format-read-witness-twice' || mode === 'format-wrong-witness'
@@ -4452,10 +4452,20 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
   const wrongCandidate = mode === 'wrong-candidate' || mode === 'format-wrong-candidate'
   const failureCode = formatFailure ? 'structured_output_format_invalid' : 'native_rpc_timeout'
   const formalRetry = mode === 'format-formal-retry', codeToSpec = formatTwice || formalRetry
-  const partitioned = mode === 'partition' || codeToSpec
+  const interruptedReview = mode === 'partition-settled-interrupted-review'
+  const partitioned = mode === 'partition' || codeToSpec || interruptedReview
   const plan = partitioned ? { version: 'sync-coordinator-v2' as const, direction: codeToSpec ? 'code_to_spec' as const : 'spec_to_code' as const, sourcePaths: ['src/export.js'], ...(codeToSpec ? { writePaths: ['.spec'], commitTrigger: { before: null, paths: ['src/export.js'] } } : {}), partitionPolicy: { version: 'sync-partition-policy-v1' as const, maxReadBytes: 524288, maxParallel: 1 } } : {}
   const f = await fixture(t, { maxAttempts: ['newer-generation', 'paused-review', 'wrong-task', 'format-formal-retry', 'format-wrong-packet'].includes(mode) || formatTwice ? 3 : 2, maxCalls: 30, maxRepairs: ['wrong-task', 'format-wrong-packet'].includes(mode) || formatTwice ? 2 : 1, timeoutMs: 120_000 }, false, original, 'project', original, { ...plan, agentWorkflow: 'native-worktree-v1', ...(formalRetry ? { executionScope: { paths: [contractPath], contractIds: [], flowIds: [] } } : {}) }, undefined, codeToSpec ? 'code' : 'spec', 'zcode:default', partitioned)
   const calls: ElaborationSessionRequest[] = []
+  if (interruptedReview) {
+    const recordFailure = f.store.recordFailure.bind(f.store)
+    f.store.recordFailure = (fence, issue) => {
+      if (f.store.readAttempt(fence.attemptId).number !== 1 || issue.code !== 'repair_budget_exhausted') return recordFailure(fence, issue)
+      const result = recordFailure(fence, { ...issue, code: 'cancellation_pending', kind: 'unsupported', message: '同一次尝试的另一分区停止待证' })
+      f.store.requestControl(f.operation.id, 'pause')
+      return result
+    }
+  }
   if (mode === 'paused' || mode === 'newer-generation') {
     const recordFailure = f.store.recordFailure.bind(f.store)
     f.store.recordFailure = (fence, issue) => {
@@ -4552,7 +4562,7 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
       run: async actual => {
         const seed = actual.worktree!, execution = structuredExecutionPolicy(actual), key = actual.sessionCreateKey!, sessionId = sessionIdForCreateKey(key)
         const identity = { threadId: `p1-timeout-${sessionId}`, turnId: 'turn' }, workspace = join(f.parent, `p1-timeout-${calls.length}`)
-        const timingOut = actual.purpose === 'elaboration_review' && attempt.number <= (formatTwice ? 2 : 1)
+        const timingOut = !interruptedReview && actual.purpose === 'elaboration_review' && attempt.number <= (formatTwice ? 2 : 1)
         let draft: unknown
         if (actual.purpose === 'code_behavior_analyze' || actual.purpose === 'code_behavior_review') {
           const task = nativeTask(actual, f.input.source.commonDir) as { requiredChangedPaths: string[] }
@@ -4567,7 +4577,9 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
           : adaptElaborationNativeOutput(actual, rows(original))
         else assert.equal(actual.purpose, 'elaboration_review')
         const worktree = draft ? committedDraftFixture(f, actual, draft, workspace) : undefined
-        const output = draft ? { summary: '已正常提交草稿' } : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+        const output = draft ? { summary: '已正常提交草稿' } : interruptedReview && attempt.number === 1
+          ? { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ code: 'review_binding', kind: 'repair', message: '修复目标须引用现存契约条款', affectedIds: ['REQ-UNKNOWN-INTERRUPTED'], evidence: `${contractPath}:42`, decision: '修复验收前的引用' }] }
+          : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
         const resultDigest = contentHash(JSON.stringify(output)), message = formatFailure ? 'fixture拒绝原格式' : 'ZCode native RPC timeout (session/events)'
         if ((!timingOut || readWitness) && !worktree) f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
         const resultWorktree = timingOut ? undefined : worktree ?? nativeWorktreeResult(workspace, seed)
@@ -4585,6 +4597,15 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
     } })(request)
   }
   let result = await runSyncOperation(f.store, f.operation.id, f.options)
+  if (interruptedReview) {
+    const persisted = f.store.listAttempts(f.operation.id)
+    assert.equal(persisted.length, 1)
+    assert.equal(persisted[0].failure?.code, 'cancellation_pending', JSON.stringify(result.failure))
+    assert.equal(persisted[0].failure?.kind, 'unsupported')
+    assert.ok(persisted[0].dispatchPlans.every(dispatch => f.store.findResource(persisted[0].id, dispatch.key)?.phase === 'removed'))
+    f.store.requestControl(f.operation.id, 'run')
+    result = await runSyncOperation(f.store, f.operation.id, f.options)
+  }
   if (mode === 'paused' || mode === 'paused-review' || mode === 'newer-generation') {
     assert.equal(result.operation.control, 'pause')
     f.store.requestControl(f.operation.id, 'run')
@@ -4606,6 +4627,20 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
     return JSON.parse(readEvidence(f.input.source.commonDir, wrapper.resultRef).toString()) as ElaborationResult
   }
   const originalResult = savedLocal(old), originalRound = originalResult.rounds.at(-1)!
+  if (interruptedReview) {
+    assert.equal(originalResult.structurePassed, true)
+    assert.equal(originalResult.reviewPassed, false)
+    assert.deepEqual(originalRound.findings.filter(issue => issue.severity === 'error').map(issue => issue.code), ['review_binding'])
+    assert.notEqual(originalRound.traces[0].sessionId, originalRound.traces[1].sessionId)
+    assert.deepEqual(calls.filter(call => call.purpose.startsWith('elaboration_')).map(call => call.purpose), ['elaboration_generate', 'elaboration_review', 'elaboration_review'])
+    const reviewed = savedLocal(retry), reviewedRound = reviewed.rounds.at(-1)!
+    assert.equal(reviewed.reviewPassed, true)
+    assert.equal(reviewed.candidateDigest, originalResult.candidateDigest)
+    assert.deepEqual(reviewedRound.traces[0], originalRound.traces[0])
+    assert.equal(reviewedRound.draft?.oid, originalRound.draft?.oid)
+    assert.notEqual(reviewedRound.traces[1].sessionId, originalRound.traces[1].sessionId)
+    return
+  }
   assert.equal(old.status, 'superseded')
   assert.equal(old.failure?.kind, mode === 'paused' ? undefined : 'repairable')
   assert.equal(originalResult.failure?.code, failureCode, JSON.stringify({ failure: originalResult.failure, findings: originalRound.findings }))
