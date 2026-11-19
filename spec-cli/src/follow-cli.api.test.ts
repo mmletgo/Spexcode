@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync, spawn } from 'node:child_process'
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { once } from 'node:events'
 import { createServer } from 'node:http'
 import { createServer as createNetServer, type Socket } from 'node:net'
@@ -40,6 +40,13 @@ function startCli(args: string[], env: NodeJS.ProcessEnv, onStderr?: (all: strin
   return once(child, 'close').then(([code]) => ({ code: code as number | null, stdout, stderr }))
 }
 const runCli = (args: string[], env: NodeJS.ProcessEnv, cwd = pkgRoot): Promise<Run> => startCli(args, env, undefined, cwd)
+
+async function stopFixtureBackend(backend: ChildProcess): Promise<void> {
+  if (backend.exitCode !== null || backend.signalCode !== null) return
+  const exited = once(backend, 'exit')
+  backend.kill('SIGTERM')
+  await exited
+}
 
 function reviewFixture(): string {
   const root = mkdtempSync(join(tmpdir(), 'spex-follow-review-repo-'))
@@ -209,8 +216,7 @@ test('managed watch registers once, delivers child states, and cancel stops deli
     assert.match(unmanaged.stderr, new RegExp(`spex session wait ${ID}`))
     assert.equal(configuredSessionApplication()!.readState(ID)?.status, 'asking')
   } finally {
-    if (backend.exitCode === null) backend.kill('SIGTERM')
-    await once(backend, 'exit').catch(() => {})
+    await stopFixtureBackend(backend)
   }
 })
 
@@ -283,9 +289,7 @@ test('a declaring CLI hands the watch delivery to the running backend and return
     const misrouted = await fetch(`http://127.0.0.1:${backendPort}/api/sessions/no-such-session/push`, { method: 'POST' })
     assert.equal(misrouted.status, 404, 'a backend holding no record for the session refuses the wake instead of answering ok')
   } finally {
-    if (backend.exitCode === null) backend.kill('SIGTERM')
-    await once(backend, 'exit').catch(() => {})
-    await harness.close()
+    await Promise.all([stopFixtureBackend(backend), harness.close()])
   }
 })
 
@@ -319,9 +323,7 @@ test('a send to a watcher whose harness is holding a watch notice does not wait 
     await waitFor(() => harness.received.some((text) => text.startsWith(peer)), 'the peer message reaching the parent after the held notice', 20_000)
     assert.ok(harness.received.findIndex((text) => /is parked — held/.test(text)) < harness.received.findIndex((text) => text.startsWith(peer)), 'order is kept')
   } finally {
-    if (backend.exitCode === null) backend.kill('SIGTERM')
-    await once(backend, 'exit').catch(() => {})
-    await harness.close()
+    await Promise.all([stopFixtureBackend(backend), harness.close()])
   }
 })
 
@@ -377,9 +379,7 @@ for (const entry of LOCAL_WATCH_COMMITS) {
       assert.ok(elapsed < 6_000, `${entry.name} took ${elapsed}ms — it held the watcher's unanswered socket instead of handing the drain to the backend`)
       await waitFor(() => harness.received.some((text) => entry.notice.test(text)), 'the backend delivered the notice', 10_000)
     } finally {
-      if (backend.exitCode === null) backend.kill('SIGTERM')
-      await once(backend, 'exit').catch(() => {})
-      await harness.close()
+      await Promise.all([stopFixtureBackend(backend), harness.close()])
     }
   })
 
