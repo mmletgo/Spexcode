@@ -46,9 +46,11 @@ unrelated writer lock.
 
 An immutable pending candidate in [[spec-lint]] explicitly opens the same snapshot in read-only mode. It
 takes no lock and needs no claimant or owner identity, including in a sandbox that cannot read process-start
-tokens. History and hunk misses use the same strict Git derivation and interpretation recheck. The candidate
-discards its additions, even with a cold or malformed snapshot. Filesystem errors other than a missing ledger
-and Git derivation failures still surface.
+tokens. History and hunk misses use the same strict Git derivation and interpretation recheck. Nested consumers
+in the same Git common directory share the read-only snapshot while its interpretation still matches. A new
+interpretation retries the outer read-only build before any nested consumer can open a writer. An explicit
+read-only build inside a writer opens its own snapshot. The candidate discards its additions, even with a cold
+or malformed snapshot. Filesystem errors other than a missing ledger and Git derivation failures still surface.
 
 Both read paths share the ledger format and derivation engine. An uncontended foreground demand still writes
 newly derived immutable facts through the ordinary writer transaction.

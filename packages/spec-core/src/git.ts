@@ -465,7 +465,7 @@ const EVENT_CACHE_SCHEMA = 'history-events-v16'
 const IMMUTABLE_HUNK_FACT = 'immutable-hunk-v1'
 const EVENT_STREAM_KINDS = ['merge', 'identity-raw'] as const
 type EventStreamKind = typeof EVENT_STREAM_KINDS[number]
-type EventCacheLocation = { path: string; identity: string; interpretation: string; objectFormat: GitObjectFormat }
+type EventCacheLocation = { common: string; path: string; identity: string; interpretation: string; objectFormat: GitObjectFormat }
 type EventLedgerSnapshot = {
   payload: Buffer
   state: EventCache
@@ -474,8 +474,10 @@ type EventLedgerBuild = {
   location: EventCacheLocation
   snapshot: EventLedgerSnapshot
   additions: string[]
+  mode: EventLedgerAttemptMode
 }
 type EventLedgerPolicy = 'write' | 'demand' | 'read-only'
+type EventLedgerAttemptMode = 'write' | 'contended-read' | 'read-only'
 type EventLedgerDiagnostics = { reads: number; locks: number; replaces: number }
 const eventLedgerBuild = new AsyncLocalStorage<EventLedgerBuild>()
 const eventLedgerDemandPolicy = new AsyncLocalStorage<{ path: string }>()
@@ -488,7 +490,7 @@ type EventStreamRequest = {
 }
 
 type EventPathMemo = EventCacheLocation & {
-  common: string; shallowPath: string; grafts: string; shallow: string
+  shallowPath: string; grafts: string; shallow: string
   replacementStorage: string; replacements: string
 }
 const eventPathMemo = new Map<string, EventPathMemo>()
@@ -531,7 +533,7 @@ function eventCacheLocation(root: string): EventCacheLocation {
     : git(['-C', root, 'for-each-ref', 'refs/replace', '--format=%(refname) %(objectname)'])
   const objectFormat = gitObjectFormat(root)
   if (old && old.shallow === shallow && old.grafts === grafts && old.replacements === replacements && old.objectFormat === objectFormat)
-    return { path: old.path, identity: old.identity, interpretation: old.interpretation, objectFormat }
+    return { common, path: old.path, identity: old.identity, interpretation: old.interpretation, objectFormat }
   const interpretation = createHash('sha256')
     .update(`${EVENT_CACHE_SCHEMA}\0${objectFormat}\0${shallow}\0${grafts}\0${replacements}`)
     .digest('hex')
@@ -542,7 +544,7 @@ function eventCacheLocation(root: string): EventCacheLocation {
   const storeIdentity = gitDir === root && common === root ? join(common, '.git') : common
   const path = join(projectRuntimeRoot(storeIdentity), `${EVENT_CACHE_SCHEMA}-${identity}.ndjson`)
   eventPathMemo.set(rootId, { common, shallowPath, grafts, shallow, replacementStorage, replacements, path, identity, interpretation, objectFormat })
-  return { path, identity, interpretation, objectFormat }
+  return { common, path, identity, interpretation, objectFormat }
 }
 
 // One existing source-of-truth identity governs every Git reader that interprets commit images. Consumers
@@ -847,19 +849,30 @@ const EVENT_LEDGER_RETRY = Symbol('event ledger identity moved')
 function activeEventLedger(root: string): EventLedgerBuild | null {
   const build = eventLedgerBuild.getStore()
   if (!build) return null
-  return eventCacheLocation(root).path === build.location.path ? build : null
+  const current = eventCacheLocation(root)
+  if (build.mode !== 'read-only') return current.path === build.location.path ? build : null
+  if (current.common !== build.location.common) return null
+  // Keep interpretation movement inside the caller's read-only retry boundary.
+  if (current.interpretation !== build.location.interpretation) throw EVENT_LEDGER_RETRY
+  return build
 }
 
 async function runEventLedgerAttempt<T>(
   root: string,
   location: EventCacheLocation,
   run: () => Promise<T>,
-  persist: boolean,
+  mode: EventLedgerAttemptMode,
 ): Promise<T | typeof EVENT_LEDGER_RETRY> {
-  const build: EventLedgerBuild = { location, snapshot: loadEventLedger(location), additions: [] }
-  const result = await eventLedgerBuild.run(build, run)
+  const build: EventLedgerBuild = { location, snapshot: loadEventLedger(location), additions: [], mode }
+  let result: T
+  try {
+    result = await eventLedgerBuild.run(build, run)
+  } catch (error) {
+    if (mode === 'read-only' && error === EVENT_LEDGER_RETRY) return EVENT_LEDGER_RETRY
+    throw error
+  }
   if (eventCacheLocation(root).identity !== location.identity) return EVENT_LEDGER_RETRY
-  if (persist && build.additions.length) {
+  if (mode === 'write' && build.additions.length) {
     removeEventTemps(location.path)
     mkdirSync(join(location.path, '..'), { recursive: true })
     replaceEventLedger(location.path, build.snapshot.payload, build.additions)
@@ -872,14 +885,15 @@ async function eventLedgerTransaction<T>(
   run: () => Promise<T>,
   policy: EventLedgerPolicy,
 ): Promise<T> {
-  if (policy !== 'read-only' && activeEventLedger(root)) return run()
+  const active = activeEventLedger(root)
+  if (active && (policy !== 'read-only' || active.mode === 'read-only')) return run()
   for (let attempt = 0; attempt < 8; attempt++) {
     const location = eventCacheLocation(root)
-    const runAttempt = (writable: boolean) => runEventLedgerAttempt(root, location, run, writable)
+    const runAttempt = (mode: EventLedgerAttemptMode) => runEventLedgerAttempt(root, location, run, mode)
     const first = policy === 'read-only'
-      ? await runAttempt(false)
-      : await withEventCacheLock(location.path, () => runAttempt(true), policy === 'write')
-    const value = first === EVENT_LEDGER_BUSY ? await runAttempt(false) : first
+      ? await runAttempt('read-only')
+      : await withEventCacheLock(location.path, () => runAttempt('write'), policy === 'write')
+    const value = first === EVENT_LEDGER_BUSY ? await runAttempt('contended-read') : first
     if (value !== EVENT_LEDGER_RETRY) return value as T
   }
   throw new Error('history event cache identity changed repeatedly during one ledger build')

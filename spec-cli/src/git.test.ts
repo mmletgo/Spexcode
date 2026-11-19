@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
 import { driftFor, ancestorsOf, primeAncestorClosures, inAncestors, mergeBaseDiff, worktreeSpecDelta, worktreeSpecDeltas, driftIndex, historyIndex, sourceIndexes, sourceIndexesFull, rowsFor, pathRangeEvents, historyCacheStats, pruneHistoryCaches, resetHistoryCachesForTests, historyEventCachePathForTests, withGitAbortSignal, git, gitA, gitBinary, batchRevisionOids, batchBlobTexts, combinedDiffOwnedChanges, unionTopology, GitWorkspaceError, type DriftIndex } from '@spexcode/spec-core'
-import { loadSpecs } from '@spexcode/spec-core'
+import { eventLedgerDiagnosticsForTests, loadSpecs, resetEventLedgerDiagnosticsForTests, withEventLedgerBuild } from '@spexcode/spec-core'
 
 // build a DriftIndex by hand from DAG edges: `parents` maps each commit to its parent hashes —
 // reachability is all that matters, insertion order is only the bitset slot assignment.
@@ -56,6 +56,68 @@ test('every history entrance gives a non-Git workspace the same actionable preco
       })
     }
   } finally {
+    rmSync(root, { recursive: true, force: true })
+    resetHistoryCachesForTests()
+  }
+})
+
+test('an explicit read-only ledger retries when nested readers see changed Git interpretation', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'spex-read-only-ledger-retry-'))
+  const run = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8' }).trim()
+  let originalLedger = ''
+  try {
+    run('init', '-q', '-b', 'main'); run('config', 'user.email', 'ledger@example.com'); run('config', 'user.name', 'Ledger Probe')
+    writeFileSync(join(root, 'source.ts'), 'export const value = 1\n')
+    run('add', '.'); run('commit', '-qm', 'seed source')
+    const parent = run('rev-parse', 'HEAD')
+    writeFileSync(join(root, 'source.ts'), 'export const value = 2\n')
+    run('add', '.'); run('commit', '-qm', 'move source')
+    const tip = run('rev-parse', 'HEAD')
+    const [, initial] = await sourceIndexes(root)
+    assert.deepEqual(initial.parents.get(tip), [parent])
+    originalLedger = historyEventCachePathForTests(root)
+    const originalBytes = readFileSync(originalLedger)
+
+    const ledgerSentinel = '{broken ledger\n'
+    const ownerSentinel = '{"probe":"unprovable"}\n'
+    let replacementLedger = ''
+    let attempts = 0
+    resetEventLedgerDiagnosticsForTests()
+    const [, result] = await withEventLedgerBuild(root, async () => {
+      if (++attempts === 1) {
+        await Promise.resolve()
+        run('replace', '--graft', tip)
+        replacementLedger = historyEventCachePathForTests(root)
+        assert.notEqual(replacementLedger, originalLedger)
+        const lock = `${replacementLedger}.lock`
+        mkdirSync(lock)
+        writeFileSync(join(lock, 'owner.json'), ownerSentinel)
+        writeFileSync(replacementLedger, ledgerSentinel)
+      }
+      const indexes = await sourceIndexes(root, tip)
+      return withEventLedgerBuild(root, async () => indexes, { readOnly: true })
+    }, { readOnly: true })
+
+    const [, fromGit] = await sourceIndexesFull(root, tip)
+    assert.deepEqual(fromGit.parents.get(tip), [])
+    assert.deepEqual(result.parents, fromGit.parents)
+    assert.equal(attempts, 2)
+    assert.deepEqual(eventLedgerDiagnosticsForTests(), { reads: 2, locks: 0, replaces: 0 })
+    assert.deepEqual(readFileSync(originalLedger), originalBytes)
+
+    const lock = `${replacementLedger}.lock`
+    await assert.rejects(sourceIndexes(root), /history event cache lock has no provable exact owner/)
+    assert.equal(readFileSync(join(lock, 'owner.json'), 'utf8'), ownerSentinel)
+    assert.equal(readFileSync(replacementLedger, 'utf8'), ledgerSentinel)
+    rmSync(lock, { recursive: true })
+
+    resetEventLedgerDiagnosticsForTests()
+    await withEventLedgerBuild(root, () =>
+      withEventLedgerBuild(root, () => sourceIndexes(root), { readOnly: true }))
+    assert.deepEqual(eventLedgerDiagnosticsForTests(), { reads: 2, locks: 1, replaces: 0 })
+    assert.equal(readFileSync(replacementLedger, 'utf8'), ledgerSentinel)
+  } finally {
+    if (originalLedger) rmSync(dirname(originalLedger), { recursive: true, force: true })
     rmSync(root, { recursive: true, force: true })
     resetHistoryCachesForTests()
   }
