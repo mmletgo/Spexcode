@@ -543,6 +543,67 @@ code: src/math.js#compute
   const graph = buildContractGraph([parse(source, 'math')])
   assert.deepEqual(errors(validateContractGraph(graph, { files: new Map([['src/math.js', 'export const compute = n => n * 2'], ['tests/math.test.js', "test('AC-MATH-01 正数、非法输入', () => {})"]]) })), [])
   assert.deepEqual(projectContractCoverage(graph).matrix, [])
+
+  const context = { files: new Map([['src/math.js', 'export const compute = n => n * 2'], ['tests/math.test.js', "test('AC-MATH-01 正数、非法输入', () => {})"]]) }
+  for (const rationale of [
+    '本能力不承载可变业务状态；输入为正整数，返回翻倍结果或拒绝错误后结束。',
+    '本能力不承载业务状态；输入为正整数，返回翻倍结果或拒绝错误后结束。',
+    '本能力不承载可变业务状态：输入为正整数，返回翻倍结果或拒绝错误后结束。',
+    '本能力不承载可变业务状态，输入为正整数，返回翻倍结果或拒绝错误后结束。',
+    '本能力不承载可变业务状态。',
+    '本能力不承载可变业务状态',
+    '本能力不承载可变业务状态 \t，输入为正整数，返回翻倍结果或拒绝错误后结束。',
+    '本能力不承载可变业务状态\n：输入为正整数，返回翻倍结果或拒绝错误后结束。',
+    '本能力不承载可变业务状态 \t\n',
+  ]) {
+    const explainedSource = rationale.trim().endsWith('业务状态')
+      ? `${source.replace('无状态纯计算，持久状态不适用。', '')}\n${rationale}`
+      : source.replace('无状态纯计算，持久状态不适用。', rationale)
+    const explained = parse(explainedSource, 'math')
+    const findings = validateContractGraph(buildContractGraph([explained]), context)
+    assert.deepEqual(errors(findings), [], rationale)
+    assert.ok(findings.some(finding => finding.code === 'semantic-review-required'), rationale)
+    assert.deepEqual(errors(validateContractGraph(buildContractGraph([explained]), { ...context, mode: 'draft' })), [])
+    for (const field of ['input', 'output', 'rules'] as const) {
+      const incomplete = structuredClone(explained)
+      const step = incomplete.items.find(item => item.kind === 'STEP')!
+      assert.equal(step.kind, 'STEP')
+      if (step.kind === 'STEP') {
+        if (field === 'rules') step.rules = []
+        else step[field] = ''
+      }
+      assert.ok(validateContractGraph(buildContractGraph([incomplete]), context).some(finding => finding.code === 'incomplete-stateless-step'), field)
+    }
+    const noExit = structuredClone(explained)
+    const step = noExit.items.find(item => item.kind === 'STEP')!
+    if (step.kind === 'STEP') step.next = [step.id]
+    assert.ok(validateContractGraph(buildContractGraph([noExit]), context).some(finding => finding.code === 'flow-no-exit'))
+  }
+  for (const rationale of [
+    '无中间持久状态。',
+    '纯计算，不持久化。',
+    '不承载持久状态，仍有可变业务状态。',
+    '本能力承载可变业务状态。',
+    '能力有状态，状态机在内存中推进。',
+    '不承载可变业务状态机，其他业务对象仍有状态。',
+    '本能力不承载可变业务状态表，状态仍在内存中更新。',
+    '本能力不承载业务状态持久化，状态仍在内存中更新。',
+    '尚不能确认本能力是否不承载可变业务状态。',
+    '本能力并非不承载可变业务状态，而是仅无持久化。',
+    '本能力不是不承载业务状态，状态仍在内存中。',
+    '本能力不承载可变业务状态？',
+    '本能力不承载可变业务状态 ？',
+    '本能力不承载可变业务状态?',
+    '不承载可变业务状态 表，状态仍在内存中更新。',
+    '不承载可变业务状态\n表，状态仍在内存中更新。',
+    '本能力不承载可变业务状态\n？',
+    '尚不能确认本能力是否 不承载可变业务状态。',
+    '本能力并非 不承载可变业务状态，而是仅无持久化。',
+    '',
+  ]) {
+    const unexplained = parse(source.replace('无状态纯计算，持久状态不适用。', rationale), 'math')
+    assert.ok(validateContractGraph(buildContractGraph([unexplained]), context).some(finding => finding.code === 'missing-stateless-rationale'), rationale)
+  }
 })
 
 test('纯契约入口可以从无Git仓库目录导入，不触发fs/git/root初始化', () => {

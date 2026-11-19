@@ -326,7 +326,7 @@ export function validateContractGraph(graph: ContractGraph, context: ContractVal
     if (!flow.steps.length) report('empty-flow', `${flow.id} 缺少步骤`, flow)
     if (flow.terminal === 'END') {
       const owner = graph.owners.get(flow.id)!
-      if (!/(状态.{0,20}不适用|不适用.{0,20}状态|无状态|stateless|state.{0,20}not applicable)/i.test(owner.expandedSpec)) report('missing-stateless-rationale', `${flow.id} 无状态结束必须解释状态不适用依据`, flow)
+      if (!/(状态.{0,20}不适用|不适用.{0,20}状态|无状态|(?<!(?:非|不是|是否)\s*)不承载(?:可变)?业务状态(?=\s*(?:[，。；：！,.;:!]|$))|stateless|state.{0,20}not applicable)/i.test(owner.expandedSpec)) report('missing-stateless-rationale', `${flow.id} 无状态结束必须解释状态不适用依据`, flow)
       for (const id of flow.steps) {
         const step = graph.items.get(id)
         if (step?.kind === 'STEP' && (!step.input || !step.output || !step.rules.length)) report('incomplete-stateless-step', `${id} 必须声明输入域、可观察输出及失败/不变量规则`, step)
