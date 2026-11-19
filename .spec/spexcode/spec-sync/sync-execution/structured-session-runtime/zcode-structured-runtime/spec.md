@@ -23,6 +23,8 @@ related:
 
 新fence观察已停ZCode edit的未批准Git稿时，复用原verifyPlan、send与public model snapshot，精确核workspace、原session/model、唯一turn.started的input/query/非空messageId、所有events身份与唯一terminal原摘要。只读核原receipt/进程组与正式canonical stop/removed，不能调用会改写旧观察的进程采样或要求messages/success/final。原exit须code0、signal:null、stopped:true，idle/closed原值保持；基础认证后，P0 的原 seed 或完整 Git tree 与 seed 相同的干净后代都只跳过无进度；常规有真实树差量仅原精确turn.failed可授Git材料，cancelled终态不取得材料资格；已结算P0 events RPC例外见下。仅打开exit.json时遇到ENOENT返回缺证据（null），将此候选标为不合格；不会用canonical stop/removed替代exit或turn.failed证明。缺plan/send、其他读取错误、坏JSON及存在但非法exit仍显式失败。新failed和旧cancelled沿[[sync-checkpoint-evidence]]各自原证明认证，不附failedWorktree/rejectedOutput，不改原计划/策略/请求或错误分类。
 
+已正式结算的普通 failed edit 有精确的原 turn.failed、未封存、无自定义错误码，且原 exit 的 code/signal 均为 null、stopped/acknowledged/idle/closed 均为 false 时，仍须完整核对上述计划、进程、模型、send 与公开终态身份。核对通过后原 exit 明确无退出见证，返回 null 并继续检查其他历史来源。只保留原稿及原 exit，不以事后 stop 补认证或读取这份未认证稿。已封存、typed 失败、取消及其他非法 exit 沿用各自原规则。
+
 P0已结算的canonical failed原typed `native_rpc_timeout` 与同一adapter官方`session/events` method/message同时精确匹配时，复用上述原计划、模型、send、process/receipt及完整公开events/terminal认证。仅原同session/turn/input的唯一turn.completed/success、同session/turn的idle.json为true及原exit0/signal:null/idle/closed/stopped全真才通过未批准Git材料源检查；不解码response、不读messages或补completed、原Native版本/CLI版本/实际模型选择照原冻结策略认证。仅打开terminal.json遇到ENOENT返回无材料；同身份原失败/取消通过公开事件和相容的原stop证据后也跳过，不要求成功的exit0/idle/closed；错误身份、未知终态结果、损坏原件及互斥停止证据仍明确拒绝。该进程内分类不认普通pause、其它method或脏物理稿；仍由[[sync-coordinator]]核原正式removed/stop、正常Git、源/测试/owner及当前fence，不授成功、格式或新调用权。
 
 已正式结算且未封存的普通取消若原事件未报告终态，打开 `terminal.json` 遇到 `ENOENT` 时跳过该草稿来源，继续检查其他历史来源。事件已报告终态时仍须原终态文件，损坏的原件仍显式失败。
