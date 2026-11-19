@@ -353,6 +353,41 @@ test('one lint transaction joins event streams and hunk facts, rebuilds corrupti
   }
 })
 
+test('pending lint keeps its verdict under an unprovable history ledger lock', { skip }, async () => {
+  const fx = fixture()
+  fx.node('calc', 'code:\n  - src/calc.ts#applyRate')
+  fx.commit('v1')
+  const ledger = historyEventCachePathForTests(fx.proj)
+  const lock = `${ledger}.lock`
+  const owner = join(lock, 'owner.json')
+  const sentinel = '{"probe":"unprovable"}\n'
+  try {
+    const seed = await specLint(fx.proj, extractors(fx.proj))
+    assert.deepEqual(seed, [])
+    const snapshot = readFileSync(ledger)
+    writeFileSync(join(fx.proj, 'src/calc.ts'), CALC('10', '2'))
+    fx.commit('change an anchored unit')
+    const tip = fx.g('rev-parse', 'HEAD')
+    const expected = await specLint(fx.proj, extractors(fx.proj), { tip })
+    assert.ok(expected.some(({ level, rule }) => level === 'error' && rule === 'anchor-drift'))
+
+    writeFileSync(ledger, snapshot)
+    mkdirSync(lock)
+    writeFileSync(owner, sentinel)
+    resetHistoryCachesForTests()
+    resetEventLedgerDiagnosticsForTests()
+    assert.deepEqual(await specLint(fx.proj, extractors(fx.proj), { tip }), expected)
+    assert.deepEqual(eventLedgerDiagnosticsForTests(), { reads: 1, locks: 0, replaces: 0 })
+
+    await assert.rejects(specLint(fx.proj, extractors(fx.proj)), /history event cache lock has no provable exact owner/)
+    assert.deepEqual(readFileSync(ledger), snapshot)
+    assert.equal(readFileSync(owner, 'utf8'), sentinel)
+  } finally {
+    rmSync(dirname(ledger), { recursive: true, force: true })
+    resetHistoryCachesForTests()
+  }
+})
+
 test('an issue-only pending commit keeps the parent drift index instead of clearing drift warnings', { skip }, async () => {
   const fx = fixture()
   fx.node('calc', 'code:\n  - src/calc.ts#applyRate')

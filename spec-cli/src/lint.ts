@@ -200,11 +200,11 @@ export async function specLintReport(root = repoRoot(), regs = extractors(root),
 }
 
 function specLintRun(root: string, regs: ReturnType<typeof extractors>, options: SpecLintOptions): Promise<SpecLintRun> {
-  return withEventLedgerBuild(root, () => specLintInLedger(root, regs, options))
+  const tip = options.tip ?? 'HEAD'
+  return withEventLedgerBuild(root, () => specLintInLedger(root, regs, tip), { readOnly: tip !== 'HEAD' })
 }
 
-async function specLintInLedger(root: string, regs: ReturnType<typeof extractors>, options: SpecLintOptions): Promise<SpecLintRun> {
-  const tip = options.tip ?? 'HEAD'
+async function specLintInLedger(root: string, regs: ReturnType<typeof extractors>, tip: string): Promise<SpecLintRun> {
   const pending = tip !== 'HEAD'
   const changed = pending ? pendingChangedPaths(root, tip) : []
   const files = pending ? treeFilePaths(root, tip) : null

@@ -475,6 +475,7 @@ type EventLedgerBuild = {
   snapshot: EventLedgerSnapshot
   additions: string[]
 }
+type EventLedgerPolicy = 'write' | 'demand' | 'read-only'
 type EventLedgerDiagnostics = { reads: number; locks: number; replaces: number }
 const eventLedgerBuild = new AsyncLocalStorage<EventLedgerBuild>()
 const eventLedgerDemandPolicy = new AsyncLocalStorage<{ path: string }>()
@@ -869,29 +870,32 @@ async function runEventLedgerAttempt<T>(
 async function eventLedgerTransaction<T>(
   root: string,
   run: () => Promise<T>,
-  demand: boolean,
+  policy: EventLedgerPolicy,
 ): Promise<T> {
-  if (activeEventLedger(root)) return run()
+  if (policy !== 'read-only' && activeEventLedger(root)) return run()
   for (let attempt = 0; attempt < 8; attempt++) {
     const location = eventCacheLocation(root)
-    const locked = await withEventCacheLock(
-      location.path,
-      () => runEventLedgerAttempt(root, location, run, true),
-      !demand,
-    )
-    const value = locked === EVENT_LEDGER_BUSY
-      ? await runEventLedgerAttempt(root, location, run, false)
-      : locked
+    const runAttempt = (writable: boolean) => runEventLedgerAttempt(root, location, run, writable)
+    const first = policy === 'read-only'
+      ? await runAttempt(false)
+      : await withEventCacheLock(location.path, () => runAttempt(true), policy === 'write')
+    const value = first === EVENT_LEDGER_BUSY ? await runAttempt(false) : first
     if (value !== EVENT_LEDGER_RETRY) return value as T
   }
   throw new Error('history event cache identity changed repeatedly during one ledger build')
 }
 
-// The event ledger is one build transaction, not one transaction per consumer: stream extraction and
-// immutable hunk derivation share the snapshot, integrity verdict, lock, and final replacement.
-export function withEventLedgerBuild<T>(root: string, run: () => Promise<T>): Promise<T> {
+// Stream extraction and immutable hunk derivation share the same build snapshot. A write-capable
+// build additionally shares one lock and final replacement.
+export function withEventLedgerBuild<T>(
+  root: string,
+  run: () => Promise<T>,
+  { readOnly = false }: { readOnly?: boolean } = {},
+): Promise<T> {
+  if (readOnly) return eventLedgerTransaction(root, run, 'read-only')
   const demand = eventLedgerDemandPolicy.getStore()
-  return eventLedgerTransaction(root, run, !!demand && demand.path === eventCacheLocation(root).path)
+  const policy = demand && demand.path === eventCacheLocation(root).path ? 'demand' : 'write'
+  return eventLedgerTransaction(root, run, policy)
 }
 
 // Demand is an ambient acquisition POLICY, not an eager lock. Nested ledger consumers therefore use the

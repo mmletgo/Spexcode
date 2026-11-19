@@ -58,9 +58,11 @@ the porcelain command, parses stdout, and needs neither a package-root lookup no
 1 exactly when one or more findings have `level: "error"`; warnings alone remain exit 0. Without `--json`,
 the human stderr rendering and its guidance remain unchanged.
 
-One lint build opens the [[source-of-truth]] event ledger transaction around both its history indexes and
-anchor-hunk demand. The linter therefore shares one decoded, integrity-checked snapshot and at most one
-locked replacement with its anchor engine; it never causes a hunk lookup to reopen or rewrite that ledger.
+One lint build shares a single integrity-checked [[event-ledger-demand]] snapshot across its history indexes
+and anchor-hunk demand. Ordinary worktree lint can persist missing facts through the ledger writer transaction.
+Lint of an immutable pending candidate opens the snapshot read-only and derives missing facts directly from Git
+without taking the writer lock or replacing the ledger. The candidate verdict, including a same-tree commit,
+therefore needs only the snapshot and Git facts, even when process identity is unreadable.
 
 Before constructing history indexes, ordinary worktree lint checks that worktree's adoption boundary. An untracked `.spec/` file
 or `.spec/spexcode.json` is an **integrity error** naming the untracked project source of truth and the ordinary
