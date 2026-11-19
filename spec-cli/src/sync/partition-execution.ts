@@ -1,7 +1,8 @@
 import type { StageDraftMaterialRequest } from './stage-worktree.js'
 import { setImmediate as yieldToControl } from 'node:timers/promises'
 import { readStageDraft, stageWorktree, STAGE_READING_INSTRUCTIONS } from './stage-worktree.js'
-import { posix } from 'node:path'
+import { posix, sep } from 'node:path'
+import { configPath } from '@spexcode/spec-core'
 import { contractReferences, parseContract, parseParts } from '@spexcode/spec-core/contracts'
 import { analyzeCodeBehavior, compositionConflictPaths, deriveBehaviorAuthorization, partitionBehaviorChangedPaths, uncoveredCompositionConflicts, verifyBehaviorReadBasis } from './code-behavior.js'
 import type { CodeBehaviorApprovalBinding, CodeBehaviorInput, CodeBehaviorContinuation, CodeBehaviorMaterialRequest, CodeBehaviorReviewReference } from './code-behavior.js'
@@ -382,16 +383,21 @@ export function projectPartitionVerificationOwnership(input: ElaborationInput, c
 }
 
 
-/** 只有原冻结source-only分区的正式P0可证明无P1义务。 */
+/** 原冻结源码或规范入口配置分区的正式P0可证明无P1写义务。 */
 export function analysisOnlyPartitionEvidence(commonDir: string, plan: SyncPartitionPlan, evidence?: CodeBehaviorEvidence): AnalysisOnlyPartitionEvidence[] {
   if (!evidence) return []
   const { analysis, ref } = evidence, coverage = analysis.partitionCoverage, locals = analysis.partitionEvidence
-  const candidates = plan.partitions.filter(partition => !partition.phase && !partition.targets.length && !partition.writePaths.length && !partition.contractIds.length && !partition.flowIds.length
-    && partition.sourcePaths.length > 0 && partition.sourcePaths.length === unique(partition.sourcePaths).length
-    && JSON.stringify(unique(partition.changedPaths)) === JSON.stringify(unique(partition.sourcePaths)) && partition.changedPaths.length === partition.sourcePaths.length
-    && partition.sourcePaths.every(path => !path.startsWith('.spec/') && plan.expectedPaths.includes(path) && plan.partitions.filter(owner => owner.changedPaths.includes(path)).length === 1)
-    && !plan.dependencies.some(edge => edge.from === partition.id || edge.to === partition.id)
-    && !analysis.newNodes.some(node => partition.sourcePaths.includes(node.codePath)))
+  const settingsPath = configPath('.').split(sep).join('/')
+  const candidates = plan.partitions.filter(partition => {
+    const settingsOnly = !partition.sourcePaths.length && partition.changedPaths.length === 1 && partition.changedPaths[0] === settingsPath
+    const paths = settingsOnly ? partition.changedPaths : partition.sourcePaths
+    return !partition.phase && !partition.targets.length && !partition.writePaths.length && !partition.contractIds.length && !partition.flowIds.length
+      && paths.length > 0 && paths.length === unique(paths).length
+      && JSON.stringify(unique(partition.changedPaths)) === JSON.stringify(unique(paths)) && partition.changedPaths.length === paths.length
+      && paths.every(path => (settingsOnly || !path.startsWith('.spec/')) && plan.expectedPaths.includes(path) && plan.partitions.filter(owner => owner.changedPaths.includes(path)).length === 1)
+      && !plan.dependencies.some(edge => edge.from === partition.id || edge.to === partition.id)
+      && !analysis.newNodes.some(node => paths.includes(node.codePath))
+  })
   if (!candidates.length) return []
   const orderedIds = plan.partitions.map(partition => partition.id)
   if (!analysis.reviewPassed || !coverage || coverage.planDigest !== plan.digest || JSON.stringify(coverage.partitionIds) !== JSON.stringify(orderedIds)

@@ -34,6 +34,8 @@ GAP 独审与严格并集合成共用同一作者 CAS 投影：原已审局部�
 
 原冻结计划中无目标、写路径、契约/流程角色或依赖边的分区，若非空精确源码集合等于变更集合，且已审P0覆盖全部路径、只含无ID和规则授权的refactor或allowed_change、没有作者/生命周期/新节点/裁决/整合/GAP等写义务，程序核原全局和局部P0、冻结计划及真实独审来源后，以仅分析证据进入全局P1。保留P0事实和原件，不派发该组的P1，也不合成局部结果或独审。既有或新派生的真实目标继续走原父/叶细化。空目标无法证明仅分析资格时仍拒绝。真实P1与仅分析分区在原计划上唯一完整覆盖，严格全图封口和后续四层验证照常执行。
 
+原冻结计划中仅包含规范入口配置 `.spec/spexcode.json` 变更、源码集合为空的分区，也可沿同一完整认证判据证明没有P1写义务；该唯一路径仍须属于原expectedPaths且只有一个变更owner。任意其他 `.spec/` 路径、混入不属于真实源码集合的路径或缺失的业务目标均不获得此资格。入口配置的policy、facts与mandatory内容仍受原冻结计划、正式P0及V1–V4核验；仅分析资格不豁免配置验证，不改原verifications或历史原件。
+
 仅分析资格按原冻结分区的实际 changedPaths 判断作者写义务。P0 保留共享只读上下文中的完整 authorChanges，由 Native 用于当前原意分析；其他 owner 的作者原意不因可读而成为本区写义务。本区自身的作者变化及其余业务、授权、整合、发现和真实来源门继续阻断仅分析资格。
 
 P1物理草稿观察所需的当前binding、含只读祖先/诊断overlay的StageWorktree及inputDigest，沿既有loadElaborationDraftMaterial仅作进程内参数传递；不进入持久请求/计划或改变缓存摘要。loadDraft认证Git来源与existingDraft传入同材料回调，只有已认证严格更新attempt/round的物理稿可替换；合法candidate/续审、分区owner/plan/schema和原source/test保护不变，未批准physical材料仍须真实新提交及独审。
