@@ -2410,6 +2410,65 @@ test('真实V1/意图门禁拒绝弱化AC、命令及错误关系，有限预算
   })
 })
 
+for (const mode of ['retry', 'cancel', 'fence-loss'] as const) test(`attempt心跳生命周期 mode=${mode} 保留活跃续租并隔离终结fence`, async t => {
+  const f = await fixture(t, { maxAttempts: 2, maxCalls: 6, maxRepairs: 1, timeoutMs: 300_000 })
+  t.mock.timers.enable({ apis: ['setInterval'] })
+  const renew = f.store.renewLease.bind(f.store), recoverable = f.store.listRecoverableResources.bind(f.store)
+  const renewals: { attemptId: string; status: string }[] = []
+  let firstSignal: AbortSignal | undefined, recoveryTick = false, recoveryAborted: boolean | undefined, generations = 0
+  t.mock.method(f.store, 'renewLease', (...args: Parameters<SyncStore['renewLease']>) => {
+    renewals.push({ attemptId: args[0].attemptId, status: f.store.readAttempt(args[0].attemptId).status })
+    return renew(...args)
+  })
+  t.mock.method(f.store, 'listRecoverableResources', () => {
+    const operation = f.store.readOperation(f.operation.id), attempt = operation.currentAttemptId && f.store.readAttempt(operation.currentAttemptId)
+    if (mode === 'retry' && attempt && attempt.number === 1 && attempt.status === 'failed' && !recoveryTick) {
+      recoveryTick = true
+      assert.ok(attempt.expiresAtMs > Date.now(), '旧fence被终结，不是30秒租约耗尽')
+      t.mock.timers.tick(f.options.heartbeatMs!)
+      recoveryAborted = firstSignal!.aborted
+    }
+    return recoverable()
+  })
+  f.transform((output, request) => {
+    if (request.purpose !== 'elaboration_generate') return output
+    generations++
+    if (generations > 1) {
+      assert.equal(request.signal?.aborted, false, '新attempt必须取得未被旧timer中止的signal')
+      throw Object.assign(new Error('下一attempt已实际派发，受控停止于P1'), { code: 'unsupported' })
+    }
+    firstSignal = request.signal
+    const before = renewals.length
+    t.mock.timers.tick(f.options.heartbeatMs!)
+    assert.ok(renewals.length > before, '当前活跃fence的心跳仍真实续租')
+    assert.equal(firstSignal!.aborted, false)
+    if (mode === 'retry') return { invalidFirstDraft: true }
+    if (mode === 'cancel') f.store.requestControl(f.operation.id, 'cancel')
+    else {
+      const operation = f.store.readOperation(f.operation.id), attempt = f.store.readAttempt(operation.currentAttemptId!)
+      f.store.recordFailure({ operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: f.input.source.physicalFingerprint }, { code: 'test-authority-loss', message: '当前执行期间真实写权已失去', kind: 'unsupported', evidenceRefs: [] })
+    }
+    t.mock.timers.tick(f.options.heartbeatMs!)
+    assert.equal(firstSignal!.aborted, true, '取消或真实fence失权仍须中止活跃执行')
+    return output
+  })
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  if (mode === 'retry') {
+    assert.equal(recoveryTick, true, '必须实际到达旧attempt终结后的资源恢复窗口')
+    assert.equal(recoveryAborted, false, '已终结attempt的旧timer不得中止下一轮')
+    assert.equal(result.status, 'unsupported', JSON.stringify(result.failure))
+    assert.equal(generations, 2)
+    assert.equal(f.store.listAttempts(f.operation.id).length, 2)
+    assert.ok(!renewals.some(renewal => renewal.status === 'failed'), '资源恢复窗口不得续租已终结fence')
+  } else {
+    assert.equal(result.status, mode === 'cancel' ? 'cancelled' : 'recovery_required', JSON.stringify(result.failure))
+    if (mode === 'fence-loss') assert.equal(result.failure?.code, 'lease_heartbeat')
+    assert.equal(generations, 1)
+    assert.equal(f.store.listAttempts(f.operation.id).length, 1)
+  }
+  assert.equal(f.store.listJournals(f.operation.id).length, 0)
+})
+
 test('租约heartbeat贯穿长调用，取消不派发下一阶段，重入不重复调用', async t => {
   const f = await fixture(t)
   f.options.leaseMs = 1500; f.options.heartbeatMs = 50

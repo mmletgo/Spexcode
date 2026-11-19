@@ -180,6 +180,8 @@ P1 只把实际目标正文及其已审代码/可写验收路径、业务 ID 加
 
 operation 独立本机 kernel mutex 防双 coordinator；紧凑 stage checkpoint 只保存 refs、独立结果及诊断，不复制整张契约图。当前 attempt 在独占证明下重入稳定 requestKey，派发前原子计费、持久资源意图，完整真实结果/hash/独立身份保存后重放。lease heartbeat 贯穿原生长调用，控制/总deadline触发 Abort；旧 generation 只能结算真实资源证据。历史未removed资源精确恢复，未知终态保留 recovery_required，不假释放容量。
 
+同一运行进入下一轮时，若当前fence对应的attempt已failed、superseded或settled，必须在任何异步资源恢复或后继认领前停止其旧heartbeat。活跃attempt的续租贯穿资源检查，实际失权、外部替换或取消仍沿原Abort门禁；不以清理旧timer恢复已失效authority，不改变租约、心跳、预算或未知资源阻断规则。
+
 P1 已审结构结果登记所有未来业务 ID，包括 GAP/partial FLOW；ready/blocked 分区只隔离业务 ID，共享 paths 留 ready。无可执行 ready AC 不生成或写半成品；V1 仅容许已审 GAP 精确解释的缺口。未读继承 GAP 必须来自本轮已通过 partitionSeal 的同义原项和精确 finding，复用原 GAP 闭包分类；GAP及完整 affected 闭包不得涉及 ready 声明或 FLOW 步骤，其全部 owner 不属于本轮 accepted，且 Spec、治理源码、AC.test 等冻结义务在已审 composed、baseTree 与 candidate 的 path/mode/OID/absence 完全一致。缺证明、新增、改变或涉及本轮依赖的 GAP 仍阻断，不扩 scope/blocked/验证登记。generation 硬门禁保护 raw/全局REQ/AC/VERIFY、实际diff与独立oracle，V2使用不同会话；V3仅执行 ready AC 和 mandatoryTests 的固定命令/镜像；V4复采完整source、当前可信plan/readset与物理身份，一致才可交付，并于 beginApply 前再核。完整V1–V4 pass才 recordVerification(pass)，范围精确ready声明/完整FLOW，不包含blocked。
 
 同一operation的局部纯父接口已通过结构校验及独立accept时，后代失败的新attempt只可承接较早已终结attempt的该interface_seed原件。原stage读取仍严格绑定所属attempt；专用承接须核同operation/input/policy、精确readSet/基线选择、完整partitionBinding及当前局部输入的唯一freezeElaborationInput摘要全部相同，且seed无failure、phase/status正确并保有独审accept。新interface_seed checkpoint即使没有基线选择也记录真实readSetDigest；缺失该绑定的旧局部原件不能跨attempt承接。失败/未审seed、旧全局seal及其他operation不取得局部承接权；在当前fence登记原resultRef及fromAttempt provenance，原review/traces不改写。所有子区继续读取已审接口，最终strict全局seal及V1–V4仍重做；局部证据不是raw、作者事实或全局批准。

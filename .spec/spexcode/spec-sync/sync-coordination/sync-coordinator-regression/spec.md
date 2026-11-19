@@ -16,6 +16,8 @@ related:
 
 ## expanded spec
 
+attempt心跳生命周期回归只控制setInterval，不伪造Date或延长原30秒租约、1秒心跳：先证明活跃fence真实续租，再在已持久失败的旧attempt资源恢复窗口触发timer，后继attempt须实际派发且signal未被旧timer中止。当前执行期间真实失权或外部cancel仍Abort并禁止后继派发；原短租约长调用取消与三项父接口fresh scope-v2断言保持，未知资源仍阻断新attempt。
+
 P0 传输冻结回归核新 attempt 保存 `reviewCoveragePreflight`，所有既有协议及已预留派发逐字保留字段缺席和原请求绑定。
 
 同operation格式续审回归以真实只读Git工作树产生原失败收尾的 `failedWorktree`，验证首次及连续两次格式拒稿后只重审同一候选、原生成trace/Git稿不重派，拒稿附件逐字保存。正式checkpoint与canonical见证路径不一致的反例在派发前拒绝。

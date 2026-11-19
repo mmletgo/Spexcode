@@ -2182,6 +2182,9 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
       mutex.assertHeld()
       operation = store.readOperation(operationId)
       attempt = operation.currentAttemptId ? store.readAttempt(operation.currentAttemptId) : null
+      if (timer && attempt && fence?.attemptId === attempt.id && ['failed', 'superseded', 'settled'].includes(attempt.status)) {
+        clearInterval(timer); timer = undefined
+      }
       if (physicallyPaused()) {
         if (!await recoverResources(store, operation, options, true)) return current('recovery_required')
         return current('paused')
