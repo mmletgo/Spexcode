@@ -350,4 +350,6 @@ ZCode P0 completed/events-RPC定向回归以真实分区协调器、Git/隔离SQ
 
 真实 Docker 回归覆盖只读未执行声明的交付与保护测试失败。核对 V1–V4、未执行清单、实际测试运行原件、源码和测试 Git 对象，以及失败没有交付。
 
+Claude P0 物理原稿回归使用真实分区协调器、Git、隔离 SQLite 和受控原生资源桥。复现原失败已正式结算且未提交时换模型正式 retryOf 的新 seed 缺稿，验证修复后截断 UTF-8 原字节及 SHA 进入新 seed。原分析须在新工作树正常提交，随后由独立会话复核。早于非零退出的重复 init、外来终态身份、缺失原 failed 观察或已知停止、保护的源文件／schema／index 改动及失效 fence 均不得授材料。原会话、Git、index、checkpoint 和 CAS 保持。 SQLite 冷启覆盖物理材料冻结后、请求 reserve 前后的两个窗口，以及 writer61 已 reserve 或已持久化原 NativePlan 的无稿请求。新版重放不得为原请求重取后来改动的物理字节、改变 seed 或额外占用调用。
+
 P1候选GAP回归用真实Git提交、两owner和隔离SQLite先证旧accept封口后仍持续blocked，再经一次只读完整并集复核、原owner原JSON字节续稿、新独审与严格seal结清误报，兄弟原件保持。复核后和完整新P1后的暂停/SQLite重启均保旧attempt及CAS字节；needs_input、conflict、无新发现和作者既有GAP不重复派发，mixed诊断只处理typed repair而保真实未知。未知ID和复用原线程先拒绝，下一原预算attempt仅沿previousReviewRef重审同一候选，合法前不派owner；候选/result refs失配及借诊断修改业务列继续拒绝。新独审实际seed须含原并集诊断文件；持久新增checkpoint不得复制review/findings正文。正常Native资源桥另核原只读请求、canonical结果及removed原件，后续P2回授仍绑定已结清GAP的新P1批准。全部场景保原预算、截止时间、source/index、非Spec Git对象与零交付journal；受控模型和Docker前停止不声称真实模型、V3或产品交付已通过。

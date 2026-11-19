@@ -93,4 +93,6 @@ v6 Claude 原生工作树在登记实际启动意图之前完成强制的同 UID
 
 正式已停owned edit的实际错误投影（type=result/subtype=success/is_error:true、无structured_output、原session/user集合精确匹配、exit1/signal:null/stopped）可仅作为新attempt未批准Git材料；不要求本次原生失败前尚未封存的public-history，不给予success、格式码、raw或业务批准。原exit0/is_error:false精准missing-final仍须完整sealed认证，未知形状和身份差异仍拒绝。新观察只读原件，旧record/plan/结果与缺席字段不追补。
 
+Canonical failed 的 P0 分析可仅供物理草稿承接。正史错误须等于执行器在完整消费原生事件、优先处理协议与停止异常后写出的精确非零退出投影，并与原 exit1 / signal:null / stopped:true、同一 session 与唯一 user 的 is_error:true 终态逐值一致。原计划、选择模型、回显、owned cwd 和已知进程组停止均须核对。缺少 structured_output 且无完成原件时，停止认证可以在公开 history 尚未封存的情况下进行。provider 响应正文与可选协议诊断日志不授草稿资格。
+
 新派发只在既有Native证据目录追加可选native-protocol.jsonl，保存消费ordinal及init/result的公开白名单身份、parent字段存在性与string/null值、model/tools和user UUID集合摘要/数量、result错误标志和structured_output存在位；协议异常仅记固定code。不得写模型正文、error body、thinking、stderr正文、环境或凭据，不赋新运输、receipt、完成或认证角色；其中 error 仅阻止受控成功发布，冷观察不补写。重复init继续严格拒绝，首异常保留；缺init/echo/result按实际缺席字段诊断，事件完整但不满足受控成功或已认证 schema 耗尽的非零退出另记真实code/signal/is_error，仍为failed，不猜HTTP错误类型。 非boolean的is_error仅记固定invalid，不插值原值。
