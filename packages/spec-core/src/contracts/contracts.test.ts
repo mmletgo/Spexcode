@@ -552,8 +552,14 @@ code: src/math.js#compute
     '本能力不承载可变业务状态，输入为正整数，返回翻倍结果或拒绝错误后结束。',
     '本能力不承载可变业务状态。',
     '本能力不承载可变业务状态',
+    '本能力不承载可变业务状态 \t，输入为正整数，返回翻倍结果或拒绝错误后结束。',
+    '本能力不承载可变业务状态\n：输入为正整数，返回翻倍结果或拒绝错误后结束。',
+    '本能力不承载可变业务状态 \t\n',
   ]) {
-    const explained = parse(source.replace('无状态纯计算，持久状态不适用。', rationale), 'math')
+    const explainedSource = rationale.trim().endsWith('业务状态')
+      ? `${source.replace('无状态纯计算，持久状态不适用。', '')}\n${rationale}`
+      : source.replace('无状态纯计算，持久状态不适用。', rationale)
+    const explained = parse(explainedSource, 'math')
     const findings = validateContractGraph(buildContractGraph([explained]), context)
     assert.deepEqual(errors(findings), [], rationale)
     assert.ok(findings.some(finding => finding.code === 'semantic-review-required'), rationale)
@@ -585,6 +591,14 @@ code: src/math.js#compute
     '尚不能确认本能力是否不承载可变业务状态。',
     '本能力并非不承载可变业务状态，而是仅无持久化。',
     '本能力不是不承载业务状态，状态仍在内存中。',
+    '本能力不承载可变业务状态？',
+    '本能力不承载可变业务状态 ？',
+    '本能力不承载可变业务状态?',
+    '不承载可变业务状态 表，状态仍在内存中更新。',
+    '不承载可变业务状态\n表，状态仍在内存中更新。',
+    '本能力不承载可变业务状态\n？',
+    '尚不能确认本能力是否 不承载可变业务状态。',
+    '本能力并非 不承载可变业务状态，而是仅无持久化。',
     '',
   ]) {
     const unexplained = parse(source.replace('无状态纯计算，持久状态不适用。', rationale), 'math')
