@@ -1526,7 +1526,7 @@ if (cmd === 'serve') {
       await assertLocalBackend()
       process.exit(await attachSession(await resolveSelectorOrExit(id)))
     } else {
-      console.error(`spex session: unknown verb '${sub}' — new | ls | files | web | widget | show | watch | wait | dequeue | wait-dequeue | stream-dequeue | review | merge | reparent | send | interrupt | rename | resume | stop | close | attach | resources | quarantine | done | park | ask  (spex help session)`)
+      console.error(`spex session: unknown verb '${sub}' — new | ls | adopt | unadopt | files | web | widget | show | watch | wait | dequeue | wait-dequeue | stream-dequeue | review | merge | reparent | send | interrupt | rename | resume | stop | close | attach | resources | quarantine | done | park | ask  (spex help session)`)
       process.exit(2)
     }
   }
