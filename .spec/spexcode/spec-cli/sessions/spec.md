@@ -24,13 +24,13 @@ the durable parent closure, and send writes the canonical application queue befo
 ## expanded spec
 
 State lives on disk, not in memory, but NOT in the worktree: each session has a record in a per-user GLOBAL
-store keyed by its harness `session_id` ([[state]]/[[runtime]]), so the session list is **enumerated from
-that store** every time — filtered to the `governed` (dashboard-launched) records — and survives a backend
-restart, while the worktree itself stays pristine ([[lifecycle]] owns the store, the state machine, and the
+store keyed by its harness `session_id` ([[state]]/[[runtime]]). The session list joins governed records and active
+project-scoped claims from [[external-session-adoption]]. Both survive a backend restart, while each managed
+worktree stays pristine ([[lifecycle]] owns the store, the state machine, and the
 worktree↔record mapping). The list is ordered by **session birth, oldest first** — by the record's stored
 `createdAt`, the one creation anchor that outlives every state rewrite — so each session keeps a permanent
 slot, new ones appending at the end: one spatial map shared by the dashboard window, the session tabs, and
-`spex ls`. A self-launched (non-governed) agent gets spec-awareness but no board row.
+`spex ls`.
 
 The subsystem divides into governed concerns:
 

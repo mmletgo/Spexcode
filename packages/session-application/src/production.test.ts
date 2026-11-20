@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
 import { RuntimeBindingError } from '@spexcode/session-runtime'
+import { applyComponentMigrations, openProtocol } from '@spexcode/session-protocol'
 
 import { openProjectSessionApplication, SESSION_CHANGE } from './production.js'
+import { SESSION_APPLICATION_MIGRATIONS } from './schema.js'
 
 const identity = (nativeSessionId: string, nativeStartToken: string) => ({
   namespace: 'spex-governed',
@@ -240,7 +242,8 @@ test('watch cursor migration seeds existing edges at the subject head and remain
   assert.equal(app.readWatchEvents(['owner']).length, 1)
   app.protocol.withTransaction(tx => {
     tx.exec('DELETE FROM session_follow_cursors WHERE watcher_session_id=? AND subject_session_id=?', 'owner', 'subject')
-    tx.exec("DELETE FROM schema_migrations WHERE component='session-application' AND version=4")
+    tx.exec('DROP TABLE session_external_claims')
+    tx.exec("DELETE FROM schema_migrations WHERE component='session-application' AND version>=4")
   })
   app.close()
 
@@ -276,18 +279,85 @@ test('production composition refuses missing locality and relative database path
 test('a toolchain with an older application schema refuses a newer shared store before composition', () => {
   const root = mkdtempSync(join(tmpdir(), 'session-application-future-schema-'))
   const databasePath = join(root, 'sessions.sqlite')
+  const current = SESSION_APPLICATION_MIGRATIONS.at(-1)!.version
   const first = openProjectSessionApplication({ databasePath, locality: () => {} })
   first.protocol.withTransaction(tx => {
     tx.exec(
-      "INSERT INTO schema_migrations(component,version,checksum,applied_at_ms) VALUES('session-application',5,'future-toolchain',1)",
+      "INSERT INTO schema_migrations(component,version,checksum,applied_at_ms) VALUES('session-application',?,'future-toolchain',1)",
+      current + 1,
     )
   })
   first.close()
 
   assert.throws(
     () => openProjectSessionApplication({ databasePath, locality: () => {} }),
-    /session-application carries schema generation 5; this build understands 4/,
+    new RegExp(`session-application carries schema generation ${current + 1}; this build understands ${current}`),
   )
+})
+
+test('external claim is atomic, leaves the mailbox untouched, and is fenced from the previous application schema', () => {
+  const root = mkdtempSync(join(tmpdir(), 'session-application-external-claim-'))
+  const databasePath = join(root, 'sessions.sqlite')
+  const options = { databasePath, locality: () => {} }
+  const app = openProjectSessionApplication(options)
+  const first = { projectKey: join(root, 'first', '.git'), sessionId: 'native-thread', harness: 'codex' }
+  const second = { ...first, projectKey: join(root, 'second', '.git') }
+  try {
+    app.protocol.withTransaction(tx => tx.exec(`CREATE TRIGGER reject_external_claim BEFORE INSERT ON session_external_claims
+      BEGIN SELECT RAISE(ABORT, 'fixture claim write failed'); END`))
+    assert.throws(() => app.adoptExternalSession(first), /fixture claim write failed/)
+    assert.equal(app.readAddress(first.sessionId), null)
+    app.protocol.withTransaction(tx => tx.exec('DROP TRIGGER reject_external_claim'))
+    const address = app.protocol.initialize(first.sessionId)
+    const message = app.enqueueMessage(first.sessionId, { kind: 'fixture.pending.v1', body: Buffer.from('mailbox') })
+    const claim = app.adoptExternalSession(first)
+    assert.deepEqual(app.adoptExternalSession(first), claim)
+    assert.deepEqual(app.readAddress(first.sessionId), address)
+    assert.throws(() => app.adoptExternalSession(second), /different project or harness claim/)
+    assert.throws(() => app.createSession({ sessionId: first.sessionId }), /belongs to an external thread/)
+    assert.throws(() => app.createSession({ sessionId: 'child-of-external', parentSessionId: first.sessionId }), /belongs to an external thread/)
+    assert.equal(app.readAddress('child-of-external'), null)
+    assert.deepEqual(app.topology.children(first.sessionId, 'parent'), [])
+    for (const [watcher, subject] of [[first.sessionId, 'new-subject'], ['new-watcher', first.sessionId]]) {
+      assert.throws(() => app.attachWatcher(watcher, subject), { code: 'external_session_read_only' })
+      assert.throws(() => app.detachWatcher(watcher, subject), { code: 'external_session_read_only' })
+      assert.throws(() => app.advanceFollowCursor(watcher, subject, 1), { code: 'external_session_read_only' })
+      assert.throws(() => app.attachAndNotify(watcher, subject, 'watch', { kind: 'notice', body: Buffer.from('blocked') }),
+        { code: 'external_session_read_only' })
+      assert.equal(app.readFollowCursor(watcher, subject), null)
+    }
+    assert.equal(app.readAddress('new-subject'), null)
+    assert.equal(app.readAddress('new-watcher'), null)
+    assert.throws(() => app.bindRuntime('would-be-owner', identity(first.sessionId, 'token')), /belongs to an external thread/)
+    assert.equal(app.readAddress('would-be-owner'), null)
+    assert.throws(() => app.createSession({
+      sessionId: 'owner-in-another-namespace',
+      runtime: { ...identity(first.sessionId, 'token'), namespace: 'alternate' },
+    }), { code: 'external_session_read_only' })
+    assert.equal(app.readAddress('owner-in-another-namespace'), null)
+    assert.equal(app.readState(first.sessionId), null)
+    assert.equal(app.resolveRuntime(first.sessionId, 'spex-governed'), null)
+    assert.equal(app.revokeExternalSession(second), false)
+    assert.equal(app.revokeExternalSession(first), true)
+    assert.throws(() => app.attachWatcher('watcher-after-revocation', first.sessionId), { code: 'external_session_read_only' })
+    assert.equal(app.readPendingMessages(first.sessionId)[0]?.messageId, message.messageId)
+    assert.ok(app.readExternalClaims(first.projectKey)[0].revokedAtMs !== null)
+    assert.equal(app.adoptExternalSession(second).projectKey, second.projectKey)
+    assert.throws(() => app.adoptExternalSession({ ...second, harness: 'other' }), /different project or harness claim/)
+    app.bindRuntime('owned-address', { ...identity('bound-native', 'fixture-start'), namespace: 'alternate' })
+    assert.throws(() => app.adoptExternalSession({ ...first, sessionId: 'bound-native' }), /already has a lifecycle, binding, or control relation/)
+    assert.equal(app.readAddress('bound-native'), null)
+    app.attachWatcher('previously-watched', 'owned-address')
+    assert.throws(() => app.adoptExternalSession({ ...first, sessionId: 'previously-watched' }), /already has a lifecycle, binding, or control relation/)
+    app.close()
+    const older = openProtocol(databasePath)
+    try {
+      assert.throws(() => applyComponentMigrations(older, 'session-application', SESSION_APPLICATION_MIGRATIONS.slice(0, -1)), /schema generation .* this build understands/)
+    } finally { older.close() }
+  } finally {
+    app.close()
+    rmSync(root, { recursive: true, force: true })
+  }
 })
 
 test('runtime binding emits the delivery wake after the binding commit', () => {
@@ -302,6 +372,7 @@ test('runtime binding emits the delivery wake after the binding commit', () => {
   assert.deepEqual(wakes, ['bound'])
   const pending = app.readPendingMessages('bound')
   assert.equal(pending.length, 1)
+  assert.equal(app.dequeueForRuntime('bound', 'spex-governed', binding.bindingGeneration, '00000000000000000000000000000000'), null)
   assert.equal(app.readMessageHistory('bound').length, 1)
   assert.equal(app.dequeuePendingMessage('bound', '00000000000000000000000000000000'), null)
   assert.equal(app.dequeuePendingMessage('bound', pending[0]!.messageId)?.messageId, pending[0]!.messageId)

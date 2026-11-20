@@ -1,6 +1,7 @@
 import { networkInterfaces } from 'node:os'
 import { alive, apiBase } from './sessions.js'
 import { sessionHost } from './session-host.js'
+import { externalControlRefusal } from './session-adoption.js'
 
 const AGENT_ALTERNATIVES = 'read the pane with `spex session show <SEL> --capture`, drive it with `session send` (plain text first; `--keys` only as a last resort)'
 
@@ -27,6 +28,8 @@ The tmux session lives on THAT machine — a terminal can't be attached over HTT
 // ending. Interactive and blocking by design — a caller without a terminal (an agent inside its turn, a
 // pipe) is refused up front and pointed at the remote-capable verbs instead of tmux's bare "not a terminal".
 export async function attachSession(id: string): Promise<number> {
+  const refused = externalControlRefusal(id)
+  if (refused) { console.error(`spex session attach: ${refused}`); return 1 }
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     console.error(`spex session attach: attach is INTERACTIVE and needs a terminal — it blocks until you detach.
 An agent must not run it inside a turn (it freezes you); ${AGENT_ALTERNATIVES}.`)

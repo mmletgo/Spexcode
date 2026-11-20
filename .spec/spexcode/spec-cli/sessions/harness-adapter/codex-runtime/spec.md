@@ -303,7 +303,8 @@ returns it — on 0.146 it never enters the closure and would be left loaded, pi
 reference nobody can release; on 0.153 it enters through the lineage read and no `cwd` read can then witness it.
 Its rollout is the durable witness: the `session_meta` header binds its `cwd` and, for a spawned subagent, its
 `parent_thread_id`, and the rollout's directory — the dated tree or the flat `archived_sessions/` — is its
-collection. So the proof walks the resident set through rollout headers: a resident thread the listing did not
+collection. This proof and [[external-session-adoption]] share the bounded first-record UUID check in
+[[transcript-reader]]. The proof walks the resident set through rollout headers: a resident thread the listing did not
 place in the subtree is a member when its header's parent chain reaches the subtree, and a member the scoped
 listing does not return (an empty-preview row, or a `cwd` filter the server answered empty) is witnessed by its
 rollout, whose bound `cwd` must equal the scope already bound for that member. Only positive evidence admits a

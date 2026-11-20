@@ -20,7 +20,8 @@ export function resolveFileRef(name, paths = []) {
 // the session's files menu opens.
 export const fileRefAddress = (sessionId, path) => sessionSurfaceAddress(sessionId, resourceSurface(resourceTabKey(sessionId, 'file', path)))
 // A face with no resource tabs (the phone) opens the file's own preview page instead — the same bytes the tab shows.
-export const filePreviewUrl = (sessionId, path) => apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/files/download?path=${encodeURIComponent(path)}&preview=1`)
+export const fileDownloadUrl = (sessionId, path) => apiUrl(`/api/sessions/${encodeURIComponent(sessionId)}/files/download?path=${encodeURIComponent(path)}`)
+export const filePreviewUrl = (sessionId, path) => `${fileDownloadUrl(sessionId, path)}&preview=1`
 
 // The session whose text is being read, what it has posted, and whether this face has resource tabs to open
 // a file in: the conversation provides it, so a reference in any prose it renders resolves against that list.

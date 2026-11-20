@@ -49,6 +49,7 @@ export const sessionDisplayState = (s) => {
 }
 export const sessionZone = (s) => sessionDisplayState(s).zone
 export const isArchived = (s) => !!s?.archived
+export const canControlSession = (s) => s?.capabilities?.control !== false
 export const sessionFooterState = (s) => {
   if (isArchived(s)) return 'archived'
   if (s?.status !== 'queued' && (s?.status === 'offline' || s?.liveness === 'offline')) return 'offline'
@@ -92,7 +93,7 @@ export const specDoorRows = (session, max) => {
 // login) resolves to null, honestly.
 export const liveSession = (sessions, id) => {
   const s = id ? (sessions || []).find((x) => x.id === id) : null
-  return s && s.status !== 'offline' && s.liveness !== 'offline' && !isArchived(s) ? s : null
+  return s && canControlSession(s) && s.status !== 'offline' && s.liveness !== 'offline' && !isArchived(s) ? s : null
 }
 // the ONE source-session PRESENCE join ([[live-session-filter]] — the session:present|missing facet):
 // does the id still resolve to a session on the current board at ALL, any zone? Presence, not liveness —

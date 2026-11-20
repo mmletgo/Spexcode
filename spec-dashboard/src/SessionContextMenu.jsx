@@ -6,7 +6,7 @@ import { useCloseSession, useSessionCloseState } from './SessionCloseProvider.js
 import SessionAttach from './SessionAttach.jsx'
 import { apiFetch, loadSettings } from './data.js'
 import { openNewTab } from './tabs.js'
-import { sessionHeadline, specDoorRows } from './session.js'
+import { canControlSession, sessionHeadline, specDoorRows } from './session.js'
 import { useEscLayer } from './escStack.js'
 import { useT } from './i18n/index.jsx'
 import { GLYPH } from './specMeta.js'
@@ -178,7 +178,8 @@ export default function SessionContextMenu({ menu, closeRequest = null, onCloseR
   // same prompt rather than a second one written beside it — two dialogs for one destruction is two places
   // for the wording, the danger styling and the background-removal semantics to drift apart. The drop's
   // request is owned by its caller, so dismissing has to hand it back rather than only clearing local state.
-  const closingSession = closing || closeRequest
+  const closeTarget = closing || closeRequest
+  const closingSession = canControlSession(closeTarget) ? closeTarget : null
   const dismissClose = () => { setClosing(null); onCloseRequestDone?.() }
 
   const confirmClose = () => { void closeSession(closingSession) }
@@ -211,42 +212,46 @@ export default function SessionContextMenu({ menu, closeRequest = null, onCloseR
         <ContextMenu x={menu.x} y={menu.y} anchorKey={menu.session.id} label={t('sessionWindow.menuLabel')}>
           <ContextMenuGroup>
             <ContextMenuItem icon="plus" onClick={openInNewTab}>{t('tabs.openInNewTab')}</ContextMenuItem>
-            <ContextMenuSubmenu icon="graph" label={t('sessionWindow.specRelated')}>
-              {/* the leading slot wears the board's OWN op mark — the same GLYPH + `ov-<op>` the graph tile,
-                  the legend and the node popup's edit pane spend — so a row says whether this session is
-                  adding, editing, deleting or moving that node instead of repeating one decorative icon. */}
-              {specNodes.map(({ id, op }) => (
-                <ContextMenuItem
-                  key={id} onClick={openSpecNode(id)}
-                  leading={<span className={`ov-mark ov-${op}`} aria-hidden="true">{GLYPH[op] || '•'}</span>}
-                  data-tip={t(`legend.opRows.${op}`)}
-                  aria-label={`${id} — ${t(`legend.opRows.${op}`)}`}
-                >{id}</ContextMenuItem>
-              ))}
-              {hiddenSpecNodes > 0 && (
-                <div className="sess-menu-note">{t('sessionWindow.specMore', { n: hiddenSpecNodes })}</div>
+            {canControlSession(menu.session) && <>
+              <ContextMenuSubmenu icon="graph" label={t('sessionWindow.specRelated')}>
+                {/* the leading slot wears the board's OWN op mark — the same GLYPH + `ov-<op>` the graph tile,
+                    the legend and the node popup's edit pane spend — so a row says whether this session is
+                    adding, editing, deleting or moving that node instead of repeating one decorative icon. */}
+                {specNodes.map(({ id, op }) => (
+                  <ContextMenuItem
+                    key={id} onClick={openSpecNode(id)}
+                    leading={<span className={`ov-mark ov-${op}`} aria-hidden="true">{GLYPH[op] || '•'}</span>}
+                    data-tip={t(`legend.opRows.${op}`)}
+                    aria-label={`${id} — ${t(`legend.opRows.${op}`)}`}
+                  >{id}</ContextMenuItem>
+                ))}
+                {hiddenSpecNodes > 0 && (
+                  <div className="sess-menu-note">{t('sessionWindow.specMore', { n: hiddenSpecNodes })}</div>
+                )}
+                {specNodes.length > 0 && <ContextMenuSeparator />}
+                <ContextMenuItem icon="search" onClick={findOnGraph}>{t('sessionWindow.findOnGraph')}</ContextMenuItem>
+              </ContextMenuSubmenu>
+              <ContextMenuItem icon="pencil" onClick={startRename}>{t('sessionWindow.rename')}</ContextMenuItem>
+              {/* selection is a verb of the surface that OWNS a selectable list; a host without one offers no dead row. */}
+              {onMultiSelect && <ContextMenuItem icon="list-checks" onClick={startSelect}>{t('sessionWindow.select')}</ContextMenuItem>}
+              {menu.session.parent && <ContextMenuItem icon="corner-up-left" onClick={detach}>{t('sessionWindow.detach')}</ContextMenuItem>}
+              {/* attach only when a live tmux window exists to join — offline/queued rows have none. */}
+              {menu.session.liveness !== 'offline' && menu.session.status !== 'queued' && (
+                <ContextMenuItem icon="terminal" onClick={startAttach}>{t('sessionWindow.attach')}</ContextMenuItem>
               )}
-              {specNodes.length > 0 && <ContextMenuSeparator />}
-              <ContextMenuItem icon="search" onClick={findOnGraph}>{t('sessionWindow.findOnGraph')}</ContextMenuItem>
-            </ContextMenuSubmenu>
-            <ContextMenuItem icon="pencil" onClick={startRename}>{t('sessionWindow.rename')}</ContextMenuItem>
-            {/* selection is a verb of the surface that OWNS a selectable list; a host without one offers no dead row. */}
-            {onMultiSelect && <ContextMenuItem icon="list-checks" onClick={startSelect}>{t('sessionWindow.select')}</ContextMenuItem>}
-            {menu.session.parent && <ContextMenuItem icon="corner-up-left" onClick={detach}>{t('sessionWindow.detach')}</ContextMenuItem>}
-            {/* attach only when a live tmux window exists to join — offline/queued rows have none. */}
-            {menu.session.liveness !== 'offline' && menu.session.status !== 'queued' && (
-              <ContextMenuItem icon="terminal" onClick={startAttach}>{t('sessionWindow.attach')}</ContextMenuItem>
-            )}
-            {/* Resume is the cold row's non-destructive exit; filing moves to the danger group below. */}
-            {menu.session.archived && <ContextMenuItem icon="star-filled" onClick={resume}>{t('sessionWindow.resume')}</ContextMenuItem>}
-            {menu.session.status === 'corrupt' && (
-              <ContextMenuItem icon="archive" onClick={startQuarantine}>{t('sessionWindow.quarantine')}</ContextMenuItem>
-            )}
+              {/* Resume is the cold row's non-destructive exit; filing moves to the danger group below. */}
+              {menu.session.archived && <ContextMenuItem icon="star-filled" onClick={resume}>{t('sessionWindow.resume')}</ContextMenuItem>}
+              {menu.session.status === 'corrupt' && (
+                <ContextMenuItem icon="archive" onClick={startQuarantine}>{t('sessionWindow.quarantine')}</ContextMenuItem>
+              )}
+            </>}
           </ContextMenuGroup>
-          <ContextMenuSeparator />
-          <ContextMenuGroup>
-            <ContextMenuItem icon="trash" danger disabled={closeState?.phase === 'pending'} onClick={startClose}>{t(closeState?.phase === 'pending' ? 'sessionWindow.closeWorking' : 'sessionWindow.close')}</ContextMenuItem>
-          </ContextMenuGroup>
+          {canControlSession(menu.session) && <>
+            <ContextMenuSeparator />
+            <ContextMenuGroup>
+              <ContextMenuItem icon="trash" danger disabled={closeState?.phase === 'pending'} onClick={startClose}>{t(closeState?.phase === 'pending' ? 'sessionWindow.closeWorking' : 'sessionWindow.close')}</ContextMenuItem>
+            </ContextMenuGroup>
+          </>}
         </ContextMenu>
       )}
       <SessionAttach session={attaching} socket={tmuxSocket} onClose={() => setAttaching(null)} />

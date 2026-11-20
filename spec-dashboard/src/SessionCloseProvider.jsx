@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react'
 import { apiFetch } from './data.js'
-import { sessionHeadline } from './session.js'
+import { canControlSession, sessionHeadline } from './session.js'
 import { useBoard, useBoardApi } from './workspace.jsx'
 import { useTransientNotice } from './TransientNotice.jsx'
 import { useT } from './i18n/index.jsx'
@@ -18,6 +18,7 @@ export function SessionCloseProvider({ children }) {
   const publish = useCallback(() => setSnapshot(new Map(requests.current)), [])
 
   const closeSession = useCallback(async (session) => {
+    if (!canControlSession(session)) return
     const { id } = session
     const previous = requests.current.get(id)
     if (previous?.phase === 'pending') return

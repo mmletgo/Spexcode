@@ -86,6 +86,8 @@ surface:
   knowledge, not harness knowledge, and [[session-transcript]]'s resolver owns the precedence. The transcript is
   an ephemeral adapter observation, never a second
   SpexCode session record; [[message-stream]] owns the one conversation entry it feeds.
+  An adapter can supply `externalTranscript` for the stricter claim witness of [[external-session-adoption]].
+  It reuses that adapter's native parser.
 - **events / shim** — which lifecycle events to bind, and the per-harness hook shim that points each at the
   dispatcher (`.claude/settings.json` vs `.codex/hooks.json` vs pi's generated `.pi/extensions/spexcode.ts` —
   the shim's `content` is whatever FILE that harness discovers, not necessarily a hooks JSON; pi has no

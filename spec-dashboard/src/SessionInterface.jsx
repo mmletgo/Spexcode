@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import SessionTerm from './SessionTerm.jsx'
 import TimelineChat from './TimelineChat.jsx'
+import ExternalSessionConversation from './ExternalSessionConversation.jsx'
 import DiffDocument from './DiffDocument.jsx'
 import { createSession, useLaunchers, useCommandPresets, useHarnessCommands } from './launch.js'
-import { sessionFooterState, sessionForest, sessionHeadline } from './session.js'
+import { canControlSession, sessionFooterState, sessionForest, sessionHeadline } from './session.js'
 import { boardCommandFor, expandMentions, typeTrigger, useMentionAutocomplete } from './mentions.jsx'
 import { useAttachQueue } from './useAttachQueue.jsx'
 import { harnessForId } from './harness.jsx'
@@ -46,7 +47,7 @@ import { useStatusItem } from './StatusBar.jsx'
 import { useViewScope } from './ViewScope.jsx'
 import { useSessionListState } from './sessionListState.js'
 
-const isHeadlessSession = (session) => session?.capabilities?.headless === true
+const isHeadlessSession = (session) => !canControlSession(session) || session?.capabilities?.headless === true
 
 // HOW MANY CONVERSATIONS STAY MOUNTED. A visited Conversation is kept warm so a revisit keeps its timeline
 // cursor and rendered history ([[conversation]]), but "visited" is not a bound: a reader working through a
@@ -1320,11 +1321,12 @@ export default function SessionInterface({ sessions, specs = [], focusNode, open
                           contentVisibility: conversationShown ? 'visible' : 'hidden',
                           pointerEvents: conversationShown ? 'auto' : 'none',
                         }}>
-                          <TimelineChat s={session} sessions={sessionsWithRetention} active={open && conversationShown}
+                          {canControlSession(session) ? <TimelineChat s={session} sessions={sessionsWithRetention} active={open && conversationShown}
                             specs={specs} boardCommands={id === active ? conversationBoardRows : NO_BOARD_COMMANDS}
                             footerState={sessionFooterState(session)}
                             onRestore={id === active && session.status !== 'retired' ? resumeAndReturnToWorking : undefined}
                             actionOutcome={id === active && actionOutcome?.owner === 'panel' ? actionOutcome : null} />
+                            : <ExternalSessionConversation session={session} active={open && conversationShown} tabs />}
                         </div>
                       )}
                     </div>

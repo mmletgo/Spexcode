@@ -3,7 +3,7 @@ import DockToggle from './DockToggle.jsx'
 import { apiFetch } from './data.js'
 import { Icon } from './icons.jsx'
 import { SessionConsoleTreeRow, SessionZone } from './SessionWindow.jsx'
-import { sessionAncestorIds, sessionForest } from './session.js'
+import { canControlSession, sessionAncestorIds, sessionForest } from './session.js'
 import { expandSessionFolds, setSessionOfflineOpen, toggleSessionFold, useSessionListState } from './sessionListState.js'
 import SessionSelectBar from './SessionSelectBar.jsx'
 import { useT } from './i18n/index.jsx'
@@ -58,7 +58,7 @@ export default function SessionForestPanel({ sessions = [], activeId, archiveAct
 
   const changeParent = useCallback(async (childId, parent) => {
     const child = sessions.find((session) => session.id === childId)
-    if (!child || (child.parent || null) === parent) return
+    if (!child || !canControlSession(child) || (child.parent || null) === parent) return
     try {
       const response = await apiFetch('/api/sessions/reparent', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -81,6 +81,7 @@ export default function SessionForestPanel({ sessions = [], activeId, archiveAct
     const row = elementAt(point.x, point.y, '[data-session-drop-id]')
     if (row) {
       const id = row.dataset.sessionDropId
+      if (!canControlSession(sessions.find((session) => session.id === id))) return undefined
       if (id === held.id || id === held.parent || sessionAncestorIds(sessions, id).includes(held.id)) return undefined
       return id
     }
@@ -88,7 +89,7 @@ export default function SessionForestPanel({ sessions = [], activeId, archiveAct
   }, [sessions])
 
   const startRowDrag = useCallback((event, session) => {
-    if (event.button !== 0 || selecting) return
+    if (event.button !== 0 || selecting || !canControlSession(session)) return
     const source = event.currentTarget
     const bounds = source.getBoundingClientRect()
     const held = {

@@ -1018,6 +1018,13 @@ if (cmd === 'serve') {
       process.exit(2)
     }
     console.log(has('json') ? JSON.stringify(picked, null, 2) : formatTable(picked, true, scope))
+  } else if (sub === 'adopt' || sub === 'unadopt') {
+    if (process.argv.length !== 4) { console.error(`usage: spex session ${sub}`); process.exit(2) }
+    try {
+      const { adoptCurrentSession, unadoptCurrentSession } = await import('./session-adoption.js')
+      if (sub === 'adopt') console.log(`adopted ${adoptCurrentSession().sessionId}`)
+      else console.log(`unadopted ${unadoptCurrentSession()}`)
+    } catch (error) { console.error(`spex session ${sub}: ${(error as Error).message}`); process.exit(1) }
   } else if (sub === 'resources') {
     rejectUnknownBackendFlags('spex session resources', 4, ['json'])
     const { clientResources } = await import('./client.js')
@@ -1041,6 +1048,14 @@ if (cmd === 'serve') {
       process.exit(2)
     }
     const files = await import('./session-files.js')
+    const ownFileSession = async (): Promise<string | null> => {
+      const { ownAdoptedSessionId, readExternalClaims } = await import('./session-adoption.js')
+      const adopted = ownAdoptedSessionId()
+      if (adopted) return adopted
+      const { envSessionId, readRecordEntry } = await import('@spexcode/spec-core')
+      const id = envSessionId()
+      return id && !readExternalClaims(id).length && readRecordEntry(id).kind !== 'absent' ? id : null
+    }
     if (verb === 'ls' || verb === 'get') {
       const sshAddress = flag('ssh')
       const wantArgs = verb === 'ls' ? 1 : 2
@@ -1068,8 +1083,8 @@ if (cmd === 'serve') {
         id = r.ok.id
       }
       else {
-        const own = (await import('./sessions.js')).ownSessionId()
-        if (!own) { console.error('spex session files ls: no governed caller session — name the session to read (spex session files ls <SEL>)'); process.exit(2) }
+        const own = await ownFileSession()
+        if (!own) { console.error('spex session files ls: no governed or adopted caller session — name the session to read (spex session files ls <SEL>)'); process.exit(2) }
         id = own
       }
       if (verb === 'ls') {
@@ -1087,11 +1102,10 @@ if (cmd === 'serve') {
       }
     } else if (verb === 'add' || verb === 'retract') {
       if (rest.length !== 1 || flag('ssh') !== undefined || outPath !== undefined) usage()
-      const { ownSessionId } = await import('./sessions.js')
       const { withSessionRecordLockSync } = await import('./session-record.js')
-      const id = ownSessionId()
+      const id = await ownFileSession()
       if (!id) {
-        console.error('spex session files: no governed caller session — run this from the agent session that produced the file')
+        console.error('spex session files: no governed or adopted caller session — run this from the agent session that produced the file')
         process.exit(2)
       }
       if (verb === 'add') {
@@ -1512,7 +1526,7 @@ if (cmd === 'serve') {
       await assertLocalBackend()
       process.exit(await attachSession(await resolveSelectorOrExit(id)))
     } else {
-      console.error(`spex session: unknown verb '${sub}' — new | ls | files | web | widget | show | watch | wait | dequeue | wait-dequeue | stream-dequeue | review | merge | reparent | send | interrupt | rename | resume | stop | close | attach | resources | quarantine | done | park | ask  (spex help session)`)
+      console.error(`spex session: unknown verb '${sub}' — new | ls | adopt | unadopt | files | web | widget | show | watch | wait | dequeue | wait-dequeue | stream-dequeue | review | merge | reparent | send | interrupt | rename | resume | stop | close | attach | resources | quarantine | done | park | ask  (spex help session)`)
       process.exit(2)
     }
   }

@@ -47,6 +47,9 @@ intended no-write trap that sends the agent to merge, close, ask, or park, `clos
 settled work with no outstanding human decision, follow-up, or inspection, while `ask` includes a reported
 finding/recommendation or handoff awaiting human direction and `park` retains its distinct self-wake owner.
 
+`spex session adopt --help` and `spex session unadopt --help` describe the local caller's
+[[external-session-adoption]] claim and the retention of posted files and mailbox history after withdrawal.
+
 `spex session new --help` lists its optional `--name <name>` alongside the prompt and launcher inputs. The
 name is the new record's initial display override; it does not enter, replace, or alter the launch prompt.
 It also lists `--base <commit-ish>`, which pins the new worktree's fork point instead of taking the

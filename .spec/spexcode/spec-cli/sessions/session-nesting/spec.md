@@ -33,6 +33,8 @@ reply-hint uses (in the CLI's own process) and passes it as `parent` in the `POS
 as a durable field, and it rides onto the
 public `Session` type and `/api/graph`. A human running `spex new` from a plain shell has no session id →
 `parent` stays null, so no phantom nesting — the same no-sender rule [[agent-reply-channel]] already uses.
+An [[external-session-adoption]] caller's normal launch is top-level. Selecting that external row as a parent,
+through `@parent:` or the explicit API field, is refused before launch.
 
 Provenance answers "who made this", which is only sometimes the same question as "whose fleet is this". So the
 launch prompt may ADDRESS a supervisor instead: `@parent:<selector>` ([[mentions]]) is resolved and consumed by

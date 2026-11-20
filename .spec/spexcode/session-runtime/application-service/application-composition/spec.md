@@ -34,3 +34,11 @@ is normalized by the importer. When both channels point at one watcher, the unio
 snapshot through the ordinary relation transaction; this policy applies to later transitions.
 
 The application also exposes a read-only event watermark: `readChangedSessionIdsSince` uses the append-only event table's database-local rowid to return distinct subjects added after a caller's cursor, their current watcher recipients, and advances that cursor in the same `BEGIN IMMEDIATE` barrier transaction. Recipient resolution shares that transaction, so an external database watcher can add only affected delivery debt without enumerating the durable roster. It returns the connection-local SQLite `data_version` observed under the same barrier, so an external database watcher can distinguish an empty duplicate/early filesystem notification from a committed database move with no state subject. This is an advisory bridge; callers must still fall back to a full projection when the event stream cannot account for a change.
+
+The typed [[external-session-adoption]] command initializes the protocol address and records the project
+claim in the same transaction. The claim table does not publish lifecycle events or runtime bindings.
+The same transaction boundary fences control operations on a claimed address, including addresses whose claim
+was withdrawn. Watch relations and durable follow cursors check both endpoints. A runtime binding checks its
+protocol address and native identity in every namespace. Failed creation, state, watch, and binding checks
+leave the prospective address, relationship, and cursor unchanged. Explicit protocol mailbox operations
+remain independent.

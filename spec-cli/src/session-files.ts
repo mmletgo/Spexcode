@@ -1,7 +1,8 @@
-import { accessSync, constants, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
-import { basename, isAbsolute, resolve } from 'node:path'
+import { accessSync, constants, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { basename, dirname, isAbsolute, resolve } from 'node:path'
 import { readRecordEntry, sessionArtifactPath } from '@spexcode/spec-core'
 import { completedUpload, uploadPathsIn } from './uploads.js'
+import { externalClaimFilesPath, readExternalClaims } from './session-adoption.js'
 
 export class SessionFileError extends Error {
   constructor(readonly status: 400 | 403 | 404 | 500, message: string) {
@@ -23,14 +24,17 @@ const IMAGE_TYPES: Record<string, string> = {
 
 const filesPath = (id: string) => sessionArtifactPath(id, 'files.json')
 
-function requireSession(id: string): void {
+function requireFilesPath(id: string): string {
+  const claim = readExternalClaims(id)[0]
+  if (claim?.revokedAtMs === null) return externalClaimFilesPath(claim)
+  if (claim) throw new SessionFileError(404, `session ${id} does not exist`)
   const record = readRecordEntry(id)
-  if (record.kind === 'absent') throw new SessionFileError(404, `session ${id} does not exist`)
   if (record.kind === 'corrupt') throw new SessionFileError(500, `session ${id} has an unreadable record: ${record.error}`)
+  if (record.kind === 'ok') return filesPath(id)
+  throw new SessionFileError(404, `session ${id} does not exist`)
 }
 
-function readFiles(id: string): string[] {
-  const path = filesPath(id)
+function readFiles(path: string): string[] {
   let parsed: unknown
   try { parsed = JSON.parse(readFileSync(path, 'utf8')) }
   catch (error) {
@@ -42,8 +46,8 @@ function readFiles(id: string): string[] {
   return [...new Set(parsed)]
 }
 
-function writeFiles(id: string, files: string[]): void {
-  const path = filesPath(id)
+function writeFiles(path: string, files: string[]): void {
+  mkdirSync(dirname(path), { recursive: true })
   const tmp = `${path}.${process.pid}.tmp`
   try {
     writeFileSync(tmp, `${JSON.stringify(files, null, 2)}\n`)
@@ -66,15 +70,13 @@ function currentFile(path: string): void {
 }
 
 export function listSessionFiles(id: string): string[] {
-  requireSession(id)
-  return readSessionFiles(id)
+  return readFiles(requireFilesPath(id))
 }
 
 export type SessionFileStatus = { path: string; valid: boolean; reason?: string }
 
 export function inspectSessionFiles(id: string): SessionFileStatus[] {
-  requireSession(id)
-  return readFiles(id).map((path) => {
+  return readFiles(requireFilesPath(id)).map((path) => {
     try { currentFile(path); return { path, valid: true } }
     catch (error) { return { path, valid: false, reason: error instanceof Error ? error.message : String(error) } }
   })
@@ -82,8 +84,8 @@ export function inspectSessionFiles(id: string): SessionFileStatus[] {
 
 // Session projections already hold a parsed runtime envelope; re-checking it here would make an in-memory
 // projection depend on the public route's existence guard. The route-facing list keeps that guard above.
-export function readSessionFiles(id: string): string[] {
-  return readFiles(id)
+export function readSessionFiles(id: string, path = filesPath(id)): string[] {
+  return readFiles(path)
 }
 
 // How prose points at a posted file: the shortest `/`-bounded tail of its path that no other posted path
@@ -113,11 +115,11 @@ export function addSessionFile(id: string, input: string, lock: SessionFileLock,
   const path = resolve(cwd, input)
   currentFile(path)
   return lock(id, () => {
-    requireSession(id)
-    const files = readFiles(id)
+    const manifest = requireFilesPath(id)
+    const files = readFiles(manifest)
     if (files.includes(path)) return { path, added: false, reference: fileReference(path, files) }
     const next = [...files, path]
-    writeFiles(id, next)
+    writeFiles(manifest, next)
     return { path, added: true, reference: fileReference(path, next) }
   })
 }
@@ -139,10 +141,10 @@ export async function postSentUploads(id: string, text: string, lock: SessionFil
   })
   if (!sent.length) return []
   return lock(id, async () => {
-    requireSession(id)
-    const files = readFiles(id)
+    const manifest = requireFilesPath(id)
+    const files = readFiles(manifest)
     const added = sent.filter((path) => !files.includes(path))
-    if (added.length) writeFiles(id, [...files, ...added])
+    if (added.length) writeFiles(manifest, [...files, ...added])
     return added
   })
 }
@@ -150,17 +152,16 @@ export async function postSentUploads(id: string, text: string, lock: SessionFil
 export function retractSessionFile(id: string, input: string, lock: SessionFileLock, cwd = process.cwd()): { path: string; removed: boolean } {
   const path = resolve(cwd, input)
   return lock(id, () => {
-    requireSession(id)
-    const files = readFiles(id)
+    const manifest = requireFilesPath(id)
+    const files = readFiles(manifest)
     if (!files.includes(path)) return { path, removed: false }
-    writeFiles(id, files.filter((file) => file !== path))
+    writeFiles(manifest, files.filter((file) => file !== path))
     return { path, removed: true }
   })
 }
 
 export function openSessionFile(id: string, path: string): { path: string; name: string; size: number } {
-  requireSession(id)
-  if (!readFiles(id).includes(path)) throw new SessionFileError(403, 'that path was not posted by this session')
+  if (!readFiles(requireFilesPath(id)).includes(path)) throw new SessionFileError(403, 'that path was not posted by this session')
   try {
     const stat = statSync(path)
     if (!stat.isFile()) throw new SessionFileError(404, `file no longer exists: ${path}`)

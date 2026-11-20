@@ -683,7 +683,7 @@ export function sessionWorktreeWatchPaths(
   forcedSessions: Set<string> = new Set(),
 ): Set<string> {
   return new Set(sessions
-    .filter((session) => session.liveness !== 'offline' || forcedSessions.has(session.id))
+    .filter((session) => session.path && (session.liveness !== 'offline' || forcedSessions.has(session.id)))
     .map((session) => canonicalWatchPath(session.path)))
 }
 

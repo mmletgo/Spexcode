@@ -69,6 +69,9 @@ The menu may also expose the Sessions document's explicit selection entry and, f
 detach/reparent command. Those entries hand off to the Sessions forest owner; they do not change this menu's
 rename/close lifecycle contract or create a second close endpoint.
 
+An [[external-session-adoption]] row with control disabled offers opening in a new tab. Rename and the
+other session mutations require a controlled row.
+
 **The opener may be a press of either button, so dismissal must survive both.** An outside press closes the
 menu — the PRESS, not the click, and only when its target is outside the menu and outside a control that
 declares it owns a menu. Closing on any click at all works exactly as long as every opener is a right-click,

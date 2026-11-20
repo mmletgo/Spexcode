@@ -4,6 +4,7 @@ import { isAbsolute } from 'node:path'
 import {
   applyComponentMigrations,
   openProtocol,
+  ProtocolError,
   type Message,
   type MessageInput,
   type ProtocolTransaction,
@@ -89,6 +90,26 @@ export interface NativeRuntimeIdentity {
   metadata?: Record<string, unknown>
 }
 
+export interface ExternalSessionIdentity {
+  projectKey: string
+  harness: string
+  sessionId: string
+}
+
+export interface ExternalSessionClaim extends ExternalSessionIdentity {
+  claimedAtMs: number
+  revokedAtMs: number | null
+}
+
+export class ExternalSessionControlError extends Error {
+  readonly code = 'external_session_read_only'
+
+  constructor(sessionId: string) {
+    super(`session ${sessionId} belongs to an external thread and cannot participate in runtime control`)
+    this.name = 'ExternalSessionControlError'
+  }
+}
+
 export interface ProjectSessionApplicationOptions {
   databasePath: string
   locality: LocalityPrecondition
@@ -150,6 +171,9 @@ export interface ProductionSessionApplication extends SessionApplication {
   readonly topology: SessionTopology
   readonly events: SessionEventStore
   readonly runtimeBindings: SessionRuntimeBindings
+  adoptExternalSession(identity: ExternalSessionIdentity): ExternalSessionClaim
+  revokeExternalSession(identity: ExternalSessionIdentity): boolean
+  readExternalClaims(projectKey: string, sessionId?: string): ExternalSessionClaim[]
   createSession(input: CreateSessionInput): SessionState
   transitionSession(sessionId: string, input: TransitionSessionInput): CommittedSessionChange
   enqueueMessage(sessionId: string, message: MessageInput): Message
@@ -218,6 +242,19 @@ const uniqueSessionIds = (...ids: readonly (string | null | undefined)[]): strin
 
 const requireStatus = (value: string): void => {
   if (typeof value !== 'string' || !STATUS.test(value)) throw new TypeError('session status has an invalid grammar')
+}
+
+const externalClaim = (row: Record<string, unknown>): ExternalSessionClaim => ({
+  projectKey: String(row.project_key),
+  harness: String(row.harness),
+  sessionId: String(row.session_id),
+  claimedAtMs: Number(row.claimed_at_ms),
+  revokedAtMs: row.revoked_at_ms === null ? null : Number(row.revoked_at_ms),
+})
+
+const assertExternalAddressUnclaimed = (tx: ProtocolTransaction, sessionId: string, otherId = sessionId): void => {
+  const claim = tx.query('SELECT session_id FROM session_external_claims WHERE session_id IN (?,?) LIMIT 1', sessionId, otherId)[0]
+  if (claim) throw new ExternalSessionControlError(String(claim.session_id))
 }
 
 const eventId = (): string => randomBytes(16).toString('hex')
@@ -292,6 +329,54 @@ export function openProjectSessionApplication(options: ProjectSessionApplication
     events,
     runtimeBindings,
 
+    adoptExternalSession(identity) {
+      const { projectKey, harness, sessionId } = identity
+      requirePath(projectKey)
+      requireStatus(harness)
+      requireId(sessionId, 'sessionId')
+      const claimedAtMs = now()
+      return protocol.withTransaction(tx => {
+        const active = tx.query('SELECT * FROM session_external_claims WHERE session_id=? AND revoked_at_ms IS NULL', sessionId)[0]
+        if (active) {
+          if (active.project_key !== projectKey || active.harness !== harness)
+            throw new Error(`external thread ${sessionId} already has a different project or harness claim`)
+          return externalClaim(active)
+        }
+        if (tx.query('SELECT session_id FROM session_external_claims WHERE session_id=? AND harness<>? LIMIT 1', sessionId, harness).length)
+          throw new Error(`external thread ${sessionId} already belongs to a different harness address`)
+        if (readStateInTransaction(tx, sessionId) || tx.query(
+          'SELECT 1 FROM session_runtime_bindings WHERE protocol_session_id=? OR native_session_id=? LIMIT 1',
+          sessionId, sessionId,
+        ).length || tx.query(
+          'SELECT 1 FROM topology_edges WHERE removed_at_ms IS NULL AND (from_session_id=? OR to_session_id=?) LIMIT 1',
+          sessionId, sessionId,
+        ).length) throw new Error(`thread ${sessionId} already has a lifecycle, binding, or control relation`)
+        tx.initialize(sessionId)
+        tx.exec(`INSERT INTO session_external_claims(project_key,session_id,harness,claimed_at_ms,revoked_at_ms)
+          VALUES(?,?,?,?,NULL) ON CONFLICT(project_key,session_id) DO UPDATE
+          SET revoked_at_ms=NULL`, projectKey, sessionId, harness, claimedAtMs)
+        return externalClaim(tx.query('SELECT * FROM session_external_claims WHERE project_key=? AND session_id=?', projectKey, sessionId)[0])
+      })
+    },
+
+    revokeExternalSession({ projectKey, harness, sessionId }) {
+      requirePath(projectKey)
+      requireStatus(harness)
+      requireId(sessionId, 'sessionId')
+      const revokedAtMs = now()
+      return protocol.withTransaction(tx => tx.exec(`UPDATE session_external_claims
+        SET revoked_at_ms=MAX(claimed_at_ms,?) WHERE project_key=? AND harness=? AND session_id=?
+        AND revoked_at_ms IS NULL`, revokedAtMs, projectKey, harness, sessionId).changes === 1)
+    },
+
+    readExternalClaims(projectKey, sessionId) {
+      requirePath(projectKey)
+      return protocol.withTransaction(tx => (sessionId === undefined
+        ? tx.query('SELECT * FROM session_external_claims WHERE project_key=?', projectKey)
+        : tx.query('SELECT * FROM session_external_claims WHERE project_key=? AND session_id=?', projectKey, sessionId)
+      ).map(externalClaim))
+    },
+
     broadcast(senderSessionId, recipients, message) {
       requireId(senderSessionId, 'senderSessionId')
       const unique = [...new Set(recipients)]
@@ -312,6 +397,7 @@ export function openProjectSessionApplication(options: ProjectSessionApplication
 
     notifyRecipients(subjectSessionId, message) {
       const result = protocol.withTransaction(tx => {
+        assertExternalAddressUnclaimed(tx, subjectSessionId)
         const recipients = topology.recipients(subjectSessionId, tx)
         const messages = recipients.map(recipient => tx.enqueue(recipient, {
           ...message,
@@ -329,6 +415,7 @@ export function openProjectSessionApplication(options: ProjectSessionApplication
 
     attachAndNotify(fromSessionId, subjectSessionId, relationType, message) {
       const result = protocol.withTransaction(tx => {
+        assertExternalAddressUnclaimed(tx, fromSessionId, subjectSessionId)
         const edge = topology.attach(tx, fromSessionId, subjectSessionId, relationType)
         const recipients = topology.recipients(subjectSessionId, tx)
         const messages = recipients.map(recipient => tx.enqueue(recipient, {
@@ -353,12 +440,14 @@ export function openProjectSessionApplication(options: ProjectSessionApplication
       const note = input.note ?? null
       const parentSessionId = input.parentSessionId ?? null
       if (parentSessionId !== null) requireId(parentSessionId, 'parentSessionId')
-      initialize(input.sessionId)
-      if (parentSessionId) initialize(parentSessionId)
       const created = protocol.withTransaction(tx => {
+        assertExternalAddressUnclaimed(tx, input.sessionId, input.runtime?.nativeSessionId)
+        if (parentSessionId) assertExternalAddressUnclaimed(tx, parentSessionId)
         if (readStateInTransaction(tx, input.sessionId)) {
           throw new Error(`session application state already exists: ${input.sessionId}`)
         }
+        tx.initialize(input.sessionId)
+        if (parentSessionId) tx.initialize(parentSessionId)
         let edge: TopologyEdge | null = null
         if (parentSessionId) edge = topology.attach(tx, parentSessionId, input.sessionId, PARENT_RELATION)
         const updatedAtMs = input.updatedAtMs ?? now()
@@ -426,8 +515,8 @@ export function openProjectSessionApplication(options: ProjectSessionApplication
       if (nextStatus !== undefined) requireStatus(nextStatus)
       if (input.parentSessionId !== undefined && input.parentSessionId !== null) requireId(input.parentSessionId, 'parentSessionId')
       if (input.parentSessionId === sessionId) throw new TypeError('a session cannot be its own parent')
-      if (input.parentSessionId) initialize(input.parentSessionId)
       const result = protocol.withTransaction(tx => {
+        assertExternalAddressUnclaimed(tx, sessionId, input.parentSessionId ?? undefined)
         const current = readStateInTransaction(tx, sessionId)
         if (!current) {
           throw new Error(`session application state is missing: ${sessionId}`)
@@ -436,6 +525,7 @@ export function openProjectSessionApplication(options: ProjectSessionApplication
         const proposal = input.proposal === undefined ? current.proposal : input.proposal
         const note = input.note === undefined ? current.note : input.note
         const parentSessionId = input.parentSessionId === undefined ? current.parentSessionId : input.parentSessionId
+        if (input.parentSessionId) tx.initialize(input.parentSessionId)
         let edge: TopologyEdge | null = null
         if (parentSessionId !== current.parentSessionId) {
           if (parentSessionId && current.parentSessionId) edge = topology.reparent(tx, sessionId, parentSessionId, PARENT_RELATION)
@@ -515,8 +605,9 @@ export function openProjectSessionApplication(options: ProjectSessionApplication
       if (conversation.from !== null && typeof conversation.from !== 'string') {
         throw new TypeError('conversation message from must be a session id or null')
       }
-      initialize(sessionId)
       return protocol.withTransaction(tx => {
+        assertExternalAddressUnclaimed(tx, sessionId)
+        tx.initialize(sessionId)
         const queued = tx.enqueue(sessionId, message)
         const recorded = events.hasMessageEvent(tx, sessionId, queued.messageId)
         if (!recorded) {
@@ -541,9 +632,10 @@ export function openProjectSessionApplication(options: ProjectSessionApplication
     attachWatcher(watcherSessionId, subjectSessionId, channel = WATCH_RELATION) {
       requireId(watcherSessionId, 'watcherSessionId')
       requireId(subjectSessionId, 'subjectSessionId')
-      initialize(watcherSessionId)
-      initialize(subjectSessionId)
       return protocol.withTransaction(tx => {
+        assertExternalAddressUnclaimed(tx, watcherSessionId, subjectSessionId)
+        tx.initialize(watcherSessionId)
+        tx.initialize(subjectSessionId)
         const edge = topology.subscribe(tx, watcherSessionId, subjectSessionId, channel)
         tx.exec(
           `INSERT INTO session_follow_cursors (watcher_session_id, subject_session_id, event_seq)
@@ -563,7 +655,10 @@ export function openProjectSessionApplication(options: ProjectSessionApplication
     detachWatcher(watcherSessionId, subjectSessionId, channel = WATCH_RELATION) {
       requireId(watcherSessionId, 'watcherSessionId')
       requireId(subjectSessionId, 'subjectSessionId')
-      return protocol.withTransaction(tx => topology.unsubscribe(tx, watcherSessionId, subjectSessionId, channel))
+      return protocol.withTransaction(tx => {
+        assertExternalAddressUnclaimed(tx, watcherSessionId, subjectSessionId)
+        return topology.unsubscribe(tx, watcherSessionId, subjectSessionId, channel)
+      })
     },
 
     listWatchers(watcherSessionId, channel = WATCH_RELATION) {
@@ -573,8 +668,11 @@ export function openProjectSessionApplication(options: ProjectSessionApplication
 
     bindRuntime(sessionId, identity, expectedGeneration) {
       requireId(sessionId, 'sessionId')
-      initialize(sessionId)
-      const binding = protocol.withTransaction(tx => runtimeBindings.bind(tx, sessionId, identity, { expectedGeneration }))
+      const binding = protocol.withTransaction(tx => {
+        assertExternalAddressUnclaimed(tx, sessionId, identity?.nativeSessionId)
+        tx.initialize(sessionId)
+        return runtimeBindings.bind(tx, sessionId, identity, { expectedGeneration })
+      })
       options.onRuntimeBound?.(sessionId)
       return binding
     },
@@ -586,13 +684,19 @@ export function openProjectSessionApplication(options: ProjectSessionApplication
 
     dequeueForRuntime(sessionId, namespace, expectedGeneration, expectedMessageId) {
       requireId(sessionId, 'sessionId')
-      const binding = runtimeBindings.resolve(namespace, sessionId)
-      if (!binding || binding.status !== 'bound') throw new Error(`runtime binding is not active for ${sessionId}`)
-      if (expectedGeneration !== undefined && binding.bindingGeneration !== expectedGeneration) {
-        throw new Error(`runtime binding generation is stale for ${sessionId}`)
-      }
-      if (expectedMessageId !== undefined && protocol.listPending(sessionId)[0]?.messageId !== expectedMessageId) return null
-      return protocol.dequeue(sessionId)
+      return protocol.withTransaction(tx => {
+        const binding = runtimeBindings.resolve(namespace, sessionId, tx)
+        assertExternalAddressUnclaimed(tx, sessionId, binding?.nativeSessionId)
+        if (!binding || binding.status !== 'bound') throw new Error(`runtime binding is not active for ${sessionId}`)
+        if (expectedGeneration !== undefined && binding.bindingGeneration !== expectedGeneration) {
+          throw new Error(`runtime binding generation is stale for ${sessionId}`)
+        }
+        try { return tx.dequeue(sessionId, expectedMessageId) }
+        catch (error) {
+          if (error instanceof ProtocolError && error.code === 'PROTOCOL_CURSOR_INVALID') return null
+          throw error
+        }
+      })
     },
 
     readPendingMessages(sessionId) {
@@ -750,6 +854,7 @@ export function openProjectSessionApplication(options: ProjectSessionApplication
       requireId(subjectSessionId, 'subjectSessionId')
       if (!Number.isSafeInteger(eventSequence) || eventSequence < 0) throw new TypeError('eventSequence must be a non-negative safe integer')
       protocol.withTransaction(tx => {
+        assertExternalAddressUnclaimed(tx, watcherSessionId, subjectSessionId)
         const prior = tx.query(
           'SELECT event_seq FROM session_follow_cursors WHERE watcher_session_id=? AND subject_session_id=?',
           watcherSessionId,

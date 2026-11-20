@@ -1,3 +1,5 @@
+import { canControlSession } from './session.js'
+
 export const UI_COMMANDS = [
   // The resident Command Box opener pins to the toolbar's right edge. It is toolbar-only: direct xterm
   // input is the default, so there is no typed `/type` command or takeover mode.
@@ -18,7 +20,7 @@ export const UI_COMMANDS = [
 // current session state. `runners` maps name → the closure that DOES the thing (the same closure the toolbar
 // tool and typed command call), so the surfaces cannot drift apart.
 export function uiCommandsFor(session, runners = {}) {
-  if (session?.archived) return []
+  if (session?.archived || !canControlSession(session)) return []
   return UI_COMMANDS
     .filter((c) => c.when(session))
     .map((c) => ({ ...c, ...(c.availability?.(session) || { enabled: true }), run: runners[c.name] }))

@@ -3,8 +3,12 @@ import { Avatar } from './avatar.jsx'
 import { STATUS } from './specMeta.js'
 import { SpecPane, HistoryPane, IssuesPane, EditPane, useHistory, panesFor } from './NodeView.jsx'
 import { SessionRow, SessionZone, RowLead, FoldPod, useFold } from './SessionWindow.jsx'
-import { sessionHandle, sessionHeadline, sessionForest, STATUS_COLOR } from './session.js'
+import { canControlSession, sessionHandle, sessionHeadline, sessionForest, STATUS_COLOR } from './session.js'
 import TimelineChat from './TimelineChat.jsx'
+import ExternalSessionConversation from './ExternalSessionConversation.jsx'
+import ResourcePicker from './ResourcePicker.jsx'
+import { resourceCatalog } from './resourceCatalog.js'
+import { fileDownloadUrl, filePreviewUrl } from './fileRefs.js'
 import { createSession, useLaunchers } from './launch.js'
 import { navigate } from './route.js'
 import { useT } from './i18n/index.jsx'
@@ -115,6 +119,7 @@ function MobileNode({ node, childrenOf, sessions, onOpenChild }) {
 
 function MobileSessionDetail({ s, sessions, onBack }) {
   const t = useT()
+  const [resourcesOpen, setResourcesOpen] = useState(false)
   return (
     <div className="m-sessdetail chat">
       <div className="m-sess-card">
@@ -126,7 +131,14 @@ function MobileSessionDetail({ s, sessions, onBack }) {
           </span>
         </div>
       </div>
-      <TimelineChat s={s} sessions={sessions} />
+      {canControlSession(s) ? <TimelineChat s={s} sessions={sessions} /> : <>
+        <ResourcePicker entries={resourceCatalog(s)} openIds={new Set()} open={resourcesOpen}
+          onOpenChange={setResourcesOpen}
+          onPick={(entry) => { setResourcesOpen(false); window.open(filePreviewUrl(s.id, entry.value), '_blank', 'noopener') }}
+          onDownload={(entry) => { window.open(fileDownloadUrl(s.id, entry.value), '_blank', 'noopener') }}
+          onCopy={(entry) => { void navigator.clipboard.writeText(entry.value) }} />
+        <ExternalSessionConversation key={s.id} session={s} />
+      </>}
     </div>
   )
 }

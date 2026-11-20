@@ -89,7 +89,7 @@ export function openSessionApplication(
   }
 }
 
-export { openProjectSessionApplication, SESSION_CHANGE } from './production.js'
+export { ExternalSessionControlError, openProjectSessionApplication, SESSION_CHANGE } from './production.js'
 export { DatabasePathError, resolveDatabasePath } from './storage-path.js'
 export type { ResolveDatabasePathOptions, StorageEnvironment } from './storage-path.js'
 export { LocalityError, requireLocalDatabasePath } from './storage-locality.js'
@@ -100,6 +100,8 @@ export type {
   ChangedSessionIds,
   ConversationMessageInput,
   CreateSessionInput,
+  ExternalSessionClaim,
+  ExternalSessionIdentity,
   LocalityPrecondition,
   NativeRuntimeIdentity,
   ProductionSessionApplication,

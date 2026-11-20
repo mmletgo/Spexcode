@@ -4,6 +4,7 @@ import { resolve, sep } from 'node:path'
 import { envSessionId } from '@spexcode/spec-core'
 import { stripRefSigil } from './mentions.js'
 import type { Session } from './sessions.js'
+import { currentExternalSessionId } from './session-adoption.js'
 
 
 
@@ -22,8 +23,9 @@ export function matchesSelector(s: Session, q: string, own = envSessionId(), cwd
   // the same session as the bare token, so the dashboard's mention grammar is tolerated in every CLI selector.
   const sessionPath = s.path ? resolve(s.path) : null
   const callerPath = resolve(cwd)
-  const self = Boolean(own) && s.id === own
-    || Boolean(sessionPath) && (callerPath === sessionPath || callerPath.startsWith(`${sessionPath}${sep}`))
+  const self = s.ownership === 'external'
+    ? Boolean(own) && s.id === currentExternalSessionId(s.harness)
+    : Boolean(own) && s.id === own || Boolean(sessionPath) && (callerPath === sessionPath || callerPath.startsWith(`${sessionPath}${sep}`))
   return q.split(',').map((p) => stripRefSigil(p.trim())).filter(Boolean)
     .some((p) => p === '.' ? self : s.id === p || s.id.startsWith(p) || s.branch === p)
 }

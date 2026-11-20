@@ -19,7 +19,8 @@ import { readSessionFiles, sessionUploads, type SessionUpload } from './session-
 import { readSessionWebs, type SessionWeb } from './session-web.js'
 import { readSessionWidgets, type SessionWidget } from './session-widgets.js'
 import { acquireFreshSessionApplicationForCreate, configuredSessionApplication, initializeFreshSessionApplication, releaseFreshSessionApplicationForCreate, sessionApplicationCutoverState, setSessionApplicationCommitWake, withoutSessionApplicationExecutionWake } from './session-application.js'
-import { type ProductionSessionApplication } from '@spexcode/session-application'
+import { type ExternalSessionClaim, type ProductionSessionApplication } from '@spexcode/session-application'
+import { externalClaimFilesPath, externalControlRefusal, ownAdoptedSessionId, readExternalClaims } from './session-adoption.js'
 import { MESSAGE_KINDS } from '@spexcode/session-protocol'
 import { decodeEventJson } from '@spexcode/session-events'
 import { claimDeliveryLock, withDeliveryLocks } from './delivery-lock.js'
@@ -146,9 +147,10 @@ export type Session = {
   issues: string[]        // the issues this session works for ([[issue-binding]]) — provenance like `parent`: written at create (a thread's `@new`, `--issue`) or assign, joined at read by the Issues page, never a lifecycle input
   issue: string | null    // legacy derived alias for compatibility; always issues[0] ?? null and will retire
   harness: string   // which harness (claude|codex) runs this session — carried so liveness/occupancy route through its adapter
-  capabilities: { headless: boolean }   // stable adapter projection; console surfaces consume data, never harness ids
+  capabilities: { headless: boolean; control?: false }   // stable adapter projection; console surfaces consume data, never harness ids
+  ownership?: 'external'
   launcher: string | null   // the launcher profile this session launched under ([[launcher-select]]); null only for old records predating launchers
-  lifecycle: Lifecycle; proposal: Proposal | null; merges: number; status: DisplayStatus; liveness: Liveness; note: string | null
+  lifecycle: Lifecycle | null; proposal: Proposal | null; merges: number; status: DisplayStatus; liveness: Liveness; note: string | null
   archived: boolean   // cold storage ([[archive]]) — successful records are offline; default views exclude them
   closedAt: string | null // exact close publication time; null on working and pre-field archived records
   archiveHazard?: string | null // explicit legacy/invariant violation; never hidden as a clean archive
@@ -487,6 +489,19 @@ export function toSession(rec: SessRec, status: DisplayStatus, lv: Liveness, act
   return { id: rec.session, branch: rec.branch, label: deriveLabel(parts), title: deriveTitle(parts), raw: { name: rec.name, title: rec.title }, path: rec.worktreePath, parent: rec.parent, issues: [...rec.issues], issue: rec.issues[0] ?? null, harness: harness.id, capabilities: { headless: harness.headless }, launcher: rec.launcher, lifecycle: rec.closedAt ? 'archived' as Lifecycle : rec.status, proposal: rec.closedAt ? null : rec.proposal, merges: rec.merges, note: rec.note, status, liveness: lv, archived: rec.archived || !!rec.closedAt, closedAt: rec.closedAt, archiveHazard: null, prompt, promptPreview: pp, created: rec.createdAt, activity: act, sortKey: rec.sortKey, files, uploadedFiles: sessionUploads(files), web: readSessionWebs(rec.session), widgets: readSessionWidgets(rec.session), ...(rec.zcodeChildSessionIds?.length ? { zcodeChildSessionIds: [...rec.zcodeChildSessionIds] } : {}) }
 }
 
+export function toExternalSession(claim: ExternalSessionClaim): Session {
+  const { sessionId: id, harness, claimedAtMs } = claim
+  const files = readSessionFiles(id, externalClaimFilesPath(claim))
+  return {
+    id, branch: null, path: '', label: id, title: `${harness} · ${id.slice(0, 8)}`,
+    raw: { name: null, title: null }, parent: null, issues: [], issue: null,
+    ownership: 'external', harness, capabilities: { headless: harnessById(harness).headless, control: false }, launcher: null,
+    lifecycle: null, proposal: null, merges: 0, status: 'unknown', liveness: 'unknown', note: null,
+    archived: false, closedAt: null, prompt: null, promptPreview: null, created: claimedAtMs,
+    activity: null, sortKey: null, files, uploadedFiles: sessionUploads(files),
+  }
+}
+
 export type ZCodeChildSessionLink = { sessionId: string; childSessionId: string; alreadyLinked: boolean }
 
 // @@@zcode child identity - ZCode owns the child id and SpexCode owns the session record. The writer accepts
@@ -603,12 +618,18 @@ export async function listSessions(
     ? [...new Set(restrictToIdsOrPending.filter((id): id is string => typeof id === 'string' && id.length > 0))]
     : null
   if (requestedIds && requestedIds.length === 0) return []
+  const canonical = configuredSessionApplication()
+  const adopted = new Map(readExternalClaims().map((claim) => [claim.sessionId, claim]))
+  const roster = requestedIds ?? [...new Set([...listSessionIds(), ...adopted.keys()])]
+  const external = roster.flatMap((id) => {
+    const claim = adopted.get(id)
+    return claim?.revokedAtMs === null ? [toExternalSession(claim)] : []
+  })
+  const ids = roster.filter((id) => !adopted.has(id))
+  if (!ids.length) return external.sort((a, b) => a.created - b.created || a.id.localeCompare(b.id))
   // ONE store enumeration + ONE tmux snapshot (windows + pane pids + titles, merged) for the whole list, then
   // every session reconciles by a pure set lookup + one existsSync — no per-session tmux spawn.
-  const [ids, snap] = await Promise.all([
-    Promise.resolve(requestedIds ?? listSessionIds()),
-    providedSnap ? Promise.resolve(providedSnap) : liveSnapshot(),
-  ])
+  const snap = providedSnap ?? await liveSnapshot()
   // Freeze one record snapshot for both the census join and row projection. A second full read after an awaited
   // probe could pair record A with thread identity B and accidentally treat a missing census entry as clean.
   const snapshots = new Map<string, { entry: PublicRecordEntry; rec: SessRec | null }>()
@@ -618,7 +639,6 @@ export async function listSessions(
       snapshots.set(id, { entry, rec: entry.kind === 'ok' ? fromRaw(entry.raw) : null })
     } catch { /* guardSession below preserves the last-known row for a transient read failure */ }
   }
-  const canonical = configuredSessionApplication()
   const canonicalStates = new Map<string, ReturnType<NonNullable<typeof canonical>['readState']>>()
   if (canonical) {
     for (const [id, snapshot] of snapshots) {
@@ -726,7 +746,7 @@ export async function listSessions(
     const liveIds = new Set(ids)
     for (const k of [...lastKnownSession.keys()]) if (!liveIds.has(k)) lastKnownSession.delete(k)
   }
-  return rows.filter((s): s is Session => s != null && (includeArchived || !s.archived || (legacyPendingArchived && pendingArchivedIds.has(s.id))))
+  return [...rows, ...external].filter((s): s is Session => s != null && (includeArchived || !s.archived || (legacyPendingArchived && pendingArchivedIds.has(s.id))))
     .sort((a, b) => (a.sortKey ?? a.created) - (b.sortKey ?? b.created) || a.id.localeCompare(b.id))
 }
 
@@ -1957,7 +1977,11 @@ export type CreateParentage = { id: string | null; source: 'caller' | 'directive
 // that dropped it would be indistinguishable from an ordinary unparented launch. The board read is paid for
 // only when a directive is actually present.
 async function settleCreateParentage(selectors: string[], callerParent: string | null): Promise<CreateParentage> {
-  if (!selectors.length) return { id: callerParent, source: 'caller' }
+  if (!selectors.length) {
+    if (callerParent && externalControlRefusal(callerParent))
+      throw new SessionCreateError('session_create_failed', 'request', `external chat ${callerParent} cannot be a session's parent`, 409)
+    return { id: callerParent, source: 'caller' }
+  }
   if (selectors.length > 1) {
     throw new SessionCreateError('session_create_failed', 'request', `session-create prompt names more than one @parent: ${selectors.join(', ')}`, 400)
   }
@@ -1975,6 +1999,8 @@ async function settleCreateParentage(selectors: string[], callerParent: string |
     if (stripRefSigil(selector) === 'none') return { id: null, source: 'directive' }
     throw new SessionCreateError('session_create_failed', 'request', `session-create @parent: names no session: ${selector}`, 400)
   }
+  if (resolved.ok.capabilities.control === false)
+    throw new SessionCreateError('session_create_failed', 'request', `external chat ${resolved.ok.id} cannot be a session's parent`, 409)
   return { id: resolved.ok.id, source: 'directive' }
 }
 type SessionCreateRequestOptions = {
@@ -2260,7 +2286,8 @@ async function probeSessionCreateAuthority(target: ApiBaseInfo): Promise<boolean
   } finally { clearTimeout(timer) }
 }
 export async function createSession(prompt: string, launcher?: string, name?: string, base?: string, issue?: string): Promise<Session> {
-  const parent = ownSessionId()
+  const caller = ownSessionId()
+  const parent = ownAdoptedSessionId() || caller && externalControlRefusal(caller) ? null : caller
   const requestKey = randomUUID()
   const body = { prompt, parent, launcher, ...(name !== undefined ? { name } : {}), ...(base !== undefined ? { base } : {}), ...(issue !== undefined ? { issue } : {}) }
   const target = await apiBaseInfo()
@@ -2302,6 +2329,7 @@ export async function createSession(prompt: string, launcher?: string, name?: st
 }
 
 export function projectCreatedSession(session: Session): void {
+  if (session.lifecycle === null) throw new Error(`session ${session.id} has no SpexCode lifecycle`)
   const application = initializeFreshSessionApplication()
   try {
     application.createSession({
@@ -4769,6 +4797,7 @@ async function sendRawKeysLocked(id: string, keys: readonly string[]): Promise<b
   return sent
 }
 export async function rawKey(id: string, key: string | string[]): Promise<boolean> {
+  if (externalControlRefusal(id)) return false
   const sent = await withRecordLock(id, () => sendRawKeysLocked(id, Array.isArray(key) ? key : [key]))
   // Raw-key remote control is transport fallback, not a lifecycle event. Freshness belongs to the
   // harness turn hooks or a successfully handed-over durable prompt; navigation keys cannot forge working.

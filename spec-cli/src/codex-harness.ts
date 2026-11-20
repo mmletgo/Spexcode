@@ -12,7 +12,7 @@ import { codexGenerationEndpoints, codexGenerationSocketPath, currentCodexGenera
 import { spawnDetachedRuntime } from './runtime-ownership.js'
 import { assertFrozenReaderRuntime, frozenReaderDisabledFeatures, structuredExecutionTimer, StructuredSessionError, StructuredSessionTransportError, structuredRealmRoot, type StructuredExecution } from './session-structured-policy.js'
 import { FROZEN_READ_TOOL, frozenReadOutputTokenLimit, frozenReadTool, frozenVisibleOutputs, persistFrozenRead, proveFrozenReads, type FrozenNativeItem, type FrozenReadProof, type FrozenReadReceipt } from './frozen-context.js'
-import { codexRolloutPath, codexTranscript } from '@spexcode/transcript'
+import { codexRolloutMetadata, codexRolloutPath, codexTranscript, exactCodexTranscript } from '@spexcode/transcript'
 import { shQuote } from './sh.js'
 import { writeFileIfChanged } from './file-write.js'
 import type { Harness, HarnessLivenessRecord, HarnessDeliveryRecord, HarnessLaunchReadyRecord, SharedRuntimeDescriptor, SharedRuntimeMutationGuard, SharedRuntimeProbe, HarnessOrphanThreadQuarantine, DispatchResult, PaneProbe, TurnFailure, NativeIdentityChange, FailureSubscription } from './harness.js'
@@ -1955,28 +1955,11 @@ type CodexRolloutWitnessed = Extract<CodexRolloutWitness, { ok: true }>
 type CodexRolloutParented = CodexRolloutWitnessed & { parentThreadId: string; cwd: string }
 const codexRolloutParented = (witness: CodexRolloutWitness): witness is CodexRolloutParented =>
   witness.ok && !!witness.parentThreadId && !!witness.cwd
-const CODEX_ROLLOUT_HEADER_CHUNK_BYTES = 64 * 1024
-const CODEX_ROLLOUT_HEADER_MAX_BYTES = 4 * 1024 * 1024
 function codexRolloutWitness(threadId: string, root?: string, exactPath?: string): CodexRolloutWitness {
   const path = exactPath ?? codexRolloutPath(threadId, root)
   if (!path) return { ok: false, reason: 'rollout is missing' }
-  let fd: number | null = null
   try {
-    fd = openSync(path, 'r')
-    let header = Buffer.alloc(0)
-    for (;;) {
-      const chunk = Buffer.allocUnsafe(CODEX_ROLLOUT_HEADER_CHUNK_BYTES)
-      const read = readSync(fd, chunk, 0, chunk.length, header.length)
-      header = Buffer.concat([header, chunk.subarray(0, read)])
-      if (read < chunk.length || header.includes(0x0a) || header.length >= CODEX_ROLLOUT_HEADER_MAX_BYTES) break
-    }
-    const newline = header.indexOf(0x0a)
-    const line = (newline < 0 ? header : header.subarray(0, newline)).toString('utf8').trim()
-    if (!line) return { ok: false, reason: 'rollout header is empty' }
-    const entry = JSON.parse(line) as { type?: unknown; payload?: { id?: unknown; parent_thread_id?: unknown; cwd?: unknown } | null }
-    if (entry.type !== 'session_meta' || !entry.payload || typeof entry.payload !== 'object')
-      return { ok: false, reason: 'rollout header is not a session_meta record' }
-    if (entry.payload.id !== threadId) return { ok: false, reason: `rollout header names thread ${String(entry.payload.id)}` }
+    const entry = codexRolloutMetadata(path, threadId)
     const parent = entry.payload.parent_thread_id
     if (parent !== undefined && parent !== null && typeof parent !== 'string') return { ok: false, reason: 'rollout parent_thread_id is malformed' }
     const cwd = entry.payload.cwd
@@ -1988,8 +1971,6 @@ function codexRolloutWitness(threadId: string, root?: string, exactPath?: string
     }
   } catch (error) {
     return { ok: false, reason: `rollout header is unreadable (${error instanceof Error ? error.message : String(error)})` }
-  } finally {
-    if (fd !== null) closeSync(fd)
   }
 }
 
@@ -2277,6 +2258,7 @@ export const codexHarness: Harness = {
   ownsRendezvous: false,                             // no rendezvous daemon — liveness + prompts through the project app-server socket
   paneTitleIsSelfSummary: false,                     // codex's pane title is a spinner + the cwd folder name, NOT a task summary → headline uses the prompt
   transcript: codexTranscript,
+  externalTranscript: exactCodexTranscript,
   launchCmd: (id, runtimeDir, cmd) => codexLaunchCommand(id, codexBaseCmd(cmd), undefined, runtimeDir ?? runtimeRoot()),   // the full app-server+TUI script BUILT AROUND the resolved base command; ONE app-server per PROJECT
   baseCmd: codexBaseCmd,
   oneShotTurn: (prompt, cmd) => ({ command: `${codexBaseCmd(cmd)} exec -`, stdin: prompt }),   // `exec -` reads the prompt from stdin

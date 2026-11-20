@@ -16,6 +16,9 @@ related:
 
 # transcript-reader
 
+The Codex reader for [[external-session-adoption]] requires a unique exact filename and checks the bounded
+first rollout record for the same native UUID before exposing any turns.
+
 Every harness keeps its conversation somewhere private — Claude Code's project JSONL, Codex's rollout, pi's
 session JSONL, Gemini's project session JSONL, OpenClaw's per-agent session JSONL, Hermes's SQLite-backed session
 export, and OpenCode's store behind `opencode export` (read raw: the `--sanitize` form replaces every prose and

@@ -980,6 +980,10 @@ export default {
   },
 
   session: {
+    externalReadOnly: 'External chat · read only',
+    externalEarlier: 'Earlier transcript page',
+    externalLater: 'Later transcript page',
+    externalLatest: 'Read latest transcript',
     // the ellipsis on the session document: it is the ONLY route to rename / tmux attach / graph
     // lock on this surface, so the tooltip says so rather than naming a shape.
     menuLabel: 'session actions — rename, attach, lock on graph, close',

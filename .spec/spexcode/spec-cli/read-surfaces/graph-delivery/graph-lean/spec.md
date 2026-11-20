@@ -29,6 +29,9 @@ The graph is the *summary*, not the archive: per-node payload that only a distin
 excluded, and that surface reconstructs or lazy-fetches it. The hot path is trimmed without changing a pixel
 of the overview, one field at a time so each cut is verifiable.
 
+The session roster can include [[external-session-adoption]] rows with an empty worktree path. Both the full
+board and its session splice leave their overlays empty and derive worktree sources from rows with a path.
+
 **`body` and `parts` are both dropped** (~56% of the payload together). `parts` is pure redundancy — it is
 `parseParts(body)` ([[three-part-body]]), and neither rides the graph now. Detail reaches its two viewers off
 the hot poll: the **detail view** fetches `{body, parts}` from `/api/specs/:id/content` on open; the
