@@ -20,6 +20,8 @@ related:
 
 ## expanded spec
 
+[[sync-p0-review-challenge]] 经共享服务核对目标来源和冻结配置，以原 operation 互斥处理身份、输入新鲜度与冷原件 preflight，再交存储事务 CAS。正式 resume 走现有控制入口。
+
 同步 run 接受显式 `retryOf`、新 `model` 和 `inheritRetryBudget: true` 交接尚未验证交付的代码→Spec 候选。接入使用正式 retry 资格及原预算、输入、政策与授权范围，独立保存新模型的工具绑定。幂等重放核对该授权，verify 不接受交接字段。派发前的原候选及独审认证由 [[sync-coordinator]] 执行。
 
 真正新接入可从同一冻结 input 的完整发现选择派生 [[sync-historical-coverage]]，内联原 planBlob 并参与政策摘要；复用原计划的重复请求及正式 retry 不重读 live heads 或补写历史资格。实际 executionScope、选择、验证登记与强制测试保持。

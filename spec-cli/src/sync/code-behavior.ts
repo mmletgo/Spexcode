@@ -1,3 +1,4 @@
+import type { P0ReviewDiagnostic } from './behavior-review-challenge.js'
 import { captureStageDraft, DRAFT_RECEIPT_INSTRUCTIONS, DRAFT_RECEIPT_SCHEMA, overlayStageTree, readStageDraft, StageDraftCommitMissingError, stageWorktree, STAGE_READING_INSTRUCTIONS, type StageDraftBinding } from './stage-worktree.js'
 import { posix } from 'node:path'
 import { parseCodeEntry, parseRelation, relationClaimsPath } from '@spexcode/spec-core'
@@ -50,7 +51,7 @@ export type CodeBehaviorPostGateReview = {
   findings: { finding: ContractFinding; before: ContractItem; after: ContractItem; changedPaths: string[] }[]
   codeDiff: string
 }
-export type CodeBehaviorInput = { contextTransport?: CodeBehaviorContextTransport; exactChangedPathsPreflight?: true; reviewCoveragePreflight?: true; postGateReview?: readonly CodeBehaviorPostGateReview[]; draftProtocol?: 'code-behavior-draft-v1'; partition?: { id: string; changedPaths: readonly string[]; factSourcePaths: readonly string[]; authorizedParentSpecPaths?: readonly string[] }; model?: string; snapshot: InputSnapshot; baseline: BaselinePair | null; baselineSelection?: FrozenBaselineSelection; composed: ComposedInputRef; readSetDigest: string; policyDigest: string; plan: SyncCoordinatorPlan; requestKey: string; timeoutMs: number | null; signal?: AbortSignal; origin?: 'initial' | 'spec' | 'code' | 'combined' | 'reconcile' | 'decision'; decision?: { request: SyncDecisionInput; previous: CodeBehaviorEvidence; previousComposed?: ComposedInputRef; previousReadPaths?: readonly string[] }; repairDiagnostics?: readonly { code: string; message: string }[] }
+export type CodeBehaviorInput = { operatorReviewDiagnostic?: P0ReviewDiagnostic; contextTransport?: CodeBehaviorContextTransport; exactChangedPathsPreflight?: true; reviewCoveragePreflight?: true; postGateReview?: readonly CodeBehaviorPostGateReview[]; draftProtocol?: 'code-behavior-draft-v1'; partition?: { id: string; changedPaths: readonly string[]; factSourcePaths: readonly string[]; authorizedParentSpecPaths?: readonly string[] }; model?: string; snapshot: InputSnapshot; baseline: BaselinePair | null; baselineSelection?: FrozenBaselineSelection; composed: ComposedInputRef; readSetDigest: string; policyDigest: string; plan: SyncCoordinatorPlan; requestKey: string; timeoutMs: number | null; signal?: AbortSignal; origin?: 'initial' | 'spec' | 'code' | 'combined' | 'reconcile' | 'decision'; decision?: { request: SyncDecisionInput; previous: CodeBehaviorEvidence; previousComposed?: ComposedInputRef; previousReadPaths?: readonly string[] }; repairDiagnostics?: readonly { code: string; message: string }[] }
 type BehaviorPurpose = 'code_behavior_analyze' | 'code_behavior_review'
 type CompletedBehaviorDraft = { trace: ElaborationTrace; draftOid: string; resultCommit: string; requestRef: BlobRef; receipt: unknown }
 /** 未批准临时稿只记录真实Git身份；readyAnalysis仅省去独审协议失败后的重复分析，不批准独审。 */
@@ -59,6 +60,8 @@ export type CodeBehaviorContinuation = {
   drafts: Partial<Record<BehaviorPurpose, ElaborationDraft>>
   errors?: Partial<Record<BehaviorPurpose, { code: string; message: string }[]>>
   readyAnalysis?: CompletedBehaviorDraft
+  reviewDiagnosticRef?: BlobRef
+  challengedAnalysisDigest?: string
   reviewResult?: CompletedBehaviorDraft
 }
 const behaviorStatusErrors = (errors: readonly { code: string }[]) => errors.map(({ code }) => ({ code, message: CODE_BEHAVIOR_FAILURE_STATUS }))
@@ -84,6 +87,7 @@ export type CodeBehaviorCheckpoints = { loadReviewFeedback?(inputDigest: string)
 type Proposal = { changes: Omit<CodeBehaviorChange, 'id'>[]; facts: CodeBehaviorAnalysis['facts']; acceptanceChanges: Omit<AcceptanceChangeProposal, 'action'>[]; newNodes: { codePath: string; parentNodeId: string; basis: string }[]; resolutions: CodeBehaviorAnalysis['resolutions'] }
 export type CodeBehaviorContext = {
   task: Record<string, unknown>
+  operatorReviewDiagnostic?: P0ReviewDiagnostic
   pendingAnalysis?: { analysisDigest: string; analysis: CodeBehaviorAnalysis; newNodeProposals: Proposal['newNodes'] }
   repairDiagnostics: NonNullable<CodeBehaviorInput['repairDiagnostics']>
   errors: readonly { code: string; message: string }[]
@@ -135,6 +139,7 @@ export function readCodeBehaviorContext(request: Pick<ElaborationSessionRequest,
   if (value.version !== (statusOnly ? 'code-behavior-context-v2' : 'code-behavior-context-v1') || value.inputDigest !== request.inputDigest || value.purpose !== request.purpose
     || !value.task || typeof value.task !== 'object' || Array.isArray(value.task) || !Array.isArray(value.repairDiagnostics) || !Array.isArray(value.errors)
     || statusOnly && (value.repairDiagnostics.length > 0 || value.errors.length > 0)
+    || value.operatorReviewDiagnostic !== undefined && (request.purpose !== 'code_behavior_review' || task.contextTransport !== 'git-json-v6')
     || (request.purpose === 'code_behavior_review') !== (value.pendingAnalysis !== undefined)) throw new Error('P0 context正文不匹配冻结任务身份')
   return value
 }
@@ -633,7 +638,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   const previous = accepted?.(inputDigest, { analysisSchemaDigest, changedPaths })
   if (previous) return previous
   if (draftMode) {
-    continuation = checkpoints?.load(inputDigest, analysisSchemaDigest) ?? { version: 'code-behavior-draft-v1', inputDigest, drafts: {} }
+    continuation = checkpoints?.load(inputDigest, analysisSchemaDigest) ?? { version: 'code-behavior-draft-v1', inputDigest, drafts: {}, ...(input.operatorReviewDiagnostic ? { reviewDiagnosticRef: input.operatorReviewDiagnostic.ref } : {}) }
     if (continuation.version !== input.draftProtocol || continuation.inputDigest !== inputDigest) throw new Error('P0草稿续修完整输入绑定不匹配')
   }
   let reviewWorktree = worktree
@@ -656,7 +661,12 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
       return output
     }
     const reviewFeedback = statusOnly && purpose === 'code_behavior_analyze' ? checkpoints?.loadReviewFeedback?.(inputDigest) : undefined
-    if (continuation && purpose === 'code_behavior_analyze') { delete continuation.drafts.code_behavior_review; delete continuation.reviewResult; delete continuation.readyAnalysis }
+    if (continuation && purpose === 'code_behavior_analyze') {
+      delete continuation.drafts.code_behavior_review
+      delete continuation.reviewResult
+      delete continuation.readyAnalysis
+      delete continuation.challengedAnalysisDigest
+    }
     const repairErrors = statusOnly ? [] : material?.errors ?? prior?.errors ?? continuation?.errors?.[purpose] ?? []
     const repairDiagnostics = statusOnly ? [] : material?.repairDiagnostics ? [...new Map([...material.repairDiagnostics, ...input.repairDiagnostics ?? []].map(item => [JSON.stringify(item), item])).values()] : input.repairDiagnostics ?? []
     const contextPath = binding.path.replace(/\.json$/, '.context.json')
@@ -665,6 +675,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
       version: statusOnly ? 'code-behavior-context-v2' : 'code-behavior-context-v1',
       inputDigest, purpose, task: JSON.parse(context) as Record<string, unknown>,
       ...(pendingAnalysis ? { pendingAnalysis } : {}),
+      ...(purpose === 'code_behavior_review' && input.operatorReviewDiagnostic ? { operatorReviewDiagnostic: input.operatorReviewDiagnostic } : {}),
       repairDiagnostics, errors: repairErrors,
       ...(acceptancePreflight ? { readonlyUnchangedAcceptanceSources: [...validRuleIds].flatMap(id => unchangedReadonlyAcceptanceBasis(id)) } : {}),
     }) : undefined
@@ -674,6 +685,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
       if (pendingAnalysis) prompt = prompt.replace(`\n待审分析:\n${JSON.stringify(pendingAnalysis)}`, '')
     }
     if (draftMode) prompt += `\n草稿文件=${binding.path}；${material ? material.sourceKind === 'physical_draft' ? '已认证停止的旧工作树中明确未批准的物理草稿已按原字节复制到当前seed；它未提交，不是历史Git稿、Native final或批准；仅续修此文件，正常提交后重新独审。' : material.sourceKind === 'git_draft' ? '认证的原Git分析草稿已按原字节复制到当前seed；沿该原文件核实分类并续修，旧批准不继承。' : material.sourceKind === 'native_output' ? '认证的旧只读Native成功结构化输出已序列化为本轮临时材料；它不是历史Git草稿或新批准，在该文件核实分类并续修。' : '旧Native原输出材料已按认证CAS原字节复制为本轮临时输入，不是既有Git草稿；在该原文件继续修复。' : source === undefined ? '首次实际创建该文件。' : '已有原草稿已复制到当前seed，在原文件继续修改，不从零重答。'}本段只把上文直接返回业务JSON的交付方式改为草稿文件；业务文件仍只读，唯一可写例外为此草稿。结构化业务JSON写入此临时文件，Spec、源码、全部测试、其他owner文件保持不变。只允许正常git add和git commit该草稿并保持clean；无需改正文时可正常commit --allow-empty，保留hooks。${DRAFT_RECEIPT_INSTRUCTIONS} 草稿仅为非权威诊断材料，不是raw、事实、批准或新授权。\n草稿业务schema只读文件=${binding.path.replace(/\.json$/, '.schema.json')}；先读取精确schema并自检，禁止修改schema。${contextSource === undefined ? `原具体错误：${JSON.stringify(repairErrors)}；本轮修复诊断：${JSON.stringify(repairDiagnostics)}` : statusOnly ? '读取任务指针指定的只读context JSON。task为原任务，review的pendingAnalysis为本轮完整待审分析。按原JSON草稿与精确schema继续自检和修复。context、schema等临时协议文件不属于业务checkedPaths。保持这些文件只读，仓库仍可自由读取。' : `读取任务指针指定的完整只读context JSON：task为原任务，repairDiagnostics/errors仅为非权威修复诊断，review的pendingAnalysis为本轮完整待审分析，均须保留各项具体拒因；按原JSON草稿继续修复。context、schema等临时协议文件不属于业务checkedPaths，不修改这些只读文件；仓库仍可自由读取。`}`
+    if (purpose === 'code_behavior_review' && input.operatorReviewDiagnostic) prompt += '\n只读 context 的 operatorReviewDiagnostic 是操作员的待核线索。依据冻结源码、调用、完整测试与原规范独立核查相关主张，并照常审核完整候选。可据证据驳回质疑并 accept；确认缺陷时以真实来源和反例给 repair。此资料不提供业务事实、原意或任何新授权。'
     if (reviewFeedback) prompt += `\n用 git show ${reviewFeedback.commit}:${reviewFeedback.path} 读取本区最近一次真实业务独审的原JSON。沿其具体发现修复原草稿。原审查意见只供返修，不授予批准或新写权。`
     const exactChangedPaths = input.contextTransport === 'git-json-v6' && input.exactChangedPathsPreflight === true && input.partition !== undefined
     if (purpose === 'code_behavior_analyze' && (input.contextTransport === 'git-json-v3' || input.contextTransport === 'git-json-v4' || acceptancePreflight)) prompt += `
@@ -976,6 +988,7 @@ SPEX_P0_REVIEW_PATHS`
   diagnostic.analysis = analysis
   if (continuation) { continuation.readyAnalysis = { ...analysisRequest!, trace: traces[0], draftOid: continuation.drafts.code_behavior_analyze!.oid, resultCommit: continuation.drafts.code_behavior_analyze!.resultCommit }; persist() }
   const analysisDigest = contentHash(JSON.stringify(analysis))
+  if (continuation?.challengedAnalysisDigest && continuation.challengedAnalysisDigest !== analysisDigest) throw Object.assign(new Error('操作员复审的待审分析与原批准候选不一致'), { code: 'sync_p0_challenge_binding' })
   const reviewSchema = codeBehaviorReviewSchema(inputDigest, analysisDigest)
   if (worktree) reviewWorktree = stageWorktree(commonDir, input.snapshot.headCommit, overlayStageTree(commonDir, worktree.tree, proposal.resolutions.map(resolution => ({ path: resolution.path, source: resolution.content, mode: resolution.mode }))))
   const reviewStage = { analysisDigest, analysis, newNodeProposals: proposal.newNodes }
@@ -993,8 +1006,10 @@ SPEX_P0_REVIEW_PATHS`
   requireOptionalRead([...review.checkedPaths, ...referencedPaths], turns.get('code_behavior_review'), reviewDetails)
   if (new Set(review.checkedPaths).size !== review.checkedPaths.length || new Set(review.checkedChangeIds).size !== review.checkedChangeIds.length) reject('独审检查范围不能重复', reviewDetails, 'behavior_analysis_invalid', true)
   if (reviewDetails.identityMismatch.length || reviewDetails.missingPaths.length || reviewDetails.missingChangeIds.length || reviewDetails.unknownChangeIds.length) reject('行为独审未接受当前完整分析', reviewDetails, 'behavior_review_failed', true)
-  if (review.verdict !== 'accept' || review.findings.length) reject('行为独审未接受当前完整分析', reviewDetails, 'behavior_review_failed')
+  if ((review.verdict === 'repair') !== (review.findings.length > 0)) reject('独审裁决与具体发现不一致', reviewDetails, 'behavior_review_failed', true)
+  if (review.verdict === 'repair') reject('行为独审未接受当前完整分析', reviewDetails, 'behavior_review_failed')
   analysis.traces = traces; analysis.reviewPassed = true
+  if (input.operatorReviewDiagnostic) analysis.reviewDiagnosticRef = input.operatorReviewDiagnostic.ref
   return analysis
 }
 

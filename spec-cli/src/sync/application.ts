@@ -1,3 +1,4 @@
+import { p0ReviewDiagnosticEvidence, p0ReviewDiagnosticRef, readP0ReviewChallengeRequest } from './behavior-review-challenge.js'
 import { finiteSyncBudget } from './budget.js'
 import { configuredVerificationTransport } from './verification-transport.js'
 import { randomUUID } from 'node:crypto'
@@ -9,7 +10,7 @@ import type { SessionProtocol } from '@spexcode/session-protocol'
 import { configuredSessionApplication, withoutSessionApplicationExecutionWake } from '../session-application.js'
 import { prepareSpecBodyEdit, readSpecBodyEdit } from '../spec-body-edit.js'
 import type { SpecBodyEdit } from '../spec-body-edit.js'
-import { isSyncInputCurrent, recoverSyncOperationResources, SyncCoordinatorError, prepareSyncAdmission, readCurrentSyncAnalysis, runSyncOperation, syncPlanDigest } from './coordinator.js'
+import { isSyncInputCurrent, recoverSyncOperationResources, SyncCoordinatorError, prepareP0ReviewChallenge, prepareSyncAdmission, readCurrentSyncAnalysis, readP0ReviewChallenges, runSyncOperation, syncPlanDigest } from './coordinator.js'
 import type { SyncCoordinatorOptions, SyncCoordinatorPlan, SyncCoordinatorResult } from './coordinator-types.js'
 import type { SyncResourceRecoveryResult } from './coordinator.js'
 import { migrateSyncStore } from './migrations.js'
@@ -779,7 +780,7 @@ export class SyncApplication {
       const requested = input.model ?? (prior || retry ? syncModel(prior ?? retry!) : syncModel(settings, Boolean(plan.agentWorkflow)))
       const model = await resolveSyncModel(requested, Boolean(plan.agentWorkflow), prior ? syncModel(prior) : undefined)
       if (prior && (syncModel(prior) !== model || (ingress?.origin ?? prior.origin) !== origin || (prior.retryOf ?? null) !== (retry?.id ?? null) || (ingress?.input ?? prior.input).id !== snapshot.id || JSON.stringify((ingress?.input ?? prior.input).source) !== JSON.stringify(snapshot.source) || prior.policyDigest !== syncPlanDigest(plan) || ((ingress ?? prior).requestBlob?.sha256 ?? null) !== (requestBlob?.sha256 ?? null))) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
-      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: input.requestId, origin, ...syncModelBinding(model), ...(input.inheritRetryBudget ? { inheritRetryBudget: true } : {}), ...(recordUnverifiedCoverage ? { recordUnverifiedCoverage } : {}), ...(retry ? { retryOf: retry.id, ...(retry.baselineSelection ? { executionScope: retry.scope, impactDigest: retry.impactDigest } : {}) } : {}), budget: retry && (revalidation || input.inheritRetryBudget) ? retry.budget : settings.budget, managedRoot: this.managedRoot, ...(requestBlob ? { requestBlob } : {}), previousBaselinePair, ...(frozen ? { baselineSelection: frozen.selection } : {}), automaticSourceAdoption }, businessSelection)
+      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: input.requestId, origin, ...syncModelBinding(model), ...(input.inheritRetryBudget ? { inheritRetryBudget: true } : {}), ...(recordUnverifiedCoverage ? { recordUnverifiedCoverage } : {}), ...(retry ? { retryOf: retry.id, ...(retry.baselineSelection ? { executionScope: retry.scope, impactDigest: retry.impactDigest } : {}) } : {}), budget: retry && (revalidation || input.inheritRetryBudget || readP0ReviewChallenges(this.store, retry).size) ? retry.budget : settings.budget, managedRoot: this.managedRoot, ...(requestBlob ? { requestBlob } : {}), previousBaselinePair, ...(frozen ? { baselineSelection: frozen.selection } : {}), automaticSourceAdoption }, businessSelection)
       if (prior) { admission.deliveryPlan = (ingress ?? prior).deliveryPlan; admission.budget = (ingress ?? prior).budget }
       this.prepareTools(admission.ingressKey, prior, model, plan.agentWorkflow)
       const operation = this.store.admitAndEnqueue(admission)
@@ -926,6 +927,30 @@ export class SyncApplication {
       const operation = this.store.admitAndEnqueue(admission)
       if (operation.ingressKey === ingressKey) this.start(operation.id)
       return { changed: true, operation: this.store.readOperation(operation.id) }
+    } finally { mutex.release() }
+  }
+  /** 登记一个已结算原生 P0 owner 的待核复审；后续派发沿已有 resume。 */
+  async challengeP0(supplied: unknown): Promise<ReturnType<SyncStore['authorizeP0ReviewChallenge']>> {
+    const input = readP0ReviewChallengeRequest(supplied)
+    const mutex = await this.requestMutex(`p0-review:${this.repositoryId}:${this.root}:${input.operationId}`, 30000)
+    try {
+      const operation = this.store.readOperation(input.operationId)
+      this.assertSource(operation)
+      const prior = operation.p0ReviewChallenges?.find(item => item.requestId === input.requestId)
+      if (prior) {
+        if (prior.diagnosticRef.sha256 !== p0ReviewDiagnosticRef(input).sha256) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', input.requestId)
+        return { operation, challenge: prior }
+      }
+      const current = await captureInputSnapshot(this.root, { committed: operation.input.captureKind === 'commit' })
+      this.requireEnabled(current, operation)
+      const plan = this.operationPlan(operation)
+      if (current.id !== operation.input.id || input.inputId !== operation.input.id) throw new SyncApplicationError('sync_p0_challenge_stale', '复审需要原冻结 source/input，当前输入已变化')
+      let challenge: Awaited<ReturnType<typeof prepareP0ReviewChallenge>>
+      try { challenge = await withReadonlySnapshotQuery(() => prepareP0ReviewChallenge(this.store, operation, plan, input)) }
+      catch (error) { if (error instanceof SyncCoordinatorError) throw new SyncApplicationError(error.code, error.message); throw error }
+      mutex.assertHeld()
+      const diagnosticRef = writeEvidence(operation.input.source.commonDir, p0ReviewDiagnosticEvidence(input))
+      return this.store.authorizeP0ReviewChallenge(operation.id, { ...challenge, diagnosticRef })
     } finally { mutex.release() }
   }
   /** 长流程附着于后端进程；拒绝和环境失败必须持久结算，不能成为悬空 Promise。 */

@@ -16,6 +16,8 @@ related:
 
 ## expanded spec
 
+用真实 Git、SQLite 和受控正式 Native 复查 [[sync-p0-review-challenge]]。暂停的三分区原批准不得直接放行受质疑 owner；该区同候选新独审。若新版独审返回真实业务 repair，只有该 owner 续原稿及新发现；其余原批准不派发。
+
 普通正式模型切换回归用隔离 SQLite、真实 Git 稿和受控 Native 资源桥保存 Claude 作者原件。作者完成后，执行失败及覆盖协议失败分别保留待审分析。重开 SQLite 后，ZCode 只派新独审，保持兄弟批准及原输入和原稿，下一次正式重试沿混合模型原件组成完整 P0。新独审返回真实业务 repair 时，后继重新分析并得到原作者 Git 字节和原独审发现。输入、分区计划、schema、作者身份、作者模型、scope 或正式重试关系失配时不取得续审资格。上述受控调用回归在 P1 入口终止。仅分析分区另经真实 P1 封口和正式 null 扩域，实际准入 scope 含冻结计划之外已有授权的既有 RULE，SQLite 冷开后沿原 P0 批准和 P1 覆盖只派候选独审。该场景在候选独审入口终止。旧 inline 指导的普通进入路径则在首次 P1 派发前拒绝仅分析承接。
 
 P0 传输冻结回归核新 attempt 保存 `reviewCoveragePreflight`，所有既有协议及已预留派发逐字保留字段缺席和原请求绑定。

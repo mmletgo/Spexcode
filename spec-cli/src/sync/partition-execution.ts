@@ -1,3 +1,4 @@
+import type { P0ReviewDiagnostic } from './behavior-review-challenge.js'
 import type { StageDraftMaterialRequest } from './stage-worktree.js'
 import { setImmediate as yieldToControl } from 'node:timers/promises'
 import { readStageDraft, stageWorktree, STAGE_READING_INSTRUCTIONS } from './stage-worktree.js'
@@ -261,7 +262,7 @@ export function partitionAnalysisEvidence(commonDir: string, analysis: CodeBehav
 }
 
 /** 每区独立分析及独审，程序只合并真实原件，不合成一次不存在的全局模型审查。 */
-export async function analyzeSyncPartitions(input: CodeBehaviorInput, plan: SyncPartitionPlan, maxParallel: number, runner: ElaborationRunner, checkpoints: PartitionCheckpoints): Promise<CodeBehaviorAnalysis> {
+export async function analyzeSyncPartitions(input: CodeBehaviorInput, plan: SyncPartitionPlan, maxParallel: number, runner: ElaborationRunner, checkpoints: PartitionCheckpoints, operatorReviewDiagnostics?: ReadonlyMap<string, P0ReviewDiagnostic>): Promise<CodeBehaviorAnalysis> {
   const { signal, ...data } = input
   input = { ...structuredClone(data), signal }; plan = structuredClone(plan)
   const failures: PartitionAnalysisFailure[] = []
@@ -271,6 +272,7 @@ export async function analyzeSyncPartitions(input: CodeBehaviorInput, plan: Sync
   try { analyses = await mapSyncPartitions(plan.partitions, maxParallel, input.signal, async partition => {
     try {
       const key = `partition:${partition.id}:analysis`
+      const diagnostic = operatorReviewDiagnostics?.get(partition.id)
       const saved = checkpoints.load<CodeBehaviorAnalysis>(key)
       // 只把全局授权、处于本区targets/只读上下文且正文可读的父Spec投影给新叶门禁，不扩充局部writePaths。
       const authorizedParentSpecPaths = input.plan.version === 'sync-coordinator-v2' && input.plan.direction === 'code_to_spec' && input.plan.sourcePaths !== undefined
@@ -280,10 +282,10 @@ export async function analyzeSyncPartitions(input: CodeBehaviorInput, plan: Sync
       const factSourcePaths = input.plan.sourcePaths === undefined
         ? unique(partition.writePaths.filter(path => !path.startsWith('.spec/')))
         : unique(partition.sourcePaths.filter(path => !path.startsWith('.spec/')))
-      const localInput: CodeBehaviorInput = { ...input, postGateReview: input.postGateReview?.filter(diagnostic => diagnostic.partitionId === partition.id), repairDiagnostics: input.repairDiagnostics?.filter(diagnostic => 'partitionId' in diagnostic && diagnostic.partitionId === partition.id), requestKey: `${input.requestKey}:partition:${partition.id}`, plan: projectSyncPartition(input.plan, partition), partition: { id: partition.id, changedPaths: partition.changedPaths, factSourcePaths, ...(authorizedParentSpecPaths !== undefined ? { authorizedParentSpecPaths } : {}) } }
+      const localInput: CodeBehaviorInput = { ...input, ...(diagnostic ? { operatorReviewDiagnostic: diagnostic } : {}), postGateReview: input.postGateReview?.filter(diagnostic => diagnostic.partitionId === partition.id), repairDiagnostics: input.repairDiagnostics?.filter(diagnostic => 'partitionId' in diagnostic && diagnostic.partitionId === partition.id), requestKey: `${input.requestKey}:partition:${partition.id}`, plan: projectSyncPartition(input.plan, partition), partition: { id: partition.id, changedPaths: partition.changedPaths, factSourcePaths, ...(authorizedParentSpecPaths !== undefined ? { authorizedParentSpecPaths } : {}) } }
       const paths = partitionBehaviorChangedPaths(localInput)
       scopes.set(partition.id, paths)
-      const local = await analyzeCodeBehavior(localInput, runner, (inputDigest, binding) => saved?.inputDigest === inputDigest ? saved : checkpoints.loadAcceptedAnalysis?.(key, plan, inputDigest, binding) ?? null, { loadReviewFeedback: inputDigest => checkpoints.loadBehaviorReviewFeedback?.(key, plan.digest, inputDigest) ?? null, loadMaterial: (purpose, schemaDigest, inputDigest, request, existingDraft) => checkpoints.loadBehaviorDraftMaterial?.(key, plan.digest, purpose, schemaDigest, inputDigest, request, existingDraft) ?? null, load: (inputDigest, analysisSchemaDigest) => checkpoints.loadBehaviorContinuation?.(key, plan.digest, inputDigest, analysisSchemaDigest) ?? null, save: continuation => { checkpoints.save(`${key}:continuation`, continuation) } }, verified ??= verifyBehaviorReadBasis(localInput))
+      const local = await analyzeCodeBehavior(localInput, runner, (inputDigest, binding) => saved?.inputDigest === inputDigest && (!diagnostic || saved.reviewDiagnosticRef?.sha256 === diagnostic.ref.sha256) ? saved : checkpoints.loadAcceptedAnalysis?.(key, plan, inputDigest, binding) ?? null, { loadReviewFeedback: inputDigest => checkpoints.loadBehaviorReviewFeedback?.(key, plan.digest, inputDigest) ?? null, loadMaterial: (purpose, schemaDigest, inputDigest, request, existingDraft) => checkpoints.loadBehaviorDraftMaterial?.(key, plan.digest, purpose, schemaDigest, inputDigest, request, existingDraft) ?? null, load: (inputDigest, analysisSchemaDigest) => checkpoints.loadBehaviorContinuation?.(key, plan.digest, inputDigest, analysisSchemaDigest) ?? null, save: continuation => { checkpoints.save(`${key}:continuation`, continuation) } }, verified ??= verifyBehaviorReadBasis(localInput))
       if (local.changes.some(change => change.paths.some(path => !paths.includes(path)))) reject(`分析超出本区真实变更集合: ${partition.id}`)
       checkpoints.save(key, local)
       return local
@@ -302,7 +304,8 @@ export async function analyzeSyncPartitions(input: CodeBehaviorInput, plan: Sync
   independentTraces(analyses.flatMap(analysis => analysis.traces))
   const first = analyses[0]
   if (!first) reject('分区计划为空')
-  const merged: CodeBehaviorAnalysis = { ...first,
+  const { reviewDiagnosticRef: _localDiagnostic, ...wholeBasis } = first
+  const merged: CodeBehaviorAnalysis = { ...wholeBasis,
     inputDigest: contentHash(JSON.stringify({ partitionPlanDigest: plan.digest, inputs: analyses.map(item => item.inputDigest) })),
     authorChanges: distinct(analyses.flatMap(item => item.authorChanges ?? []), item => item.path, 'author'),
     rawIntegrations: distinct(analyses.flatMap(item => item.rawIntegrations ?? []), item => item.path, 'raw'),

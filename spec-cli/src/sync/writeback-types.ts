@@ -37,6 +37,7 @@ export type CodeBehaviorAnalysis = {
   facts: ElaborationFact[]; authorizedChanges: ContractChangeProposal[]; nodeChanges: ContractNodeProposal[]
   newNodes: { nodeId: string; path: string; rawSource: string; codePath: string }[]
   resolutions: { path: string; content: string | null; mode: '100644' | '100755' | '120000' | null }[]
+  reviewDiagnosticRef?: BlobRef
   partitionCoverage?: { planDigest: string; partitionIds: string[]; changedPaths: string[] }
   partitionEvidence?: { partitionId: string; changedPaths: string[]; analysisRef: BlobRef; analysis: CodeBehaviorAnalysis }[]
   traces: ElaborationTrace[]; reviewPassed: boolean
