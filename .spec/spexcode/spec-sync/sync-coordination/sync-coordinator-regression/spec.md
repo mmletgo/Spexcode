@@ -40,7 +40,7 @@ P0 传输冻结回归核新 attempt 保存 `reviewCoveragePreflight`，所有既
 
 混合候选的冷验计数检查同一真实冻结 Git 树只完整读取一次。原候选、已拒稿及全部独审结论保持完整认证。
 
-旧候选回归用真实历史程序自然产生 git-json-v4 / v7：四组 P0、三个真实 P1 与一个仅分析 owner、合法 repair / accept / 格式失败三组 P2。原轮尚无正式 attempt.candidate，经 SQLite 冷开及 canonical Native/Git 冷验，只新增原格式独审，再仅重派命中 P1；原 v7、全部旧 CAS 和 source/index 不变。另经两次真实正式retry与显式换模型继承原P0及已审P1，保部分P1后的原范围；SQLite冷续同样只补格式审查再返命中owner。逐 owner及祖先控制机会、缺 P0 原件、Native 输出身份/原生产者模型漂移、无retryOf的跨 operation、祖先结算拒绝、缺null扩域证据、缺 P2 outcome、未结算资源及 scope 退出后的普通指导版本门均有反例。旧producer另自然保留needs_input的P1与缺席GAP复核阶段，冷续须保持格式审查、owner返修、新并集GAP复核的先后。该隔离场景在 V3 前硬停，不把受控 Native 输出冒充真实模型或最终交付证据。
+旧候选回归用真实历史程序自然产生 git-json-v4 / v7：四组 P0、三个真实 P1 与一个仅分析 owner、合法 repair / accept / 格式失败三组 P2。原轮尚无正式 attempt.candidate，经 SQLite 冷开及 canonical Native/Git 冷验，只新增原格式独审，再仅重派命中 P1；原 v7、全部旧 CAS 和 source/index 不变。另经两次真实正式retry与显式换模型继承原P0及已审P1，保部分P1后的原范围；SQLite冷续同样只补格式审查再返命中owner。逐 owner及祖先控制机会、缺 P0 原件、Native 输出身份/原生产者模型漂移、无retryOf的跨 operation、祖先结算拒绝、缺null扩域证据、缺 P2 outcome、未结算资源及 scope 退出后的普通指导版本门均有反例。旧producer另自然保留needs_input的P1与缺席GAP复核阶段，冷续须保持格式审查、owner返修、新并集GAP复核的先后。该隔离场景在 V3 前硬停，不把受控 Native 输出冒充真实模型或最终交付证据。 只替换局部读集并重算相关引用时，旧中间实现最终在独审摘要门拒绝，恢复后的门在检查原 Native 证据前，先对照原 whole 的冻结读集并报告该局部失配。
 
 旧 Git 程序和受控 Native 响应共同产生 v8 候选回归原件。code→spec 混合 P2 候选经 SQLite 冷开，同 operation 重新执行当前 P0/P1/P2，保留仅分析分区可见的共享作者意图及原失败、CAS、Native 和 schema 字节。显式换模型交接断言 `review_handoff_binding` 和零派发。spec→code 通过公开 `SyncApplication.submit` 同模型 `retryOf`，分别核对原候选只遇 V3 预检失败时完成新分析、生成、独审与新 runId，以及旧后继已结算 V3 时在派发前返回 `candidate_retry_binding`。两路比较原记录与原件。
 
