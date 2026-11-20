@@ -1,20 +1,19 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import net from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
-import { readFileSync } from 'node:fs'
 
 // [[dispatch]]: `POST /api/sessions/:id/interrupt` is ONE verb whose transport branch is decided in the
 // backend. A pane-backed TUI without a native interrupt receives the operator's own key — C-c into its own
 // pane — but only while its lifecycle is active; a headless adapter interrupts through its shim's native abort
 // and refuses loudly when no turn is serving its rendezvous socket.
-// Measured against a real backend, a real tmux server on a throwaway socket, and a real pane whose shell
-// reports the SIGINT it received.
+// Measured against a real backend, a real tmux server on a throwaway socket, and a real pane whose probe
+// reports readiness and the SIGINT it received.
 const here = dirname(fileURLToPath(import.meta.url))
 const index = join(here, 'index.ts')
 
@@ -40,7 +39,6 @@ async function stop(child: ChildProcess): Promise<void> {
   try { process.kill(-child.pid!, 'SIGTERM') } catch { child.kill('SIGTERM') }
   await Promise.race([once(child, 'exit'), new Promise((resolve) => setTimeout(resolve, 5_000))])
 }
-const tmux = (socket: string, ...args: string[]) => spawnSync('tmux', ['-L', socket, ...args], { encoding: 'utf8' })
 
 // The live proof below cannot force a declaration between the lifecycle read and the send; this pins the
 // shape that makes such a window impossible: one record lock holds both, and no send happens outside it.
@@ -52,11 +50,13 @@ test('interrupt reads the lifecycle and sends the pane key under one record lock
 })
 
 test('YATU: interrupt reaches a pane-backed TUI as its own key, and refuses where no keyboard or turn exists', { timeout: 90_000 }, async () => {
-  const fixture = mkdtempSync(join(tmpdir(), 'spex-interrupt-api-'))
+  const fixture = realpathSync(mkdtempSync(join(tmpdir(), 'spex-int-')))
   const project = join(fixture, 'project')
   const home = join(fixture, 'home')
   const port = await freePort()
-  const socket = `interrupt-api-${port}`
+  const socket = 'int'
+  const env = { ...process.env, TMUX_TMPDIR: fixture, SPEXCODE_TMUX: socket }
+  const tmux = (...args: string[]) => spawnSync('tmux', ['-f', '/dev/null', '-L', socket, ...args], { encoding: 'utf8', env })
   const idle = 'interrupt-api-idle'
   const pane = 'interrupt-api-pane'
   const headless = 'interrupt-api-headless'
@@ -83,7 +83,8 @@ test('YATU: interrupt reaches a pane-backed TUI as its own key, and refuses wher
     record(headless, 'pi-headless', 'active')
 
     backend = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), index], {
-      cwd: project, env: { ...process.env, PORT: String(port), SPEXCODE_HOME: home, SPEXCODE_TMUX: socket }, stdio: 'ignore', detached: true,
+      cwd: project, env: { ...env, PORT: String(port), SPEXCODE_HOME: home, SPEX_SESSION_DATABASE_PATH: join(home, 'sessions.sqlite') },
+      stdio: 'ignore', detached: true,
     })
     const base = `http://127.0.0.1:${port}`
     await waitFor(() => fetch(`${base}/health`).then((response) => response.ok).catch(() => false), 'backend health')
@@ -104,15 +105,21 @@ test('YATU: interrupt reaches a pane-backed TUI as its own key, and refuses wher
     assert.equal(refusedIdle.status, 502)
     assert.match(refusedIdle.body.error || '', /not working/)
 
-    // a working pane-backed TUI gets C-c in its own pane: the shell in the pane reports the SIGINT it received
-    assert.equal(tmux(socket, 'new-session', '-d', '-s', pane, '-x', '80', '-y', '24',
-      'sh', '-c', 'trap "echo GOT_INT" INT; while :; do sleep 1; done').status, 0)
+    const probe = `
+      process.on('SIGINT', () => console.log('GOT_INT'))
+      process.stdin.resume()
+      console.log('INT_READY')
+    `
+    const started = tmux('new-session', '-d', '-s', pane, '-x', '80', '-y', '24', process.execPath, '-e', probe)
+    assert.equal(started.status, 0, started.stderr)
+    const capture = () => tmux('capture-pane', '-p', '-t', pane).stdout
+    await waitFor(async () => capture().split('\n').includes('INT_READY'), 'SIGINT listener ready in the pane', 10_000)
     const delivered = await interrupt(pane)
     assert.deepEqual(delivered, { status: 200, body: { ok: true } })
-    await waitFor(async () => tmux(socket, 'capture-pane', '-p', '-t', pane).stdout.includes('GOT_INT'), 'SIGINT observed in the pane', 10_000)
+    await waitFor(async () => capture().includes('GOT_INT'), 'SIGINT observed in the pane', 10_000)
   } finally {
     if (backend) await stop(backend)
-    tmux(socket, 'kill-server')
+    tmux('kill-server')
     rmSync(fixture, { recursive: true, force: true })
   }
 })

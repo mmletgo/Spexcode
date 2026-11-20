@@ -106,6 +106,9 @@ operator would press, `C-c` into its own pane through the raw-key channel, and o
 `active` (the same key on an idle TUI is one more Ctrl-C from quitting it). Callers never choose the branch;
 there is one route and one verb.
 
+The live pane regression waits for the probe in its private tmux server to report that its SIGINT listener
+is installed. It then checks the HTTP key receipt and observes the signal in that same pane.
+
 **A confirmed interrupt is a turn outcome the record states.** The human ended the turn, so the agent now waits
 for the human: a native interrupt that confirms on an `active` record projects `asking` with the note
 `interrupted: the human stopped this turn; the next message continues the conversation` — the same
