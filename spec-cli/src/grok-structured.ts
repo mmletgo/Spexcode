@@ -117,12 +117,19 @@ function nativeHttpStatus(text: string): { code: number; message: string } | nul
   return status ? { code: Number(status[0]), message: value.slice(status[0].length) } : null
 }
 
-function observeNativeStderr(stderr: Readable) {
+type StartupError = { kind: 'unexpected_argument'; flag: string } | { kind: 'os_error'; errno: 'ENOENT' | 'EACCES' }
+
+function observeNativeStderr(stderr: Readable, args: readonly string[]) {
   const hash = createHash('sha256'), line = Buffer.alloc(STDERR_LINE_LIMIT), httpStatuses = new Set<number>()
+  const startupErrors = new Map<string, StartupError>(), flags = new Set(args.filter((_, index) => index % 2 === 0))
   let bytes = 0, lineBytes = 0, discardLine = false, oversizedLine = false, usageBalanceExhausted = false, readError = false
   const finishLine = (): void => {
     if (!discardLine) {
-      const text = line.toString('utf8', 0, lineBytes).trim()
+      const startupLine = line.toString('utf8', 0, lineBytes).replace(/\r$/, ''), text = startupLine.trim()
+      const argument = /^error: unexpected argument '(--[a-z][a-z-]*)' found$/.exec(startupLine)
+      if (argument && argument[0] === startupLine && flags.has(argument[1])) startupErrors.set(argument[1], { kind: 'unexpected_argument', flag: argument[1] })
+      const errno = startupLine === 'Error: No such file or directory (os error 2)' ? 'ENOENT' : startupLine === 'Error: Permission denied (os error 13)' ? 'EACCES' : undefined
+      if (errno) startupErrors.set(errno, { kind: 'os_error', errno })
       const status = nativeHttpStatus(text)
       if (status) httpStatuses.add(status.code)
       const body = (status?.message ?? text.replace(/^error:[ \t]*/i, '')).trimStart()
@@ -147,7 +154,7 @@ function observeNativeStderr(stderr: Readable) {
   })
   stderr.once('end', finishLine)
   stderr.once('error', () => { readError = true })
-  return () => ({ bytes, sha256: hash.digest('hex'), ended: stderr.readableEnded, oversizedLine, readError, httpStatuses: [...httpStatuses].sort((a, b) => a - b), usageBalanceExhausted })
+  return () => ({ bytes, sha256: hash.digest('hex'), ended: stderr.readableEnded, oversizedLine, readError, httpStatuses: [...httpStatuses].sort((a, b) => a - b), usageBalanceExhausted, ...(startupErrors.size ? { startupErrors: [...startupErrors.values()] } : {}) })
 }
 
 async function observeNativeOutput(stdout: Readable, plan: NativePlan, onEnd: (terminal: Terminal) => void): Promise<NativeOutput> {
@@ -341,7 +348,7 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
   for (const key of sessionIdentityEnvVars()) delete env[key]
   const launchedAt = performance.now()
   const child = spawn('/bin/sh', ['-c', 'IFS= read -r ready && [ "$ready" = start ] || exit 1; exec "$@"', 'spex-grok-launch', launch.command, ...launch.args, ...args], { cwd: worktreePath, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
-  const stderrDiagnostic = observeNativeStderr(child.stderr)
+  const stderrDiagnostic = observeNativeStderr(child.stderr, args)
   let observedExit: Exit | undefined
   let exitAtMs: number | null = null
   const exited = new Promise<Exit & { observedAt: number }>(resolve => child.once('exit', (code, signal) => {

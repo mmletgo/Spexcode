@@ -15,7 +15,7 @@ const schema = { type: 'object', properties: { marker: { type: 'string' } }, req
 const finalText = '{"marker":"终态"}'
 const sha256 = (text: string): string => createHash('sha256').update(text).digest('hex')
 
-type Scenario = 'success' | 'wrong-session' | 'wrong-cwd' | 'missing-request' | 'duplicate-terminal' | 'missing-terminal' | 'wrong-format' | 'bad-schema' | 'hang' | 'read' | 'periodic' | 'split-settlement-window' | 'cancel-during-settlement' | 'inherited-stdout' | 'inherited-stdout-trailing' | 'parent-awaits-owned-child' | 'parent-restarts-owned-child' | 'natural-child-shutdown' | 'short-lived-terminal-parent' | 'unowned-stdout' | 'terminal-exit-timeout' | 'terminal-timeout-unowned-stdout'
+type Scenario = 'startup-error' | 'success' | 'wrong-session' | 'wrong-cwd' | 'missing-request' | 'duplicate-terminal' | 'missing-terminal' | 'wrong-format' | 'bad-schema' | 'hang' | 'read' | 'periodic' | 'split-settlement-window' | 'cancel-during-settlement' | 'inherited-stdout' | 'inherited-stdout-trailing' | 'parent-awaits-owned-child' | 'parent-restarts-owned-child' | 'natural-child-shutdown' | 'short-lived-terminal-parent' | 'unowned-stdout' | 'terminal-exit-timeout' | 'terminal-timeout-unowned-stdout'
 
 function fixture(t: TestContext, scenario: Scenario, model = 'grok:default', purpose = 'grok-fixture', stderrChunks: readonly string[] = []) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'spex-grok-fixture-')))
@@ -156,6 +156,7 @@ if (scenario === 'split-settlement-window' || scenario === 'cancel-during-settle
       process.stderr.write(chunks[index], () => setTimeout(writeStderr, 10, index + 1))
       return
     }
+    if (scenario === 'startup-error') { process.exitCode = 1; return }
     if (scenario === 'missing-terminal' && chunks.length) process.exitCode = 1
     finish()
   }
@@ -585,6 +586,64 @@ for (const [label, chunks, statuses, exhausted, oversizedLine] of [
     assert.equal(f.state().turnId, undefined)
     assert.equal(existsSync(join(root, 'result.json')), false)
     assert.equal(existsSync(join(root, 'settlement.json')), false)
+  })
+}
+
+for (const [label, chunks, startupErrors, oversizedLine] of [
+  ['known argument and split OS errors', [
+    "error: unexpected argument '--session-id' found\n",
+    'Error: Permission denied (os error ', '13)\n',
+    'Error: No such file or directory (os error 2)\n',
+    "error: unexpected argument '--session-id' found\n",
+  ], [
+    { kind: 'unexpected_argument', flag: '--session-id' },
+    { kind: 'os_error', errno: 'EACCES' },
+    { kind: 'os_error', errno: 'ENOENT' },
+  ], false],
+  ['private and unknown lines', [
+    'Authorization: Bearer FAKE_STARTUP_SECRET\napi_key=FAKE_STARTUP_SECRET\n',
+    'Error: /private/FAKE_STARTUP_SECRET: Permission denied (os error 13)\n',
+    'Error: https://example.invalid/?key=FAKE_STARTUP_SECRET\n',
+    '{"error":"Error: Permission denied (os error 13)","key":"FAKE_STARTUP_SECRET"}\n',
+    "error: unexpected argument '--api-key' found\n",
+    "error: unexpected argument '--model' found\n",
+    "error: unexpected argument 'FAKE_STARTUP_SECRET' found\n",
+  ], [], false],
+  ['confusable and non-complete templates', [
+    "prefix error: unexpected argument '--session-id' found\n",
+    "error: unexpected argument '--session-id' found FAKE_STARTUP_SECRET\n",
+    "ｅrror: unexpected argument '--session-id' found\n",
+    "error: unexpected argument '--session-id' found\u2028\n",
+    "error: unexpected argu\nment '--session-id' found\n",
+    "\x1b[31merror: unexpected argument '--session-id' found\x1b[0m\n",
+    'Error: Permission denied (os error 13) trailing\n',
+    'Error: Permission denied (os error 130)\n',
+  ], [], false],
+  ['oversized split lines never become templates', [
+    "error: unexpected argument '--session-id' found", ' '.repeat(5_000), '\n',
+    'x'.repeat(5_000), 'Error: Permission denied (os error 13)\n',
+    ' '.repeat(5_000), 'Error: No such file or directory (os error 2)',
+  ], [], true],
+] as const) {
+  test(`Grok startup stderr projects only safe fixed reasons for ${label}`, async t => {
+    const f = fixture(t, 'startup-error', 'grok:default', 'grok-fixture', chunks)
+    await assert.rejects(f.run(), { code: 'cancellation_pending', message: 'Grok native stream closed without its original terminal' })
+    const raw = readFileSync(join(f.sessionRoot, 'missing-terminal-diagnostic.json'), 'utf8')
+    const diagnostic = JSON.parse(raw)
+    assert.deepEqual(diagnostic.exit, { code: 1, signal: null })
+    assert.deepEqual(diagnostic.stderr, {
+      bytes: Buffer.byteLength(chunks.join('')),
+      sha256: sha256(chunks.join('')),
+      ended: true, oversizedLine, readError: false,
+      httpStatuses: [], usageBalanceExhausted: false,
+      ...(startupErrors.length ? { startupErrors } : {}),
+    })
+    assert.ok(!/FAKE_STARTUP_SECRET|Bearer|api_key|https:|private/.test(raw))
+    assert.equal(statSync(join(f.sessionRoot, 'missing-terminal-diagnostic.json')).mode & 0o777, 0o400)
+    assert.equal(f.state().turnId, undefined)
+    assert.equal(existsSync(join(f.sessionRoot, 'result.json')), false)
+    assert.equal(existsSync(join(f.sessionRoot, 'settlement.json')), false)
+    await assert.rejects(f.run(f.state(), replayCallbacks), { code: 'cancellation_pending' })
   })
 }
 
