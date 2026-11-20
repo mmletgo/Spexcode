@@ -11662,7 +11662,7 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
     'src/import.js': 'export class ImportService {}\n', 'src/archive.js': 'export class ArchiveService {}\n',
     'tests/import.test.mjs': 'import assert from "node:assert/strict"\n', 'tests/archive.test.mjs': 'import assert from "node:assert/strict"\n',
   }, false, syncSettings, false, mode === 'accept')
-  let store = f.store, active = f.operation, pauseWholeAt = 1, pauseFailureAt = 0
+  let store = f.store, active = f.operation, pauseWholeAt = 1, pauseFailureAt = 0, pauseBeforeWholeAt = 0
   const calls: string[] = []
   const diagnostic = '待核：原权限边界遗漏已存在的代码分支。'
   const evidencePaths = ['tests/archive.test.mjs', 'tests/import.test.mjs']
@@ -11719,7 +11719,12 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
   const pauseAtBoundary = () => {
     const checkpoint = store.checkpoint.bind(store), recordFailure = store.recordFailure.bind(store)
     store.checkpoint = (fence, ref) => {
-      const attempt = checkpoint(fence, ref), wrapper = JSON.parse(readEvidence(commonDir, ref).toString()) as { stage?: string }
+      const wrapper = JSON.parse(readEvidence(commonDir, ref).toString()) as { stage?: string }
+      if (wrapper.stage === 'analysis' && pauseBeforeWholeAt === store.readAttempt(fence.attemptId).number) {
+        store.requestControl(active.id, 'pause')
+        throw Object.assign(new Error('已批准local但未封whole时停止'), { code: 'cancelled' })
+      }
+      const attempt = checkpoint(fence, ref)
       if (wrapper.stage === 'analysis' && attempt.number === pauseWholeAt) store.requestControl(active.id, 'pause')
       return attempt
     }
@@ -11828,12 +11833,23 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
   const useColdStore = () => {
     store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) }); f.useStore(store); pauseAtBoundary()
   }
+
+  const stageWrappers = (attempt: SyncAttempt) => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(commonDir, ref).toString()))
+  const hideReviewSchema = (approval: SyncAttempt) => {
+    const wrapper = stageWrappers(approval).find(item => item.stage === `partition:${target.partitionId}:analysis:continuation`)
+    const draft = JSON.parse(readEvidence(commonDir, wrapper.resultRef).toString()).drafts.code_behavior_review
+    const oid = f.git('rev-parse', `${draft.seed.tree}:${draft.path.replace(/\.json$/, '.schema.json')}`)
+    const path = join(commonDir, 'objects', oid.slice(0, 2), oid.slice(2)), bytes = readFileSync(path)
+    rmSync(path)
+    return () => writeFileSync(path, bytes)
+  }
+  let localApproval: SyncAttempt | undefined
   useColdStore()
   if (mode === 'accept') {
     const physical = store.readPhysicalControl(paused.input.source)
     assert.equal(physical.control, 'pause')
     store.requestPhysicalControl(paused.input.source, 'run', physical.revision)
-    pauseWholeAt = 3
+    pauseWholeAt = 5
     pauseFailureAt = 2
     const rejected = await runSyncOperation(store, active.id, f.options)
     assert.equal(rejected.operation.phase, 'paused')
@@ -11844,6 +11860,29 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
     protocol = openProtocol(join(f.parent, 'sync.sqlite'))
     useColdStore()
     pauseFailureAt = 0
+    pauseBeforeWholeAt = 3
+    store.requestControl(active.id, 'run')
+    const partial = await runSyncOperation(store, active.id, f.options)
+    localApproval = store.readAttempt(partial.operation.currentAttemptId!)
+    assert.equal(partial.operation.phase, 'paused')
+    assert.ok(stageWrappers(localApproval).some(wrapper => wrapper.stage === `partition:${target.partitionId}:analysis`))
+    assert.ok(!stageWrappers(localApproval).some(wrapper => wrapper.stage === 'analysis'))
+    pauseBeforeWholeAt = 0
+    protocol.close()
+    protocol = openProtocol(join(f.parent, 'sync.sqlite'))
+    useColdStore()
+    const restoreSchema = hideReviewSchema(localApproval)
+    try {
+      store.requestControl(active.id, 'run')
+      const blocked = await runSyncOperation(store, active.id, f.options)
+      const attempt = store.readAttempt(blocked.operation.currentAttemptId!)
+      assert.equal(attempt.number, 4)
+      assert.match(blocked.failure?.message ?? '', /cat-file/)
+      assert.ok(!stageWrappers(attempt).some(wrapper => wrapper.stage === 'analysis' || wrapper.stage === `partition:${target.partitionId}:analysis`))
+      assert.equal(attempt.dispatchPlans.length, 0)
+      assert.deepEqual(store.readAttempt(localApproval.id), localApproval)
+    } finally { restoreSchema() }
+    store.requestControl(active.id, 'pause')
     store.requestControl(active.id, 'run')
   } else {
     pauseWholeAt = 0
@@ -11906,6 +11945,30 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
   assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
   t.diagnostic(JSON.stringify({ mode, original: target.analysisRef.sha256, resumed: currentLocal.analysisRef.sha256, callsBefore: paused.callsUsed, callsAfter: store.readBudgetUsage(active.id).callsUsed }))
+  if (mode === 'accept') {
+    protocol.close()
+    protocol = openProtocol(join(f.parent, 'sync.sqlite'))
+    useColdStore()
+    assert.deepEqual(readCurrentSyncAnalysis(store, resumed), current, '完整v2批准冷读仍可用')
+    const approvedAttempt = store.readAttempt(resumed.currentAttemptId!), callsBeforeLoss = calls.length
+    const restoreSchema = hideReviewSchema(localApproval!)
+    try {
+      let queried = false
+      try { queried = readCurrentSyncAnalysis(store, resumed) !== null } catch (error) {
+        assert.match((error as Error).message, /cat-file/)
+      }
+      store.requestControl(active.id, 'run')
+      const blocked = await runSyncOperation(store, active.id, f.options)
+      const blockedAttempt = store.readAttempt(blocked.operation.currentAttemptId!)
+      const reusedWhole = stageWrappers(blockedAttempt).some(wrapper => wrapper.stage === 'analysis')
+      assert.deepEqual({ queried, reusedWhole }, { queried: false, reusedWhole: false })
+      assert.match(blocked.failure?.message ?? '', /cat-file/)
+      assert.equal(calls.length, callsBeforeLoss)
+      assert.equal(blockedAttempt.dispatchPlans.length, 0)
+      assert.deepEqual(store.readAttempt(approvedAttempt.id), approvedAttempt)
+    } finally { restoreSchema() }
+    store.requestControl(active.id, 'pause')
+  }
   const app = await SyncApplication.create(f.root, { protocol, runtimeDirectory: join(f.parent, 'negative-application'), tools: f.options.tools })
   await app.enable()
   const queued = store.requestControl(active.id, 'run')
