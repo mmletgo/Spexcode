@@ -369,14 +369,14 @@ export function assertZCodeSettledProviderReview(sessionId: string, prompt: stri
     throw new StructuredSessionError('stale_result', 'ZCode provider review lacks its exact input, failure attribution or exit evidence')
 }
 
-/** 只读核原任务与公开终态；true认证未批准稿，null跳过不具资格的候选。 */
-export function assertZCodeStoppedDraftSource(prompt: string, execution: ZCodeStructuredExecution, worktreePath: string, allowUnpublishedCompletion = false): boolean | null {
+/** 只读核原任务与公开终态。 */
+export function assertZCodeStoppedDraftSource(prompt: string, execution: ZCodeStructuredExecution, worktreePath: string, mode?: 'unpublished-completion' | 'cancelled-commit'): boolean | 'cancelled-commit' | null {
   const native = execution.zcodeNative
   if (execution.version !== 6 || execution.policy !== 'native-worktree-v1' || !execution.model?.startsWith('zcode:') || execution.worktree?.mode !== 'edit' || !native || !['failed', 'cancelled'].includes(execution.state ?? '') || !execution.cancellation?.nativeStopped)
     throw new StructuredSessionError('stale_result', 'stopped ZCode draft requires its original stopped native worktree')
   const completedPath = join(native.root, 'completed.json')
   const sealed = existsSync(completedPath)
-  if (sealed && (!allowUnpublishedCompletion || execution.state !== 'cancelled' || execution.errorCode !== undefined || execution.output !== undefined || execution.resultDigest !== undefined || execution.resultWorktree || execution.failedWorktree || execution.rejectedOutput))
+  if (sealed && (mode !== 'unpublished-completion' || execution.state !== 'cancelled' || execution.errorCode !== undefined || execution.output !== undefined || execution.resultDigest !== undefined || execution.resultWorktree || execution.failedWorktree || execution.rejectedOutput))
     throw new StructuredSessionError('stale_result', 'stopped ZCode draft requires its original stopped native worktree')
   const read = (name: string): unknown => JSON.parse(readFileSync(join(native.root, name), 'utf8'))
   const plan = read('plan.json') as NativePlan
@@ -413,11 +413,18 @@ export function assertZCodeStoppedDraftSource(prompt: string, execution: ZCodeSt
     if (readFileSync(completedPath, 'utf8') !== JSON.stringify(completed)) throw new StructuredSessionError('stale_result', 'ZCode immutable native evidence differs')
     return null
   }
-  if (completedEventsRpc) {
-    if (nonSuccess) return null
-    const idle = read('idle.json') as { sessionId: string; turnId: string; idle: boolean }
-    if (terminal.payload.resultType !== 'success' || typeof terminal.payload.response !== 'string'
-      || idle.sessionId !== plan.sessionId || idle.turnId !== plan.turnId || idle.idle !== true || exit.idle !== true || exit.closed !== true || exit.stopped !== true)
+  if (nonSuccess) return null
+  const cancelledCommit = mode === 'cancelled-commit' && execution.state === 'cancelled' && execution.errorCode === undefined
+    && execution.turnStartRequested === true && execution.cancellation.nativeStatus === 'stopped' && execution.cancellation.acknowledged === true
+    && terminal.type === 'turn.completed' && terminal.payload.resultType === 'cancelled'
+  if (completedEventsRpc || cancelledCommit) {
+    let idle: { sessionId: string; turnId: string; idle: boolean }
+    try { idle = read('idle.json') as typeof idle }
+    catch (error) { if (cancelledCommit && (error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error }
+    const normalExit = idle.sessionId === plan.sessionId && idle.turnId === plan.turnId && idle.idle === true
+      && exit.idle === true && exit.closed === true && exit.stopped === true && typeof terminal.payload.response === 'string'
+    if (cancelledCommit) return normalExit && exit.acknowledged === true ? 'cancelled-commit' : false
+    if (!normalExit || terminal.payload.resultType !== 'success')
       throw new StructuredSessionError('stale_result', 'ZCode events RPC draft has no exact completed terminal and idle/closed stop')
     return true
   }

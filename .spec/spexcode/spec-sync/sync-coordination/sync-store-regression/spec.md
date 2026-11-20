@@ -54,6 +54,8 @@ writer32回归由隔离真实SQLite核v31→v32只追加marker、只备份一次
 
 writer28回归在隔离真实SQLite中核v27到v28无DDL，只增加一条组件marker，保留完整v1–v27 registry与业务/protocol旧表。旧writer拒绝升级库，一致online backup可由旧writer读取，重复升级幂等。
 
+writer66 沿真实 online backup 验证 v65 原表、组件记录、自动采纳索引和业务证据保持。v65 拒写新库，原备份独立可开，重复迁移幂等。
+
 writer27沿真实online backup验证旧v26一致库可独立恢复，升级无DDL且所有旧表与v1–v26完整registry行不变；旧v26 writer拒绝新代，重复迁移幂等，不触默认用户库。
 
 v26 ZCode停止材料marker回归仅操作专用临时SQLite：25→26只追加SELECT1，完整保v1–v25 migration行/checksum/applied_at及全部业务/protocol旧表与schema，旧25 writer拒26，online backup可由25 writer读取且原行相等，重复迁移幂等。不得操作生产数据库或删除真实marker。

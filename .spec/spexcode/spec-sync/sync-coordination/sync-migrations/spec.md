@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+writer66 追加 SELECT 1 marker，保护 [[sync-coordinator]] P0 按精确正常取消冻结的未批准提交稿。writer65 在写入和派发前拒绝新版。升级先停稳并结算旧 writer，再保存一致 v65 SQLite online backup 及配套 enabled、Git/CAS。回滚先停稳并结算新 writer，再恢复整套备份。原记录及旧迁移逐字保留。
+
 writer65 追加 SELECT 1 marker，保护 [[sync-p0-review-challenge]] 的不可变授权及已批准缓存失效。writer64 拒绝新版。升级先停稳并正式结算旧 writer，保存一致 v64 SQLite online backup 与配套 enabled、Git/CAS。回滚先停稳并结算新 writer，再恢复整套 v64 备份，不删除 marker。
 
 writer64 追加 SELECT 1 marker，保护 [[sync-coordinator]] 普通正式重试的 P0 跨 operation 续审来源和混合模型批准。writer63 在写入或派发前拒绝新版。升级先停稳并正式结算旧 writer，保存一致 writer63 SQLite online backup 及配套 enabled、Git/CAS 原件。回滚先停稳并结算新 writer，再完整恢复该备份与配套原件。旧迁移、请求、失败及证据保持。
