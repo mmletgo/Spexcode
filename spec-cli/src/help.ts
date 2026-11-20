@@ -436,7 +436,7 @@ consumes the token after it.`,
        spex sync status [--node <node-id>] [--limit N] [--json]
        spex sync run <node-id> [--request-id <id>] [--patch-file <json>] [--retry-of <operation-id>] [--origin spec|initial|code|combined] [--committed] [--model <model-id>] [--record-unverified-coverage] [--inherit-retry-budget]
        spex sync decide <operation-id> --input-id <id> --analysis <sha256> --findings <id,...> --choice keep_intent|adopt_behavior|new_rule [--rule <text>] [--request-id <id>]
-       spex sync challenge <operation-id> --request-id <id> --expected-revision <N> --input-id <id> --partition <id> --analysis <sha256> --diagnostic-file <utf8>
+       spex sync challenge <operation-id> --request-id <id> --expected-revision <N> --input-id <id> --partition <id> --analysis <sha256> --diagnostic-file <utf8> --evidence-paths <json-array>
        spex sync show <operation-id>
        spex sync pause|resume
        spex sync verify <node-id> [--request-id <id>] [--model <model-id>]

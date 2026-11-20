@@ -14,7 +14,7 @@ code:
 
 ## expanded spec
 
-[[sync-p0-review-challenge]] 授权存在原 operation，保存操作员请求身份、原 local/continuation wrapper、冻结分区计划与 scope、诊断 CAS 引用。诊断只进入正式独审。
+[[sync-p0-review-challenge]] 授权存在原 operation，保存操作员请求身份、原 local/continuation wrapper、冻结分区计划与 scope、诊断 CAS 引用。诊断只进入正式独审。 v2 授权通过同一诊断 CAS 绑定精确的只读证据路径。v1 缺此数据，继续按原资格验证。
 
 模型交接在正式 `retryOf` 的 operation 和 ingress receipt 保存 `inheritRetryBudget: true`。新 operation 固定自己的模型和派发身份，沿 dispatchAnchor 的原预算根累计使用并保持原 deadlineAtMs。原 operation 与其派发、候选和证据保留。
 

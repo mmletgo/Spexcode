@@ -1,4 +1,4 @@
-import type { P0ReviewDiagnostic } from './behavior-review-challenge.js'
+import { requiredBehaviorReviewPaths, type P0ReviewDiagnostic } from './behavior-review-challenge.js'
 import { captureStageDraft, DRAFT_RECEIPT_INSTRUCTIONS, DRAFT_RECEIPT_SCHEMA, overlayStageTree, readStageDraft, StageDraftCommitMissingError, stageWorktree, STAGE_READING_INSTRUCTIONS, type StageDraftBinding } from './stage-worktree.js'
 import { posix } from 'node:path'
 import { parseCodeEntry, parseRelation, relationClaimsPath } from '@spexcode/spec-core'
@@ -27,11 +27,14 @@ const object = (properties: Record<string, unknown>): Record<string, unknown> =>
 const change = object({ kind: { type: 'string', enum: ['refactor', 'allowed_change', 'coverage_gap', 'conflict'] }, paths: { ...strings, minItems: 1 }, affectedIds: strings, ruleIds: strings, originalIntent: string, previousBehavior: string, sourceBehavior: string, deliveryBehavior: string, evidence: string, counterexample: string })
 export const CODE_BEHAVIOR_SCHEMA = object({ changes: { type: 'array', items: change }, facts: { type: 'array', items: object({ source: string, text: string }) }, acceptanceChanges: { type: 'array', items: object({ id: string, ruleIds: { ...strings, minItems: 1 }, source: string, reason: string }) }, newNodes: { type: 'array', items: object({ codePath: string, parentNodeId: string, basis: string }) }, resolutions: { type: 'array', items: object({ path: string, content: { type: ['string', 'null'] }, mode: { type: ['string', 'null'], enum: ['100644', '100755', '120000', null] } }) } })
 export const CODE_BEHAVIOR_REVIEW_SCHEMA = object({ inputDigest: string, analysisDigest: string, verdict: { type: 'string', enum: ['accept', 'repair'] }, checkedPaths: strings, checkedChangeIds: strings, findings: { type: 'array', description: '仅列需要修正的问题；verdict=accept时必须为空数组，不写通过说明或肯定评价。', items: object({ message: string, evidence: string, counterexample: string }) } })
-export function codeBehaviorReviewSchema(inputDigest: string, analysisDigest: string): Record<string, unknown> {
+export function codeBehaviorReviewSchema(inputDigest: string, analysisDigest: string, requiredCheckedPaths?: readonly string[]): Record<string, unknown> {
   const schema = structuredClone(CODE_BEHAVIOR_REVIEW_SCHEMA)
   const properties = schema.properties as Record<string, unknown>
   properties.inputDigest = { ...string, enum: [inputDigest] }
   properties.analysisDigest = { ...string, enum: [analysisDigest] }
+  if (requiredCheckedPaths) {
+    properties.checkedPaths = { ...strings, allOf: requiredCheckedPaths.map(path => ({ contains: { const: path } })) }
+  }
   return schema
 }
 export type CodeBehaviorApprovalBinding = { analysisSchemaDigest: string; changedPaths: readonly string[] }
@@ -39,6 +42,7 @@ export const CODE_BEHAVIOR_GUIDANCE_VERSION = 'code-behavior-guidance-v9'
 export const LEGACY_CODE_BEHAVIOR_GUIDANCE_VERSION = 'code-behavior-guidance-v7'
 export const CODE_BEHAVIOR_FAILURE_STATUS = 'P0 行为校验未通过'
 export const CODE_BEHAVIOR_DRAFT_COMMIT_MISSING = 'behavior_draft_commit_missing'
+export const CODE_BEHAVIOR_REVIEW_COVERAGE_MISSING = 'behavior_review_coverage_missing'
 const CONTEXT_TRANSPORTS = ['git-json-v1', 'git-json-v2', 'git-json-v3', 'git-json-v4', 'git-json-v5', 'git-json-v6'] as const
 export type CodeBehaviorContextTransport = typeof CONTEXT_TRANSPORTS[number]
 export function isCodeBehaviorContextTransport(value: unknown): value is CodeBehaviorContextTransport {
@@ -88,6 +92,7 @@ type Proposal = { changes: Omit<CodeBehaviorChange, 'id'>[]; facts: CodeBehavior
 export type CodeBehaviorContext = {
   task: Record<string, unknown>
   operatorReviewDiagnostic?: P0ReviewDiagnostic
+  requiredCheckedPaths?: readonly string[]
   pendingAnalysis?: { analysisDigest: string; analysis: CodeBehaviorAnalysis; newNodeProposals: Proposal['newNodes'] }
   repairDiagnostics: NonNullable<CodeBehaviorInput['repairDiagnostics']>
   errors: readonly { code: string; message: string }[]
@@ -141,6 +146,11 @@ export function readCodeBehaviorContext(request: Pick<ElaborationSessionRequest,
     || statusOnly && (value.repairDiagnostics.length > 0 || value.errors.length > 0)
     || value.operatorReviewDiagnostic !== undefined && (request.purpose !== 'code_behavior_review' || task.contextTransport !== 'git-json-v6')
     || (request.purpose === 'code_behavior_review') !== (value.pendingAnalysis !== undefined)) throw new Error('P0 context正文不匹配冻结任务身份')
+  const evidencePaths = value.operatorReviewDiagnostic?.evidencePaths
+  if (evidencePaths !== undefined
+    ? !Array.isArray(evidencePaths) || !evidencePaths.length || !Array.isArray(value.task.requiredChangedPaths)
+      || JSON.stringify(value.requiredCheckedPaths) !== JSON.stringify(requiredBehaviorReviewPaths(value.task.requiredChangedPaths as string[], value.operatorReviewDiagnostic))
+    : value.requiredCheckedPaths !== undefined) throw new Error('P0复审必审路径不匹配冻结证据')
   return value
 }
 
@@ -404,6 +414,8 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     for (const entry of selectedEvidence.paths) if (entry.pairId !== null) { if (entry.base) authorEntries.set(entry.path, entry.base); else authorEntries.delete(entry.path); if (entry.delivery) deliveryEntries.set(entry.path, entry.delivery); else deliveryEntries.delete(entry.path) }
   }
   const changedPaths = input.partition ? partitionBehaviorChangedPaths(input) : sorted([...(selectedEvidence?.residualPaths ?? []), ...ungoverned, ...actualTreeDiff([...authorEntries.values()], sourceEntries).map(file => file.path), ...actualTreeDiff([...deliveryEntries.values()], frozenTreeRead(input, input.composed.tree, frozenTreeReads, trees).entries.map(entry => ({ ...entry }))).map(file => file.path)].filter(path => within(path, input.plan.readPaths)))
+  const challengeEvidencePaths = input.operatorReviewDiagnostic?.evidencePaths
+  const requiredCheckedPaths = requiredBehaviorReviewPaths(changedPaths, input.operatorReviewDiagnostic)
   authorEntries.clear(); deliveryEntries.clear()
   const decisionScopePaths = new Set([
     ...input.plan.decisionAuthorities?.flatMap(authority => authority.paths) ?? [],
@@ -676,6 +688,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
       inputDigest, purpose, task: JSON.parse(context) as Record<string, unknown>,
       ...(pendingAnalysis ? { pendingAnalysis } : {}),
       ...(purpose === 'code_behavior_review' && input.operatorReviewDiagnostic ? { operatorReviewDiagnostic: input.operatorReviewDiagnostic } : {}),
+      ...(purpose === 'code_behavior_review' && challengeEvidencePaths ? { requiredCheckedPaths } : {}),
       repairDiagnostics, errors: repairErrors,
       ...(acceptancePreflight ? { readonlyUnchangedAcceptanceSources: [...validRuleIds].flatMap(id => unchangedReadonlyAcceptanceBasis(id)) } : {}),
     }) : undefined
@@ -685,7 +698,12 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
       if (pendingAnalysis) prompt = prompt.replace(`\n待审分析:\n${JSON.stringify(pendingAnalysis)}`, '')
     }
     if (draftMode) prompt += `\n草稿文件=${binding.path}；${material ? material.sourceKind === 'physical_draft' ? '已认证停止的旧工作树中明确未批准的物理草稿已按原字节复制到当前seed；它未提交，不是历史Git稿、Native final或批准；仅续修此文件，正常提交后重新独审。' : material.sourceKind === 'git_draft' ? '认证的原Git分析草稿已按原字节复制到当前seed；沿该原文件核实分类并续修，旧批准不继承。' : material.sourceKind === 'native_output' ? '认证的旧只读Native成功结构化输出已序列化为本轮临时材料；它不是历史Git草稿或新批准，在该文件核实分类并续修。' : '旧Native原输出材料已按认证CAS原字节复制为本轮临时输入，不是既有Git草稿；在该原文件继续修复。' : source === undefined ? '首次实际创建该文件。' : '已有原草稿已复制到当前seed，在原文件继续修改，不从零重答。'}本段只把上文直接返回业务JSON的交付方式改为草稿文件；业务文件仍只读，唯一可写例外为此草稿。结构化业务JSON写入此临时文件，Spec、源码、全部测试、其他owner文件保持不变。只允许正常git add和git commit该草稿并保持clean；无需改正文时可正常commit --allow-empty，保留hooks。${DRAFT_RECEIPT_INSTRUCTIONS} 草稿仅为非权威诊断材料，不是raw、事实、批准或新授权。\n草稿业务schema只读文件=${binding.path.replace(/\.json$/, '.schema.json')}；先读取精确schema并自检，禁止修改schema。${contextSource === undefined ? `原具体错误：${JSON.stringify(repairErrors)}；本轮修复诊断：${JSON.stringify(repairDiagnostics)}` : statusOnly ? '读取任务指针指定的只读context JSON。task为原任务，review的pendingAnalysis为本轮完整待审分析。按原JSON草稿与精确schema继续自检和修复。context、schema等临时协议文件不属于业务checkedPaths。保持这些文件只读，仓库仍可自由读取。' : `读取任务指针指定的完整只读context JSON：task为原任务，repairDiagnostics/errors仅为非权威修复诊断，review的pendingAnalysis为本轮完整待审分析，均须保留各项具体拒因；按原JSON草稿继续修复。context、schema等临时协议文件不属于业务checkedPaths，不修改这些只读文件；仓库仍可自由读取。`}`
-    if (purpose === 'code_behavior_review' && input.operatorReviewDiagnostic) prompt += '\n只读 context 的 operatorReviewDiagnostic 是操作员的待核线索。依据冻结源码、调用、完整测试与原规范独立核查相关主张，并照常审核完整候选。可据证据驳回质疑并 accept；确认缺陷时以真实来源和反例给 repair。此资料不提供业务事实、原意或任何新授权。'
+    if (purpose === 'code_behavior_review' && input.operatorReviewDiagnostic) {
+      const instruction = '\n只读 context 的 operatorReviewDiagnostic 是操作员的待核线索。依据冻结源码、调用、完整测试与原规范独立核查相关主张，并照常审核完整候选。可据证据驳回质疑并 accept；确认缺陷时以真实来源和反例给 repair。此资料不提供业务事实、原意或任何新授权。'
+      prompt = challengeEvidencePaths
+        ? `先读取下方只读 context 的 operatorReviewDiagnostic.text，并逐一独立核实这些冻结证据文件：${JSON.stringify(challengeEvidencePaths)}。将实际核实的路径写入 checkedPaths。${instruction}\n${prompt}`
+        : prompt + instruction
+    }
     if (reviewFeedback) prompt += `\n用 git show ${reviewFeedback.commit}:${reviewFeedback.path} 读取本区最近一次真实业务独审的原JSON。沿其具体发现修复原草稿。原审查意见只供返修，不授予批准或新写权。`
     const exactChangedPaths = input.contextTransport === 'git-json-v6' && input.exactChangedPathsPreflight === true && input.partition !== undefined
     if (purpose === 'code_behavior_analyze' && (input.contextTransport === 'git-json-v3' || input.contextTransport === 'git-json-v4' || acceptancePreflight)) prompt += `
@@ -715,13 +733,13 @@ const invalidAcceptanceBasis = acceptanceChanges.flatMap(({ id, ruleIds, source 
 ` : ''}console.log(JSON.stringify({ missingChangedPaths, missingOwnerPaths${acceptancePreflight ? ', invalidAcceptanceBasis' : ''}${exactChangedPaths ? ', invalidChangedPaths' : ''} }, null, 2))
 if (missingChangedPaths.length || missingOwnerPaths.length${acceptancePreflight ? ' || invalidAcceptanceBasis.length' : ''}${exactChangedPaths ? ' || invalidChangedPaths.length' : ''}) process.exitCode = 1
 SPEX_P0_COVERAGE`
-    const reviewCoverage = input.contextTransport === 'git-json-v6' && input.reviewCoveragePreflight === true
+    const reviewCoverage = input.contextTransport === 'git-json-v6' && (input.reviewCoveragePreflight === true || challengeEvidencePaths !== undefined)
     if ((input.contextTransport === 'git-json-v4' || input.contextTransport === 'git-json-v5' || input.contextTransport === 'git-json-v6') && purpose === 'code_behavior_review') prompt += `
 在续审开头对已有评审稿运行下方只读检查，提交前再次检查。checkedPaths 只记录已实际独立检查的冻结文件。输出中的路径须重新核对，改用真实已检查文件的精确仓库相对路径；只读了目录、临时文件或不存在的路径时，先检查真正相关的文件。全部必审路径、业务证据、拒因和独立审查继续按原要求完成。${reviewCoverage ? '\ncheckedChangeIds 精确使用 pendingAnalysis.analysis.changes 中的变化 id。该集合为空时填 []。用输出的缺失及越界项核对原草稿，需求、规则与验收 ID 只作为事实和条款证据。' : ''}
 node - ${contextPath} ${binding.path} ${worktree!.tree} <<'SPEX_P0_REVIEW_PATHS'
 const { readFileSync } = require('node:fs')
 const { execFileSync } = require('node:child_process')
-const { task${reviewCoverage ? ', pendingAnalysis' : ''} } = JSON.parse(readFileSync(process.argv[2], 'utf8'))
+const { task${reviewCoverage ? ', pendingAnalysis' : ''}${challengeEvidencePaths ? ', requiredCheckedPaths' : ''} } = JSON.parse(readFileSync(process.argv[2], 'utf8'))
 const { checkedPaths${reviewCoverage ? ', checkedChangeIds' : ''} } = JSON.parse(readFileSync(process.argv[3], 'utf8'))
 const readable = new Set()
 for (const tree of new Set([process.argv[4], ...task.historicalRoles.map(role => role.tree)])) {
@@ -730,7 +748,7 @@ for (const tree of new Set([process.argv[4], ...task.historicalRoles.map(role =>
 }
 const invalidCheckedPaths = checkedPaths.filter(path => !readable.has(path))
 ${reviewCoverage ? `const expectedIds = new Set(pendingAnalysis.analysis.changes.map(change => change.id))
-const missingCheckedPaths = task.requiredChangedPaths.filter(path => !checkedPaths.includes(path))
+const missingCheckedPaths = ${challengeEvidencePaths ? 'requiredCheckedPaths' : 'task.requiredChangedPaths'}.filter(path => !checkedPaths.includes(path))
 const missingChangeIds = [...expectedIds].filter(id => !checkedChangeIds.includes(id))
 const unknownChangeIds = checkedChangeIds.filter(id => !expectedIds.has(id))
 ` : ''}console.log(JSON.stringify({ invalidCheckedPaths${reviewCoverage ? ', missingCheckedPaths, missingChangeIds, unknownChangeIds' : ''} }, null, 2))
@@ -989,12 +1007,12 @@ SPEX_P0_REVIEW_PATHS`
   if (continuation) { continuation.readyAnalysis = { ...analysisRequest!, trace: traces[0], draftOid: continuation.drafts.code_behavior_analyze!.oid, resultCommit: continuation.drafts.code_behavior_analyze!.resultCommit }; persist() }
   const analysisDigest = contentHash(JSON.stringify(analysis))
   if (continuation?.challengedAnalysisDigest && continuation.challengedAnalysisDigest !== analysisDigest) throw Object.assign(new Error('操作员复审的待审分析与原批准候选不一致'), { code: 'sync_p0_challenge_binding' })
-  const reviewSchema = codeBehaviorReviewSchema(inputDigest, analysisDigest)
+  const reviewSchema = codeBehaviorReviewSchema(inputDigest, analysisDigest, challengeEvidencePaths ? requiredCheckedPaths : undefined)
   if (worktree) reviewWorktree = stageWorktree(commonDir, input.snapshot.headCommit, overlayStageTree(commonDir, worktree.tree, proposal.resolutions.map(resolution => ({ path: resolution.path, source: resolution.content, mode: resolution.mode }))))
   const reviewStage = { analysisDigest, analysis, newNodeProposals: proposal.newNodes }
   const review = await dispatch('code_behavior_review', worktree ? `${STAGE_READING_INSTRUCTIONS}\n${nativeBusinessSemantics}${authorIntentInstructions}\n只读独立复查本区全部真实changedPaths、分析的change.id及引用行为，读取当前工作树及historicalRoles的Spec、源码、调用方和完整测试断言。核分类、原意/作者差量、整合与AC授权、新治理父nodeId和叶职责；不能采用构建者结论或编造政策。checkedPaths填写实际核对的具体仓库文件；必须覆盖全部changedPaths，checkedChangeIds覆盖全部本轮change.id。accept只能findings为空；否则repair并给具体证据/反例。schema已固定inputDigest=${inputDigest}及analysisDigest=${analysisDigest}，只返回JSON，不修改文件。\n任务:\n${context}\n待审分析:\n${JSON.stringify(reviewStage)}` : `${readingInstructions}${reviewNewNodeInstructions}你是独立代码行为审查者。必须独立重读全部三方源码、调用/测试assertions与raw/显式规则，重走变化路径。核对分类、完整范围、文本相容整合、原意与双方差异/反例、新归属节点与每项AC授权。代码自身错误不能授权弱化AC/REQ/VERIFY，不凭builder总结判通过。覆盖changedPaths和每项change.id；checkedPaths只填实际冻结完整读取且在plan.readPaths内的具体文件路径，baseline/manifest中的路径清单、目录名或只有链接目标路径不代表读取全文，不能填入；已完整读取nonTextFiles时可检查该binary或链接对象路径，链接仍不代表其目标文件全文。缺上下文/不相容解决方案/遗漏必要边界返回repair具体证据。真实业务conflict/GAP是被正确识别的输出，可accept分析但不能授予其依赖写权。verdict=accept时findings必须为空数组；findings只写需要修正的问题，不写通过说明或肯定评价。inputDigest必须为${inputDigest}，analysisDigest必须为${analysisDigest}，两者已固定在schema中，不从其他上下文摘要猜测。\n冻结三方输入:\n${context}\n待审分析:\n${JSON.stringify(reviewStage)}`, reviewSchema, reviewStage) as { inputDigest: string; analysisDigest: string; verdict: string; checkedPaths: string[]; checkedChangeIds: string[]; findings: unknown[] }
   const reviewDetails = {
-    missingPaths: changedPaths.filter(path => !review.checkedPaths.includes(path)),
+    missingPaths: requiredCheckedPaths.filter(path => !review.checkedPaths.includes(path)),
     missingChangeIds: changes.filter(item => !review.checkedChangeIds.includes(item.id)).map(item => item.id),
     unknownChangeIds: review.checkedChangeIds.filter(id => !changes.some(item => item.id === id)),
     identityMismatch: [...review.inputDigest !== inputDigest ? ['inputDigest'] : [], ...review.analysisDigest !== analysisDigest ? ['analysisDigest'] : [], ...traces[0].sessionId === traces[1].sessionId ? ['sessionId'] : [], ...traces[0].threadId === traces[1].threadId ? ['threadId'] : []],
@@ -1005,6 +1023,7 @@ SPEX_P0_REVIEW_PATHS`
   const referencedPaths = [...proposal.changes.flatMap(item => item.paths), ...proposal.facts.filter(fact => fact.source.startsWith('code:')).map(fact => anchorPath(fact.source.slice(5))), ...proposal.newNodes.map(item => item.codePath), ...proposal.resolutions.map(item => item.path)]
   requireOptionalRead([...review.checkedPaths, ...referencedPaths], turns.get('code_behavior_review'), reviewDetails)
   if (new Set(review.checkedPaths).size !== review.checkedPaths.length || new Set(review.checkedChangeIds).size !== review.checkedChangeIds.length) reject('独审检查范围不能重复', reviewDetails, 'behavior_analysis_invalid', true)
+  if (challengeEvidencePaths && reviewDetails.missingPaths.length) reject('复审遗漏冻结必审路径', reviewDetails, CODE_BEHAVIOR_REVIEW_COVERAGE_MISSING, true)
   if (reviewDetails.identityMismatch.length || reviewDetails.missingPaths.length || reviewDetails.missingChangeIds.length || reviewDetails.unknownChangeIds.length) reject('行为独审未接受当前完整分析', reviewDetails, 'behavior_review_failed', true)
   if ((review.verdict === 'repair') !== (review.findings.length > 0)) reject('独审裁决与具体发现不一致', reviewDetails, 'behavior_review_failed', true)
   if (review.verdict === 'repair') reject('行为独审未接受当前完整分析', reviewDetails, 'behavior_review_failed')

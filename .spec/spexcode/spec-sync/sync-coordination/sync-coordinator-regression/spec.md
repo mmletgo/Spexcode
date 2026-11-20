@@ -16,6 +16,10 @@ related:
 
 ## expanded spec
 
+v2 复审回归经 CLI/HTTP 保存精确冻结证据路径，拒绝缺失和无效路径。已提交的漏路径审查只续原独审，冷重启保持同一分析及 Git 稿。齐全的 accept 与 repair 保留真实裁决，并逐项核准兄弟分区的原引用。历史 v1 复审沿原请求重放。
+
+同一操作冷重入时，完整 v2 局部批准可继续封 whole，兄弟来源保持原引用。仅移走原 v2 独审的冻结 schema Git 对象，后续尝试在新派发前拒绝复用局部批准或 whole，只读查询也拒绝暴露该批准。原成功阶段和证据引用保持原样。
+
 旧只读 Native 格式拒绝按原请求字节测试两条路径。在已固定的相同 v5 业务任务中，程序冷验并沿用原拒绝正文及 provenance。新 v6 引入方向与作者意图指导，使旧分析任务和独审 schema 失配，原拒稿不进入新 seed，由新分析和独审重新产生证据。单体与分区均覆源对象、旧记录、投影及最终调用顺序。
 
 用真实 Git、SQLite 和受控正式 Native 复查 [[sync-p0-review-challenge]]。暂停的三分区原批准不得直接放行受质疑 owner；该区同候选新独审。若新版独审返回真实业务 repair，只有该 owner 续原稿及新发现；其余原批准不派发。
@@ -36,7 +40,7 @@ P0 传输冻结回归核新 attempt 保存 `reviewCoveragePreflight`，所有既
 
 混合候选的冷验计数检查同一真实冻结 Git 树只完整读取一次。原候选、已拒稿及全部独审结论保持完整认证。
 
-旧候选回归用真实历史程序自然产生 git-json-v4 / v7：四组 P0、三个真实 P1 与一个仅分析 owner、合法 repair / accept / 格式失败三组 P2。原轮尚无正式 attempt.candidate，经 SQLite 冷开及 canonical Native/Git 冷验，只新增原格式独审，再仅重派命中 P1；原 v7、全部旧 CAS 和 source/index 不变。另经两次真实正式retry与显式换模型继承原P0及已审P1，保部分P1后的原范围；SQLite冷续同样只补格式审查再返命中owner。逐 owner及祖先控制机会、缺 P0 原件、Native 输出身份/原生产者模型漂移、无retryOf的跨 operation、祖先结算拒绝、缺null扩域证据、缺 P2 outcome、未结算资源及 scope 退出后的普通指导版本门均有反例。旧producer另自然保留needs_input的P1与缺席GAP复核阶段，冷续须保持格式审查、owner返修、新并集GAP复核的先后。该隔离场景在 V3 前硬停，不把受控 Native 输出冒充真实模型或最终交付证据。
+旧候选回归用真实历史程序自然产生 git-json-v4 / v7：四组 P0、三个真实 P1 与一个仅分析 owner、合法 repair / accept / 格式失败三组 P2。原轮尚无正式 attempt.candidate，经 SQLite 冷开及 canonical Native/Git 冷验，只新增原格式独审，再仅重派命中 P1；原 v7、全部旧 CAS 和 source/index 不变。另经两次真实正式retry与显式换模型继承原P0及已审P1，保部分P1后的原范围；SQLite冷续同样只补格式审查再返命中owner。逐 owner及祖先控制机会、缺 P0 原件、Native 输出身份/原生产者模型漂移、无retryOf的跨 operation、祖先结算拒绝、缺null扩域证据、缺 P2 outcome、未结算资源及 scope 退出后的普通指导版本门均有反例。旧producer另自然保留needs_input的P1与缺席GAP复核阶段，冷续须保持格式审查、owner返修、新并集GAP复核的先后。该隔离场景在 V3 前硬停，不把受控 Native 输出冒充真实模型或最终交付证据。 只替换局部读集并重算相关引用时，旧中间实现最终在独审摘要门拒绝，恢复后的门在检查原 Native 证据前，先对照原 whole 的冻结读集并报告该局部失配。
 
 旧 Git 程序和受控 Native 响应共同产生 v8 候选回归原件。code→spec 混合 P2 候选经 SQLite 冷开，同 operation 重新执行当前 P0/P1/P2，保留仅分析分区可见的共享作者意图及原失败、CAS、Native 和 schema 字节。显式换模型交接断言 `review_handoff_binding` 和零派发。spec→code 通过公开 `SyncApplication.submit` 同模型 `retryOf`，分别核对原候选只遇 V3 预检失败时完成新分析、生成、独审与新 runId，以及旧后继已结算 V3 时在派发前返回 `candidate_retry_binding`。两路比较原记录与原件。
 

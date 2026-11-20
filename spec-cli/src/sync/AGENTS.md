@@ -88,4 +88,5 @@
 - writer35 钉新初始化分区策略及跨正式 retry 的局部 P0 批准来源。升级停稳旧 writer 并结算资源及租约，保 v34 一致备份。旧分区按原冻结策略继续。回滚恢复对应 v34 库及证据和 Git refs，不删 marker。
 
 - 同一 operation 暂停恢复的 P0 正常取消只在新分析 reserve 前认证真实已提交单稿。冷重放重新核原 Native/removed、公开取消和 Git 冻结稿，旧物理、独审及跨操作路径保持。writer66 沿 [[sync-migrations]] 停稳结算并备份一致 v65 及配套 Git/CAS。
+- [[sync-p0-review-challenge]] v2 仅从显式冻结 evidencePaths 扩充独审必审集合。schema、自检、正式结果及冷复用共享该集合，遗漏只续原审。writer67 升级和回滚沿 [[sync-migrations]]，v1 原授权与请求身份保持。
 - [[sync-p0-review-challenge]] 只在原生分区 P0 已暂停、源和旧资源正式结算且未派发 P1 时接入。一个 owner 的诊断只给同候选新独审。旧 Git 作者、真实原审及其他 owner 的有效批准保留，目标旧批准必须在 whole/local/retry 快路失效。writer65 升级先停稳、结算旧 writer，保存一致 v64 SQLite online backup 及配套 enabled、Git/CAS。回滚须停稳结算新 writer 后恢复整套备份。

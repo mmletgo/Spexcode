@@ -20,7 +20,7 @@ related:
 
 ## expanded spec
 
-[[sync-p0-review-challenge]] 经共享服务核对目标来源和冻结配置，以原 operation 互斥处理身份、输入新鲜度与冷原件 preflight，再交存储事务 CAS。正式 resume 走现有控制入口。
+[[sync-p0-review-challenge]] 经共享服务核对目标来源和冻结配置，以原 operation 互斥处理身份、输入新鲜度与冷原件 preflight，再交存储事务 CAS。正式 resume 走现有控制入口。 新请求须提供可从原冻结 Git 树逐项查证的 evidencePaths。已登记旧请求先按原 CAS 摘要完成幂等查询。
 
 同步 run 接受显式 `retryOf`、新 `model` 和 `inheritRetryBudget: true` 交接尚未验证交付的代码→Spec 候选。接入使用正式 retry 资格及原预算、输入、政策与授权范围，独立保存新模型的工具绑定。幂等重放核对该授权，verify 不接受交接字段。派发前的原候选及独审认证由 [[sync-coordinator]] 执行。
 

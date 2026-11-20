@@ -1301,9 +1301,11 @@ for (const partitioned of [false, true]) for (const keepRefactor of [false, true
     assert.ok(local)
     const request = { operationId: operation.id, inputId: operation.input.id, expectedRevision: operation.revision, requestId: 'challenge-before-postgate',
       analysisRef: local.analysisRef, partitionId: local.partitionId, diagnostic: '独审请检查冻结权限与序列化兼容性' }
-    const challenge = await continuationCoordinator.prepareP0ReviewChallenge(f.store, operation, f.plan, request)
-    assert.deepEqual(writeEvidence(commonDir, p0ReviewDiagnosticEvidence(request)), challenge.diagnosticRef)
-    f.store.authorizeP0ReviewChallenge(operation.id, challenge)
+    const reserved = await continuationCoordinator.prepareP0ReviewChallenge(f.store, operation, f.plan, { ...request, evidencePaths: ['src/export.js'] })
+    const challenge = { ...reserved, version: 'p0-review-challenge-v1' as const, diagnosticRef: writeEvidence(commonDir, p0ReviewDiagnosticEvidence(request)) }
+    const original = f.store.authorizeP0ReviewChallenge(operation.id, challenge)
+    const api = await SyncApplication.create(f.root, { protocol: f.protocol, runtimeDirectory: join(f.parent, 'v1-challenge-api'), tools: f.options.tools })
+    assert.deepEqual(await api.challengeP0(request), original)
     f.store.requestControl(operation.id, 'run')
     result = await runSyncOperation(f.store, operation.id, f.options)
     const reviews = calls.filter(call => call.purpose === 'code_behavior_review').map(call => readCodeBehaviorContext(call, commonDir))
@@ -11340,6 +11342,21 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
     assert.equal(calls.length, callsBeforeAuthentication, '原失败认证不新增模型调用')
     const missingP0 = { ...first, checkpointRefs: first.checkpointRefs.filter(ref => read<{ stage?: string }>(ref).stage !== originalStages.find(stage => stage.stage.startsWith('partition:') && stage.stage.endsWith(':analysis'))!.stage) }
     await assert.rejects(continuationCoordinator.authenticateFrozenCandidateAnalysis(store, current, missingP0), /frozen_candidate_analysis_binding/, '缺任何一个原P0 owner批准均拒绝')
+    if (boundary === 'legacy-v4' && gapMode === 'none') {
+      const whole = read<import('./writeback-types.js').CodeBehaviorAnalysis>(p0.resultRef), member = whole.partitionEvidence![0]
+      const local = { ...member.analysis, readSetDigest: 'a'.repeat(64) }
+      const localRef = writeEvidence(f.input.source.commonDir, local)
+      const changedWhole = { ...whole, partitionEvidence: [{ ...member, analysis: local, analysisRef: localRef }, ...whole.partitionEvidence!.slice(1)] }
+      const wholeRef = writeEvidence(f.input.source.commonDir, changedWhole)
+      const detached = { ...first, checkpointRefs: first.checkpointRefs.map(ref => {
+        const stage = read<{ stage?: string; resultRef?: BlobRef }>(ref)
+        const replacement = stage.stage === 'analysis' ? { payload: changedWhole, resultRef: wholeRef }
+          : stage.stage === `partition:${member.partitionId}:analysis` ? { payload: local, resultRef: localRef } : null
+        if (!replacement) return ref
+        return { ...writeEvidence(f.input.source.commonDir, { ...stage, resultRef: replacement.resultRef }), artifacts: syncCheckpointArtifacts(replacement.payload, replacement.resultRef) }
+      }) }
+      await assert.rejects(continuationCoordinator.authenticateFrozenCandidateAnalysis(store, current, detached), /原P0 owner缺少原v4\/v7及完整冻结输入/, 'legacy local读集必须与whole独立比对')
+    }
     const producer = legacyRetry ? store.listAttempts(ancestors[0].id)[0] : first
     const originalAnalyze = producer.dispatchPlans.find(dispatch => dispatch.purpose === 'code_behavior_analyze')!.session!.sessionId
     await assert.rejects(continuationCoordinator.authenticateFrozenCandidateAnalysis(store, current, first, { readNativeRecord: id => {
@@ -11660,18 +11677,19 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
     'src/import.js': 'export class ImportService {}\n', 'src/archive.js': 'export class ArchiveService {}\n',
     'tests/import.test.mjs': 'import assert from "node:assert/strict"\n', 'tests/archive.test.mjs': 'import assert from "node:assert/strict"\n',
   }, false, syncSettings, false, mode === 'accept')
-  let store = f.store, active = f.operation, pauseWholeAt = 1, pauseFailureAt = 0
+  let store = f.store, active = f.operation, pauseWholeAt = 1, pauseFailureAt = 0, pauseBeforeWholeAt = 0
   const calls: string[] = []
   const diagnostic = '待核：原权限边界遗漏已存在的代码分支。'
+  const evidencePaths = ['tests/archive.test.mjs', 'tests/import.test.mjs']
   const findings = [{ message: '权限边界描述遗漏原输入分支', evidence: '冻结 src/export.js 实际分支', counterexample: '已验范围内的输入必须保留原活动限制' }]
-  let challengedId: string | undefined, originalDraft: string | undefined
+  let challengedId: string | undefined, originalDraft: string | undefined, incompleteReview: string | undefined
   let repairDraft: { commit: string; path: string } | undefined
   const originals = new Map<string, NonNullable<ReturnType<typeof readCodeBehaviorContext>['pendingAnalysis']>>()
   const commonDir = f.input.source.commonDir
   f.options.runner = async request => {
     if (!request.purpose.startsWith('code_behavior_')) throw Object.assign(new Error('夹具在P0完成后停止'), { code: 'unsupported' })
     const operation = store.readOperation(active.id), attempt = store.readAttempt(operation.currentAttemptId!)
-    const { task, pendingAnalysis, operatorReviewDiagnostic } = readCodeBehaviorContext(request, commonDir)
+    const { task, pendingAnalysis, operatorReviewDiagnostic, requiredCheckedPaths } = readCodeBehaviorContext(request, commonDir)
     const { requiredChangedPaths, partition } = task as { requiredChangedPaths: string[]; partition: { id: string } }
     calls.push(`${operation.id}:${attempt.number}:${partition.id}:${request.purpose}`)
     const initial = active.id === f.operation.id && attempt.number === 1
@@ -11681,6 +11699,11 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
       assert.equal(partition.id, challengedId)
       if (pendingAnalysis) {
         assert.equal(operatorReviewDiagnostic?.text, diagnostic)
+        assert.deepEqual(operatorReviewDiagnostic?.evidencePaths, evidencePaths)
+        assert(evidencePaths.every(path => !requiredChangedPaths.includes(path)), '证据文件不扩充owner变化')
+        assert.deepEqual(requiredCheckedPaths, [...requiredChangedPaths, ...evidencePaths].sort())
+        assert.ok(request.prompt.startsWith('先读取下方只读 context 的 operatorReviewDiagnostic.text'))
+        if (attempt.number === 3 && mode === 'accept') assert.equal(f.git('show', `${request.worktree!.baseCommit}:${path}`), incompleteReview)
         if (active.id === f.operation.id || attempt.number === 1) assert.deepEqual(pendingAnalysis, originals.get(partition.id))
       } else {
         assert.equal(operatorReviewDiagnostic, undefined)
@@ -11690,7 +11713,7 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
       }
     } else assert.equal(operatorReviewDiagnostic, undefined)
     const domain = requiredChangedPaths.some(path => path.endsWith('/import.js')) ? 'IMPORT' : requiredChangedPaths.some(path => path.endsWith('/archive.js')) ? 'ARCHIVE' : 'EXPORT'
-    const output = pendingAnalysis ? { inputDigest: request.inputDigest, analysisDigest: pendingAnalysis.analysisDigest, verdict: 'accept', checkedPaths: requiredChangedPaths, checkedChangeIds: pendingAnalysis.analysis.changes.map(change => change.id), findings: [] as typeof findings }
+    const output = pendingAnalysis ? { inputDigest: request.inputDigest, analysisDigest: pendingAnalysis.analysisDigest, verdict: 'accept', checkedPaths: mode === 'accept' && attempt.number === 2 ? requiredChangedPaths : requiredCheckedPaths ?? requiredChangedPaths, checkedChangeIds: pendingAnalysis.analysis.changes.map(change => change.id), findings: [] as typeof findings }
       : { changes: requiredChangedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: [`RULE-${domain}-05`], ruleIds: [`RULE-${domain}-05`], originalIntent: '保留原业务', previousBehavior: '原权限', sourceBehavior: '原权限', deliveryBehavior: '原权限', evidence: path, counterexample: '必须保留原权限' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
     if (initial && !pendingAnalysis && requiredChangedPaths.includes('src/export.js')) originalDraft = JSON.stringify(output)
     if (mode === 'repair' && !initial && active.id === f.operation.id) {
@@ -11703,6 +11726,7 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
       output.findings = findings
     }
     if (mode === 'repair' && active.id !== f.operation.id && !pendingAnalysis) output.changes![0].sourceBehavior = '原活动限制和输入分支均保持'
+    if (mode === 'accept' && attempt.number === 2) incompleteReview = JSON.stringify(output)
     const worktree = committedDraftFixture(f, request, output, join(f.parent, `p0-challenge-${calls.length}`))
     if (output.verdict === 'repair') repairDraft = { commit: worktree.headCommit, path }
     return settledBehaviorNativeFixture(store, operation, request, { output: { summary: '分区真实Git草稿' }, worktree })
@@ -11710,7 +11734,12 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
   const pauseAtBoundary = () => {
     const checkpoint = store.checkpoint.bind(store), recordFailure = store.recordFailure.bind(store)
     store.checkpoint = (fence, ref) => {
-      const attempt = checkpoint(fence, ref), wrapper = JSON.parse(readEvidence(commonDir, ref).toString()) as { stage?: string }
+      const wrapper = JSON.parse(readEvidence(commonDir, ref).toString()) as { stage?: string }
+      if (wrapper.stage === 'analysis' && pauseBeforeWholeAt === store.readAttempt(fence.attemptId).number) {
+        store.requestControl(active.id, 'pause')
+        throw Object.assign(new Error('已批准local但未封whole时停止'), { code: 'cancelled' })
+      }
+      const attempt = checkpoint(fence, ref)
       if (wrapper.stage === 'analysis' && attempt.number === pauseWholeAt) store.requestControl(active.id, 'pause')
       return attempt
     }
@@ -11731,7 +11760,7 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
   assert.equal(store.hasVerificationOrJournal(paused.id), false)
   const target = analysis.analysis.partitionEvidence!.find(item => item.changedPaths.includes('src/export.js'))!
   challengedId = target.partitionId
-  const request = { operationId: paused.id, expectedRevision: paused.revision, inputId: paused.input.id, partitionId: target.partitionId, requestId: 'operator-review', analysisRef: target.analysisRef, diagnostic }
+  const request = { operationId: paused.id, expectedRevision: paused.revision, inputId: paused.input.id, partitionId: target.partitionId, requestId: 'operator-review', analysisRef: target.analysisRef, diagnostic, evidencePaths }
   let recorded: Awaited<ReturnType<SyncApplication['challengeP0']>>
   if (mode === 'accept') {
     const listener = createServer().listen(0, '127.0.0.1')
@@ -11761,6 +11790,12 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
       for (const [patch, status, code] of [
         [{ operationId: 'foreign-operation' }, 400, 'sync_p0_challenge_invalid'],
         [{ forgedTrace: target.analysis.traces[1] }, 400, 'sync_p0_challenge_invalid'],
+        [{ evidencePaths: undefined }, 400, 'sync_p0_challenge_invalid'],
+        [{ evidencePaths: [] }, 400, 'sync_p0_challenge_invalid'],
+        [{ evidencePaths: ['../outside.ts'] }, 400, 'sync_p0_challenge_invalid'],
+        [{ evidencePaths: ['.spex-sync-drafts/protocol.json'] }, 400, 'sync_p0_challenge_invalid'],
+        [{ evidencePaths: ['tests/.env'] }, 400, 'sync_p0_challenge_invalid'],
+        [{ evidencePaths: ['missing.ts'] }, 409, 'sync_p0_challenge_binding'],
         [{ inputId: 'foreign-input' }, 409, 'sync_p0_challenge_stale'],
         [{ expectedRevision: request.expectedRevision - 1 }, 409, 'sync_p0_challenge_binding'],
         [{ partitionId: 'foreign-owner' }, 409, 'sync_p0_challenge_binding'],
@@ -11781,11 +11816,12 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
       const diagnosticFile = join(f.parent, 'diagnostic.txt')
       writeFileSync(diagnosticFile, diagnostic, 'utf8')
       recorded = JSON.parse(cli(['challenge', paused.id, '--request-id', request.requestId, '--expected-revision', String(request.expectedRevision),
-        '--input-id', request.inputId, '--partition', request.partitionId, '--analysis', request.analysisRef.sha256, '--diagnostic-file', diagnosticFile])) as typeof recorded
+        '--input-id', request.inputId, '--partition', request.partitionId, '--analysis', request.analysisRef.sha256, '--diagnostic-file', diagnosticFile,
+        '--evidence-paths', JSON.stringify([evidencePaths[1], ...evidencePaths])])) as typeof recorded
       const replay = await post(`${operation}/challenge`, request)
       assert.equal(replay.status, 200)
       assert.deepEqual(await replay.json(), recorded)
-      const conflict = await post(`${operation}/challenge`, { ...request, diagnostic: 'different diagnostic' })
+      const conflict = await post(`${operation}/challenge`, { ...request, evidencePaths: evidencePaths.slice(1) })
       assert.equal(conflict.status, 409)
       assert.equal((await conflict.json() as { code: string }).code, 'SYNC_IDEMPOTENCY_CONFLICT')
       assert.equal(readCurrentSyncAnalysis(store, recorded.operation), null)
@@ -11803,6 +11839,7 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
     assert.equal(readCurrentSyncAnalysis(store, recorded.operation), null)
     store.requestControl(paused.id, 'run')
   }
+  assert.equal(recorded.challenge.version, 'p0-review-challenge-v2')
   assert.equal(recorded.operation.phase, 'paused')
   assert.equal(recorded.operation.callsUsed, paused.callsUsed)
   assert.deepEqual(store.readAttempt(origin.id), origin)
@@ -11811,12 +11848,57 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
   const useColdStore = () => {
     store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) }); f.useStore(store); pauseAtBoundary()
   }
+
+  const stageWrappers = (attempt: SyncAttempt) => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(commonDir, ref).toString()))
+  const hideReviewSchema = (approval: SyncAttempt) => {
+    const wrapper = stageWrappers(approval).find(item => item.stage === `partition:${target.partitionId}:analysis:continuation`)
+    const draft = JSON.parse(readEvidence(commonDir, wrapper.resultRef).toString()).drafts.code_behavior_review
+    const oid = f.git('rev-parse', `${draft.seed.tree}:${draft.path.replace(/\.json$/, '.schema.json')}`)
+    const path = join(commonDir, 'objects', oid.slice(0, 2), oid.slice(2)), bytes = readFileSync(path)
+    rmSync(path)
+    return () => writeFileSync(path, bytes)
+  }
+  let localApproval: SyncAttempt | undefined
   useColdStore()
   if (mode === 'accept') {
     const physical = store.readPhysicalControl(paused.input.source)
     assert.equal(physical.control, 'pause')
     store.requestPhysicalControl(paused.input.source, 'run', physical.revision)
-    pauseWholeAt = 2
+    pauseWholeAt = 5
+    pauseFailureAt = 2
+    const rejected = await runSyncOperation(store, active.id, f.options)
+    assert.equal(rejected.operation.phase, 'paused')
+    assert.equal(store.readAttempt(rejected.operation.currentAttemptId!).failure?.code, 'behavior_review_coverage_missing')
+    assert.equal(rejected.operation.callsUsed, paused.callsUsed + 1)
+    assert.equal(readCurrentSyncAnalysis(store, rejected.operation), null)
+    protocol.close()
+    protocol = openProtocol(join(f.parent, 'sync.sqlite'))
+    useColdStore()
+    pauseFailureAt = 0
+    pauseBeforeWholeAt = 3
+    store.requestControl(active.id, 'run')
+    const partial = await runSyncOperation(store, active.id, f.options)
+    localApproval = store.readAttempt(partial.operation.currentAttemptId!)
+    assert.equal(partial.operation.phase, 'paused')
+    assert.ok(stageWrappers(localApproval).some(wrapper => wrapper.stage === `partition:${target.partitionId}:analysis`))
+    assert.ok(!stageWrappers(localApproval).some(wrapper => wrapper.stage === 'analysis'))
+    pauseBeforeWholeAt = 0
+    protocol.close()
+    protocol = openProtocol(join(f.parent, 'sync.sqlite'))
+    useColdStore()
+    const restoreSchema = hideReviewSchema(localApproval)
+    try {
+      store.requestControl(active.id, 'run')
+      const blocked = await runSyncOperation(store, active.id, f.options)
+      const attempt = store.readAttempt(blocked.operation.currentAttemptId!)
+      assert.equal(attempt.number, 4)
+      assert.match(blocked.failure?.message ?? '', /cat-file/)
+      assert.ok(!stageWrappers(attempt).some(wrapper => wrapper.stage === 'analysis' || wrapper.stage === `partition:${target.partitionId}:analysis`))
+      assert.equal(attempt.dispatchPlans.length, 0)
+      assert.deepEqual(store.readAttempt(localApproval.id), localApproval)
+    } finally { restoreSchema() }
+    store.requestControl(active.id, 'pause')
+    store.requestControl(active.id, 'run')
   } else {
     pauseWholeAt = 0
     for (const attempt of [2, 3, 4]) {
@@ -11864,8 +11946,8 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
   const afterOrigin = calls.slice(6).map(call => call.split(':').slice(1).join(':'))
   if (mode === 'accept') {
     assert.deepEqual(currentLocal.analysis.traces[0], target.analysis.traces[0])
-    assert.deepEqual(afterOrigin, [`2:${target.partitionId}:code_behavior_review`])
-    assert.equal(resumed.callsUsed, paused.callsUsed + 1)
+    assert.deepEqual(afterOrigin, [`2:${target.partitionId}:code_behavior_review`, `3:${target.partitionId}:code_behavior_review`])
+    assert.equal(resumed.callsUsed, paused.callsUsed + 2)
   } else {
     assert.notEqual(currentLocal.analysis.traces[0].sessionId, target.analysis.traces[0].sessionId)
     assert.deepEqual(afterOrigin, [`2:${target.partitionId}:code_behavior_review`, `3:${target.partitionId}:code_behavior_review`, `4:${target.partitionId}:code_behavior_review`, `5:${target.partitionId}:code_behavior_review`, `1:${target.partitionId}:code_behavior_review`, `2:${target.partitionId}:code_behavior_analyze`, `2:${target.partitionId}:code_behavior_review`])
@@ -11878,6 +11960,30 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
   assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
   t.diagnostic(JSON.stringify({ mode, original: target.analysisRef.sha256, resumed: currentLocal.analysisRef.sha256, callsBefore: paused.callsUsed, callsAfter: store.readBudgetUsage(active.id).callsUsed }))
+  if (mode === 'accept') {
+    protocol.close()
+    protocol = openProtocol(join(f.parent, 'sync.sqlite'))
+    useColdStore()
+    assert.deepEqual(readCurrentSyncAnalysis(store, resumed), current, '完整v2批准冷读仍可用')
+    const approvedAttempt = store.readAttempt(resumed.currentAttemptId!), callsBeforeLoss = calls.length
+    const restoreSchema = hideReviewSchema(localApproval!)
+    try {
+      let queried = false
+      try { queried = readCurrentSyncAnalysis(store, resumed) !== null } catch (error) {
+        assert.match((error as Error).message, /cat-file/)
+      }
+      store.requestControl(active.id, 'run')
+      const blocked = await runSyncOperation(store, active.id, f.options)
+      const blockedAttempt = store.readAttempt(blocked.operation.currentAttemptId!)
+      const reusedWhole = stageWrappers(blockedAttempt).some(wrapper => wrapper.stage === 'analysis')
+      assert.deepEqual({ queried, reusedWhole }, { queried: false, reusedWhole: false })
+      assert.match(blocked.failure?.message ?? '', /cat-file/)
+      assert.equal(calls.length, callsBeforeLoss)
+      assert.equal(blockedAttempt.dispatchPlans.length, 0)
+      assert.deepEqual(store.readAttempt(approvedAttempt.id), approvedAttempt)
+    } finally { restoreSchema() }
+    store.requestControl(active.id, 'pause')
+  }
   const app = await SyncApplication.create(f.root, { protocol, runtimeDirectory: join(f.parent, 'negative-application'), tools: f.options.tools })
   await app.enable()
   const queued = store.requestControl(active.id, 'run')
