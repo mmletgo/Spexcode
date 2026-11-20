@@ -3026,6 +3026,10 @@ body.is-session-dragging .si-pill.archive:hover {
    their m-* classes. */
 .tl-chat { position: relative; display: flex; flex-direction: column; flex: 1; min-height: 0; container-type: inline-size; }
 .si-term-layer .tl-chat { height: 100%; background: var(--paper); }
+.external-transcript-controls {
+  display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3);
+  font-size: var(--type-caption); color: var(--muted); padding-block: var(--space-4);
+}
 .m-timeline {
   flex: 1; min-height: 0; overflow: auto; -webkit-overflow-scrolling: touch;
   /* the margin grows with the pane (container units, since the pane is the page here), so a wide window

@@ -3,6 +3,7 @@ import type { Context } from 'hono'
 import { readAliasedRawRecord } from '@spexcode/spec-core'
 import { defaultHarness, harnessById, resolveLauncher, type Harness } from './harness.js'
 import { TranscriptReadError, openFrameStream, type TranscriptReader } from '@spexcode/transcript'
+import { readExternalClaims } from './session-adoption.js'
 const { streamSSE } = await daemonRuntime()
 
 // The session-addressed face of [[transcript-reader]]: one resolver from a governed session to its adapter and
@@ -10,9 +11,15 @@ const { streamSSE } = await daemonRuntime()
 // agent is working in right now, whose end is "now" and moves. Native bytes never cross here; the adapter's
 // reader hands back normalized turns and this module only addresses them.
 
-type Target = { ok: true; harness: Harness; transcript: TranscriptReader; threadId: string } | { ok: false; status: 404 | 409 | 500; error: string }
+type Target = { ok: true; harness: Harness; transcript: TranscriptReader; threadId: string; external?: true } | { ok: false; status: 404 | 409 | 500; error: string }
 
 export function resolveTranscriptTarget(id: string): Target {
+  const claim = readExternalClaims(id)[0]
+  if (claim) {
+    if (claim.revokedAtMs !== null) return { ok: false, status: 404, error: `session ${id} does not exist` }
+    const harness = harnessById(claim.harness)
+    return { ok: true, harness, transcript: harness.transcript, threadId: claim.sessionId, external: true }
+  }
   let raw: ReturnType<typeof readAliasedRawRecord>
   try { raw = readAliasedRawRecord(id) } catch (error) { return { ok: false, status: 500, error: `session ${id} record is unreadable: ${error instanceof Error ? error.message : String(error)}` } }
   if (!raw || !raw.governed) return { ok: false, status: 404, error: `session ${id} does not exist` }
@@ -83,6 +90,7 @@ export async function readSessionTranscriptTool(c: Context) {
   if (from === null || !toolId) return c.json({ error: 'transcript tool needs a tool id and from as integer epoch milliseconds' }, 400)
   const target = resolveTranscriptTarget(id)
   if (!target.ok) return c.json({ error: target.error }, target.status)
+  if (target.external) return c.json({ error: 'external chats use the bounded transcript read' }, 409)
   try {
     const read = await target.transcript.read(target.threadId, { from, to: Math.max(from + 1, Date.now()) })
     for (const turn of read.turns) for (const tool of turn.tools ?? []) {
@@ -111,6 +119,7 @@ export async function sessionTranscriptStream(c: Context) {
   if (from === null) return c.json({ error: 'transcript stream needs from as integer epoch milliseconds' }, 400)
   const target = resolveTranscriptTarget(id)
   if (!target.ok) return c.json({ error: target.error }, target.status)
+  if (target.external) return c.json({ error: 'external chats use the bounded transcript read' }, 409)
   const frames = openFrameStream(target.transcript, target.threadId, from)
   return streamSSE(c, async (stream) => {
     let aborted = false

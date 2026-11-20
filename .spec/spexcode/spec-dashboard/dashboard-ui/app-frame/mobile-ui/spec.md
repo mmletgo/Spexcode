@@ -45,6 +45,9 @@ with its legacy explicit `replyVia:"note"` input retained but redundant for a he
 `MobileSessionDetail` is only the phone wrapper around it (identity card and
 back control). Viewport width changes chrome and layout, never the conversation model.
 
+The phone opens [[adopted-conversation]] for an externally adopted row. Its file links open the existing
+preview route, with the resource picker available above the read-only transcript.
+
 **The review and Settings pages are the SAME routed pages, reflowed — never a phone clone.** The phone honors the
 [[side-nav]] route family: an `#/issues` address (list or detail) opened at phone width renders the SAME
 [[issues-view]] components and their current [[paged-review]] request inside the phone shell, restacked by [[review-chrome]]'s

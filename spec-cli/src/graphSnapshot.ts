@@ -24,8 +24,9 @@ export async function boardSnapshot(): Promise<BoardSnapshot> {
   const [specs, sessions] = await Promise.all([loadSpecs(), listSessions()])
   // Session worktrees are the live-root census for immutable history caches. Reconcile before the snapshot
   // returns so closing a session releases its full index immediately rather than waiting for an LRU slot.
-  pruneHistoryCaches([root, ...sessions.map((session) => session.path)])
-  const layout = await resolveLayout({ activeSessionIds: sessions.map((session) => session.id) })
+  const worktreeSessions = sessions.filter((session) => session.path)
+  pruneHistoryCaches([root, ...worktreeSessions.map((session) => session.path)])
+  const layout = await resolveLayout({ activeSessionIds: worktreeSessions.map((session) => session.id) })
   const nodeIds = [...new Set([
     ...specs.map((node) => node.id),
     ...layout.worktrees.flatMap((worktree) => (worktree.ops || []).map((op: any) => op.nodeId)),

@@ -103,13 +103,18 @@ test('file previews use one selectable resource tab, keep Markdown restricted, e
 })
 
 test('pane-backed and headless consoles share one warm TimelineChat Conversation surface', () => {
-  assert.match(source, /const isHeadlessSession = \(session\) => session\?\.capabilities\?\.headless === true/)
+  assert.match(source, /const isHeadlessSession = \(session\) => !canControlSession\(session\) \|\| session\?\.capabilities\?\.headless === true/)
   assert.match(source, /const next = new Set\(\[\.\.\.prev\]\.filter\(\(id\) => \{[\s\S]*?return session && !isHeadlessSession\(session\) && hasLivePane\(session\)[\s\S]*?\}\)\)/)
   assert.match(source, /\(headless \|\| openedConversations\.has\(id\)\) && \(/)
   assert.match(source, /<TimelineChat s=\{session\} sessions=\{sessionsWithRetention\} active=\{open && conversationShown\}/)
   assert.match(source, /setOpenedConversations\(\(prev\) => \(prev\.has\(id\) \? prev : new Set\(prev\)\.add\(id\)\)\)/)
   assert.match(timelineChat, /sendSessionCommand\(s\.id, composed, \{\s*\n?\s*replyVia: 'note',/)
   assert.equal((timelineChat.match(/className="tl-chat"/g) || []).length, 1)
+})
+
+test('external chat exposes a read-only conversation and keeps controlled session commands out', () => {
+  assert.deepEqual(uiCommandsFor({ status: 'unknown', liveness: 'unknown', capabilities: { control: false } }), [])
+  assert.match(source, /canControlSession\(session\) \? <TimelineChat[\s\S]+?: <ExternalSessionConversation/)
 })
 
 test('live offline and archived conversations share one footer with coldline and polling policy', () => {

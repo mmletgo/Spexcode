@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import net from 'node:net'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { SESSION_FILE_PREVIEW_MAX_BYTES, sessionFilesPath } from './session-files.js'
-import { sessionStoreDir } from '@spexcode/spec-core'
+import { encodeProject, sessionStoreDir } from '@spexcode/spec-core'
+import { DatabaseSync } from 'node:sqlite'
 import { tsxBin } from './tsx-bin.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -46,8 +47,176 @@ async function waitForHealth(base: string, child: ChildProcess, log: () => strin
   throw new Error(`backend never became healthy: ${log()}`)
 }
 
+test('an external chat claims only its project and uses the existing file and transcript APIs', { timeout: 45_000 }, async () => {
+  const fixture = mkdtempSync(join(realpathSync(tmpdir()), 'spex-external-chat-'))
+  const project = join(fixture, 'project'), other = join(fixture, 'other'), linked = join(fixture, 'linked')
+  const home = join(fixture, 'home'), databasePath = join(home, 'sessions.sqlite')
+  const codexHome = join(fixture, 'codex-home')
+  const id = '11111111-1111-4111-8111-111111111111'
+  const artifact = join(fixture, 'artifact.txt')
+  const bytes = 'external chat evidence 字节\n'
+  const now = new Date()
+  const day = now.toISOString().slice(0, 10).split('-')
+  const rolloutDir = join(codexHome, 'sessions', ...day)
+  const port = await freePort()
+  const base = `http://127.0.0.1:${port}`
+  const env: NodeJS.ProcessEnv = { ...process.env, SPEXCODE_HOME: home, SPEX_SESSION_DATABASE_PATH: databasePath, CODEX_HOME: codexHome, SPEXCODE_TMUX: `adoption-fixture-${port}`, PORT: String(port) }
+  for (const key of ['SPEXCODE_API_URL', 'SPEXCODE_SESSION_ID', 'CLAUDE_CODE_SESSION_ID', 'CODEX_THREAD_ID', 'PI_SESSION_ID', 'OPENCODE_SESSION_ID', 'ZCODE_SESSION_ID']) delete env[key]
+  const owner = { ...env, CODEX_THREAD_ID: id }
+  let backend: ChildProcess | null = null
+  const cli = (cwd: string, identity: NodeJS.ProcessEnv, ...args: string[]) => runCli(cwd, identity, 'session', ...args)
+  const api = (path: string, options?: RequestInit) => fetch(`${base}/api${path}`, options)
+  const row = () => api(`/sessions/${id}`)
+  const stop = async () => {
+    if (!backend || backend.exitCode !== null) return
+    backend.kill()
+    await new Promise<void>((done) => backend!.once('close', done))
+    backend = null
+  }
+  const start = async () => {
+    let log = ''
+    backend = spawn(process.execPath, [tsxBin(packageRoot), join(packageRoot, 'src', 'index.ts')], {
+      cwd: project, env, stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    backend.stdout?.on('data', (chunk) => { log += String(chunk) })
+    backend.stderr?.on('data', (chunk) => { log += String(chunk) })
+    await waitForHealth(base, backend, () => log)
+  }
+  const waitForGraph = async (accepts: (candidate: Record<string, unknown> | undefined) => boolean) => {
+    const deadline = Date.now() + 10_000
+    for (;;) {
+      const graph = await api('/graph')
+      assert.equal(graph.status, 200)
+      const candidate = (await graph.json()).sessions.find((session: { id: string }) => session.id === id)
+      if (!graph.headers.get('x-spexcode-graph')?.includes('stale') && accepts(candidate)) return candidate
+      assert.ok(Date.now() < deadline, 'the graph did not publish the committed claim or file change')
+      await new Promise((done) => setTimeout(done, 100))
+    }
+  }
+  try {
+    for (const root of [project, other]) {
+      mkdirSync(join(root, '.spec'), { recursive: true })
+      writeFileSync(join(root, '.spec/spexcode.json'), JSON.stringify({ harnesses: ['codex'] }))
+      git(root, 'init', '-q', '-b', 'main')
+      git(root, 'add', '.')
+      git(root, '-c', 'user.name=Test', '-c', 'user.email=test@example.test', 'commit', '-qm', 'fixture')
+    }
+    git(project, 'worktree', 'add', '-qb', 'linked', linked)
+    const worktrees = () => spawnSync('git', ['worktree', 'list', '--porcelain'], { cwd: project, encoding: 'utf8' }).stdout
+    const baseline = worktrees()
+    mkdirSync(rolloutDir, { recursive: true })
+    writeFileSync(join(rolloutDir, `rollout-${id}.jsonl`), [
+      { timestamp: now.toISOString(), type: 'session_meta', payload: { id, cli_version: '0.153.0' } },
+      { timestamp: now.toISOString(), type: 'response_item', payload: { type: 'reasoning', content: 'private fixture payload' } },
+      { timestamp: now.toISOString(), type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'See [[file:artifact.txt]].' }] } },
+    ].map((item) => JSON.stringify(item)).join('\n') + '\n')
+    writeFileSync(artifact, bytes)
+    await start()
+    assert.equal((await row()).status, 404)
+    assert.notEqual((await cli(project, owner, 'files', 'add', artifact)).code, 0)
+    assert.notEqual((await cli(project, { ...env, SPEXCODE_SESSION_ID: id }, 'adopt')).code, 0)
+    assert.notEqual((await cli(project, { ...owner, CLAUDE_CODE_SESSION_ID: id }, 'adopt')).code, 0)
+    assert.notEqual((await cli(project, owner, 'adopt', id)).code, 0)
+    await waitForGraph((candidate) => !candidate)
+
+    const adopted = await cli(project, owner, 'adopt')
+    assert.equal(adopted.code, 0, adopted.err)
+    const again = await cli(linked, owner, 'adopt')
+    assert.equal(again.code, 0, again.err)
+    assert.equal(again.out, adopted.out)
+    const crossProject = await cli(other, owner, 'adopt')
+    assert.notEqual(crossProject.code, 0)
+    assert.match(crossProject.err, /different project or harness claim/)
+    assert.notEqual((await cli(other, owner, 'unadopt')).code, 0)
+    assert.notEqual((await cli(project, { ...owner, CODEX_THREAD_ID: 'other-chat' }, 'unadopt')).code, 0)
+    assert.notEqual((await cli(project, { ...env, SPEXCODE_SESSION_ID: id }, 'files', 'add', artifact)).code, 0)
+    const recordDir = join(home, 'projects', encodeProject(project), 'sessions', id)
+    assert.equal(existsSync(join(recordDir, 'runtime.json')), false)
+    mkdirSync(recordDir, { recursive: true })
+    writeFileSync(join(recordDir, 'runtime.json'), JSON.stringify({
+      session_id: id, governed: false, harness: 'codex', worktree_path: project, branch: null, status: 'idle',
+    }))
+    const legacyFile = join(fixture, 'legacy.txt')
+    writeFileSync(legacyFile, 'earlier unadopted file list')
+    writeFileSync(join(recordDir, 'files.json'), JSON.stringify([legacyFile]))
+    const add = await cli(linked, owner, 'files', 'add', artifact)
+    assert.equal(add.code, 0, add.err)
+    assert.match(add.out, /\[\[file:artifact\.txt\]\]/)
+    assert.equal((await cli(project, owner, 'files', 'ls')).out.trim(), artifact)
+    assert.equal((await cli(project, env, 'files', 'get', id, '[[file:artifact.txt]]')).out, bytes)
+    const detail = await row()
+    assert.equal(detail.status, 200)
+    const session = await detail.json()
+    assert.deepEqual({
+      ownership: session.ownership, liveness: session.liveness, lifecycle: session.lifecycle,
+      path: session.path, branch: session.branch, control: session.capabilities.control, files: session.files,
+    }, {
+      ownership: 'external', liveness: 'unknown', lifecycle: null, path: '', branch: null, control: false, files: [artifact],
+    })
+    const published = await waitForGraph((candidate) => (candidate?.files as string[] | undefined)?.includes(artifact) === true)
+    assert.deepEqual(published.ops, [])
+    assert.equal(await (await api(`/sessions/${id}/files/download?path=${encodeURIComponent(artifact)}`)).text(), bytes)
+    const preview = await api(`/sessions/${id}/files/download?path=${encodeURIComponent(artifact)}&preview=1`)
+    assert.equal(preview.headers.get('X-Spexcode-Preview-Kind'), 'text')
+    assert.equal(await preview.text(), bytes)
+    assert.equal((await api(`/sessions/${id}/files/download?path=${encodeURIComponent(legacyFile)}`)).status, 403)
+    const transcript = await api(`/sessions/${id}/transcript?from=${now.getTime() - 1}&to=${now.getTime() + 1}`)
+    assert.equal(transcript.status, 200)
+    assert.deepEqual((await transcript.json()).turns.map((turn: { text: string }) => turn.text), ['See [[file:artifact.txt]].'])
+    for (const verb of ['stop', 'resume', 'interrupt', 'merge', 'close', 'input', 'sort', 'rename', 'quarantine']) {
+      const denied = await api(`/sessions/${id}/${verb}`, { method: 'POST' })
+      assert.equal(denied.status, 409, verb)
+      assert.match((await denied.json()).error, /external chat/)
+    }
+    assert.equal((await api(`/sessions/${id}/capture`)).status, 409)
+    assert.equal((await api(`/sessions/${id}/transcript/stream?from=${now.getTime()}`)).status, 409)
+    const reparent = await api('/sessions/reparent', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ children: [id], parent: null }),
+    })
+    assert.equal(reparent.status, 409)
+    assert.match((await reparent.json()).error, /not a governed session/)
+    for (const input of [{ prompt: 'fixture', parent: id }, { prompt: `@parent:${id} fixture` }]) {
+      const create = await api('/sessions', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input),
+      })
+      assert.equal(create.status, 409)
+      assert.match((await create.json()).error, /external chat .* cannot be a session's parent/)
+    }
+    assert.equal(worktrees(), baseline)
+    const database = new DatabaseSync(databasePath, { readOnly: true })
+    try {
+      assert.equal(database.prepare('SELECT session_id FROM protocol_sessions WHERE session_id=?').get(id)?.session_id, id)
+      assert.equal(database.prepare('SELECT 1 FROM session_application_state WHERE session_id=?').get(id), undefined)
+      assert.equal(database.prepare('SELECT 1 FROM session_runtime_bindings WHERE native_session_id=?').get(id), undefined)
+    } finally { database.close() }
+
+    await stop()
+    await start()
+    assert.deepEqual((await (await row()).json()).files, [artifact])
+    assert.equal((await cli(project, owner, 'unadopt')).code, 0)
+    assert.equal((await row()).status, 404)
+    assert.equal((await api(`/sessions/${id}/transcript?from=${now.getTime() - 1}&to=${now.getTime() + 1}`)).status, 404)
+    assert.equal((await api(`/sessions/${id}/files/download?path=${encodeURIComponent(artifact)}`)).status, 404)
+    assert.equal((await api(`/sessions/${id}/files`)).status, 404)
+    assert.notEqual((await cli(project, owner, 'files', 'add', legacyFile)).code, 0)
+    assert.notEqual((await cli(project, owner, 'files', 'ls')).code, 0)
+    assert.notEqual((await cli(project, env, 'files', 'get', id, 'legacy.txt')).code, 0)
+    await waitForGraph((candidate) => !candidate)
+    assert.equal((await cli(project, owner, 'adopt')).code, 0)
+    assert.equal((await cli(project, owner, 'files', 'ls')).out.trim(), artifact)
+    assert.equal((await cli(project, owner, 'files', 'retract', artifact)).code, 0)
+    assert.equal(await (await api(`/sessions/${id}/files/download?path=${encodeURIComponent(artifact)}`)).status, 403)
+    assert.equal(readFileSync(artifact, 'utf8'), bytes)
+    assert.equal(worktrees(), baseline)
+  } finally {
+    await stop()
+    rmSync(fixture, { recursive: true, force: true })
+  }
+})
+
 test('public session files CLI stores a live path and the backend authorizes only that path', { timeout: 30_000 }, async () => {
-  const fixture = mkdtempSync(join(tmpdir(), 'spex-session-files-'))
+  const fixture = mkdtempSync(join(realpathSync(tmpdir()), 'spex-session-files-'))
   const project = join(fixture, 'project')
   const home = join(fixture, 'home')
   const artifact = join(fixture, 'artifact.txt')
@@ -175,7 +344,7 @@ test('public session files CLI stores a live path and the backend authorizes onl
     assert.equal(readFileSync(saved, 'utf8'), readFileSync(htmlArtifact, 'utf8'))
     const writerOnly = await runCli(project, reader, 'session', 'files', 'add', '../artifact.txt')
     assert.equal(writerOnly.code, 2)
-    assert.match(writerOnly.err, /no governed caller session — run this from the agent session that produced the file/)
+    assert.match(writerOnly.err, /no governed or adopted caller session — run this from the agent session that produced the file/)
 
     writeFileSync(artifact, Buffer.alloc(SESSION_FILE_PREVIEW_MAX_BYTES + 1))
     const oversized = await fetch(`${base}/api/sessions/${id}/files/download?path=${encodeURIComponent(absolute)}&preview=1`)
@@ -219,7 +388,7 @@ test('public session files CLI stores a live path and the backend authorizes onl
 })
 
 test('a prompt that carries a completed upload posts it to the receiving session as the human\'s own file', { timeout: 120_000 }, async () => {
-  const fixture = mkdtempSync(join(tmpdir(), 'spex-sent-uploads-'))
+  const fixture = mkdtempSync(join(realpathSync(process.platform === 'darwin' ? '/tmp' : tmpdir()), 'spex-sent-uploads-'))
   const project = join(fixture, 'project')
   const home = join(fixture, 'home')
   const port = await freePort()

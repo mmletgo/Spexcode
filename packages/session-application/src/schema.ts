@@ -55,4 +55,24 @@ ON CONFLICT(watcher_session_id, subject_session_id) DO UPDATE
  SET event_seq=MAX(session_follow_cursors.event_seq, excluded.event_seq);
 `,
   },
+  {
+    version: 5,
+    sql: `
+CREATE TABLE session_external_claims (
+  project_key   TEXT    NOT NULL,
+  session_id    TEXT    NOT NULL REFERENCES protocol_sessions(session_id),
+  harness       TEXT    NOT NULL,
+  claimed_at_ms INTEGER NOT NULL,
+  revoked_at_ms INTEGER,
+  PRIMARY KEY (project_key, session_id),
+  CHECK (claimed_at_ms >= 0),
+  CHECK (revoked_at_ms IS NULL OR revoked_at_ms >= claimed_at_ms)
+) STRICT;
+
+CREATE UNIQUE INDEX session_external_claims_active
+  ON session_external_claims (session_id) WHERE revoked_at_ms IS NULL;
+CREATE INDEX session_external_claims_history
+  ON session_external_claims (session_id, harness);
+`,
+  },
 ]

@@ -10,12 +10,16 @@ related:
 ---
 # session application state schema
 
-The application component owns one strict state row per initialized protocol address. It stores only the current
+The application component owns one strict state row per governed session address. It stores only the current
 status, proposal, note, explicit parent address, and update time. State changes append the typed application event
 before notifying topology recipients. Parent/child relations remain in the neutral topology component;
 existing JSON records enter this table only through the one-time deterministic migration, after which JSON is never a
 read source for application state. The component also owns the follow-cursor table recording, per watcher and
 subject address, the last event sequence that watcher has consumed.
+
+Version 5 records the project claim and revocation history of [[external-session-adoption]]. It references the
+existing protocol address, with one active claim per address. Claim writes leave lifecycle state, topology,
+events, and runtime bindings untouched.
 
 The migration list is this component's entire schema generation ledger, and it is append-only. A version that has
 been applied to any store is never rewritten or removed, because its checksum is verified on every open. Every build

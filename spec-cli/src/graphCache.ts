@@ -6,6 +6,7 @@ import { buildBoard, spliceSessions, type SessionSpliceRequest } from './graphSn
 import { headSha, repoRoot, requireGitWorkspace, withGitAbortSignal } from '@spexcode/spec-core'
 import { unitize, tagOf, type Units } from '@spexcode/spec-core'
 import { listSessionIds, mainBranch, mainCheckout, readPublicRecordEntry, sessionArtifactPath, sessionRecordPath } from '@spexcode/spec-core'
+import { externalClaimFilesPath, readExternalClaims } from './session-adoption.js'
 import { boardThreads } from './issues.js'
 import { resolveForgeHost } from '@spexcode/spec-forge/drivers'
 import { residentForgeState } from '@spexcode/spec-forge/resident'
@@ -198,7 +199,9 @@ function sessionInputRevision(): SessionInputRevision {
     const entry = readPublicRecordEntry(id)
     return entry.kind === 'ok' && entry.raw.governed && !entry.raw.archived ? [entry.raw.worktree_path] : []
   }))].sort()
-  return { sessions: digest([canonical, sessionInputs]), activeRoots }
+  const external = readExternalClaims().filter((claim) => claim.revokedAtMs === null).sort((a, b) => a.sessionId.localeCompare(b.sessionId))
+    .map((claim) => [claim, textOrNull(externalClaimFilesPath(claim))])
+  return { sessions: digest([canonical, sessionInputs, external]), activeRoots }
 }
 
 function boardInputRevision(board: Board | null): BoardInputRevision {
@@ -427,7 +430,7 @@ function startSessionSplice(): Flight | null {
       if (base !== cached || revision !== cachedRevision || generation !== topologyGeneration) continue
       const stable = partial || ('activeRoots' in before && 'activeRoots' in after && before.sessions === after.sessions &&
         JSON.stringify(before.activeRoots) === JSON.stringify(after.activeRoots))
-      const projectedRoots = [...new Set(board.sessions.map((row) => row.path))].sort()
+      const projectedRoots = [...new Set(board.sessions.map((row) => row.path).filter(Boolean))].sort()
       const rootTransition = carrySubtractiveWorktrees(revision, projectedRoots)
       const carried = stable ? rootTransition.revision : revision
       cached = board
@@ -592,7 +595,7 @@ function startBuild(mode: FlightMode = 'dirty'): Flight | null {
         // half anchors on `before` — the conservative direction, which costs at most one extra rebuild and can
         // never certify unread bytes.
         if (sessionsOnly && anchor) {
-          const projectedRoots = [...new Set(board.sessions.map((row) => row.path))].sort()
+          const projectedRoots = [...new Set(board.sessions.map((row) => row.path).filter(Boolean))].sort()
           const rootTransition = carrySubtractiveWorktrees(anchor, projectedRoots)
           buildAddedSessionRoot = rootTransition.added
           completedRevision = revisionCarriedBySessionSplice(

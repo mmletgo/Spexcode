@@ -43,6 +43,9 @@ the console's working-session rows take lifecycle state from `/api/graph` (i.e. 
 the documented archive index, retained-record, timeline/detail, and post-create transitional projections. Those
 secondary projections do not become a second lifecycle authority, so a human watching the dashboard and an agent
 driving the same sessions through the CLI see the same reported session state.
+For [[external-session-adoption]], the session row leads to the read-only native transcript with file links
+and the ordinary resource picker. The console, row menu, and batch controls use the projected control
+capability, and the phone opens the same read-only conversation.
 
 The backend's closed `DisplayStatus` vocabulary is the one lifecycle word source for the dashboard. The
 session projection, both locale dictionaries, and every status-word surface cover the full set, including

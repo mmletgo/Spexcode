@@ -968,6 +968,10 @@ export default {
   },
 
   session: {
+    externalReadOnly: '外部会话 · 只读',
+    externalEarlier: '上一段对话',
+    externalLater: '下一段对话',
+    externalLatest: '读取最新对话',
     // 会话文档上的省略号：这个面上只有它能走到重命名 / tmux attach / 锁定到图谱，所以直接把内容写出来。
     menuLabel: '会话操作 —— 重命名、attach、锁定到图谱、关闭',
     opsTitle: '此会话正在改动的节点 —— ctrl+点击在新标签打开 · 右键打开会话操作',

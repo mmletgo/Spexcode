@@ -1,3 +1,4 @@
+import { externalControlRefusal } from './session-adoption.js'
 import type { Server as HttpServer, ServerResponse as HttpServerResponse } from 'node:http'
 import { once } from 'node:events'
 import { randomUUID } from 'node:crypto'
@@ -77,6 +78,14 @@ setSessionApplicationCommitObserver((change) => {
 })
 startUploadReaper()
 app.use('/api/*', cors())
+app.use('/api/sessions/:id/*', async (c, next) => {
+  const path = c.req.path
+  if (c.req.method !== 'GET' && c.req.method !== 'HEAD' || path.endsWith('/capture') || path.endsWith('/socket')) {
+    const error = externalControlRefusal(c.req.param('id'))
+    if (error) return c.json({ ok: false, error }, 409)
+  }
+  return next()
+})
 app.onError((error, c) => {
   // a record that cannot carry state is a CONFLICT with the caller's request, not a server fault: the refusal
   // is deliberate and already carries its own diagnosis + repair ([[sessions-core]]). Answering 500 with a

@@ -100,6 +100,8 @@ export type {
   ChangedSessionIds,
   ConversationMessageInput,
   CreateSessionInput,
+  ExternalSessionClaim,
+  ExternalSessionIdentity,
   LocalityPrecondition,
   NativeRuntimeIdentity,
   ProductionSessionApplication,

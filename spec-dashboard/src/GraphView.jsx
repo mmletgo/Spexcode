@@ -609,7 +609,7 @@ function GraphCanvas({ param, page: routePage = 'graph' }) {
         <GraphStats specs={specs} focusId={focusId} onJump={focusNode} />
 
         {!graphOnly && <SessionWindow sessions={sessions} activeId={highlightId}
-          onPick={(session) => lockGraphTo(session.source)} onOpenSession={openSession}
+          onPick={(session) => session.source ? lockGraphTo(session.source) : openSession(session.id)} onOpenSession={openSession}
           onNew={() => startNew(`[[${focus.id}]] `)} />}
 
 

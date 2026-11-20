@@ -89,6 +89,17 @@ export interface NativeRuntimeIdentity {
   metadata?: Record<string, unknown>
 }
 
+export interface ExternalSessionIdentity {
+  projectKey: string
+  harness: string
+  sessionId: string
+}
+
+export interface ExternalSessionClaim extends ExternalSessionIdentity {
+  claimedAtMs: number
+  revokedAtMs: number | null
+}
+
 export interface ProjectSessionApplicationOptions {
   databasePath: string
   locality: LocalityPrecondition
@@ -150,6 +161,9 @@ export interface ProductionSessionApplication extends SessionApplication {
   readonly topology: SessionTopology
   readonly events: SessionEventStore
   readonly runtimeBindings: SessionRuntimeBindings
+  adoptExternalSession(identity: ExternalSessionIdentity): ExternalSessionClaim
+  revokeExternalSession(identity: ExternalSessionIdentity): boolean
+  readExternalClaims(projectKey: string, sessionId?: string): ExternalSessionClaim[]
   createSession(input: CreateSessionInput): SessionState
   transitionSession(sessionId: string, input: TransitionSessionInput): CommittedSessionChange
   enqueueMessage(sessionId: string, message: MessageInput): Message
@@ -218,6 +232,19 @@ const uniqueSessionIds = (...ids: readonly (string | null | undefined)[]): strin
 
 const requireStatus = (value: string): void => {
   if (typeof value !== 'string' || !STATUS.test(value)) throw new TypeError('session status has an invalid grammar')
+}
+
+const externalClaim = (row: Record<string, unknown>): ExternalSessionClaim => ({
+  projectKey: String(row.project_key),
+  harness: String(row.harness),
+  sessionId: String(row.session_id),
+  claimedAtMs: Number(row.claimed_at_ms),
+  revokedAtMs: row.revoked_at_ms === null ? null : Number(row.revoked_at_ms),
+})
+
+const assertExternalAddressUnclaimed = (tx: ProtocolTransaction, sessionId: string, nativeSessionId = sessionId): void => {
+  if (tx.query('SELECT session_id FROM session_external_claims WHERE session_id IN (?,?) LIMIT 1', sessionId, nativeSessionId).length)
+    throw new Error(`runtime identity ${nativeSessionId} belongs to an external thread`)
 }
 
 const eventId = (): string => randomBytes(16).toString('hex')
@@ -292,6 +319,51 @@ export function openProjectSessionApplication(options: ProjectSessionApplication
     events,
     runtimeBindings,
 
+    adoptExternalSession(identity) {
+      const { projectKey, harness, sessionId } = identity
+      requirePath(projectKey)
+      requireStatus(harness)
+      requireId(sessionId, 'sessionId')
+      const claimedAtMs = now()
+      return protocol.withTransaction(tx => {
+        const active = tx.query('SELECT * FROM session_external_claims WHERE session_id=? AND revoked_at_ms IS NULL', sessionId)[0]
+        if (active) {
+          if (active.project_key !== projectKey || active.harness !== harness)
+            throw new Error(`external thread ${sessionId} already has a different project or harness claim`)
+          return externalClaim(active)
+        }
+        if (tx.query('SELECT session_id FROM session_external_claims WHERE session_id=? AND harness<>? LIMIT 1', sessionId, harness).length)
+          throw new Error(`external thread ${sessionId} already belongs to a different harness address`)
+        if (readStateInTransaction(tx, sessionId) || tx.query(
+          "SELECT protocol_session_id FROM session_runtime_bindings WHERE namespace='spex-governed' AND native_session_id=? LIMIT 1",
+          sessionId,
+        ).length) throw new Error(`thread ${sessionId} is already governed`)
+        tx.initialize(sessionId)
+        tx.exec(`INSERT INTO session_external_claims(project_key,session_id,harness,claimed_at_ms,revoked_at_ms)
+          VALUES(?,?,?,?,NULL) ON CONFLICT(project_key,session_id) DO UPDATE
+          SET revoked_at_ms=NULL`, projectKey, sessionId, harness, claimedAtMs)
+        return externalClaim(tx.query('SELECT * FROM session_external_claims WHERE project_key=? AND session_id=?', projectKey, sessionId)[0])
+      })
+    },
+
+    revokeExternalSession({ projectKey, harness, sessionId }) {
+      requirePath(projectKey)
+      requireStatus(harness)
+      requireId(sessionId, 'sessionId')
+      const revokedAtMs = now()
+      return protocol.withTransaction(tx => tx.exec(`UPDATE session_external_claims
+        SET revoked_at_ms=MAX(claimed_at_ms,?) WHERE project_key=? AND harness=? AND session_id=?
+        AND revoked_at_ms IS NULL`, revokedAtMs, projectKey, harness, sessionId).changes === 1)
+    },
+
+    readExternalClaims(projectKey, sessionId) {
+      requirePath(projectKey)
+      return protocol.withTransaction(tx => (sessionId === undefined
+        ? tx.query('SELECT * FROM session_external_claims WHERE project_key=?', projectKey)
+        : tx.query('SELECT * FROM session_external_claims WHERE project_key=? AND session_id=?', projectKey, sessionId)
+      ).map(externalClaim))
+    },
+
     broadcast(senderSessionId, recipients, message) {
       requireId(senderSessionId, 'senderSessionId')
       const unique = [...new Set(recipients)]
@@ -356,6 +428,8 @@ export function openProjectSessionApplication(options: ProjectSessionApplication
       initialize(input.sessionId)
       if (parentSessionId) initialize(parentSessionId)
       const created = protocol.withTransaction(tx => {
+        assertExternalAddressUnclaimed(tx, input.sessionId, input.runtime?.namespace === 'spex-governed' ? input.runtime.nativeSessionId : undefined)
+        if (parentSessionId) assertExternalAddressUnclaimed(tx, parentSessionId)
         if (readStateInTransaction(tx, input.sessionId)) {
           throw new Error(`session application state already exists: ${input.sessionId}`)
         }
@@ -428,6 +502,7 @@ export function openProjectSessionApplication(options: ProjectSessionApplication
       if (input.parentSessionId === sessionId) throw new TypeError('a session cannot be its own parent')
       if (input.parentSessionId) initialize(input.parentSessionId)
       const result = protocol.withTransaction(tx => {
+        if (input.parentSessionId) assertExternalAddressUnclaimed(tx, input.parentSessionId)
         const current = readStateInTransaction(tx, sessionId)
         if (!current) {
           throw new Error(`session application state is missing: ${sessionId}`)
@@ -574,7 +649,10 @@ export function openProjectSessionApplication(options: ProjectSessionApplication
     bindRuntime(sessionId, identity, expectedGeneration) {
       requireId(sessionId, 'sessionId')
       initialize(sessionId)
-      const binding = protocol.withTransaction(tx => runtimeBindings.bind(tx, sessionId, identity, { expectedGeneration }))
+      const binding = protocol.withTransaction(tx => {
+        if (identity.namespace === 'spex-governed') assertExternalAddressUnclaimed(tx, sessionId, identity.nativeSessionId)
+        return runtimeBindings.bind(tx, sessionId, identity, { expectedGeneration })
+      })
       options.onRuntimeBound?.(sessionId)
       return binding
     },

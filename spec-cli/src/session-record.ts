@@ -4,6 +4,7 @@ import { join, dirname, isAbsolute, resolve } from 'node:path'
 import { mainRoot, runtimeRoot, sessionStoreDir, sessionRecordPath, sessionArtifactPath, rawLaunchReadinessOriginal, readRecordEntry, readAliasedRecordEntry, processStartToken, isSessionLifecycle, isSessionProposal, parseSessionLifecycle, parseSessionProposal, type RawRecord, type SessionLifecycle, type SessionProposal, type ProcessIdentity } from '@spexcode/spec-core'
 import { jsonMigrationFencePath } from '@spexcode/session-application'
 import { configuredSessionApplication, sessionApplicationCutoverState } from './session-application.js'
+import { readExternalClaims } from './session-adoption.js'
 import { withSessionRecordLock, withSessionRecordLockSync as coreWithSessionRecordLockSync } from './session-record-lock.js'
 import { defaultHarness, HARNESSES, harnessById, rendezvousListening } from './harness.js'
 import { gitTry } from '@spexcode/spec-core'
@@ -102,14 +103,17 @@ export function readRecord(id: string): SessRec | null {
       diffComments: [], launchReadinessPending: null,
     }
   }
-  if (entry.kind === 'corrupt') throw new SessionRecordUnusable('corrupt', id, corruptReason(entry))
+  if (entry.kind === 'corrupt') {
+    if (readExternalClaims(id).length) return null
+    throw new SessionRecordUnusable('corrupt', id, corruptReason(entry))
+  }
   try {
     const record = fromRaw(entry.raw)
     // After cutover, runtime.json is only the runtime/worktree envelope. Lifecycle is owned by the
     // session application. Overlaying here keeps every internal caller on the same fact instead of
     // letting a stale JSON snapshot steer a launch, close, or hook decision.
     const application = configuredSessionApplication()
-    if (!record.governed) return record
+    if (!record.governed) return readExternalClaims(record.session).length ? null : record
     const state = application.readState(record.session)
     if (!state) throw new ResourceConflict(`session ${record.session} has no canonical application state after JSON cutover`)
     return {

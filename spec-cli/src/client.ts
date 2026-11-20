@@ -1,3 +1,4 @@
+import { readExternalClaims } from './session-adoption.js'
 import { existsSync } from 'node:fs'
 import { platform } from 'node:os'
 import { randomUUID } from 'node:crypto'
@@ -6,7 +7,7 @@ import { resourceBudgets, type ResourceReport } from './host-resources.js'
 import { envSessionId, listSessionIds, parseSessionLifecycle, parseSessionProposal, readPublicRecordEntry } from '@spexcode/spec-core'
 import { cockpitReview, type CockpitReview } from './cockpit.js'
 import { configuredSessionApplication } from './session-application.js'
-import { apiBaseInfo, assertProjectMatch, canonicalRecordProjection, displayStatusForProposal, drainSession, optionArgv, toSession, type DisplayStatus, type Session, type DispatchResult } from './sessions.js'
+import { apiBaseInfo, assertProjectMatch, canonicalRecordProjection, displayStatusForProposal, drainSession, optionArgv, toExternalSession, toSession, type DisplayStatus, type Session, type DispatchResult } from './sessions.js'
 import { resolveSession, type Resolved } from './session-selectors.js'
 import { fromRaw } from './session-record.js'
 import { resolveMachinePeer } from './machine-peer.js'
@@ -160,7 +161,11 @@ export function localCachedSessions(includeArchived = false): Session[] {
   // a canonical application row before its runtime.json is materialized (or after it is retired). Selectors
   // must still resolve that row; treating the missing envelope as "no such session" strands watch/cancel.
   const application = configuredSessionApplication()
+  const external = readExternalClaims()
+  const externalIds = new Set(external.map((claim) => claim.sessionId))
+  rows.push(...external.filter((claim) => claim.revokedAtMs === null).map(toExternalSession))
   for (const id of listSessionIds()) {
+    if (externalIds.has(id)) continue
     const entry = readPublicRecordEntry(id)
     if (entry.kind === 'corrupt') {
       rows.push(corruptCachedSession(id, entry.error))
@@ -224,11 +229,11 @@ export function localCachedSessions(includeArchived = false): Session[] {
 function localCachedResources(): ResourceReport {
   const projectRoot = repoRoot()
   const budgets = resourceBudgets(projectRoot)
-  const owners = localCachedSessions(true).map((session) => ({
+  const owners = localCachedSessions(true).filter((session) => session.lifecycle !== null).map((session) => ({
     kind: 'session' as const,
     id: session.id,
     label: session.label,
-    status: session.lifecycle,
+    status: session.lifecycle!,
     liveness: 'unknown' as const,
     proposal: session.proposal,
     note: session.note,

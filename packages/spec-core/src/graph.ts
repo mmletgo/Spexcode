@@ -33,7 +33,7 @@ export type BoardSnapshot = {
 // invisible exactly when it fires: the splice would carry the stale ops forward forever. The rule belongs to
 // the row, not to one producer, so both decorate through this one function.
 const rowOps = (s: { path: string; archived?: boolean }, opsByPath: Record<string, any[]>): any[] =>
-  (s.archived ? [] : opsByPath[s.path] || [])
+  (!s.path || s.archived ? [] : opsByPath[s.path] || [])
 
 export async function buildBoard({ root, specs, layout, sessions, issues: merged, issuesStamp, issueSource }: BoardSnapshot) {
   const worktrees = layout.worktrees.filter((w) => !w.isMain)
@@ -41,7 +41,7 @@ export async function buildBoard({ root, specs, layout, sessions, issues: merged
   const opWts = worktrees.filter((w) => w.ops && w.ops.length)
 
   const sessIdByPath: Record<string, string> = {}
-  sessions.forEach((s) => { sessIdByPath[s.path] = s.id })
+  sessions.forEach((s) => { if (s.path) sessIdByPath[s.path] = s.id })
   const seedOf = (path: string): string => sessIdByPath[path] || path
 
   const byId: Record<string, any> = Object.fromEntries(specs.map((n) => [n.id, n]))
@@ -145,7 +145,7 @@ export async function spliceSessions(
   prev: Awaited<ReturnType<typeof buildBoard>>,
   sessions: any[],
 ): Promise<Awaited<ReturnType<typeof buildBoard>>> {
-  const activeSources = new Set(sessions.map((session) => session.path))
+  const activeSources = new Set(sessions.map((session) => session.path).filter(Boolean))
   const opsByPath: Record<string, any[]> = {}
   for (const s of prev.sessions) opsByPath[s.source] = s.ops
   const sess = sessions.map((s) => ({
