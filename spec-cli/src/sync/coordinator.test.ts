@@ -11342,6 +11342,21 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
     assert.equal(calls.length, callsBeforeAuthentication, '原失败认证不新增模型调用')
     const missingP0 = { ...first, checkpointRefs: first.checkpointRefs.filter(ref => read<{ stage?: string }>(ref).stage !== originalStages.find(stage => stage.stage.startsWith('partition:') && stage.stage.endsWith(':analysis'))!.stage) }
     await assert.rejects(continuationCoordinator.authenticateFrozenCandidateAnalysis(store, current, missingP0), /frozen_candidate_analysis_binding/, '缺任何一个原P0 owner批准均拒绝')
+    if (boundary === 'legacy-v4' && gapMode === 'none') {
+      const whole = read<import('./writeback-types.js').CodeBehaviorAnalysis>(p0.resultRef), member = whole.partitionEvidence![0]
+      const local = { ...member.analysis, readSetDigest: 'a'.repeat(64) }
+      const localRef = writeEvidence(f.input.source.commonDir, local)
+      const changedWhole = { ...whole, partitionEvidence: [{ ...member, analysis: local, analysisRef: localRef }, ...whole.partitionEvidence!.slice(1)] }
+      const wholeRef = writeEvidence(f.input.source.commonDir, changedWhole)
+      const detached = { ...first, checkpointRefs: first.checkpointRefs.map(ref => {
+        const stage = read<{ stage?: string; resultRef?: BlobRef }>(ref)
+        const replacement = stage.stage === 'analysis' ? { payload: changedWhole, resultRef: wholeRef }
+          : stage.stage === `partition:${member.partitionId}:analysis` ? { payload: local, resultRef: localRef } : null
+        if (!replacement) return ref
+        return { ...writeEvidence(f.input.source.commonDir, { ...stage, resultRef: replacement.resultRef }), artifacts: syncCheckpointArtifacts(replacement.payload, replacement.resultRef) }
+      }) }
+      await assert.rejects(continuationCoordinator.authenticateFrozenCandidateAnalysis(store, current, detached), /原P0 owner缺少原v4\/v7及完整冻结输入/, 'legacy local读集必须与whole独立比对')
+    }
     const producer = legacyRetry ? store.listAttempts(ancestors[0].id)[0] : first
     const originalAnalyze = producer.dispatchPlans.find(dispatch => dispatch.purpose === 'code_behavior_analyze')!.session!.sessionId
     await assert.rejects(continuationCoordinator.authenticateFrozenCandidateAnalysis(store, current, first, { readNativeRecord: id => {

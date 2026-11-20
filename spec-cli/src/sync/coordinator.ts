@@ -1688,10 +1688,13 @@ export async function prepareP0ReviewChallenge(store: SyncStore, operation: Sync
 
 type ApprovalSourceLineage = { ancestors?: SyncOperation[]; settled: Set<string> }
 type ApprovedBehaviorPartition = NonNullable<CodeBehaviorAnalysis['partitionEvidence']>[number]
-type ApprovalSourceOptions = { frozenLegacy?: boolean; inline?: boolean; analysisSchemaDigest?: string; authorization?: P0ReviewAuthorization }
+type ApprovalSourceOptions = {
+  expectedReadSetDigest: string; expectedComposedDigest: string
+  frozenLegacy?: boolean; inline?: boolean; analysisSchemaDigest?: string; authorization?: P0ReviewAuthorization
+}
 
-function* approvedBehaviorPartitionSource(store: SyncStore, operation: SyncOperation, ownerOperation: SyncOperation, origin: SyncAttempt, planDigest: string, member: ApprovedBehaviorPartition, selection: FrozenBaselineSelection | undefined, checkpoints: (attempt: SyncAttempt) => SyncCheckpointStageView, lineage: ApprovalSourceLineage, options?: ApprovalSourceOptions): Generator<void, string | null> {
-  const { frozenLegacy, inline, authorization } = options ?? {}
+function* approvedBehaviorPartitionSource(store: SyncStore, operation: SyncOperation, ownerOperation: SyncOperation, origin: SyncAttempt, planDigest: string, member: ApprovedBehaviorPartition, selection: FrozenBaselineSelection | undefined, checkpoints: (attempt: SyncAttempt) => SyncCheckpointStageView, lineage: ApprovalSourceLineage, options: ApprovalSourceOptions): Generator<void, string | null> {
+  const { expectedReadSetDigest, expectedComposedDigest, frozenLegacy, inline, authorization } = options
   if (authorization?.challenge.version === 'p0-review-challenge-v2' && authorization.challenge.origin.partitionPlanRef.sha256 !== planDigest) {
     return `原P0 owner复审授权未绑定精确分区计划: ${member.partitionId}`
   }
@@ -1700,11 +1703,11 @@ function* approvedBehaviorPartitionSource(store: SyncStore, operation: SyncOpera
     const original = checkpoints(origin)
     const oldPlan = partitionStage<SyncPartitionPlan>(store, ownerOperation, origin, 'partition-plan', selection, original)
     const local = partitionStage<CodeBehaviorAnalysis>(store, ownerOperation, origin, key, selection, original, undefined, usage)
-    if (oldPlan?.resultRef.sha256 !== planDigest || local?.resultRef.sha256 !== member.analysisRef.sha256 || origin.composedInput?.contentDigest !== member.analysis.composedDigest) return `原P0 owner的计划、local或组合输入失配: ${member.partitionId}`
+    if (oldPlan?.resultRef.sha256 !== planDigest || local?.resultRef.sha256 !== member.analysisRef.sha256 || origin.composedInput?.contentDigest !== expectedComposedDigest) return `原P0 owner的计划、local或组合输入失配: ${member.partitionId}`
     if (frozenLegacy) {
       const wrapper = original.json.map(({ value }) => value as Stage).find(value => value.stage === key && value.resultRef?.sha256 === member.analysisRef.sha256)
       if (wrapper?.guidanceContractVersion !== LEGACY_CODE_BEHAVIOR_GUIDANCE_VERSION || local.result.guidanceContractVersion !== undefined
-        || local.result.inputId !== operation.input.id || local.result.policyDigest !== operation.policyDigest || local.result.readSetDigest !== member.analysis.readSetDigest || local.result.composedDigest !== member.analysis.composedDigest) return `原P0 owner缺少原v4/v7及完整冻结输入: ${member.partitionId}`
+        || local.result.inputId !== operation.input.id || local.result.policyDigest !== operation.policyDigest || local.result.readSetDigest !== expectedReadSetDigest || local.result.composedDigest !== expectedComposedDigest) return `原P0 owner缺少原v4/v7及完整冻结输入: ${member.partitionId}`
     }
     const provenance = stage<{ fromOperationId: string; fromAttemptId: string; resultRef: BlobRef }>(store, ownerOperation, origin, `${key}:provenance`, 'automatic', original)
     if (!provenance) {
@@ -1731,7 +1734,7 @@ function* approvedBehaviorPartitionSource(store: SyncStore, operation: SyncOpera
         yield
       }
       const ancestor = lineage.ancestors[previousPosition]
-      ownerOperation = withCheckpointStageBasis(ancestor, member.analysis.readSetDigest, selection)
+      ownerOperation = withCheckpointStageBasis(ancestor, expectedReadSetDigest, selection)
     }
     origin = previous
   }
@@ -1779,7 +1782,9 @@ function* approvedBehaviorPartitionAuthentication(store: SyncStore, operation: S
   for (const owner of owners) {
     const member = whole.partitionEvidence?.find(item => item.partitionId === owner.partitionId)
     if (!member || member.analysisRef.sha256 !== owner.analysisRef.sha256 || owner.wholeAnalysisRef.sha256 !== evidence.ref.sha256 || contentHash(JSON.stringify(member.analysis)) !== member.analysisRef.sha256) return reject(`原P0 owner未绑定精确whole/local摘要: ${owner.partitionId}`)
-    const error = yield* approvedBehaviorPartitionSource(store, operation, source, p0, planDigest, member, selection, checkpoints, lineage, { frozenLegacy, inline, authorization: challenges.get(owner.partitionId) })
+    const error = yield* approvedBehaviorPartitionSource(store, operation, source, p0, planDigest, member, selection, checkpoints, lineage, {
+      expectedReadSetDigest: whole.readSetDigest, expectedComposedDigest: whole.composedDigest, frozenLegacy, inline, authorization: challenges.get(owner.partitionId),
+    })
     if (error) return reject(error)
     yield
   }
@@ -3630,7 +3635,9 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
                 : historyCheckpoints(origin.operationId === operation.id ? operation : store.readOperation(origin.operationId), origin)
               const member = { partitionId, analysisRef: source.resultRef, analysis: source.result, changedPaths: [...binding.changedPaths] }
               const error = withReadonlySnapshotQuery(() => finishApprovalProof(approvedBehaviorPartitionSource(store, operation, operation, prior, contentHash(JSON.stringify(plan)), member, selection, checkpoints,
-                { settled: new Set() }, { analysisSchemaDigest: binding.analysisSchemaDigest, authorization })))
+                { settled: new Set() }, {
+                  expectedReadSetDigest: operation.readSetDigest, expectedComposedDigest: view.composed.contentDigest, analysisSchemaDigest: binding.analysisSchemaDigest, authorization,
+                })))
               if (error) fail('sync_p0_challenge_binding', error)
             } else if (partitionStage<SyncPartitionPlan>(store, operation, prior, 'partition-plan')?.result.digest !== plan.digest || source.result.traces.length !== 2 || !source.result.traces.every(trace => stage<{ version: string }>(store, operation, prior, 'behavior-draft-protocol')?.version === 'code-behavior-draft-v1' ? behaviorTraceBinding(store, operation, prior, key, trace) : prior.dispatchPlans.some(dispatch => dispatch.purpose === trace.purpose && dispatch.session?.sessionId === trace.sessionId && dispatch.session.threadId === trace.threadId && dispatch.session.turnId === trace.turnId))) continue
             if (prior.id === current.id) return source.result
