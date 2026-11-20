@@ -9,8 +9,9 @@ import { stripRefSigil } from './mentions.js'
 export async function runSyncCli(argv: readonly string[]): Promise<void> {
   const [verb] = argv
   if (verb === 'check') return (await import('./sync/conformance-cli.js')).runConformanceCli(argv.slice(1))
+  const challengeValues = ['--expected-revision', '--partition', '--diagnostic-file']
   const continuityValues = ['--revision', '--enabled-digest', '--old-common-dev', '--old-root-dev', '--old-git-dev']
-  const values = new Set(['--node', '--request-id', '--model', '--retry-of', '--patch-file', '--limit', '--config-digest', '--api', '--port', '--password', '--origin', '--input-id', '--analysis', '--findings', '--choice', '--rule', ...continuityValues])
+  const values = new Set(['--node', '--request-id', '--model', '--retry-of', '--patch-file', '--limit', '--config-digest', '--api', '--port', '--password', '--origin', '--input-id', '--analysis', '--findings', '--choice', '--rule', ...continuityValues, ...challengeValues])
   const allowed = new Set([...values, '--json', '--insecure', '--committed', '--record-unverified-coverage', '--inherit-retry-budget'])
   const positional: string[] = []
   const flags = new Map<string, string>()
@@ -24,8 +25,10 @@ export async function runSyncCli(argv: readonly string[]): Promise<void> {
       flags.set(token, value)
     }
   }
-  if (verb !== 'decide' && ['--analysis', '--findings', '--choice', '--rule'].some(flag => flags.has(flag))) throw usage('裁决选项只用于 sync decide')
-  if (!['decide', 'resources', 'source-continuity'].includes(verb ?? '') && flags.has('--input-id')) throw usage('--input-id只用于裁决或显式离线恢复入口')
+  if (verb !== 'decide' && ['--findings', '--choice', '--rule'].some(flag => flags.has(flag))) throw usage('裁决选项只用于 sync decide')
+  if (verb !== 'decide' && verb !== 'challenge' && flags.has('--analysis')) throw usage('--analysis 只用于 sync decide 或 sync challenge')
+  if (verb !== 'challenge' && challengeValues.some(flag => flags.has(flag))) throw usage('复审选项只用于 sync challenge')
+  if (!['decide', 'challenge', 'resources', 'source-continuity'].includes(verb ?? '') && flags.has('--input-id')) throw usage('--input-id 只用于裁决、复审或显式离线恢复入口')
   if (verb !== 'source-continuity' && continuityValues.some(flag => flags.has(flag))) throw usage('连续性证明选项只用于 sync source-continuity')
   if (!['run', 'verify', 'status'].includes(verb ?? '') && flags.has('--node')) throw usage('--node 只用于 sync run、verify 或 status，物理暂停请省略节点选项')
   if (verb !== 'run' && flags.has('--patch-file')) throw usage('--patch-file 只用于 sync run')
@@ -72,6 +75,15 @@ export async function runSyncCli(argv: readonly string[]): Promise<void> {
     if (retryOf && patchFile) throw usage('--retry-of 沿用原正文意图，不能同时指定 --patch-file')
     const patch = patchFile ? readSpecBodyEdit(JSON.parse(readFileSync(patchFile, 'utf8')) as unknown) : undefined
     result = await clientSyncRequest(verb === 'verify' ? '/verify' : '/run', { targetTree, nodeId: stripRefSigil(nodeId), requestId: flags.get('--request-id') ?? randomUUID(), ...(retryOf ? { retryOf, ...(flags.has('--origin') ? { origin: flags.get('--origin') } : {}) } : { origin: flags.get('--origin') ?? 'spec' }), ...(flags.has('--model') ? { model: flags.get('--model') } : {}), ...(inheritRetryBudget ? { inheritRetryBudget } : {}), ...(patch ? { patch } : {}), ...(committed ? { committed } : {}), ...(recordUnverifiedCoverage ? { recordUnverifiedCoverage } : {}) })
+  } else if (verb === 'challenge') {
+    const required = ['--request-id', '--input-id', '--analysis', ...challengeValues]
+    const expectedRevision = Number(flags.get('--expected-revision'))
+    if (positional.length !== 1 || !required.every(flag => flags.get(flag)?.trim()) || !Number.isSafeInteger(expectedRevision) || expectedRevision < 1
+      || !/^[a-f0-9]{64}$/.test(flags.get('--analysis')!)) throw usage('challenge 需要 operation ID、--request-id、--expected-revision、--input-id、--partition、--analysis SHA 和 --diagnostic-file')
+    if ([...flags.keys()].some(flag => ![...required, '--api', '--port', '--password'].includes(flag))) throw usage('challenge 仅接受复审身份、诊断文件和 API 路由选项')
+    const diagnostic = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(readFileSync(flags.get('--diagnostic-file')!))
+    result = await clientSyncRequest(`/operations/${encodeURIComponent(positional[0])}/challenge`, { targetTree, requestId: flags.get('--request-id'), expectedRevision,
+      inputId: flags.get('--input-id'), partitionId: flags.get('--partition'), analysisRef: { sha256: flags.get('--analysis') }, diagnostic })
   } else if (verb === 'decide') {
     if (positional.length !== 1 || !['--input-id', '--analysis', '--findings', '--choice'].every(flag => flags.has(flag))) throw usage('decide 需要 operation ID、--input-id、--analysis、--findings 与 --choice')
     const choice = flags.get('--choice')!
@@ -93,7 +105,7 @@ export async function runSyncCli(argv: readonly string[]): Promise<void> {
     if (positional.length !== 1) throw usage(`${verb} 需要完整 operation ID`)
     const path = `/operations/${encodeURIComponent(positional[0])}`
     result = verb === 'show' ? await clientSyncRequest(`${path}?${query}`) : await clientSyncRequest(`${path}/${verb}`, { targetTree })
-  } else throw usage('用法：spex sync settings|enable|status|run|verify|decide|show|pause|resume|cancel|recover|resources|adopt|revert|stop-writer|check（spex help sync）')
+  } else throw usage('用法：spex sync settings|enable|status|run|verify|decide|challenge|show|pause|resume|cancel|recover|resources|adopt|revert|stop-writer|check（spex help sync）')
   console.log(JSON.stringify(result, null, 2))
 }
 function usage(message: string): Error { const error = new Error(message); error.name = 'UsageError'; return error }

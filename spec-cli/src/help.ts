@@ -434,6 +434,7 @@ consumes the token after it.`,
        spex sync status [--node <node-id>] [--limit N] [--json]
        spex sync run <node-id> [--request-id <id>] [--patch-file <json>] [--retry-of <operation-id>] [--origin spec|initial|code|combined] [--committed] [--model <model-id>] [--record-unverified-coverage] [--inherit-retry-budget]
        spex sync decide <operation-id> --input-id <id> --analysis <sha256> --findings <id,...> --choice keep_intent|adopt_behavior|new_rule [--rule <text>] [--request-id <id>]
+       spex sync challenge <operation-id> --request-id <id> --expected-revision <N> --input-id <id> --partition <id> --analysis <sha256> --diagnostic-file <utf8>
        spex sync show <operation-id>
        spex sync pause|resume
        spex sync verify <node-id> [--request-id <id>] [--model <model-id>]
@@ -458,6 +459,7 @@ run --origin initial --committed 仅从实际提交 HEAD 初始化，排除工�
 直接进入完整操作，不先单独提交 Spec。重复 --request-id 幂等；不同内容不能复用同一键。
 recover 只核对并结算已有资源或已开始的交付日志，保持原控制、输入及预算，不派发新模型任务。
 resources recover 是单次离线资源清理；必须明确原input-id，不启动API/队列，不回放journal，也不改变业务失败或取得resume/adopt权限。
+challenge 在原生分区 P0 已暂停且未派发 P1 时登记具体复审，诊断由新独审根据冻结资料判定。登记后用 resume 续审。
 resume 继续原操作，--retry-of 建立关联新操作；三个入口各自有明确门禁。
 手动 --model 优先于项目 sync.model。省略模型时，同 request/retry 继承原选择；新原生操作依次读取项目设置、宿主 CLI 功能组，缺省沿用 Claude Code。换模型使用 --retry-of --model。模型固定于 operation 和独审请求，resume/recover 沿用原选择。
 --model llm-manager 或 sync.model=llm-manager 在新原生操作准入时解析已登记的宿主 CLI 功能组。cursor:default 沿用本机 Cursor CLI 配置。

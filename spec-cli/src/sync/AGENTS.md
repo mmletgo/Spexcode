@@ -86,3 +86,5 @@
 - writer33保护P1 V5事实资格；旧V1–V4/缺席、saved/reserved请求不补升级。升级先停稳旧writer/结算资源并做32一致online backup，回滚停新writer并恢复32库及配套evidence/Git refs，禁止删marker。旧批准owner按原source protocol冷验，新返修才绑定V5。
 
 - writer35 钉新初始化分区策略及跨正式 retry 的局部 P0 批准来源。升级停稳旧 writer 并结算资源及租约，保 v34 一致备份。旧分区按原冻结策略继续。回滚恢复对应 v34 库及证据和 Git refs，不删 marker。
+
+- [[sync-p0-review-challenge]] 只在原生分区 P0 已暂停、源和旧资源正式结算且未派发 P1 时接入。一个 owner 的诊断只给同候选新独审。旧 Git 作者、真实原审及其他 owner 的有效批准保留，目标旧批准必须在 whole/local/retry 快路失效。writer65 升级先停稳、结算旧 writer，保存一致 v64 SQLite online backup 及配套 enabled、Git/CAS。回滚须停稳结算新 writer 后恢复整套备份。

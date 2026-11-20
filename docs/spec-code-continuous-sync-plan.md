@@ -302,6 +302,8 @@ P1 原生进程观测故障结算后，只将下一次真实 P1 返修收紧为�
 
 ### 8.4 失败恢复与资源约束
 
+已暂停并且资源、租约和旧执行权都已正式结算的原生分区 P0，可用 `spex sync challenge` 质疑一个当前已批准的局部分析，前提是尚未派发 P1。诊断只给新独审核查原候选。恢复仍用原预算和原作者 Git JSON，其他分区保留原批准。真实独审 accept 后方能使用新批准，真实 repair 才由该区作者沿原稿续修。writer65 升级先停稳并保留一致 v64 SQLite online backup 及配套配置、Git 和 CAS 证据。
+
 重启仅设备号漂移时，提供正式offline source-continuity登记：原operation/input/revision、旧启用原字节摘要及commonDir/root/gitDir各自旧dev候选；真实Git登记/回链、原branch、当前配置与前后stat稳定后同时精确重算两个旧hash，不搜索猜值、不修旧source。先结算同commonDir全部owned资源/journal并确认无有效lease/attempt/observer/owner，再CAS暂停原PhysicalControl、CAS登记EnabledRecord v2。成功仅恢复身份连续性，后续operator另行resume，旧operation/input/预算/全部CAS原件保持。
 
 commonDir见证统一原logical仓库ID；每root旧physical authority分别证明，新managed工作树仍用真实新stat。实际path/gitDir/branch不投影回旧值，normal currentness/V4/准入及完整source门统一核验；失效v2严格拒绝，raw元数据只给显式证明和专用资源清理。后续config-only model提交与enable新digest可正常保留物理见证链。无新HTTP、维护flag或稳定VolumeUUID框架。

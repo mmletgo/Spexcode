@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
 import fs from 'node:fs'
+import { once } from 'node:events'
+import { createServer } from 'node:net'
+import type { AddressInfo } from 'node:net'
 import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire, syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
@@ -22,6 +25,7 @@ import { buildSyncApplicationPlan } from './planning.js'
 import { restoreGenerationInput } from './generation.js'
 import { CODE_BEHAVIOR_DRAFT_COMMIT_MISSING, CODE_BEHAVIOR_GUIDANCE_VERSION, type CodeBehaviorContinuation } from './code-behavior.js'
 import { SyncApplication } from './application.js'
+import { p0ReviewDiagnosticEvidence } from './behavior-review-challenge.js'
 import * as continuationCoordinator from './coordinator.js'
 import { acceptedCandidateReviewSource, isSyncInputCurrent, prepareSyncAdmission, readCurrentSyncAnalysis, readonlySpecRepairStalled, recoverSyncOperationResources, runSyncOperation, syncPlanDigest } from './coordinator.js'
 import type { SyncCoordinatorOptions, SyncCoordinatorPlan } from './coordinator-types.js'
@@ -1181,16 +1185,25 @@ for (const corruptBinding of ['none', 'native', 'candidate', 'pause-binding', 'p
   assert.equal(calls.some(call => call.purpose === 'code_generate'), false); assert.deepEqual(f.store.listJournals(f.operation.id), [])
 })
 
-for (const partitioned of [false, true]) for (const keepRefactor of [false, true]) for (const formatPhase of !partitioned && !keepRefactor ? ['', 'code_behavior_analyze', 'code_behavior_review'] : ['']) test(`P1后置分类回审 ${partitioned ? 'partition' : 'whole'} ${keepRefactor ? '维持refactor恢复候选' : '重新分析allowed_change'} ${formatPhase}`, async t => {
+for (const partitioned of [false, true]) for (const keepRefactor of [false, true]) for (const formatPhase of !partitioned && !keepRefactor ? ['', 'code_behavior_analyze', 'code_behavior_review'] : partitioned && !keepRefactor ? ['', 'operator-challenge'] : ['']) test(`P1后置分类回审 ${partitioned ? 'partition' : 'whole'} ${keepRefactor ? '维持refactor恢复候选' : '重新分析allowed_change'} ${formatPhase}`, async t => {
+  const operatorChallenge = formatPhase === 'operator-challenge', firstP1Attempt = operatorChallenge ? 2 : 1
   const plan = partitioned ? { version: 'sync-coordinator-v2' as const, direction: 'code_to_spec' as const, sourcePaths: ['src'], writePaths: ['.spec'], partitionPolicy: { version: 'sync-partition-policy-v1' as const, maxReadBytes: 524288, maxParallel: 1 }, commitTrigger: { before: null, paths: ['src/export.js'] } } : {}
   const f = await fixture(t, { maxAttempts: formatPhase ? 3 : 2, maxCalls: 20, maxRepairs: formatPhase ? 2 : 1, timeoutMs: 120_000 }, false, original, 'project', original, { ...plan, agentWorkflow: 'native-worktree-v1' }, undefined, 'code', 'claude:MiniMax-M3.1-Flash', partitioned)
   const calls: ElaborationSessionRequest[] = [], originalBlobs = readTree(f.input.source.commonDir, f.input.immutableTree)
   const draftTexts: string[] = []
+  if (operatorChallenge) {
+    const checkpoint = f.store.checkpoint.bind(f.store), commonDir = f.input.source.commonDir
+    f.store.checkpoint = (fence, ref) => {
+      const attempt = checkpoint(fence, ref)
+      if (attempt.number === 1 && (JSON.parse(readEvidence(commonDir, ref).toString()) as { stage: string }).stage === 'analysis') f.store.requestControl(f.operation.id, 'pause')
+      return attempt
+    }
+  }
   f.store.startGeneration = () => { throw Object.assign(new Error('P1已完整通过，fixture在实现前停止'), { code: 'unsupported' }) }
   f.store.expandContractScope = () => { throw Object.assign(new Error('P1已完整通过，fixture在扩域前停止'), { code: 'unsupported' }) }
   f.options.runner = async request => {
     calls.push(request)
-    const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!), seed = request.worktree!
+    const operation = f.store.readOperation(f.operation.id), attempt = f.store.readAttempt(operation.currentAttemptId!), seed = request.worktree!
     if (request.purpose === 'elaboration_review') {
       const output = { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }, dispatch = attempt.dispatchPlans.find(dispatch => dispatch.key === request.requestKey)!
       return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `postgate-${request.requestKey}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
@@ -1201,7 +1214,7 @@ for (const partitioned of [false, true]) for (const keepRefactor of [false, true
     f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
     let output: unknown
     if (request.purpose === 'code_behavior_analyze') {
-      if (attempt.number === 2) {
+      if (attempt.number === firstP1Attempt + 1) {
         assert.equal(readFileSync(join(workspace, path), 'utf8'), draftTexts[0], '沿认证原P0 JSON续改')
         assert.equal(task.postGateReview?.length, 1)
         const feedback = task.postGateReview![0]
@@ -1211,13 +1224,13 @@ for (const partitioned of [false, true]) for (const keepRefactor of [false, true
         assert.deepEqual(feedback.findings.map(item => ({ ...item.finding, message: '' })), [{ code: 'refactor_business_meaning_changed', message: '', nodeId: 'export-contract', path: contractPath, itemId: 'RULE-EXPORT-05', severity: 'error' }])
         assert.ok(feedback.findings[0].before); assert.ok(feedback.findings[0].after)
       }
-      output = { changes: task.requiredChangedPaths.map(path => ({ kind: attempt.number >= 2 && !keepRefactor ? 'allowed_change' : 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保留原意，核实表示细节', previousBehavior: '原结果和失败事实', sourceBehavior: '普通序列化惯例', deliveryBehavior: '原结果和失败事实', evidence: 'src/export.js#ExportService', counterexample: '不得改变权限或AC/VERIFY' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+      output = { changes: task.requiredChangedPaths.map(path => ({ kind: attempt.number > firstP1Attempt && !keepRefactor ? 'allowed_change' : 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保留原意，核实表示细节', previousBehavior: '原结果和失败事实', sourceBehavior: '普通序列化惯例', deliveryBehavior: '原结果和失败事实', evidence: 'src/export.js#ExportService', counterexample: '不得改变权限或AC/VERIFY' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
     } else if (request.purpose === 'code_behavior_review') {
       const reviewed = readCodeBehaviorContext(request, f.input.source.commonDir).pendingAnalysis! as { analysisDigest: string; analysis: import('./writeback-types.js').CodeBehaviorAnalysis }
       output = { inputDigest: request.inputDigest, analysisDigest: reviewed.analysisDigest, verdict: 'accept', checkedPaths: task.requiredChangedPaths, checkedChangeIds: reviewed.analysis.changes.map(change => change.id), findings: [] }
     } else {
       const changed = rows(original)
-      if (attempt.number === 1 || !keepRefactor) changed.changes[0].tables.RULE.find(row => row.id === 'RULE-EXPORT-05')!.basis = '普通序列化惯例'
+      if (attempt.number === firstP1Attempt || !keepRefactor) changed.changes[0].tables.RULE.find(row => row.id === 'RULE-EXPORT-05')!.basis = '普通序列化惯例'
       output = adaptElaborationNativeOutput(request, changed)
     }
     if (attempt.number === 3 && request.purpose === formatPhase) assert.equal(readFileSync(join(workspace, path), 'utf8'), '{POSTGATE_ORIGINAL_INVALID_JSON')
@@ -1226,11 +1239,32 @@ for (const partitioned of [false, true]) for (const keepRefactor of [false, true
     mkdirSync(join(workspace, path, '..'), { recursive: true }); writeFileSync(join(workspace, path), text)
     execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '--allow-empty', '-m', 'postgate fixture draft'], { stdio: 'pipe' })
     const dispatch = attempt.dispatchPlans.find(dispatch => dispatch.key === request.requestKey)!, receipt = { summary: '正常提交fixture草稿' }
-    return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `postgate-${request.requestKey}`, turnId: 'turn', output: receipt, resultDigest: contentHash(JSON.stringify(receipt)), worktree: nativeWorktreeResult(workspace, seed) }
+    const worktree = nativeWorktreeResult(workspace, seed)
+    if (operatorChallenge && request.purpose.startsWith('code_behavior_')) return settledBehaviorNativeFixture(f.store, operation, request, { output: receipt, worktree })
+    return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `postgate-${request.requestKey}`, turnId: 'turn', output: receipt, resultDigest: contentHash(JSON.stringify(receipt)), worktree }
   }
-  const result = await runSyncOperation(f.store, f.operation.id, f.options)
+  let result = await runSyncOperation(f.store, f.operation.id, f.options)
+  if (operatorChallenge) {
+    assert.equal(result.operation.phase, 'paused')
+    const commonDir = f.input.source.commonDir, operation = result.operation
+    const local = readCurrentSyncAnalysis(f.store, operation)?.analysis.partitionEvidence?.find(item => item.changedPaths.includes('src/export.js'))
+    assert.ok(local)
+    const request = { operationId: operation.id, inputId: operation.input.id, expectedRevision: operation.revision, requestId: 'challenge-before-postgate',
+      analysisRef: local.analysisRef, partitionId: local.partitionId, diagnostic: '独审请检查冻结权限与序列化兼容性' }
+    const challenge = await continuationCoordinator.prepareP0ReviewChallenge(f.store, operation, f.plan, request)
+    assert.deepEqual(writeEvidence(commonDir, p0ReviewDiagnosticEvidence(request)), challenge.diagnosticRef)
+    f.store.authorizeP0ReviewChallenge(operation.id, challenge)
+    f.store.requestControl(operation.id, 'run')
+    result = await runSyncOperation(f.store, operation.id, f.options)
+    const reviews = calls.filter(call => call.purpose === 'code_behavior_review').map(call => readCodeBehaviorContext(call, commonDir))
+    assert.equal(reviews.length, 3, JSON.stringify({ failure: result.failure, phase: result.operation.phase, calls: calls.map(call => call.purpose) }))
+    assert.deepEqual(reviews[1]?.pendingAnalysis, reviews[0]?.pendingAnalysis)
+    assert.deepEqual(reviews[1]?.operatorReviewDiagnostic, { ref: challenge.diagnosticRef, text: request.diagnostic })
+    assert.deepEqual(reviews[2]?.operatorReviewDiagnostic, reviews[1]?.operatorReviewDiagnostic)
+    assert.notEqual(reviews[2]?.pendingAnalysis?.analysisDigest, reviews[1]?.pendingAnalysis?.analysisDigest)
+  }
   assert.equal(calls.filter(call => call.purpose === 'code_behavior_analyze').length, formatPhase === 'code_behavior_analyze' ? 3 : 2, JSON.stringify({ failure: result.failure, calls: calls.map(call => call.purpose) }))
-  assert.equal(calls.filter(call => call.purpose === 'code_behavior_review').length, formatPhase === 'code_behavior_review' ? 3 : 2, JSON.stringify({ failure: result.failure, calls: calls.map(call => call.purpose) }))
+  assert.equal(calls.filter(call => call.purpose === 'code_behavior_review').length, formatPhase === 'code_behavior_review' || operatorChallenge ? 3 : 2, JSON.stringify({ failure: result.failure, calls: calls.map(call => call.purpose) }))
   assert.equal(calls.filter(call => call.purpose === 'elaboration_review').length, 1)
   assert.equal(calls.filter(call => call.purpose === 'code_generate').length, 0)
   const analyses = calls.filter(call => call.purpose === 'code_behavior_analyze')
@@ -1406,7 +1440,7 @@ function gitReadCounter(directory: string): { reset(): void; entries(): string[]
     },
   }
 }
-async function fixture(t: test.TestContext, budget: import('./operation-types.js').SyncBudget = { maxAttempts: 3, maxCalls: 16, maxRepairs: 2, timeoutMs: 300_000 }, adopt = false, specSource = original, projectId = 'project', factsSource = specSource, planPatch: Partial<SyncCoordinatorPlan> = {}, controlledEdit?: { original: string; replacement: string; intent: string; testPath: string }, origin: 'spec' | 'code' | 'combined' = 'spec', model?: string, precise: boolean | SyncOperation['scope'] = false, extraSpecs: Readonly<Record<string, string>> = {}, committedInput = false, syncSettings?: import('./settings.js').SyncSettings, postCommitOracleEdit = false) {
+async function fixture(t: test.TestContext, budget: import('./operation-types.js').SyncBudget = { maxAttempts: 3, maxCalls: 16, maxRepairs: 2, timeoutMs: 300_000 }, adopt = false, specSource = original, projectId = 'project', factsSource = specSource, planPatch: Partial<SyncCoordinatorPlan> = {}, controlledEdit?: { original: string; replacement: string; intent: string; testPath: string }, origin: 'spec' | 'code' | 'combined' = 'spec', model?: string, precise: boolean | SyncOperation['scope'] = false, extraSpecs: Readonly<Record<string, string>> = {}, committedInput = false, syncSettings?: import('./settings.js').SyncSettings, postCommitOracleEdit = false, canonicalProtocol = false) {
   const parent = realpathSync(mkdtempSync(join(tmpdir(), 'sync-coordinator-'))), root = join(parent, 'source'), managedRoot = join(parent, 'managed'), artifactRoot = join(parent, 'artifacts')
   mkdirSync(root); mkdirSync(managedRoot, { mode: 0o700 }); mkdirSync(artifactRoot, { mode: 0o700 }); cpSync(fixturePath, root, { recursive: true })
   const targetPath = `.spec/${projectId}/export-contract/spec.md`
@@ -1444,7 +1478,16 @@ async function fixture(t: test.TestContext, budget: import('./operation-types.js
     const request = prepareControlledRequest(input, prepared, { kind: 'user_edit', requestId: `controlled-${contentHash(controlledEdit.intent)}`, nodeId: 'export-contract', intent: controlledEdit.intent })
     assert.equal(request.changed, true); requestBlob = request.requestBlob!
   }
-  const protocol = openProtocol(join(parent, 'sync.sqlite')); await migrateSyncStore(protocol, { backupPath: join(parent, 'db-backup') })
+  const databasePath = join(parent, 'sync.sqlite')
+  if (canonicalProtocol) {
+    const home = join(parent, 'api-home')
+    mkdirSync(home)
+    const sessionApplication = new URL('../session-application.ts', import.meta.url).href
+    const initialize = `import { configuredSessionApplication } from ${JSON.stringify(sessionApplication)}; configuredSessionApplication().protocol.close()`
+    execFileSync(process.execPath, ['--import', import.meta.resolve('tsx'), '--input-type=module', '--eval', initialize],
+      { cwd: root, env: { ...process.env, SPEXCODE_HOME: home, SPEX_SESSION_DATABASE_PATH: databasePath }, stdio: 'pipe' })
+  }
+  const protocol = openProtocol(databasePath); await migrateSyncStore(protocol, { backupPath: join(parent, 'db-backup') })
   let store = new SyncStore(protocol, { readBlob: ref => readEvidence(input.source.commonDir, ref) })
   const exactScope = typeof precise === 'object' ? precise : plan.executionScope ?? { paths: plan.targets.map(target => target.path), contractIds: [], flowIds: [] }
   const selected = precise ? store.readBaselineSelection(input.source, [...readTree(input.source.commonDir, input.immutableTree).map(entry => ({ kind: 'path' as const, path: entry.path })), ...exactScope.contractIds.map(id => ({ kind: 'contract' as const, id })), ...exactScope.flowIds.map(id => ({ kind: 'flow' as const, id }))]) : null
@@ -9076,7 +9119,8 @@ test('Coordinator 已有code且P1新增managed AC.test的null路径只续原评�
 })
 
 
-for (const failureKind of ['format', 'business', 'protocol'] as const) for (const legacyMaterial of [false, true]) for (const partitioned of [false, true]) for (const phase of ['code_behavior_analyze', 'code_behavior_review']) if (failureKind === 'format' || !legacyMaterial && phase === 'code_behavior_review' && (failureKind === 'protocol' || !partitioned)) test(`Native P0 ${partitioned ? '分区' : '单体'} ${phase}${failureKind === 'protocol' ? 'ID协议失败SQLite冷恢复' : '格式失败持久续改'}，${failureKind === 'business' ? '业务repair重做分析独审' : legacyMaterial ? '旧Native材料' : '保已校验分析'}与只读对象`, async t => {
+for (const failureKind of ['format', 'business', 'protocol'] as const) for (const legacyTransport of [undefined, 'git-json-v5', 'git-json-v6'] as const) for (const partitioned of [false, true]) for (const phase of ['code_behavior_analyze', 'code_behavior_review']) if (failureKind === 'format' || !legacyTransport && phase === 'code_behavior_review' && (failureKind === 'protocol' || !partitioned)) test(`Native P0 ${partitioned ? '分区' : '单体'} ${phase}${failureKind === 'protocol' ? 'ID协议失败SQLite冷恢复' : '格式失败持久续改'}，${failureKind === 'business' ? '业务repair重做分析独审' : legacyTransport ? '旧Native材料' : '保已校验分析'}与只读对象${legacyTransport ? ` transport=${legacyTransport}` : ''}`, async t => {
+  const legacyMaterial = legacyTransport !== undefined, exactLegacyTask = legacyTransport === 'git-json-v5'
   const businessRepair = failureKind === 'business', protocolRepair = failureKind === 'protocol'
   const plan = partitioned ? { version: 'sync-coordinator-v2' as const, direction: 'code_to_spec' as const, sourcePaths: ['src'], writePaths: ['.spec'], partitionPolicy: { version: 'sync-partition-policy-v1' as const, maxReadBytes: 524288, maxParallel: 1 }, commitTrigger: { before: null, paths: ['src/export.js'] } } : {}
   const legacyRounds = legacyMaterial && phase === 'code_behavior_analyze' ? 2 : 1
@@ -9093,6 +9137,16 @@ for (const failureKind of ['format', 'business', 'protocol'] as const) for (cons
     const claimNext = (input: Parameters<typeof claimLegacy>[0]) => {
       const next = claimLegacy(input)
       if (next.attempt.number <= legacyRounds) f.store.reserveDispatch(next.fence, { key: `sync:${next.attempt.id}:historical-reserved-p0`, purpose: 'code_behavior_analyze', requestDigest: contentHash('frozen next original read request') })
+      else if (exactLegacyTask) {
+        const commonDir = f.input.source.commonDir, selection = f.store.readBusinessBaselineSelection(f.operation.id)
+        const protocol = { version: 'code-behavior-draft-v1', contextTransport: legacyTransport }, resultRef = writeEvidence(commonDir, protocol)
+        const artifacts = syncCheckpointArtifacts(protocol, resultRef)
+        const baselineSelectionRef = selection ? writeEvidence(commonDir, selection) : undefined
+        if (baselineSelectionRef) artifacts.push({ kind: 'json', ref: baselineSelectionRef })
+        const wrapper = writeEvidence(commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: next.attempt.id, inputId: f.input.id,
+          policyDigest: f.operation.policyDigest, readSetDigest: f.operation.readSetDigest, baselineSelectionRef, stage: 'behavior-draft-protocol', resultRef })
+        f.store.checkpoint(next.fence, { ...wrapper, artifacts })
+      }
       return next
     }
     if (partitioned) f.store.claimQueuedAttempt = claimNext
@@ -9132,7 +9186,10 @@ for (const failureKind of ['format', 'business', 'protocol'] as const) for (cons
     else {
       if (request.purpose === phase) {
         assert.equal(attempt.number, legacyRounds + 1)
-        if (businessRepair) assert.equal(existsSync(join(workspace, path)), false)
+        if (businessRepair || legacyMaterial && !exactLegacyTask) {
+          assert.equal(existsSync(join(workspace, path)), false)
+          if (legacyMaterial) assert.doesNotMatch(request.prompt, /旧Native原输出材料/)
+        }
         else {
           assert.equal(readFileSync(join(workspace, path), 'utf8'), invalid)
           if (protocolRepair) {
@@ -9176,7 +9233,7 @@ for (const failureKind of ['format', 'business', 'protocol'] as const) for (cons
   assert.ok(stages.at(-1)!.some(entry => entry.stage === 'behavior-draft-protocol'))
   if (legacyMaterial) {
     assert.ok(!stages[0].some(entry => entry.stage === 'behavior-draft-protocol'))
-    assert.ok(stages.at(-1)!.some(entry => entry.stage.endsWith(`${phase}:native-material-provenance`)))
+    assert.equal(stages.at(-1)!.some(entry => entry.stage.endsWith(`${phase}:native-material-provenance`)), exactLegacyTask)
     assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
     assert.equal(f.store.listJournals(f.operation.id).length, 0); return
   }
@@ -11534,4 +11591,258 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
     assert.deepEqual(store.listAttempts(originalOperation.id), originalAttempts)
     assert.equal(calls.some(call => call.purpose.startsWith('code_behavior_')), false, '换模型不重做已审P0')
   }
+})
+
+for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派指定已批准分区 mode=${mode}`, { timeout: 120_000 }, async t => {
+  const importPath = '.spec/project/import-contract/spec.md', archivePath = '.spec/project/archive-contract/spec.md'
+  const copySpec = (name: 'import' | 'archive') => original.replaceAll('export-job', `${name}-job`).replaceAll('EXPORT', name.toUpperCase()).replaceAll('export-contract', `${name}-contract`).replaceAll('src/export.js', `src/${name}.js`).replaceAll('tests/export.test.mjs', `tests/${name}.test.mjs`)
+  const budget = { maxAttempts: 8, maxCalls: 24, maxRepairs: 4, timeoutMs: 120000 }
+  const syncSettings: import('./settings.js').SyncSettings = {
+    version: 'sync-settings-v1', sourcePaths: ['src'], testPaths: ['generated-tests'], readPaths: ['tests'], nodeIds: ['export-contract'], facts: [], mandatoryTests: [], budget,
+    verifications: [{ definition: { id: 'VERIFY-EXPORT-01', command: ['node', '--test', 'tests/export.test.mjs'], cwd: '.', timeoutMs: 1000 }, environment: { version: 'trusted-test-v1', image: 'node@sha256:' + 'a'.repeat(64), platform: 'linux/arm64', memoryBytes: 10000000, cpus: 1, pidsLimit: 64, scratchBytes: 1000000, logBytes: 100000 } }],
+  }
+  const f = await fixture(t, budget, false, original, 'project', original, {
+    version: 'sync-coordinator-v2', direction: 'code_to_spec', agentWorkflow: 'native-worktree-v1', sourcePaths: ['src'], writePaths: ['.spec'],
+    targets: [{ nodeId: 'export-contract', path: contractPath }, { nodeId: 'import-contract', path: importPath }, { nodeId: 'archive-contract', path: archivePath }],
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 32768, maxParallel: 1 }, commitTrigger: { before: null, paths: ['src/export.js', 'src/import.js', 'src/archive.js'] },
+  }, undefined, 'code', 'claude:default', true, {
+    [importPath]: copySpec('import'), [archivePath]: copySpec('archive'),
+    'src/import.js': 'export class ImportService {}\n', 'src/archive.js': 'export class ArchiveService {}\n',
+    'tests/import.test.mjs': 'import assert from "node:assert/strict"\n', 'tests/archive.test.mjs': 'import assert from "node:assert/strict"\n',
+  }, false, syncSettings, false, mode === 'accept')
+  let store = f.store, active = f.operation, pauseWholeAt = 1, pauseFailureAt = 0
+  const calls: string[] = []
+  const diagnostic = '待核：原权限边界遗漏已存在的代码分支。'
+  const findings = [{ message: '权限边界描述遗漏原输入分支', evidence: '冻结 src/export.js 实际分支', counterexample: '已验范围内的输入必须保留原活动限制' }]
+  let challengedId: string | undefined, originalDraft: string | undefined
+  let repairDraft: { commit: string; path: string } | undefined
+  const originals = new Map<string, NonNullable<ReturnType<typeof readCodeBehaviorContext>['pendingAnalysis']>>()
+  const commonDir = f.input.source.commonDir
+  f.options.runner = async request => {
+    if (!request.purpose.startsWith('code_behavior_')) throw Object.assign(new Error('夹具在P0完成后停止'), { code: 'unsupported' })
+    const operation = store.readOperation(active.id), attempt = store.readAttempt(operation.currentAttemptId!)
+    const { task, pendingAnalysis, operatorReviewDiagnostic } = readCodeBehaviorContext(request, commonDir)
+    const { requiredChangedPaths, partition } = task as { requiredChangedPaths: string[]; partition: { id: string } }
+    calls.push(`${operation.id}:${attempt.number}:${partition.id}:${request.purpose}`)
+    const initial = active.id === f.operation.id && attempt.number === 1
+    const path = /草稿文件=([^\s；]+)/.exec(request.prompt)![1]
+    if (initial && pendingAnalysis) originals.set(partition.id, pendingAnalysis)
+    if (!initial) {
+      assert.equal(partition.id, challengedId)
+      if (pendingAnalysis) {
+        assert.equal(operatorReviewDiagnostic?.text, diagnostic)
+        if (active.id === f.operation.id || attempt.number === 1) assert.deepEqual(pendingAnalysis, originals.get(partition.id))
+      } else {
+        assert.equal(operatorReviewDiagnostic, undefined)
+        assert.ok(repairDraft && request.prompt.includes(`${repairDraft.commit}:${repairDraft.path}`))
+        assert.deepEqual(JSON.parse(f.git('show', `${repairDraft.commit}:${repairDraft.path}`)).findings, findings)
+        assert.equal(f.git('show', `${request.worktree!.baseCommit}:${path}`), originalDraft)
+      }
+    } else assert.equal(operatorReviewDiagnostic, undefined)
+    const domain = requiredChangedPaths.some(path => path.endsWith('/import.js')) ? 'IMPORT' : requiredChangedPaths.some(path => path.endsWith('/archive.js')) ? 'ARCHIVE' : 'EXPORT'
+    const output = pendingAnalysis ? { inputDigest: request.inputDigest, analysisDigest: pendingAnalysis.analysisDigest, verdict: 'accept', checkedPaths: requiredChangedPaths, checkedChangeIds: pendingAnalysis.analysis.changes.map(change => change.id), findings: [] as typeof findings }
+      : { changes: requiredChangedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: [`RULE-${domain}-05`], ruleIds: [`RULE-${domain}-05`], originalIntent: '保留原业务', previousBehavior: '原权限', sourceBehavior: '原权限', deliveryBehavior: '原权限', evidence: path, counterexample: '必须保留原权限' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    if (initial && !pendingAnalysis && requiredChangedPaths.includes('src/export.js')) originalDraft = JSON.stringify(output)
+    if (mode === 'repair' && !initial && active.id === f.operation.id) {
+      if ([3, 5].includes(attempt.number)) return settledBehaviorNativeFixture(store, operation, request, { error: '受控原生执行失败，已正式停止' })
+      if (attempt.number === 2) output.findings = findings
+      else output.verdict = 'repair'
+    }
+    if (mode === 'repair' && active.id !== f.operation.id && attempt.number === 1) {
+      output.verdict = 'repair'
+      output.findings = findings
+    }
+    if (mode === 'repair' && active.id !== f.operation.id && !pendingAnalysis) output.changes![0].sourceBehavior = '原活动限制和输入分支均保持'
+    const worktree = committedDraftFixture(f, request, output, join(f.parent, `p0-challenge-${calls.length}`))
+    if (output.verdict === 'repair') repairDraft = { commit: worktree.headCommit, path }
+    return settledBehaviorNativeFixture(store, operation, request, { output: { summary: '分区真实Git草稿' }, worktree })
+  }
+  const pauseAtBoundary = () => {
+    const checkpoint = store.checkpoint.bind(store), recordFailure = store.recordFailure.bind(store)
+    store.checkpoint = (fence, ref) => {
+      const attempt = checkpoint(fence, ref), wrapper = JSON.parse(readEvidence(commonDir, ref).toString()) as { stage?: string }
+      if (wrapper.stage === 'analysis' && attempt.number === pauseWholeAt) store.requestControl(active.id, 'pause')
+      return attempt
+    }
+    store.recordFailure = (fence, failure) => {
+      const failed = recordFailure(fence, failure)
+      if (store.readAttempt(fence.attemptId).number === pauseFailureAt) store.requestControl(active.id, 'pause')
+      return failed
+    }
+  }
+  pauseAtBoundary()
+  await runSyncOperation(store, f.operation.id, f.options)
+  const paused = store.readOperation(f.operation.id), origin = store.readAttempt(paused.currentAttemptId!)
+  const analysis = readCurrentSyncAnalysis(store, paused)
+  assert.equal(paused.phase, 'paused', JSON.stringify({ failure: origin.failure, calls }))
+  assert.equal(paused.callsUsed, 6)
+  assert.equal(analysis?.analysis.partitionEvidence?.length, 3, JSON.stringify({ failure: origin.failure, calls }))
+  assert.equal(store.listRecoverableResources().length, 0)
+  assert.equal(store.hasVerificationOrJournal(paused.id), false)
+  const target = analysis.analysis.partitionEvidence!.find(item => item.changedPaths.includes('src/export.js'))!
+  challengedId = target.partitionId
+  const request = { operationId: paused.id, expectedRevision: paused.revision, inputId: paused.input.id, partitionId: target.partitionId, requestId: 'operator-review', analysisRef: target.analysisRef, diagnostic }
+  let recorded: Awaited<ReturnType<SyncApplication['challengeP0']>>
+  if (mode === 'accept') {
+    const listener = createServer().listen(0, '127.0.0.1')
+    await once(listener, 'listening')
+    const { port } = listener.address() as AddressInfo
+    await new Promise<void>(resolve => listener.close(() => resolve()))
+    const api = `http://127.0.0.1:${port}`, apiHome = join(f.parent, 'api-home')
+    const env = { ...process.env, PORT: String(port), SPEXCODE_HOME: apiHome, SPEX_SESSION_DATABASE_PATH: join(f.parent, 'sync.sqlite') }
+    const serverEntry = fileURLToPath(new URL('../index.ts', import.meta.url)), cliEntry = fileURLToPath(new URL('../cli.ts', import.meta.url))
+    const backend = spawn(process.execPath, ['--import', import.meta.resolve('tsx'), serverEntry], { cwd: f.root, env, stdio: ['ignore', 'pipe', 'pipe'] })
+    let log = ''
+    for (const out of [backend.stdout, backend.stderr]) out.on('data', (bytes: Buffer) => { log += bytes.toString('utf8') })
+    const exited = once(backend, 'exit')
+    const post = (path: string, body: unknown) => fetch(`${api}/api/sync${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ targetTree: f.root, ...body as object }) })
+    const operation = `/operations/${paused.id}`
+    const cli = (args: string[]) => execFileSync(process.execPath, ['--import', import.meta.resolve('tsx'), cliEntry, 'sync', ...args, '--api', api], { cwd: f.root, env, encoding: 'utf8' })
+    try {
+      const deadline = Date.now() + 15_000
+      while (!await fetch(`${api}/health`).then(response => response.ok).catch(() => false)) {
+        assert.ok(Date.now() < deadline && backend.exitCode === null, log)
+        await new Promise(resolve => setTimeout(resolve, 40))
+      }
+      for (const path of ['/automatic/pause', '/settings']) {
+        const response = await post(path, {})
+        assert.equal(response.status, 200, `${path}: ${await response.text()}\n${log}`)
+      }
+      for (const [patch, status, code] of [
+        [{ operationId: 'foreign-operation' }, 400, 'sync_p0_challenge_invalid'],
+        [{ forgedTrace: target.analysis.traces[1] }, 400, 'sync_p0_challenge_invalid'],
+        [{ inputId: 'foreign-input' }, 409, 'sync_p0_challenge_stale'],
+        [{ expectedRevision: request.expectedRevision - 1 }, 409, 'sync_p0_challenge_binding'],
+        [{ partitionId: 'foreign-owner' }, 409, 'sync_p0_challenge_binding'],
+        [{ analysisRef: { sha256: 'a'.repeat(64) } }, 409, 'sync_p0_challenge_binding'],
+        [{ analysisRef: analysis.analysis.partitionEvidence!.find(item => item.partitionId !== target.partitionId)!.analysisRef }, 409, 'sync_p0_challenge_binding'],
+      ] as const) {
+        const refused = await post(`${operation}/challenge`, { ...request, ...patch })
+        assert.equal(refused.status, status)
+        assert.equal((await refused.json() as { code: string }).code, code)
+      }
+      const changedPath = join(f.root, 'src/export.js')
+      writeFileSync(changedPath, Buffer.concat([f.bytes, Buffer.from('\n// external drift\n')]))
+      try {
+        const drift = await post(`${operation}/challenge`, request)
+        assert.equal(drift.status, 409)
+        assert.equal((await drift.json() as { code: string }).code, 'sync_p0_challenge_stale')
+      } finally { writeFileSync(changedPath, f.bytes) }
+      const diagnosticFile = join(f.parent, 'diagnostic.txt')
+      writeFileSync(diagnosticFile, diagnostic, 'utf8')
+      recorded = JSON.parse(cli(['challenge', paused.id, '--request-id', request.requestId, '--expected-revision', String(request.expectedRevision),
+        '--input-id', request.inputId, '--partition', request.partitionId, '--analysis', request.analysisRef.sha256, '--diagnostic-file', diagnosticFile])) as typeof recorded
+      const replay = await post(`${operation}/challenge`, request)
+      assert.equal(replay.status, 200)
+      assert.deepEqual(await replay.json(), recorded)
+      const conflict = await post(`${operation}/challenge`, { ...request, diagnostic: 'different diagnostic' })
+      assert.equal(conflict.status, 409)
+      assert.equal((await conflict.json() as { code: string }).code, 'SYNC_IDEMPOTENCY_CONFLICT')
+      assert.equal(readCurrentSyncAnalysis(store, recorded.operation), null)
+      const resumed = JSON.parse(cli(['resume', paused.id])) as { operation: SyncOperation }
+      assert.equal(resumed.operation.phase, 'queued')
+      assert.equal(resumed.operation.callsUsed, paused.callsUsed)
+    } finally {
+      if (backend.exitCode === null && backend.signalCode === null) backend.kill('SIGTERM')
+      await exited
+    }
+  } else {
+    const application = await SyncApplication.create(f.root, { protocol: f.protocol, runtimeDirectory: join(f.parent, 'application'), tools: f.options.tools })
+    await application.enable()
+    recorded = await application.challengeP0(request)
+    assert.equal(readCurrentSyncAnalysis(store, recorded.operation), null)
+    store.requestControl(paused.id, 'run')
+  }
+  assert.equal(recorded.operation.phase, 'paused')
+  assert.equal(recorded.operation.callsUsed, paused.callsUsed)
+  assert.deepEqual(store.readAttempt(origin.id), origin)
+  f.closeForRestart()
+  let protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
+  const useColdStore = () => {
+    store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) }); f.useStore(store); pauseAtBoundary()
+  }
+  useColdStore()
+  if (mode === 'accept') {
+    const physical = store.readPhysicalControl(paused.input.source)
+    assert.equal(physical.control, 'pause')
+    store.requestPhysicalControl(paused.input.source, 'run', physical.revision)
+    pauseWholeAt = 2
+  } else {
+    pauseWholeAt = 0
+    for (const attempt of [2, 3, 4]) {
+      pauseFailureAt = attempt
+      await runSyncOperation(store, active.id, f.options)
+      const stopped = store.readOperation(active.id)
+      assert.equal(stopped.phase, 'paused')
+      assert.equal(store.readAttempt(stopped.currentAttemptId!).failure?.code, attempt === 3 ? 'failed' : 'behavior_review_failed')
+      assert.equal(readCurrentSyncAnalysis(store, stopped), null)
+      assert.equal(stopped.callsUsed, 6 + attempt - 1)
+      protocol.close()
+      protocol = openProtocol(join(f.parent, 'sync.sqlite'))
+      useColdStore()
+      store.requestControl(stopped.id, 'run')
+    }
+    pauseFailureAt = 0
+    const failed = await runSyncOperation(store, active.id, f.options)
+    assert.equal(failed.operation.phase, 'failed')
+    assert.equal(failed.operation.callsUsed, 10)
+    assert.equal(readCurrentSyncAnalysis(store, failed.operation), null)
+    assert.equal(store.listRecoverableResources().length, 0)
+    protocol.close()
+    protocol = openProtocol(join(f.parent, 'sync.sqlite'))
+    useColdStore()
+    const retry = await prepareSyncAdmission(f.input, f.plan, { ingressKey: 'p0-challenge-retry', rootCauseId: 'p0-challenge-retry', retryOf: failed.operation.id,
+      model: 'zcode:default', origin: failed.operation.origin, budget: failed.operation.budget, managedRoot: f.managedRoot,
+      baselineSelection: store.readBusinessBaselineSelection(failed.operation.id), executionScope: failed.operation.scope, impactDigest: failed.operation.impactDigest })
+    active = store.admitAndEnqueue(retry)
+    active = store.ackDispatch(f.input.source.repositoryId, active.dispatchMessageId)
+    f.useOperation(active)
+    assert.equal(active.deadlineAtMs, paused.deadlineAtMs)
+    assert.deepEqual(active.budget, paused.budget)
+    assert.equal(store.readBudgetUsage(active.id).callsUsed, 10)
+    pauseWholeAt = 2
+  }
+  const outcome = await runSyncOperation(store, active.id, f.options)
+  const resumed = store.readOperation(active.id), current = readCurrentSyncAnalysis(store, resumed)
+  assert.equal(resumed.phase, 'paused', JSON.stringify({ failure: outcome.failure, calls }))
+  assert.ok(current)
+  const currentLocal = current.analysis.partitionEvidence!.find(item => item.partitionId === target.partitionId)!
+  assert.notEqual(currentLocal.analysisRef.sha256, target.analysisRef.sha256)
+  assert.deepEqual(currentLocal.analysis.reviewDiagnosticRef, recorded.challenge.diagnosticRef)
+  assert.notEqual(currentLocal.analysis.traces[1].sessionId, target.analysis.traces[1].sessionId)
+  assert.equal(currentLocal.analysis.inputDigest, target.analysis.inputDigest)
+  const afterOrigin = calls.slice(6).map(call => call.split(':').slice(1).join(':'))
+  if (mode === 'accept') {
+    assert.deepEqual(currentLocal.analysis.traces[0], target.analysis.traces[0])
+    assert.deepEqual(afterOrigin, [`2:${target.partitionId}:code_behavior_review`])
+    assert.equal(resumed.callsUsed, paused.callsUsed + 1)
+  } else {
+    assert.notEqual(currentLocal.analysis.traces[0].sessionId, target.analysis.traces[0].sessionId)
+    assert.deepEqual(afterOrigin, [`2:${target.partitionId}:code_behavior_review`, `3:${target.partitionId}:code_behavior_review`, `4:${target.partitionId}:code_behavior_review`, `5:${target.partitionId}:code_behavior_review`, `1:${target.partitionId}:code_behavior_review`, `2:${target.partitionId}:code_behavior_analyze`, `2:${target.partitionId}:code_behavior_review`])
+    assert.equal(store.readBudgetUsage(active.id).callsUsed, 13)
+  }
+  for (const sibling of analysis.analysis.partitionEvidence!.filter(item => item.partitionId !== target.partitionId)) {
+    assert.deepEqual(current.analysis.partitionEvidence!.find(item => item.partitionId === sibling.partitionId)?.analysisRef, sibling.analysisRef)
+  }
+  assert.deepEqual(store.readAttempt(origin.id), origin)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+  assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+  t.diagnostic(JSON.stringify({ mode, original: target.analysisRef.sha256, resumed: currentLocal.analysisRef.sha256, callsBefore: paused.callsUsed, callsAfter: store.readBudgetUsage(active.id).callsUsed }))
+  const app = await SyncApplication.create(f.root, { protocol, runtimeDirectory: join(f.parent, 'negative-application'), tools: f.options.tools })
+  await app.enable()
+  const queued = store.requestControl(active.id, 'run')
+  const claimed = store.claimQueuedAttempt({ operationId: active.id, expectedRevision: queued.revision, source: queued.input.source, scope: queued.scope, leaseMs: 30000, continuation: true })
+  if (mode === 'accept') {
+    store.startElaboration(claimed.fence)
+    store.reserveDispatch(claimed.fence, { key: `sync:${claimed.attempt.id}:elaborate:test`, purpose: 'elaboration_generate', requestDigest: contentHash('正式保留 P1 派发') })
+  } else {
+    const planBlob = writeEvidence(commonDir, { purpose: 'code_behavior_review', state: '未结算资源夹具' })
+    store.planResource(claimed.fence, { key: `sync:${claimed.attempt.id}:analysis:review:test`, kind: 'native_session', payloadDigest: planBlob.sha256,
+      inputId: queued.input.id, candidateDigest: null, planBlob, checkpointRef: planBlob })
+  }
+  const unavailable = store.requestControl(active.id, 'pause')
+  await assert.rejects(app.challengeP0({ ...request, operationId: active.id, requestId: 'operator-review-not-eligible', expectedRevision: unavailable.revision,
+    analysisRef: currentLocal.analysisRef }), mode === 'accept' ? /SYNC_P0_CHALLENGE_PHASE/ : /SYNC_P0_CHALLENGE_UNSETTLED/)
+  assert.equal(store.readOperation(active.id).revision, unavailable.revision)
+
 })

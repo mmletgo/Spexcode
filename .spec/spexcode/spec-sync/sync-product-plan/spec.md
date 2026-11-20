@@ -16,6 +16,8 @@ P0至P5按完整需求交付，不以阶段演示、局部测试或可修改的�
 
 ## expanded spec
 
+平台为真正处于 P1 之前、已正式暂停并结算的原生 P0 提供定向再审。[[sync-p0-review-challenge]] 约束原件、诊断角色、新独审、预算与历史。
+
 [[sync-model-selection]] 在新操作准入时固定功能组选择的原生 CLI 与模型。[[cursor-structured-runtime]] 使用真实 Cursor 会话执行任务。原独审、验证、Git 交付和采纳门禁适用于所有执行器；恢复沿用原操作与原会话证据。
 
 正式重试由 [[sync-coordinator]] 冷验同一冻结计划下已批准的 P1 局部分区。新修复证据优先于同 owner 的旧批准，未采纳交付的首次重验仍需取得新批准。

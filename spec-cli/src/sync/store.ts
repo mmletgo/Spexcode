@@ -9,7 +9,7 @@ import { assertPublicationParentCurrent, verifyPublicationBase } from './publica
 import { baselineSelectionDigest, selectedRetiredIds } from './composition.js'
 import { proveUnadoptedDelivery } from './source-adoption.js'
 import type { SyncCoordinatorPlan } from './coordinator-types.js'
-import type { PublicationBase, PublicationHeads } from './operation-types.js'
+import type { P0ReviewChallenge, PublicationBase, PublicationHeads } from './operation-types.js'
 import { SYNC_COMPONENT, SYNC_MIGRATIONS, syncCoordinatorAddress, syncSemanticDigest } from './migrations.js'
 import type { BaselineResource, BaselineBinding, FrozenBaselineSelection, BaselineSelectionResult, PhysicalScope, PhysicalControl, ClaimQueuedAttemptInput, SyncObserverHealth, SyncObservationInput, SyncObservation, ObserveAndAdmitResult, AdmitSyncInput, ApplyFilePlan, ApplyJournal, ApplyPlan, ApplyReceipt, ApplyStep, BaselinePair, BlobRef, CandidateRef, ClaimedAttempt, ClaimAttemptInput, ComposedInputRef, RecoverableSyncResource, SyncResourceCheckpoint, SyncResourcePlan, SyncResourceRecord, DispatchPlan, InputSnapshot, NativeSessionRef, RecoverableSync, ScopeLease, SyncAttempt, SyncControl, SyncDispatchEnvelope, SyncFailure, SyncOperation, SyncIngressReceipt, SyncScope, VerificationRef, VerificationResultBlob, WorktreeIdentity, WriteFence } from './operation-types.js'
 
@@ -513,6 +513,14 @@ export class SyncStore {
         if (input.ingressKey === previous.ingressKey || input.rootCauseId === previous.rootCauseId) fail('SYNC_RETRY_BINDING', '显式重试需要新的用户请求身份')
         const siblings = tx.query("SELECT record_json FROM sync_operations WHERE repository_id=? AND source_key=? AND json_extract(record_json,'$.retryOf')=? AND (? OR json_extract(record_json,'$.inheritRetryBudget')=1)", input.input.source.repositoryId, identityKey(input.input.source), previous.id, input.inheritRetryBudget ? 1 : 0).map(row => parseRecord<SyncOperation>(row)!)
         if (siblings.some(operation => operation.inheritRetryBudget !== input.inheritRetryBudget)) fail('SYNC_RETRY_BUDGET_BINDING', '同一原候选的重试必须保留同一交接授权')
+        let ancestor: SyncOperation | undefined = previous
+        while (ancestor && !ancestor.p0ReviewChallenges?.length) ancestor = ancestor.retryOf ? this.operation(tx, ancestor.retryOf) : undefined
+        if (ancestor) {
+          if (input.inheritRetryBudget && !this.p1OrLater(tx, previous)) fail('SYNC_P0_CHALLENGE_RETRY_BINDING', '定向 P0 复审的正式重试自带原执行预算，未进入 P1 的操作不具备完整候选交接资格')
+          if (digest(previous.budget) !== digest(input.budget) || digest(previous.scope) !== digest(canonicalScope(input.scope))
+            || previous.planBlob?.sha256 !== input.planBlob?.sha256) fail('SYNC_P0_CHALLENGE_RETRY_BINDING', '定向复审的正式重试必须保留原计划、完整范围、预算及截止时间')
+          retryBudgetSource = previous
+        }
         if (input.inheritRetryBudget) {
           if (revalidation || !previous.currentAttemptId
             || previous.recordUnverifiedCoverage !== input.recordUnverifiedCoverage || digest(previous.scope) !== digest(canonicalScope(input.scope))
@@ -1006,6 +1014,35 @@ export class SyncStore {
       attempt.status = 'settled'; journal.status = 'settled'; this.saveJournal(tx, journal); this.saveAttempt(tx, attempt); this.release(tx, attempt.leaseToken); this.saveOperation(tx, operation); return operation
     })
   }
+  /** 在暂停围栏内追加后端已冷验的定向复审授权。 */
+  authorizeP0ReviewChallenge(operationId: string, challenge: P0ReviewChallenge): { operation: SyncOperation; challenge: P0ReviewChallenge } {
+    this.blob(challenge.diagnosticRef)
+    return this.write(tx => {
+      const operation = this.operation(tx, operationId)
+      const prior = operation.p0ReviewChallenges?.find(item => item.requestId === challenge.requestId)
+      if (prior) {
+        if (prior.diagnosticRef.sha256 !== challenge.diagnosticRef.sha256) fail('SYNC_IDEMPOTENCY_CONFLICT', challenge.requestId)
+        return { operation, challenge: prior }
+      }
+      if (operation.revision !== challenge.expectedRevision || operation.input.id !== challenge.inputId || digest(operation.scope) !== challenge.scopeDigest) fail('SYNC_P0_CHALLENGE_STALE', '复审的 operation revision、输入或范围已变化')
+      if (operation.control !== 'pause' || operation.phase !== 'paused' || !operation.currentAttemptId
+        || tx.query("SELECT id FROM sync_attempts WHERE operation_id=? AND status NOT IN ('failed','superseded','settled') LIMIT 1", operationId).length
+        || tx.query('SELECT operation_id FROM sync_leases WHERE operation_id=? AND token IS NOT NULL AND expires_at_ms>? LIMIT 1', operationId, this.now()).length
+        || tx.query("SELECT id FROM sync_resources WHERE operation_id=? AND phase!='removed' LIMIT 1", operationId).length
+        || tx.query("SELECT id FROM sync_apply_journals WHERE operation_id=? AND status!='settled' LIMIT 1", operationId).length) fail('SYNC_P0_CHALLENGE_UNSETTLED', '申请前须正式暂停并结算原执行栅栏、资源、租约及应用日志')
+      for (let source: SyncOperation | undefined = operation; source; source = source.retryOf ? this.operation(tx, source.retryOf) : undefined) {
+        if (this.p1OrLater(tx, source)) {
+          fail('SYNC_P0_CHALLENGE_PHASE', '定向复审只接受从未派发 P1 或产生候选的原生 P0 操作及正式重试链')
+        }
+      }
+      const origin = this.attempt(tx, challenge.origin.attemptId)
+      if (origin.operationId !== challenge.origin.operationId || !origin.checkpointRefs.some(ref => ref.sha256 === challenge.origin.approvalCheckpointRef.sha256
+        && ref.artifacts?.some(artifact => artifact.ref.sha256 === challenge.analysisRef.sha256))) fail('SYNC_P0_CHALLENGE_BINDING', '获准的局部分析已经失去原检查点')
+      operation.p0ReviewChallenges = [...operation.p0ReviewChallenges ?? [], clone(challenge)]
+      this.saveOperation(tx, operation)
+      return { operation, challenge }
+    })
+  }
   requestControl(operationId: string, control: SyncControl): SyncOperation {
     return this.write(tx => {
       const operation = this.operation(tx, operationId)
@@ -1077,6 +1114,11 @@ export class SyncStore {
       catch (error) { return { eligible: false, reason: { code: error instanceof Error && 'code' in error ? String(error.code) : 'SYNC_RETRY_EVIDENCE_INVALID', message: error instanceof Error ? error.message : String(error) } } }
     }
     return this.write(tx => this.retryEligibility(tx, this.operation(tx, operationId), proof))
+  }
+  private p1OrLater(tx: ProtocolTransaction, operation: SyncOperation): boolean {
+    const attempts = tx.query('SELECT record_json FROM sync_attempts WHERE operation_id=?', operation.id).map(row => parseRecord<SyncAttempt>(row)!)
+    return !!operation.delivery || !contains(emptyScope(), operation.deliveredScope) || this.verificationOrJournalExists(tx, operation.id)
+      || attempts.some(attempt => attempt.candidate || attempt.dispatchPlans.some(dispatch => !['code_behavior_analyze', 'code_behavior_review'].includes(dispatch.purpose)))
   }
   private verificationOrJournalExists(tx: ProtocolTransaction, operationId: string): boolean {
     return tx.query(`SELECT EXISTS (SELECT 1 FROM sync_apply_journals WHERE operation_id=?)

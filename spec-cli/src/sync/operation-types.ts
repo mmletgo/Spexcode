@@ -49,6 +49,12 @@ export type BaselineResource = { kind: 'path'; path: string } | { kind: 'contrac
 export type BaselineBinding = { resource: { kind: 'path'; path: string }; bytePair: BaselinePair | null } | { resource: { kind: 'contract' | 'flow'; id: string }; intentPair: BaselinePair | null }
 export type FrozenBaselineSelection = { version: 'sync-baseline-selection-v1'; source: WorktreeIdentity; bindings: BaselineBinding[]; digest: string }
 export type BaselineSelectionResult = { selection: FrozenBaselineSelection } | { failure: SyncFailure }
+export type P0ReviewChallenge = {
+  version: 'p0-review-challenge-v1'
+  requestId: string; expectedRevision: number; inputId: string; partitionId: string
+  analysisRef: BlobRef; diagnosticRef: BlobRef; scopeDigest: string
+  origin: { operationId: string; attemptId: string; approvalCheckpointRef: BlobRef; continuationRef: BlobRef; partitionPlanRef: BlobRef; analysisDigest: string }
+}
 export type SyncOperation = {
   id: string; ingressKey: string; payloadDigest: string; rootCauseId: string
   origin: 'initial' | 'spec' | 'code' | 'combined' | 'reconcile' | 'decision'
@@ -62,6 +68,7 @@ export type SyncOperation = {
   requestBlob?: BlobRef
   /** 用户显式重开已结束操作；冻结业务输入不变。 */
   retryOf?: string
+  p0ReviewChallenges?: P0ReviewChallenge[]
   /** 模型交接只为原候选续审，保留原预算族和截止时间。 */
   inheritRetryBudget?: true
   /** 固定操作模型；缺省表示历史 gpt-6.1-sol，不随全局配置变化。 */

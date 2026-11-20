@@ -154,6 +154,11 @@ app.post('/api/sync/run', async c => {
   const body = await syncRequestBody(c.req), application = await syncApplication(c.req.query('targetTree'), body.targetTree)
   return c.json(await application.submit({ nodeId: body.nodeId as string, requestId: body.requestId as string, ...(body.origin === undefined ? {} : { origin: body.origin as SyncSubmitInput['origin'] }), ...(body.committed === undefined ? {} : { committed: body.committed as boolean }), ...(body.retryOf === undefined ? {} : { retryOf: body.retryOf as string }), ...(body.model === undefined ? {} : { model: body.model as string }), ...(body.inheritRetryBudget === undefined ? {} : { inheritRetryBudget: body.inheritRetryBudget as true }), ...(body.patch === undefined ? {} : { patch: readSpecBodyEdit(body.patch) }), ...(body.recordUnverifiedCoverage === undefined ? {} : { recordUnverifiedCoverage: body.recordUnverifiedCoverage as true }) }))
 })
+app.post('/api/sync/operations/:id/challenge', async c => {
+  const { targetTree, operationId, ...body } = await syncRequestBody(c.req), id = c.req.param('id')
+  if (operationId !== undefined && operationId !== id) throw new SyncApplicationError('sync_p0_challenge_invalid', '复审 operation 身份不一致', 400)
+  return c.json(await (await syncApplication(c.req.query('targetTree'), targetTree)).challengeP0({ ...body, operationId: id }))
+})
 app.post('/api/sync/operations/:id/decide', async c => {
   const body = await syncRequestBody(c.req)
   if (body.operationId !== undefined && body.operationId !== c.req.param('id')) throw new SyncApplicationError('sync_decision_invalid', '裁决 operation 身份不一致', 400)
