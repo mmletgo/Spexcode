@@ -19,8 +19,11 @@ history. The fixture also proves one-time migration marker behavior and independ
 
 After every start and restart, the fixture checks the serving instance, child PID, and project before sending a
 matrix request. A confirmed loopback address conflict can acquire another port within the same startup budget.
-Both instances in the restart story use the fixture's original database. The ten stories run on both an ordinary
-port and a deliberately occupied first port. The second run checks that the other listener receives no matrix requests.
+Both instances in the restart story use the fixture's original database. The ten stories run on an ordinary
+port and on first ports deliberately occupied by listeners serving another identity, redirects, or empty and
+malformed JSON. Readiness uses direct responses and waits for the spawned child's outcome when it has no
+parseable instance receipt. The competing listener receives only direct readiness requests. Each run removes
+its temporary files after stopping its child and listener.
 
 The protocol's sequence scope stays explicit in the proof: `enqueueSeq` is global to the message table, so independent
 watcher queues may contain interleaved sequence values, and the proof requires FIFO within each recipient and identical

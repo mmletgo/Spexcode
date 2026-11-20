@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, mkdtempSync, writeFileSync, chmodSync, realpathSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync, chmodSync, realpathSync, rmSync } from 'node:fs'
 import net from 'node:net'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
@@ -28,7 +28,7 @@ async function stop(child: ChildProcess): Promise<void> {
   try { await exited } finally { clearTimeout(timer) }
 }
 
-for (const mode of ['available', 'occupied'] as const) test(`YATU cutover matrix: ten distinct stories through the backend HTTP and migration CLI surfaces (${mode} port)`, { timeout: 180_000 }, async () => {
+for (const mode of ['available', 'occupied', 'redirect', 'malformed-json'] as const) test(`YATU cutover matrix: ten distinct stories through the backend HTTP and migration CLI surfaces (${mode} port)`, { timeout: 180_000 }, async () => {
   const fixture = mkdtempSync(join(tmpdir(), 'spex-session-cutover-http-'))
   const project = join(fixture, 'project')
   const home = join(fixture, 'home')
@@ -68,11 +68,19 @@ for (const mode of ['available', 'occupied'] as const) test(`YATU cutover matrix
   let occupiedPort: number | undefined
   let occupiedStarts = 0
   const foreignRequests: string[] = []
-  const foreign = mode === 'occupied' ? createServer((request, response) => {
+  let foreignProbes = 0
+  const foreign = mode !== 'available' ? createServer((request, response) => {
     if (request.method === 'GET' && request.url === '/health') { response.end('ok'); return }
     if (request.method === 'GET' && request.url === '/api/instance') {
+      foreignProbes++
+      if (mode === 'redirect') {
+        response.writeHead(302, { location: '/readiness-redirect-trap' }).end()
+        return
+      }
       response.writeHead(200, { 'content-type': 'application/json' })
-      response.end(JSON.stringify({ instanceId: 'other-fixture', pid: process.pid, root: project }))
+      response.end(mode === 'malformed-json'
+        ? (foreignProbes % 2 === 1 ? '' : '{"pid":')
+        : JSON.stringify({ instanceId: 'other-fixture', pid: process.pid, root: project }))
       return
     }
     foreignRequests.push(`${request.method} ${request.url}`)
@@ -103,19 +111,21 @@ for (const mode of ['available', 'occupied'] as const) test(`YATU cutover matrix
           }
           throw new Error(`${label}: backend exited before readiness (entry=${indexPath}, cwd=${project}, exit=${child.exitCode}, signal=${child.signalCode ?? 'none'}, output=${log || '<empty>'})`)
         }
-        const response = await fetch(`http://${address}/api/instance`, { signal: AbortSignal.timeout(1000) }).catch((error: unknown) => {
-          const code = (error as { cause?: { code?: string } }).cause?.code
-          if (code === 'ECONNREFUSED' || code === 'ECONNRESET' || code === 'UND_ERR_SOCKET' || error instanceof DOMException && error.name === 'TimeoutError') return null
-          throw error
-        })
-        if (response?.ok && response.headers.get('content-type')?.includes('application/json')) {
-          const instance = await response.json() as { pid: number; instanceId: string | null; root: string }
-          if (instance?.pid === child.pid) {
-            assert.equal(instance.instanceId, instanceId, `${label}: unexpected backend instance`)
-            assert.equal(realpathSync(instance.root), realpathSync(project), `${label}: unexpected backend project`)
-            base = `http://${address}`
-            return
-          }
+        const instance = await fetch(`http://${address}/api/instance`, { redirect: 'manual', signal: AbortSignal.timeout(1000) })
+          .then(async response => {
+            if (!response.ok || !response.headers.get('content-type')?.includes('application/json')) return null
+            try { return await response.json() as { pid: number; instanceId: string | null; root: string } }
+            catch (error) { if (error instanceof SyntaxError) return null; throw error }
+          }).catch((error: unknown) => {
+            const code = (error as { cause?: { code?: string } }).cause?.code
+            if (code === 'ECONNREFUSED' || code === 'ECONNRESET' || code === 'UND_ERR_SOCKET' || error instanceof DOMException && error.name === 'TimeoutError') return null
+            throw error
+          })
+        if (instance && instance.pid === child.pid) {
+          assert.equal(instance.instanceId, instanceId, `${label}: unexpected backend instance`)
+          assert.equal(realpathSync(instance.root), realpathSync(project), `${label}: unexpected backend project`)
+          base = `http://${address}`
+          return
         }
         if (Date.now() >= deadline) throw new Error(`${label}: backend readiness timeout (entry=${indexPath}, cwd=${project}, pid=${child.pid}, exit=${child.exitCode ?? 'running'}, signal=${child.signalCode ?? 'none'}, output=${log || '<empty>'})`)
         await new Promise(resolve => setTimeout(resolve, 40))
@@ -170,11 +180,15 @@ for (const mode of ['available', 'occupied'] as const) test(`YATU cutover matrix
     console.log(JSON.stringify({ mode, scenarios: results, passed: results.filter(result => result.passed).length, failed: results.filter(result => !result.passed).length }, null, 2))
     if (foreign) {
       assert.equal(occupiedStarts, 2, 'both starts encounter the intentionally occupied port')
+      assert.ok(foreignProbes >= 2, 'the readiness client observed the competing listener')
       assert.deepEqual(foreignRequests, [], 'matrix operations must never reach the other listener')
     }
     assert.equal(results.length, 10); assert.equal(results.filter(result => !result.passed).length, 0)
   } finally {
     try { await stopBackend() }
-    finally { if (foreign?.listening) await new Promise<void>((resolve, reject) => foreign.close(error => error ? reject(error) : resolve())) }
+    finally {
+      try { if (foreign?.listening) await new Promise<void>((resolve, reject) => foreign.close(error => error ? reject(error) : resolve())) }
+      finally { rmSync(fixture, { recursive: true, force: true }) }
+    }
   }
 })
