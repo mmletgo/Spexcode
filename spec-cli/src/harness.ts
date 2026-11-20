@@ -209,6 +209,7 @@ export interface Harness {
   // exactly one parser. Adapters without a reliable native transcript declare `unsupportedTranscript`, which
   // fails loudly instead of pretending the conversation was empty.
   readonly transcript: TranscriptReader
+  readonly externalTranscript?: TranscriptReader
   // the same reader addressed under a DECLARED agent config dir ([[launcher-select]]'s `configDir`): two
   // launchers of one harness may keep their threads under different dirs (reclaude → ~/.claude, claude-glm →
   // ~/.claude-glm), and the default `transcript` above only knows the harness default root. Optional — an

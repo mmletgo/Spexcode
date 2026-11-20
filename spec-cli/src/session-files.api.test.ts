@@ -8,7 +8,7 @@ import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { SESSION_FILE_PREVIEW_MAX_BYTES, sessionFilesPath } from './session-files.js'
 import { encodeProject, sessionStoreDir } from '@spexcode/spec-core'
-import { DatabaseSync } from 'node:sqlite'
+import { openProjectSessionApplication, requireLocalDatabasePath } from '@spexcode/session-application'
 import { tsxBin } from './tsx-bin.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -47,7 +47,7 @@ async function waitForHealth(base: string, child: ChildProcess, log: () => strin
   throw new Error(`backend never became healthy: ${log()}`)
 }
 
-test('an external chat claims only its project and uses the existing file and transcript APIs', { timeout: 45_000 }, async () => {
+test('an external chat claims only its project and uses the existing file and transcript APIs', { timeout: 45_000 }, async (t) => {
   const fixture = mkdtempSync(join(realpathSync(tmpdir()), 'spex-external-chat-'))
   const project = join(fixture, 'project'), other = join(fixture, 'other'), linked = join(fixture, 'linked')
   const home = join(fixture, 'home'), databasePath = join(home, 'sessions.sqlite')
@@ -58,6 +58,7 @@ test('an external chat claims only its project and uses the existing file and tr
   const now = new Date()
   const day = now.toISOString().slice(0, 10).split('-')
   const rolloutDir = join(codexHome, 'sessions', ...day)
+  const rolloutFile = join(rolloutDir, `rollout-${id}.jsonl`)
   const port = await freePort()
   const base = `http://127.0.0.1:${port}`
   const env: NodeJS.ProcessEnv = { ...process.env, SPEXCODE_HOME: home, SPEX_SESSION_DATABASE_PATH: databasePath, CODEX_HOME: codexHome, SPEXCODE_TMUX: `adoption-fixture-${port}`, PORT: String(port) }
@@ -105,7 +106,7 @@ test('an external chat claims only its project and uses the existing file and tr
     const worktrees = () => spawnSync('git', ['worktree', 'list', '--porcelain'], { cwd: project, encoding: 'utf8' }).stdout
     const baseline = worktrees()
     mkdirSync(rolloutDir, { recursive: true })
-    writeFileSync(join(rolloutDir, `rollout-${id}.jsonl`), [
+    writeFileSync(rolloutFile, [
       { timestamp: now.toISOString(), type: 'session_meta', payload: { id, cli_version: '0.153.0' } },
       { timestamp: now.toISOString(), type: 'response_item', payload: { type: 'reasoning', content: 'private fixture payload' } },
       { timestamp: now.toISOString(), type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'See [[file:artifact.txt]].' }] } },
@@ -163,6 +164,71 @@ test('an external chat claims only its project and uses the existing file and tr
     const transcript = await api(`/sessions/${id}/transcript?from=${now.getTime() - 1}&to=${now.getTime() + 1}`)
     assert.equal(transcript.status, 200)
     assert.deepEqual((await transcript.json()).turns.map((turn: { text: string }) => turn.text), ['See [[file:artifact.txt]].'])
+    await t.test('external Codex reads require an exact unique filename and matching first record', async () => {
+      const partial = await cli(project, { ...env, CODEX_THREAD_ID: id.slice(0, 8) }, 'adopt')
+      const old = readFileSync(rolloutFile, 'utf8')
+      const transcriptPath = `/sessions/${id}/transcript?from=${now.getTime() - 1}&to=${now.getTime() + 1}`
+      const lookalike = join(rolloutDir, `rollout-${id}-neighbor.jsonl`)
+      const duplicate = join(rolloutDir, `rollout-copy-${id}.jsonl`)
+      try {
+        writeFileSync(lookalike, old)
+        rmSync(rolloutFile)
+        const missing = await api(transcriptPath)
+        writeFileSync(rolloutFile, old.replace(id, '99999999-9999-4999-8999-999999999999'))
+        const mismatch = await api(transcriptPath)
+        writeFileSync(rolloutFile, old)
+        writeFileSync(duplicate, old)
+        const ambiguous = await api(transcriptPath)
+        assert.deepEqual([partial.code, missing.status, mismatch.status, ambiguous.status], [1, 409, 422, 422])
+        assert.match((await missing.json()).error, /not found/)
+        assert.match((await mismatch.json()).error, /does not identify/)
+        assert.match((await ambiguous.json()).error, /multiple exact/)
+        assert.equal((await api(`/sessions/${id}/files`)).status, 200)
+      } finally {
+        rmSync(lookalike, { force: true })
+        rmSync(duplicate, { force: true })
+        writeFileSync(rolloutFile, old)
+      }
+    })
+    await t.test('canonical session-runtime routes refuse both ends of external control', async () => {
+      const watch = (subject: string, watcherSessionId: string) => postRuntime(subject, 'watch', { watcherSessionId })
+      const runtime = { namespace: 'alternate', runtimeKind: 'fixture', nativeSessionId: 'candidate-native', nativeStartToken: 'fixture-start' }
+      const postRuntime = (target: string, verb: string, input: object) => api(`/session-runtime/${target}/${verb}`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input),
+      })
+      const attempts = [
+        await watch(id, 'new-watcher'),
+        await watch('new-subject', id),
+        await postRuntime(id, 'bind', runtime),
+        await postRuntime('new-binding-address', 'bind', { ...runtime, nativeSessionId: id }),
+        await postRuntime(id, 'dequeue', { namespace: runtime.namespace }),
+        await postRuntime(id, 'publish', { kind: 'fixture.notice.v1', body: 'irrelevant' }),
+        await postRuntime(id, 'state', { status: 'active', parentSessionId: 'new-parent' }),
+      ]
+      assert.deepEqual(attempts.map((response) => response.status), Array(attempts.length).fill(409))
+      for (const response of attempts) assert.equal((await response.json()).code, 'external_session_read_only')
+      const app = openProjectSessionApplication({ databasePath, locality: requireLocalDatabasePath })
+      try {
+        for (const address of ['new-watcher', 'new-subject', 'new-binding-address', 'new-parent']) {
+          assert.equal(app.readAddress(address), null)
+          assert.equal(app.readFollowCursor(address, id), null)
+          assert.equal(app.readFollowCursor(id, address), null)
+        }
+        assert.equal(app.resolveRuntime(id, runtime.namespace), null)
+        app.createSession({ sessionId: 'managed-watcher' })
+        app.createSession({ sessionId: 'managed-subject' })
+        assert.equal((await watch('managed-subject', 'managed-watcher')).status, 201)
+        assert.equal((await postRuntime('managed-watcher', 'bind', runtime)).status, 200)
+        assert.equal((await postRuntime('managed-subject', 'publish', { kind: 'fixture.notice.v1', body: 'managed delivery' })).status, 201)
+        const delivered = await postRuntime('managed-watcher', 'dequeue', { namespace: runtime.namespace })
+        assert.equal(delivered.status, 200)
+        assert.equal((await delivered.json()).kind, 'fixture.notice.v1')
+        app.enqueueMessage(id, { kind: 'session.text.v1', body: Buffer.from('explicit mailbox') })
+      } finally { app.close() }
+      const mailbox = await cli(project, owner, 'dequeue', '--json')
+      assert.equal(mailbox.code, 0, mailbox.err)
+      assert.equal(JSON.parse(mailbox.out).text, 'explicit mailbox')
+    })
     for (const verb of ['stop', 'resume', 'interrupt', 'merge', 'close', 'input', 'sort', 'rename', 'quarantine']) {
       const denied = await api(`/sessions/${id}/${verb}`, { method: 'POST' })
       assert.equal(denied.status, 409, verb)
@@ -184,11 +250,11 @@ test('an external chat claims only its project and uses the existing file and tr
       assert.match((await create.json()).error, /external chat .* cannot be a session's parent/)
     }
     assert.equal(worktrees(), baseline)
-    const database = new DatabaseSync(databasePath, { readOnly: true })
+    const database = openProjectSessionApplication({ databasePath, locality: requireLocalDatabasePath })
     try {
-      assert.equal(database.prepare('SELECT session_id FROM protocol_sessions WHERE session_id=?').get(id)?.session_id, id)
-      assert.equal(database.prepare('SELECT 1 FROM session_application_state WHERE session_id=?').get(id), undefined)
-      assert.equal(database.prepare('SELECT 1 FROM session_runtime_bindings WHERE native_session_id=?').get(id), undefined)
+      assert.equal(database.readAddress(id)?.sessionId, id)
+      assert.equal(database.readState(id), null)
+      assert.equal(database.protocol.withTransaction(tx => tx.query('SELECT 1 FROM session_runtime_bindings WHERE native_session_id=? OR protocol_session_id=?', id, id)).length, 0)
     } finally { database.close() }
 
     await stop()

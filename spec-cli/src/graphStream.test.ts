@@ -239,6 +239,7 @@ test('the census counts live registrations and returns to its floor on close', (
 test('worktree observers cover live sessions and an explicitly demanded offline session only', () => {
   const sessions = [
     { id: 'live', path: '/repo/.worktrees/live', liveness: 'live' },
+    { id: 'adopted', path: '', liveness: 'unknown' },
     { id: 'offline-a', path: '/repo/.worktrees/offline-a', liveness: 'offline' },
     { id: 'offline-b', path: '/repo/.worktrees/offline-b', liveness: 'offline' },
   ]

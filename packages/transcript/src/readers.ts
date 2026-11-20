@@ -26,19 +26,65 @@ export function claudeTranscriptPath(threadId: string, root = projectTranscriptR
 }
 
 const codexSessionsDir = () => join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'sessions')
+export const isCodexThreadId = (threadId: string): boolean => /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(threadId)
+
+function* codexRolloutDirectories(root: string, archive: string): Generator<string> {
+  for (const year of children(root)) for (const month of children(join(root, year))) for (const day of children(join(root, year, month)))
+    yield join(root, year, month, day)
+  yield archive
+}
+
 // Walk newest day first and return on the first hit; the walk is exhaustive rather than capped, because
 // future-dated junk under sessions/ sorts above every real day and a cap once masked every real rollout.
 // A thread Codex has ARCHIVED (the app-server's thread/archive, which a closed session runs) keeps its
 // rollout, moved out of the dated tree into the flat `archived_sessions/` beside it — a closed session's
 // conversation is still on disk and still readable, so the locator looks there second.
 export function codexRolloutPath(threadId: string, root = codexSessionsDir(), archive = join(dirname(root), 'archived_sessions')): string | null {
-  for (const year of children(root)) for (const month of children(join(root, year))) for (const day of children(join(root, year, month))) {
-    const dir = join(root, year, month, day)
+  for (const dir of codexRolloutDirectories(root, archive)) {
     const file = children(dir).find((name) => name.includes(threadId))
     if (file) return join(dir, file)
   }
-  const archived = children(archive).find((name) => name.includes(threadId))
-  return archived ? join(archive, archived) : null
+  return null
+}
+
+function exactCodexRolloutPath(threadId: string, root = codexSessionsDir()): string | null {
+  if (!isCodexThreadId(threadId)) throw new TranscriptReadError('invalid', 'Codex transcript requires a complete native thread UUID')
+  const suffix = `-${threadId}.jsonl`
+  let path: string | null = null
+  for (const dir of codexRolloutDirectories(root, join(dirname(root), 'archived_sessions'))) {
+    for (const name of children(dir)) {
+      if (!name.startsWith('rollout-') || !name.endsWith(suffix)) continue
+      if (path) throw new TranscriptReadError('invalid', 'Codex transcript has multiple exact rollouts for this thread')
+      path = join(dir, name)
+    }
+  }
+  return path
+}
+
+type CodexRolloutMetadata = { type: 'session_meta'; payload: Record<string, unknown> }
+
+function codexRolloutMetadataAt(fd: number, threadId: string): CodexRolloutMetadata {
+  let header = Buffer.alloc(0)
+  const chunk = Buffer.allocUnsafe(64 * 1024)
+  const maximum = 4 * 1024 * 1024
+  while (header.length < maximum) {
+    const size = readSync(fd, chunk, 0, Math.min(chunk.length, maximum - header.length), header.length)
+    const newline = chunk.subarray(0, size).indexOf(0x0a)
+    header = Buffer.concat([header, chunk.subarray(0, newline < 0 ? size : newline)])
+    if (newline < 0 && size > 0) continue
+    let record: CodexRolloutMetadata | null
+    try { record = JSON.parse(header.toString('utf8')) }
+    catch { throw new TranscriptReadError('invalid', 'Codex rollout header is not a valid first record') }
+    if (record?.type !== 'session_meta' || record.payload?.id !== threadId)
+      throw new TranscriptReadError('invalid', 'Codex rollout header does not identify the requested thread')
+    return record
+  }
+  throw new TranscriptReadError('invalid', 'Codex rollout header exceeds the bounded first record')
+}
+
+export function codexRolloutMetadata(path: string, threadId: string): CodexRolloutMetadata {
+  const fd = openSync(path, 'r')
+  try { return codexRolloutMetadataAt(fd, threadId) } finally { closeSync(fd) }
 }
 
 const piSessionsRoot = () => join(process.env.SPEXCODE_PI_AGENT_DIR || join(homedir(), '.pi', 'agent'), 'sessions')
@@ -152,8 +198,9 @@ class LineFileCursor {
   private collector: IntervalCollector
   private scan: LineScan = { position: 0, carry: Buffer.alloc(0) }
   private started = false
+  private parse: Parse | null = null
   private readonly seekKey: string
-  constructor(private readonly harness: string, private readonly path: string, private readonly parse: Parse, private readonly from: number) {
+  constructor(private readonly harness: string, private readonly path: string, private readonly parser: (fd: number) => Parse, private readonly from: number) {
     this.seekKey = `${path}\n${from}`
     this.collector = new IntervalCollector({ from, to: from })
   }
@@ -165,6 +212,7 @@ class LineFileCursor {
     // a seek lands on the interval's first event, so the timestamps before it are known to exist
     if (start > 0) this.collector.sawTimestamp = true
     this.scan = { position: start, carry: Buffer.alloc(0) }
+    this.parse = null
   }
 
   advance(to: number, lookahead = Number.POSITIVE_INFINITY): TranscriptRead {
@@ -175,17 +223,19 @@ class LineFileCursor {
     // watching — read as zero bytes. Failing there put an error on the page for a conversation that simply had
     // not begun. Zero bytes is unambiguous in a way a garbled file is not: there is nothing to misread, so this
     // is the one place the no-timestamp gate is skipped rather than tripped.
-    if (size <= 0) return { revision: fileRevision(this.path) ?? '0', from: this.from, to, turns: [], truncated: false, omittedTurns: 0, omittedBytes: 0, outOfOrderEvents: 0 }
     // a source that shrank was rewritten underneath the cursor: forget the position and read the interval afresh
     if (!this.started || size < this.scan.position) { this.restart(size); this.started = true }
     this.collector.extend(to)
     let fd: number | null = null
     try {
       fd = openSync(this.path, 'r')
+      const parse = this.parse ?? this.parser(fd)
+      if (size <= 0) return { revision: fileRevision(this.path) ?? '0', from: this.from, to, turns: [], truncated: false, omittedTurns: 0, omittedBytes: 0, outOfOrderEvents: 0 }
+      this.parse = parse
       let postRangeLines = 0, parsedLines = 0, unparsableLines = 0
       this.scan = scanLines(fd, this.scan, (value, offset) => {
         parsedLines++
-        const event = this.parse(value)
+        const event = parse(value)
         if (!event) return false
         const inRange = event.at !== null && event.at >= this.from && event.at <= to
         if (inRange && !intervalOffsets.has(this.seekKey)) intervalOffsets.set(this.seekKey, offset)
@@ -203,16 +253,13 @@ class LineFileCursor {
   }
 }
 
-function fileHeader(path: string): unknown {
-  const fd = openSync(path, 'r')
+function fileHeader(fd: number): unknown {
   let header: unknown
-  try {
-    scanLines(fd, { position: 0, carry: Buffer.alloc(0) }, (value) => { header = value; return true }, () => {})
-  } finally { closeSync(fd) }
+  scanLines(fd, { position: 0, carry: Buffer.alloc(0) }, (value) => { header = value; return true }, () => {})
   return header
 }
 
-function lineFileReader(harness: string, locate: (threadId: string) => string | null, parser: (path: string) => Parse): TranscriptReader {
+function lineFileReader(harness: string, locate: (threadId: string) => string | null, parser: (fd: number, threadId: string) => Parse): TranscriptReader {
   const find = (threadId: string): string => {
     const path = locate(threadId)
     if (!path) throw new TranscriptReadError('missing', `${harness} transcript for ${threadId} is unavailable: file was not found`)
@@ -220,7 +267,7 @@ function lineFileReader(harness: string, locate: (threadId: string) => string | 
   }
   const cursor = (threadId: string, from: number): LineFileCursor => {
     const path = find(threadId)
-    return new LineFileCursor(harness, path, parser(path), from)
+    return new LineFileCursor(harness, path, (fd) => parser(fd, threadId), from)
   }
   return {
     revision: (threadId) => { const path = locate(threadId); return path ? fileRevision(path) : null },
@@ -243,13 +290,14 @@ function lineFileReader(harness: string, locate: (threadId: string) => string | 
 // had no way to ask. Passing nothing keeps the old behaviour exactly: the locator's own default is evaluated
 // per call, so a late `CLAUDE_CONFIG_DIR` is still picked up.
 export const claudeTranscriptReader = (root?: string): TranscriptReader => lineFileReader('claude', (threadId) => claudeTranscriptPath(threadId, root ?? projectTranscriptRoot()), () => claudeEvent)
-export const codexTranscriptReader = (root?: string): TranscriptReader => lineFileReader('codex', (threadId) => codexRolloutPath(threadId, root ?? codexSessionsDir()), (path) => codexRolloutEvent(fileHeader(path)))
+export const codexTranscriptReader = (root?: string): TranscriptReader => lineFileReader('codex', (threadId) => codexRolloutPath(threadId, root ?? codexSessionsDir()), (fd) => codexRolloutEvent(fileHeader(fd)))
 export const piTranscriptReader = (root?: string): TranscriptReader => lineFileReader('pi', (threadId) => piSessionPath(threadId, root ?? piSessionsRoot()), () => piEvent)
 export const geminiTranscriptReader = (root?: string): TranscriptReader => lineFileReader('gemini', (threadId) => geminiTranscriptPath(threadId, root ?? geminiRoot()), () => geminiEvent)
 export const openclawTranscriptReader = (root?: string): TranscriptReader => lineFileReader('openclaw', (threadId) => openclawTranscriptPath(threadId, root ?? openclawRoot()), () => openclawEvent)
 
 export const claudeTranscript: TranscriptReader = claudeTranscriptReader()
 export const codexTranscript: TranscriptReader = codexTranscriptReader()
+export const exactCodexTranscript: TranscriptReader = lineFileReader('codex', exactCodexRolloutPath, (fd, id) => codexRolloutEvent(codexRolloutMetadataAt(fd, id)))
 export const piTranscript: TranscriptReader = piTranscriptReader()
 export const geminiTranscript: TranscriptReader = geminiTranscriptReader()
 export const openclawTranscript: TranscriptReader = openclawTranscriptReader()

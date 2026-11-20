@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, realpathSync } from 'node:fs'
 import { gitCommonDir, HARNESS_IDENTITIES, listSessionIds, readRecordEntry, sessionArtifactPath } from '@spexcode/spec-core'
 import { resolveDatabasePath, type ExternalSessionClaim, type ExternalSessionIdentity } from '@spexcode/session-application'
+import { isCodexThreadId } from '@spexcode/transcript'
 import { configuredSessionApplication } from './session-application.js'
 import { withSessionRecordLockSync } from './session-record-lock.js'
 
@@ -15,7 +16,9 @@ function ownNativeIdentity(): Omit<ExternalSessionIdentity, 'projectKey'> | null
     const sessionId = process.env[sessionEnvVar]?.trim()
     return sessionId ? [{ harness, sessionId }] : []
   })
-  return identities.length === 1 && NATIVE_ID.test(identities[0].sessionId) ? identities[0] : null
+  if (identities.length !== 1) return null
+  const identity = identities[0]
+  return (identity.harness === 'codex' ? isCodexThreadId(identity.sessionId) : NATIVE_ID.test(identity.sessionId)) ? identity : null
 }
 
 function ownExternalIdentity(): ExternalSessionIdentity {

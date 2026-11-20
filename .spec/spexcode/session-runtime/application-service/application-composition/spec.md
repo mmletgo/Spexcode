@@ -37,3 +37,8 @@ The application also exposes a read-only event watermark: `readChangedSessionIds
 
 The typed [[external-session-adoption]] command initializes the protocol address and records the project
 claim in the same transaction. The claim table does not publish lifecycle events or runtime bindings.
+The same transaction boundary fences control operations on a claimed address, including addresses whose claim
+was withdrawn. Watch relations and durable follow cursors check both endpoints. A runtime binding checks its
+protocol address and native identity in every namespace. Failed creation, state, watch, and binding checks
+leave the prospective address, relationship, and cursor unchanged. Explicit protocol mailbox operations
+remain independent.

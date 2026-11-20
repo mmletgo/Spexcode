@@ -18,6 +18,9 @@ Git project identified by the real path of its common directory, shared by its l
 The local CLI takes the identity from the harness's own per-thread environment. No native id operand,
 remote self-registration, launcher identity fallback, synthetic SessionStart, process, or worktree is involved.
 Ambiguous environments and a native identity already governed by SpexCode are refused.
+Codex claims take the complete native UUID. Its transcript is available only when one exact rollout filename
+and that rollout's first `session_meta` record identify the claimed UUID. Missing, mismatched, and duplicate
+rollouts produce a named transcript error. The posted files remain available.
 
 The application commits the project claim and the native id's existing or new protocol address together.
 The same project and thread are idempotent. A competing project claim is refused while the first is active.
@@ -31,6 +34,8 @@ liveness. It owns neither checkout nor branch and contributes no worktree overla
 details show the same row. File posting, listing, byte retrieval, retraction and dashboard preview continue
 through [[files]]. The console opens [[adopted-conversation]] for the native transcript.
 Control verbs for process, launch, worktree, terminal and session topology refuse the external identity.
+That refusal covers both ends of watch and parent relations, and every namespace of runtime bind or dequeue.
+A claim conflicts with existing control relations or bindings of that identity.
 The intentionally explicit mailbox commands remain protocol-addressed independently of a claim.
 
 The additive application migration leaves existing addresses, histories and runtime bindings in place.

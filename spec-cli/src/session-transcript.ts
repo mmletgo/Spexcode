@@ -18,7 +18,7 @@ export function resolveTranscriptTarget(id: string): Target {
   if (claim) {
     if (claim.revokedAtMs !== null) return { ok: false, status: 404, error: `session ${id} does not exist` }
     const harness = harnessById(claim.harness)
-    return { ok: true, harness, transcript: harness.transcript, threadId: claim.sessionId, external: true }
+    return { ok: true, harness, transcript: harness.externalTranscript ?? harness.transcript, threadId: claim.sessionId, external: true }
   }
   let raw: ReturnType<typeof readAliasedRawRecord>
   try { raw = readAliasedRawRecord(id) } catch (error) { return { ok: false, status: 500, error: `session ${id} record is unreadable: ${error instanceof Error ? error.message : String(error)}` } }

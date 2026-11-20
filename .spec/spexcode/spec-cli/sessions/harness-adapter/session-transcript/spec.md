@@ -19,7 +19,8 @@ related:
 [[transcript-reader]] answers for a native thread; this module addresses it by session. One resolver turns a
 governed session id into its adapter and exact native thread identity (`exactNativeTargetId`). The same
 bounded GET also accepts an active [[external-session-adoption]] in the current project and addresses its
-claimed native thread. An unknown session is a 404, a record without a native identity yet is a 409, and native bytes never cross here:
+claimed native thread using the adapter's external reader when supplied. An unknown session is a 404, a record
+without a native identity yet is a 409, and native bytes never cross here:
 the adapter's reader hands back normalized turns and these routes only address them.
 
 The resolver also picks WHICH root the reader looks under, because that is launcher knowledge, not harness

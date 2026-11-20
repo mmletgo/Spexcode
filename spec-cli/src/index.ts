@@ -49,7 +49,7 @@ import { collectResourceReport, ResourceConflict } from './host-resources.js'
 import { reparentRequest, SessionReparentRequestError } from './session-reparent.js'
 import { buildGuidanceCatalog } from './guidance-catalog.js'
 import { configuredSessionApplication, setSessionApplicationCommitObserver } from './session-application.js'
-import { SESSION_CHANGE } from '@spexcode/session-application'
+import { ExternalSessionControlError, SESSION_CHANGE } from '@spexcode/session-application'
 import { editSpecBody, readSpecBodyEdit, SpecBodyEditError } from './spec-body-edit.js'
 import { ContractReportScopeError, readProjectContractReport, resolveProjectReadRoot } from './sync/contract-report.js'
 import { configuredSyncApplication, configuredSyncResourceRecoveryApplication, startConfiguredSyncServices, closeConfiguredSyncServices, type SyncSubmitInput } from './sync/application.js'
@@ -96,7 +96,8 @@ app.onError((error, c) => {
   if (error instanceof SpecBodyEditError) return c.json({ error: error.message, code: error.code, ...(error.detail ?? {}) }, error.status)
   if (error instanceof SyncDiffReadError) return c.json({ error: error.message, code: error.code }, error.status)
   if (error instanceof SyncStoreError) return c.json({ error: error.message, code: error.code }, ['SYNC_OPERATION_UNKNOWN', 'SYNC_ATTEMPT_UNKNOWN', 'SYNC_JOURNAL_UNKNOWN'].includes(error.code) ? 404 : 409)
-  if (error instanceof ResourceConflict) return c.json({ error: error.message, code: error.code }, 409)
+  if (error instanceof ResourceConflict || error instanceof ExternalSessionControlError)
+    return c.json({ error: error.message, code: error.code }, 409)
   if (error instanceof SessionReparentRequestError) return c.json({ error: error.message }, 400)
   console.error(error)
   return c.text('Internal Server Error', 500)

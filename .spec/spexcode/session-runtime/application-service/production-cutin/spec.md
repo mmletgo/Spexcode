@@ -43,6 +43,8 @@ migration inputs only; after the marker is published they are retired, not a com
 Concurrent or retried accepted creates may publish the same idempotency receipt more than once; the HTTP bridge
 initializes its canonical row at most once and accepts a duplicate only when the existing projection matches.
 The runtime API exposes only explicit watcher, state, event/replay, native binding, publish, and dequeue operations.
+Its control writes report HTTP 409 with `external_session_read_only` when an [[external-session-adoption]]
+address or native identity participates. The refusal leaves the explicit protocol inbox usable.
 
 严格resource-only恢复在独立异步上下文中静音本次提交后的主动execution wake和observer；canonical事务、事件、运行绑定及待投递消息仍正常持久化。作用域覆盖其派生异步回调，返回后遗留microtask不取得执行权；并发、嵌套后的普通业务调用继续默认wake，不使用进程全局开关。
 Native identity is caller supplied, and binding generation is checked by the shared runtime component. The YATU drives
