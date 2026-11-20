@@ -9119,7 +9119,8 @@ test('Coordinator 已有code且P1新增managed AC.test的null路径只续原评�
 })
 
 
-for (const failureKind of ['format', 'business', 'protocol'] as const) for (const legacyMaterial of [false, true]) for (const partitioned of [false, true]) for (const phase of ['code_behavior_analyze', 'code_behavior_review']) if (failureKind === 'format' || !legacyMaterial && phase === 'code_behavior_review' && (failureKind === 'protocol' || !partitioned)) test(`Native P0 ${partitioned ? '分区' : '单体'} ${phase}${failureKind === 'protocol' ? 'ID协议失败SQLite冷恢复' : '格式失败持久续改'}，${failureKind === 'business' ? '业务repair重做分析独审' : legacyMaterial ? '旧Native材料' : '保已校验分析'}与只读对象`, async t => {
+for (const failureKind of ['format', 'business', 'protocol'] as const) for (const legacyTransport of [undefined, 'git-json-v5', 'git-json-v6'] as const) for (const partitioned of [false, true]) for (const phase of ['code_behavior_analyze', 'code_behavior_review']) if (failureKind === 'format' || !legacyTransport && phase === 'code_behavior_review' && (failureKind === 'protocol' || !partitioned)) test(`Native P0 ${partitioned ? '分区' : '单体'} ${phase}${failureKind === 'protocol' ? 'ID协议失败SQLite冷恢复' : '格式失败持久续改'}，${failureKind === 'business' ? '业务repair重做分析独审' : legacyTransport ? '旧Native材料' : '保已校验分析'}与只读对象${legacyTransport ? ` transport=${legacyTransport}` : ''}`, async t => {
+  const legacyMaterial = legacyTransport !== undefined, exactLegacyTask = legacyTransport === 'git-json-v5'
   const businessRepair = failureKind === 'business', protocolRepair = failureKind === 'protocol'
   const plan = partitioned ? { version: 'sync-coordinator-v2' as const, direction: 'code_to_spec' as const, sourcePaths: ['src'], writePaths: ['.spec'], partitionPolicy: { version: 'sync-partition-policy-v1' as const, maxReadBytes: 524288, maxParallel: 1 }, commitTrigger: { before: null, paths: ['src/export.js'] } } : {}
   const legacyRounds = legacyMaterial && phase === 'code_behavior_analyze' ? 2 : 1
@@ -9136,6 +9137,16 @@ for (const failureKind of ['format', 'business', 'protocol'] as const) for (cons
     const claimNext = (input: Parameters<typeof claimLegacy>[0]) => {
       const next = claimLegacy(input)
       if (next.attempt.number <= legacyRounds) f.store.reserveDispatch(next.fence, { key: `sync:${next.attempt.id}:historical-reserved-p0`, purpose: 'code_behavior_analyze', requestDigest: contentHash('frozen next original read request') })
+      else if (exactLegacyTask) {
+        const commonDir = f.input.source.commonDir, selection = f.store.readBusinessBaselineSelection(f.operation.id)
+        const protocol = { version: 'code-behavior-draft-v1', contextTransport: legacyTransport }, resultRef = writeEvidence(commonDir, protocol)
+        const artifacts = syncCheckpointArtifacts(protocol, resultRef)
+        const baselineSelectionRef = selection ? writeEvidence(commonDir, selection) : undefined
+        if (baselineSelectionRef) artifacts.push({ kind: 'json', ref: baselineSelectionRef })
+        const wrapper = writeEvidence(commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: next.attempt.id, inputId: f.input.id,
+          policyDigest: f.operation.policyDigest, readSetDigest: f.operation.readSetDigest, baselineSelectionRef, stage: 'behavior-draft-protocol', resultRef })
+        f.store.checkpoint(next.fence, { ...wrapper, artifacts })
+      }
       return next
     }
     if (partitioned) f.store.claimQueuedAttempt = claimNext
@@ -9175,7 +9186,10 @@ for (const failureKind of ['format', 'business', 'protocol'] as const) for (cons
     else {
       if (request.purpose === phase) {
         assert.equal(attempt.number, legacyRounds + 1)
-        if (businessRepair) assert.equal(existsSync(join(workspace, path)), false)
+        if (businessRepair || legacyMaterial && !exactLegacyTask) {
+          assert.equal(existsSync(join(workspace, path)), false)
+          if (legacyMaterial) assert.doesNotMatch(request.prompt, /旧Native原输出材料/)
+        }
         else {
           assert.equal(readFileSync(join(workspace, path), 'utf8'), invalid)
           if (protocolRepair) {
@@ -9219,7 +9233,7 @@ for (const failureKind of ['format', 'business', 'protocol'] as const) for (cons
   assert.ok(stages.at(-1)!.some(entry => entry.stage === 'behavior-draft-protocol'))
   if (legacyMaterial) {
     assert.ok(!stages[0].some(entry => entry.stage === 'behavior-draft-protocol'))
-    assert.ok(stages.at(-1)!.some(entry => entry.stage.endsWith(`${phase}:native-material-provenance`)))
+    assert.equal(stages.at(-1)!.some(entry => entry.stage.endsWith(`${phase}:native-material-provenance`)), exactLegacyTask)
     assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
     assert.equal(f.store.listJournals(f.operation.id).length, 0); return
   }
