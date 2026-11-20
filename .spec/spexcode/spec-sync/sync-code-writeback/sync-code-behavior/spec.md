@@ -12,6 +12,8 @@ related:
 
 ## expanded spec
 
+原生 P0 的已校验分析经协调器认证可在正式重试中作为待审材料承接。分析阶段用本轮同一 schema 与程序门重校原作者 Git 稿，保留原 trace，按同一待审分析生成新的独审请求。新独审与原作者的会话及线程须独立。合法业务 repair 清除已校验资格，对同一稿件继续分析及独审。
+
 P0 的唯一模型计划投影排除仅供全图封口的 contextVerifications 和 [[sync-historical-coverage]] 证明；局部分析和独审仍只接收本轮原 verifications 与 mandatoryTests，不取得历史未执行许可。完整可信计划继续参与 policyDigest，不删改 planBlob 或从实时配置补写旧缺席。
 
 loadMaterial可返回异步材料，派发前await既有停止材料认证与正式归档checkout的临时恢复/观察/回收；恢复不启动Native。空材料按原逻辑继续，原Git/JSON字节与errors/repairDiagnostics不变，不能把关闭目录变成清空原稿的理由；原真实性、schema、保护面和批准门保持。

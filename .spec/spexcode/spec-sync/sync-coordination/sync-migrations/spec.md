@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+writer64 追加 SELECT 1 marker，保护 [[sync-coordinator]] 普通正式重试的 P0 跨 operation 续审来源和混合模型批准。writer63 在写入或派发前拒绝新版。升级先停稳并正式结算旧 writer，保存一致 writer63 SQLite online backup 及配套 enabled、Git/CAS 原件。回滚先停稳并结算新 writer，再完整恢复该备份与配套原件。旧迁移、请求、失败及证据保持。
+
 writer63 追加 SELECT 1 marker，保护 [[sync-coordinator]] 在同一 operation 内对已结算 ZCode P1 同候选独审的续审来源与请求，以及 [[sync-partition-execution]] 经正式 P0 独审认证的规范入口配置仅分析承接。仅持久化原候选来源、已经保留只读派发及读取已认证配置分区的冷恢复均须在写入或派发前阻止 writer62。升级先停稳旧 writer 并结算资源、journal 和租约，保存一致 writer62 SQLite online backup 及配套 enabled、Git/CAS 原件。回退先停稳并结算新 writer，再完整恢复该配套备份。既有迁移和请求失败、CAS 原件均原样保留。
 
 writer62 追加 SELECT 1 marker，保护 [[sync-coordinator]] 在 P0 新请求 reserve 前冻结的 Claude 物理草稿。旧 writer 在写入或派发前拒绝新库。升级停稳并结算旧 writer，保存一致 writer61 SQLite online backup 和配套 Git/CAS 原件。回滚先停稳并结算新 writer，再恢复该备份与配套原件。既有 SQL、迁移 checksum 及请求记录逐字保留。

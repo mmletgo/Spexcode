@@ -80,7 +80,7 @@ export function codeBehaviorContinuationStatus(continuation: CodeBehaviorContinu
 
 export type CodeBehaviorReviewReference = { commit: string; path: string }
 export type CodeBehaviorMaterialRequest = Pick<ElaborationSessionRequest, 'prompt' | 'worktree'> & { previousInstructions?: string }
-export type CodeBehaviorCheckpoints = { loadReviewFeedback?(inputDigest: string): CodeBehaviorReviewReference | null; loadMaterial?(purpose: BehaviorPurpose, schemaDigest: string, inputDigest: string, request: CodeBehaviorMaterialRequest, existingDraft?: ElaborationDraft): ElaborationDraftMaterial | null | Promise<ElaborationDraftMaterial | null>; load(inputDigest: string): CodeBehaviorContinuation | null; save(value: CodeBehaviorContinuation): void }
+export type CodeBehaviorCheckpoints = { loadReviewFeedback?(inputDigest: string): CodeBehaviorReviewReference | null; loadMaterial?(purpose: BehaviorPurpose, schemaDigest: string, inputDigest: string, request: CodeBehaviorMaterialRequest, existingDraft?: ElaborationDraft): ElaborationDraftMaterial | null | Promise<ElaborationDraftMaterial | null>; load(inputDigest: string, analysisSchemaDigest: string): CodeBehaviorContinuation | null; save(value: CodeBehaviorContinuation): void }
 type Proposal = { changes: Omit<CodeBehaviorChange, 'id'>[]; facts: CodeBehaviorAnalysis['facts']; acceptanceChanges: Omit<AcceptanceChangeProposal, 'action'>[]; newNodes: { codePath: string; parentNodeId: string; basis: string }[]; resolutions: CodeBehaviorAnalysis['resolutions'] }
 export type CodeBehaviorContext = {
   task: Record<string, unknown>
@@ -629,10 +629,11 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   frozenTreeReads.clear()
   let analysisRequest: { requestRef: BlobRef; receipt: unknown } | undefined
   const inputDigest = contentHash(worktree ? JSON.stringify({ context, worktree, logicalInput: contentHash(JSON.stringify(frozen)) }) : context), traces: ElaborationTrace[] = []
-  const previous = accepted?.(inputDigest, { analysisSchemaDigest: contentHash(JSON.stringify(analysisSchema)), changedPaths })
+  const analysisSchemaDigest = contentHash(JSON.stringify(analysisSchema))
+  const previous = accepted?.(inputDigest, { analysisSchemaDigest, changedPaths })
   if (previous) return previous
   if (draftMode) {
-    continuation = checkpoints?.load(inputDigest) ?? { version: 'code-behavior-draft-v1', inputDigest, drafts: {} }
+    continuation = checkpoints?.load(inputDigest, analysisSchemaDigest) ?? { version: 'code-behavior-draft-v1', inputDigest, drafts: {} }
     if (continuation.version !== input.draftProtocol || continuation.inputDigest !== inputDigest) throw new Error('P0草稿续修完整输入绑定不匹配')
   }
   let reviewWorktree = worktree

@@ -846,6 +846,47 @@ export function behaviorMaterialTaskMatches(original: BehaviorTaskRequest, curre
   return previous.body === expected.body && (previous.instructions === expected.instructions || previous.instructions === current.previousInstructions)
 }
 
+type BehaviorContinuationProvenance = { fromOperationId: string; fromAttemptId: string; resultRef: BlobRef; scopeDigest?: string }
+
+function* behaviorContinuationLineage(store: SyncStore, operation: SyncOperation, scopeDigest: string, stageSelection?: FrozenBaselineSelection): Generator<SyncOperation> {
+  const selection = stageSelection ?? store.readBusinessBaselineSelection(operation.id)
+  for (const ancestor of retryOperationLineage(store, operation)) {
+    if (ancestor.id === operation.id) continue
+    if (!operation.planBlob || ancestor.planBlob?.sha256 !== operation.planBlob.sha256 || ancestor.impactDigest !== operation.impactDigest
+      || ancestor.readSetDigest !== operation.readSetDigest || contentHash(canonical(ancestor.scope)) !== scopeDigest
+      || canonical(ancestor.input) !== canonical(operation.input) || canonical(store.readBusinessBaselineSelection(ancestor.id)) !== canonical(selection)
+      || !settledApprovalSource(store, ancestor)) return
+    yield ancestor
+  }
+}
+
+function previousBehaviorContinuation(store: SyncStore, operation: SyncOperation, origin: SyncAttempt, key: string, selection?: FrozenBaselineSelection, readCheckpoints?: (attempt: SyncAttempt) => SyncCheckpointStageView) {
+  const provenance = stage<BehaviorContinuationProvenance>(store, operation, origin, `${key}:continuation-provenance`, 'automatic', readCheckpoints?.(origin))
+  if (!provenance) return null
+  const crossOperation = provenance.fromOperationId !== operation.id
+  let owner: SyncOperation | undefined = crossOperation ? undefined : operation
+  if (crossOperation && provenance.scopeDigest) for (const ancestor of behaviorContinuationLineage(store, operation, provenance.scopeDigest, selection)) {
+    if (ancestor.id === provenance.fromOperationId) { owner = ancestor; break }
+  }
+  if (!owner) return null
+  const attempt = store.readAttempt(provenance.fromAttemptId)
+  if (attempt.operationId !== owner.id || (!crossOperation && attempt.number >= origin.number) || !['failed', 'superseded', 'settled'].includes(attempt.status)) return null
+  const source = partitionStage<CodeBehaviorContinuation>(store, owner, attempt, `${key}:continuation`, selection, readCheckpoints?.(attempt))
+  if (!source || source.resultRef.sha256 !== provenance.resultRef.sha256) return null
+  if (crossOperation) {
+    const plan = key === 'analysis' ? null : partitionStage<SyncPartitionPlan>(store, operation, origin, 'partition-plan', selection, readCheckpoints?.(origin))
+    if (key !== 'analysis' && (!plan || partitionStage<SyncPartitionPlan>(store, owner, attempt, 'partition-plan', selection, readCheckpoints?.(attempt))?.resultRef.sha256 !== plan.resultRef.sha256)) return null
+    if (canonical(attempt.composedInput) !== canonical(origin.composedInput) || provenance.scopeDigest !== contentHash(canonical(operation.scope))) {
+      const expanded = store.readOperation(operation.id)
+      const after = expanded.baselineSelection
+      if (!selection || !after || selection.digest === after.digest || origin.composedInput?.baselineSelectionDigest !== after.digest
+        || !composedBeforeNullExpansionMatches(attempt.composedInput, origin.composedInput, selection.digest)
+        || !plan || reviewPlanStage(store, expanded, origin, 'partition-plan', 'analysis_only_p1', readCheckpoints)?.resultRef.sha256 !== plan.resultRef.sha256) return null
+    }
+  }
+  return { owner, attempt, continuation: source.result }
+}
+
 /** 续审analysis沿精确原件provenance回到实际Native提交；不借任意历史session授予已校验资格。 */
 function behaviorTraceBinding(store: SyncStore, operation: SyncOperation, origin: SyncAttempt, key: string, trace: ElaborationTrace, sourceSelection?: FrozenBaselineSelection, readCheckpoints?: (attempt: SyncAttempt) => SyncCheckpointStageView, bindModel = false): boolean {
   for (;;) {
@@ -859,23 +900,25 @@ function behaviorTraceBinding(store: SyncStore, operation: SyncOperation, origin
       if (request.requestKey !== `sync:${origin.id}:analysis${suffix}:${trace.purpose}` || source!.result.inputDigest !== trace.inputDigest || bindModel && request.model !== syncModel(operation)) return false
       const ownerDigest = contentHash(JSON.stringify({ version: 'code-behavior-draft-v1', source: canonicalSnapshotSource(operation.input.source), partitionId: key === 'analysis' ? null : key.slice('partition:'.length, -':analysis'.length), purpose: trace.purpose }))
       readStageDraft(operation.input.source.commonDir, draft, { ownerDigest, sourceInputId: operation.input.id, schemaDigest: draft.schemaDigest, path: `.spex-sync-drafts/${ownerDigest}.json` })
-      const result = completedNativeStageResult(store, operation, origin, request, trace, ready.receipt, '')
+      const result = completedNativeStageResult(store, operation, origin, request, trace, ready.receipt, '', readCheckpoints?.(origin))
       return !!result?.worktree && canonical({ baseCommit: result.worktree.baseCommit, tree: result.worktree.baseTree, mode: 'edit' }) === canonical(draft.seed) && result.worktree.headCommit === draft.resultCommit && result.worktree.tree === draft.resultTree
     }
     if (trace.purpose !== 'code_behavior_analyze') return false
-    const provenance = stage<{ fromOperationId: string; fromAttemptId: string; resultRef: BlobRef }>(store, operation, origin, `${key}:continuation-provenance`, 'automatic', readCheckpoints?.(origin))
-    if (!provenance || provenance.fromOperationId !== operation.id) return false
-    const previous = store.readAttempt(provenance.fromAttemptId)
-    if (previous.operationId !== operation.id || previous.number >= origin.number || !['failed', 'superseded', 'settled'].includes(previous.status)) return false
-    const prior = partitionStage<CodeBehaviorContinuation>(store, operation, previous, `${key}:continuation`, sourceSelection, readCheckpoints?.(previous))
-    if (!prior || prior.resultRef.sha256 !== provenance.resultRef.sha256 || canonical(prior.result.readyAnalysis) !== canonical(ready) || prior.result.inputDigest !== source!.result.inputDigest) return false
-    origin = previous
+    const previous = previousBehaviorContinuation(store, operation, origin, key, sourceSelection, readCheckpoints)
+    if (!previous || canonical(previous.continuation.readyAnalysis) !== canonical(ready) || previous.continuation.inputDigest !== source!.result.inputDigest) return false
+    if (previous.owner.id !== operation.id) {
+      const originalDraft = previous.continuation.drafts.code_behavior_analyze
+      if (!originalDraft || canonical(codeBehaviorDraftStatus(originalDraft)) !== canonical(codeBehaviorDraftStatus(draft))) return false
+      bindModel = true
+    }
+    operation = previous.owner; origin = previous.attempt
   }
 }
 
 /** 业务repair清除ready后，原分析稿仍沿精确continuation来源认证；不继承祖先的推进状态。 */
 function behaviorAnalysisDraftBinding(store: SyncStore, operation: SyncOperation, origin: SyncAttempt, key: string, draft: ElaborationDraft, planDigest?: string, statusOnly = false): boolean {
   const suffix = key === 'analysis' ? '' : `:partition:${key.slice('partition:'.length, -':analysis'.length)}`
+  let bindModel = false
   for (;;) {
     const source = partitionStage<CodeBehaviorContinuation>(store, operation, origin, `${key}:continuation`)
     const saved = source?.result.drafts.code_behavior_analyze
@@ -885,15 +928,13 @@ function behaviorAnalysisDraftBinding(store: SyncStore, operation: SyncOperation
     const dispatch = origin.dispatchPlans.find(dispatch => dispatch.key === requestKey && dispatch.purpose === 'code_behavior_analyze')
     if (dispatch) {
       const trace = source.result.readyAnalysis?.trace
-      return !!trace && dispatch.session?.sessionId === trace.sessionId && dispatch.session.threadId === trace.threadId && dispatch.session.turnId === trace.turnId && behaviorTraceBinding(store, operation, origin, key, trace)
+      return !!trace && dispatch.session?.sessionId === trace.sessionId && dispatch.session.threadId === trace.threadId && dispatch.session.turnId === trace.turnId && behaviorTraceBinding(store, operation, origin, key, trace, undefined, undefined, bindModel)
     }
-    const provenance = stage<{ fromOperationId: string; fromAttemptId: string; resultRef: BlobRef }>(store, operation, origin, `${key}:continuation-provenance`)
-    if (!provenance || provenance.fromOperationId !== operation.id) return false
-    const previous = store.readAttempt(provenance.fromAttemptId)
-    if (previous.operationId !== operation.id || previous.number >= origin.number || !['failed', 'superseded', 'settled'].includes(previous.status) || canonical(previous.composedInput) !== canonical(origin.composedInput)) return false
-    const prior = partitionStage<CodeBehaviorContinuation>(store, operation, previous, `${key}:continuation`)
-    if (!prior || prior.resultRef.sha256 !== provenance.resultRef.sha256 || prior.result.inputDigest !== source.result.inputDigest) return false
-    origin = previous
+    const previous = previousBehaviorContinuation(store, operation, origin, key)
+    if (!previous || previous.continuation.inputDigest !== source.result.inputDigest
+      || previous.owner.id === operation.id && canonical(previous.attempt.composedInput) !== canonical(origin.composedInput)) return false
+    if (previous.owner.id !== operation.id) bindModel = true
+    operation = previous.owner; origin = previous.attempt
   }
 }
 
@@ -3088,11 +3129,12 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         if (frozenClaude) fail('behavior_draft_material_binding', '已冻结的Claude物理稿缺少仍可认证的原owner和停止来源')
         return null
       }
-      const loadBehaviorContinuation = (key: string, inputDigest: string, planDigest?: string): CodeBehaviorContinuation | null => {
-        const current = stage<CodeBehaviorContinuation>(store, operation, store.readAttempt(attempt!.id), `${key}:continuation`)
+      const loadBehaviorContinuation = (key: string, inputDigest: string, analysisSchemaDigest: string, planDigest?: string): CodeBehaviorContinuation | null => {
+        const live = store.readAttempt(attempt!.id)
+        const current = stage<CodeBehaviorContinuation>(store, operation, live, `${key}:continuation`)
         if (current) {
           if (current.inputDigest !== inputDigest) fail('behavior_continuation_binding', '当前P0草稿与完整业务输入不匹配')
-          if (current.readyAnalysis && !behaviorTraceBinding(store, operation, store.readAttempt(attempt!.id), key, current.readyAnalysis.trace)) fail('behavior_continuation_binding', '当前P0分析原件没有精确Native/Git来源证明')
+          if (current.readyAnalysis && !behaviorTraceBinding(store, operation, live, key, current.readyAnalysis.trace)) fail('behavior_continuation_binding', '当前P0分析原件没有精确Native/Git来源证明')
           return current
         }
         const priorAttempts = store.listAttempts(operation.id).filter(prior => prior.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(prior.status))
@@ -3106,6 +3148,27 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           if (trace && !behaviorTraceBinding(store, operation, prior, key, trace)) fail('behavior_continuation_binding', 'P0已校验分析没有原生派发身份')
           saveStage(store, fence!, `${key}:continuation-provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef })
           const continuation = p0StatusOnly ? codeBehaviorContinuationStatus(source.result) : source.result
+          saveStage(store, fence!, `${key}:continuation`, continuation, !operation.baselineSelection ? { readSetDigest: operation.readSetDigest } : undefined)
+          return continuation
+        }
+        if (!operation.retryOf) return null
+        const suffix = key === 'analysis' ? '' : `:partition:${key.slice('partition:'.length, -':analysis'.length)}`
+        if (live.dispatchPlans.some(dispatch => dispatch.key.startsWith(`sync:${live.id}:analysis${suffix}:code_behavior_`))) return null
+        const previousCheckpoints = (prior: SyncAttempt) => historyCheckpoints(store.readOperation(prior.operationId), prior)
+        const partitionPlanRef = partitions && contentHash(JSON.stringify(partitions)), scopeDigest = contentHash(canonical(operation.scope))
+        for (const owner of behaviorContinuationLineage(store, operation, scopeDigest)) for (const prior of store.listAttempts(owner.id).reverse()) {
+          if (!['failed', 'superseded', 'settled'].includes(prior.status) || canonical(prior.composedInput) !== canonical(view.composed)) continue
+          const checkpoints = historyCheckpoints(owner, prior)
+          if (planDigest && partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan', undefined, checkpoints)?.resultRef.sha256 !== partitionPlanRef) continue
+          const source = partitionStage<CodeBehaviorContinuation>(store, owner, prior, `${key}:continuation`, undefined, checkpoints)
+          if (!source && !prior.dispatchPlans.some(dispatch => dispatch.key.startsWith(`sync:${prior.id}:analysis${suffix}:code_behavior_`))) continue
+          const ready = source?.result.readyAnalysis, draft = source?.result.drafts.code_behavior_analyze
+          if (!source || source.result.version !== 'code-behavior-draft-v1' || !ready || !draft || draft.errors.length || draft.schemaDigest !== analysisSchemaDigest || source.result.inputDigest !== inputDigest
+            || stage<{ version: string }>(store, owner, prior, 'behavior-draft-protocol', 'automatic', checkpoints)?.version !== 'code-behavior-draft-v1'
+            || !behaviorTraceBinding(store, owner, prior, key, ready.trace, undefined, previousCheckpoints, true)) return null
+          assertMaterialFence()
+          saveStage(store, fence!, `${key}:continuation-provenance`, { fromOperationId: owner.id, fromAttemptId: prior.id, resultRef: source.resultRef, scopeDigest } satisfies BehaviorContinuationProvenance)
+          const continuation: CodeBehaviorContinuation = { version: source.result.version, inputDigest, drafts: { code_behavior_analyze: draft }, readyAnalysis: ready }
           saveStage(store, fence!, `${key}:continuation`, continuation, !operation.baselineSelection ? { readSetDigest: operation.readSetDigest } : undefined)
           return continuation
         }
@@ -3132,7 +3195,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
               || !originalDraft || canonical(codeBehaviorDraftStatus(originalDraft)) !== canonical(codeBehaviorDraftStatus(draft))) fail('behavior_review_material_binding', '业务续修缺少原独审continuation来源')
             continue
           }
-          if (trace.purpose !== 'code_behavior_review' || !behaviorTraceBinding(store, owner, prior, key, trace, undefined, item => historyCheckpoints(owner, item))) fail('behavior_review_material_binding', '业务续修缺少原独审Native/Git身份')
+          if (trace.purpose !== 'code_behavior_review' || !behaviorTraceBinding(store, owner, prior, key, trace, undefined, item => historyCheckpoints(owner, item), owner.id !== operation.id)) fail('behavior_review_material_binding', '业务续修缺少原独审Native/Git身份')
           if (source.result.readyAnalysis) return null
           const commonDir = owner.input.source.commonDir
           const output = JSON.parse(readObject(commonDir, draft.oid).toString()) as { verdict: string; findings: unknown[]; checkedPaths: string[]; checkedChangeIds: string[] }
@@ -3299,7 +3362,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         },
         authenticateAnalysisOnly: (plan, evidence, owners) => authenticateAnalysisOnlyPartitions(store, operation, store.readAttempt(attempt!.id), plan, evidence, owners),
         loadBehaviorDraftMaterial: (key, planDigest, purpose, schemaDigest, inputDigest, request, existingDraft) => loadBehaviorDraftMaterial(key, purpose, schemaDigest, inputDigest, request, planDigest, existingDraft),
-        loadBehaviorContinuation: (key, planDigest, inputDigest) => loadBehaviorContinuation(key, inputDigest, planDigest),
+        loadBehaviorContinuation: (key, planDigest, inputDigest, analysisSchemaDigest) => loadBehaviorContinuation(key, inputDigest, analysisSchemaDigest, planDigest),
         loadBehaviorReviewFeedback: (key, planDigest, inputDigest) => loadBehaviorReviewFeedback(key, inputDigest, planDigest),
         loadAcceptedAnalysis: (key, plan, inputDigest, binding) => {
           for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(item.status))) {
@@ -3316,7 +3379,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           const planRef = contentHash(JSON.stringify(plan)), selection = store.readBusinessBaselineSelection(operation.id)
           for (const { owner, prior } of approvalAncestors) {
             if (canonical(prior.composedInput) !== canonical(view.composed)) continue
-            const checkpoints = (origin: SyncAttempt): SyncCheckpointStageView => historyCheckpoints(owner, origin)
+            const checkpoints = (origin: SyncAttempt): SyncCheckpointStageView => historyCheckpoints(origin.operationId === owner.id ? owner : store.readOperation(origin.operationId), origin)
             const original = checkpoints(prior), savedPlan = partitionStage<SyncPartitionPlan>(store, owner, prior, 'partition-plan', selection, original)
             if (savedPlan?.resultRef.sha256 !== planRef) continue
             const source = partitionStage<CodeBehaviorAnalysis>(store, owner, prior, key, selection, original)
@@ -3627,7 +3690,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
             }
           }
           const draftProtocol = behaviorProtocol?.version
-          try { const analysisInput: import('./code-behavior.js').CodeBehaviorInput = { ...(draftProtocol ? { draftProtocol } : {}), ...(behaviorProtocol?.contextTransport ? { contextTransport: behaviorProtocol.contextTransport } : {}), exactChangedPathsPreflight: behaviorProtocol?.exactChangedPathsPreflight, reviewCoveragePreflight: behaviorProtocol?.reviewCoveragePreflight, model, snapshot: operation.input, baseline: operation.previousBaselinePair, ...(operation.baselineSelection ? { baselineSelection: store.readBusinessBaselineSelection(operation.id) } : {}), composed: view.composed, readSetDigest: operation.readSetDigest, policyDigest: operation.policyDigest, plan: operation.baselineSelection ? { ...options.plan, readPaths: view.readPaths } : options.plan, requestKey: `sync:${attempt.id}:analysis`, timeoutMs: callTimeoutMs, signal, origin: operation.origin, ...(decision && previousDecisionAnalysis ? { decision: { request: decision, previous: previousDecisionAnalysis, previousComposed: previousDecisionComposed, previousReadPaths: previousDecisionReadPaths } } : {}), repairDiagnostics, postGateReview }; approved = partitions ? await analyzeSyncPartitions(analysisInput, partitions, options.plan.version === 'sync-coordinator-v2' ? options.plan.partitionPolicy.maxParallel : 1, runner, partitionCheckpoints) : await analyzeCodeBehavior(analysisInput, runner, undefined, { loadReviewFeedback: inputDigest => loadBehaviorReviewFeedback('analysis', inputDigest), loadMaterial: (purpose, schemaDigest, inputDigest, request, existingDraft) => loadBehaviorDraftMaterial('analysis', purpose, schemaDigest, inputDigest, request, undefined, existingDraft), load: inputDigest => loadBehaviorContinuation('analysis', inputDigest), save: continuation => { saveStage(store, fence!, 'analysis:continuation', continuation, !operation.baselineSelection ? { readSetDigest: operation.readSetDigest } : undefined) } }) }
+          try { const analysisInput: import('./code-behavior.js').CodeBehaviorInput = { ...(draftProtocol ? { draftProtocol } : {}), ...(behaviorProtocol?.contextTransport ? { contextTransport: behaviorProtocol.contextTransport } : {}), exactChangedPathsPreflight: behaviorProtocol?.exactChangedPathsPreflight, reviewCoveragePreflight: behaviorProtocol?.reviewCoveragePreflight, model, snapshot: operation.input, baseline: operation.previousBaselinePair, ...(operation.baselineSelection ? { baselineSelection: store.readBusinessBaselineSelection(operation.id) } : {}), composed: view.composed, readSetDigest: operation.readSetDigest, policyDigest: operation.policyDigest, plan: operation.baselineSelection ? { ...options.plan, readPaths: view.readPaths } : options.plan, requestKey: `sync:${attempt.id}:analysis`, timeoutMs: callTimeoutMs, signal, origin: operation.origin, ...(decision && previousDecisionAnalysis ? { decision: { request: decision, previous: previousDecisionAnalysis, previousComposed: previousDecisionComposed, previousReadPaths: previousDecisionReadPaths } } : {}), repairDiagnostics, postGateReview }; approved = partitions ? await analyzeSyncPartitions(analysisInput, partitions, options.plan.version === 'sync-coordinator-v2' ? options.plan.partitionPolicy.maxParallel : 1, runner, partitionCheckpoints) : await analyzeCodeBehavior(analysisInput, runner, undefined, { loadReviewFeedback: inputDigest => loadBehaviorReviewFeedback('analysis', inputDigest), loadMaterial: (purpose, schemaDigest, inputDigest, request, existingDraft) => loadBehaviorDraftMaterial('analysis', purpose, schemaDigest, inputDigest, request, undefined, existingDraft), load: (inputDigest, analysisSchemaDigest) => loadBehaviorContinuation('analysis', inputDigest, analysisSchemaDigest), save: continuation => { saveStage(store, fence!, 'analysis:continuation', continuation, !operation.baselineSelection ? { readSetDigest: operation.readSetDigest } : undefined) } }) }
           catch (error) {
             const issue = error as { code?: string; message?: string }
             const partitionFailures = (error as { partitionFailures?: PartitionAnalysisFailure[] }).partitionFailures
