@@ -17,6 +17,11 @@ watching session. State transitions append events; the backend that owns the wat
 into ordinary queue messages before dequeue, while a relation created after an earlier publish does not receive that
 history. The fixture also proves one-time migration marker behavior and independent watcher pairs.
 
+After every start and restart, the fixture checks the serving instance, child PID, and project before sending a
+matrix request. A confirmed loopback address conflict can acquire another port within the same startup budget.
+Both instances in the restart story use the fixture's original database. The ten stories run on both an ordinary
+port and a deliberately occupied first port. The second run checks that the other listener receives no matrix requests.
+
 The protocol's sequence scope stays explicit in the proof: `enqueueSeq` is global to the message table, so independent
 watcher queues may contain interleaved sequence values, and the proof requires FIFO within each recipient and identical
 payload order across recipients, not equal sequence numbers between recipients. There is one proof of this composition,
