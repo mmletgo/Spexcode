@@ -1301,9 +1301,11 @@ for (const partitioned of [false, true]) for (const keepRefactor of [false, true
     assert.ok(local)
     const request = { operationId: operation.id, inputId: operation.input.id, expectedRevision: operation.revision, requestId: 'challenge-before-postgate',
       analysisRef: local.analysisRef, partitionId: local.partitionId, diagnostic: '独审请检查冻结权限与序列化兼容性' }
-    const challenge = await continuationCoordinator.prepareP0ReviewChallenge(f.store, operation, f.plan, request)
-    assert.deepEqual(writeEvidence(commonDir, p0ReviewDiagnosticEvidence(request)), challenge.diagnosticRef)
-    f.store.authorizeP0ReviewChallenge(operation.id, challenge)
+    const reserved = await continuationCoordinator.prepareP0ReviewChallenge(f.store, operation, f.plan, { ...request, evidencePaths: ['src/export.js'] })
+    const challenge = { ...reserved, version: 'p0-review-challenge-v1' as const, diagnosticRef: writeEvidence(commonDir, p0ReviewDiagnosticEvidence(request)) }
+    const original = f.store.authorizeP0ReviewChallenge(operation.id, challenge)
+    const api = await SyncApplication.create(f.root, { protocol: f.protocol, runtimeDirectory: join(f.parent, 'v1-challenge-api'), tools: f.options.tools })
+    assert.deepEqual(await api.challengeP0(request), original)
     f.store.requestControl(operation.id, 'run')
     result = await runSyncOperation(f.store, operation.id, f.options)
     const reviews = calls.filter(call => call.purpose === 'code_behavior_review').map(call => readCodeBehaviorContext(call, commonDir))
@@ -11663,15 +11665,16 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
   let store = f.store, active = f.operation, pauseWholeAt = 1, pauseFailureAt = 0
   const calls: string[] = []
   const diagnostic = '待核：原权限边界遗漏已存在的代码分支。'
+  const evidencePaths = ['tests/archive.test.mjs', 'tests/import.test.mjs']
   const findings = [{ message: '权限边界描述遗漏原输入分支', evidence: '冻结 src/export.js 实际分支', counterexample: '已验范围内的输入必须保留原活动限制' }]
-  let challengedId: string | undefined, originalDraft: string | undefined
+  let challengedId: string | undefined, originalDraft: string | undefined, incompleteReview: string | undefined
   let repairDraft: { commit: string; path: string } | undefined
   const originals = new Map<string, NonNullable<ReturnType<typeof readCodeBehaviorContext>['pendingAnalysis']>>()
   const commonDir = f.input.source.commonDir
   f.options.runner = async request => {
     if (!request.purpose.startsWith('code_behavior_')) throw Object.assign(new Error('夹具在P0完成后停止'), { code: 'unsupported' })
     const operation = store.readOperation(active.id), attempt = store.readAttempt(operation.currentAttemptId!)
-    const { task, pendingAnalysis, operatorReviewDiagnostic } = readCodeBehaviorContext(request, commonDir)
+    const { task, pendingAnalysis, operatorReviewDiagnostic, requiredCheckedPaths } = readCodeBehaviorContext(request, commonDir)
     const { requiredChangedPaths, partition } = task as { requiredChangedPaths: string[]; partition: { id: string } }
     calls.push(`${operation.id}:${attempt.number}:${partition.id}:${request.purpose}`)
     const initial = active.id === f.operation.id && attempt.number === 1
@@ -11681,6 +11684,11 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
       assert.equal(partition.id, challengedId)
       if (pendingAnalysis) {
         assert.equal(operatorReviewDiagnostic?.text, diagnostic)
+        assert.deepEqual(operatorReviewDiagnostic?.evidencePaths, evidencePaths)
+        assert(evidencePaths.every(path => !requiredChangedPaths.includes(path)), '证据文件不扩充owner变化')
+        assert.deepEqual(requiredCheckedPaths, [...requiredChangedPaths, ...evidencePaths].sort())
+        assert.ok(request.prompt.startsWith('先读取下方只读 context 的 operatorReviewDiagnostic.text'))
+        if (attempt.number === 3 && mode === 'accept') assert.equal(f.git('show', `${request.worktree!.baseCommit}:${path}`), incompleteReview)
         if (active.id === f.operation.id || attempt.number === 1) assert.deepEqual(pendingAnalysis, originals.get(partition.id))
       } else {
         assert.equal(operatorReviewDiagnostic, undefined)
@@ -11690,7 +11698,7 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
       }
     } else assert.equal(operatorReviewDiagnostic, undefined)
     const domain = requiredChangedPaths.some(path => path.endsWith('/import.js')) ? 'IMPORT' : requiredChangedPaths.some(path => path.endsWith('/archive.js')) ? 'ARCHIVE' : 'EXPORT'
-    const output = pendingAnalysis ? { inputDigest: request.inputDigest, analysisDigest: pendingAnalysis.analysisDigest, verdict: 'accept', checkedPaths: requiredChangedPaths, checkedChangeIds: pendingAnalysis.analysis.changes.map(change => change.id), findings: [] as typeof findings }
+    const output = pendingAnalysis ? { inputDigest: request.inputDigest, analysisDigest: pendingAnalysis.analysisDigest, verdict: 'accept', checkedPaths: mode === 'accept' && attempt.number === 2 ? requiredChangedPaths : requiredCheckedPaths ?? requiredChangedPaths, checkedChangeIds: pendingAnalysis.analysis.changes.map(change => change.id), findings: [] as typeof findings }
       : { changes: requiredChangedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: [`RULE-${domain}-05`], ruleIds: [`RULE-${domain}-05`], originalIntent: '保留原业务', previousBehavior: '原权限', sourceBehavior: '原权限', deliveryBehavior: '原权限', evidence: path, counterexample: '必须保留原权限' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
     if (initial && !pendingAnalysis && requiredChangedPaths.includes('src/export.js')) originalDraft = JSON.stringify(output)
     if (mode === 'repair' && !initial && active.id === f.operation.id) {
@@ -11703,6 +11711,7 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
       output.findings = findings
     }
     if (mode === 'repair' && active.id !== f.operation.id && !pendingAnalysis) output.changes![0].sourceBehavior = '原活动限制和输入分支均保持'
+    if (mode === 'accept' && attempt.number === 2) incompleteReview = JSON.stringify(output)
     const worktree = committedDraftFixture(f, request, output, join(f.parent, `p0-challenge-${calls.length}`))
     if (output.verdict === 'repair') repairDraft = { commit: worktree.headCommit, path }
     return settledBehaviorNativeFixture(store, operation, request, { output: { summary: '分区真实Git草稿' }, worktree })
@@ -11731,7 +11740,7 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
   assert.equal(store.hasVerificationOrJournal(paused.id), false)
   const target = analysis.analysis.partitionEvidence!.find(item => item.changedPaths.includes('src/export.js'))!
   challengedId = target.partitionId
-  const request = { operationId: paused.id, expectedRevision: paused.revision, inputId: paused.input.id, partitionId: target.partitionId, requestId: 'operator-review', analysisRef: target.analysisRef, diagnostic }
+  const request = { operationId: paused.id, expectedRevision: paused.revision, inputId: paused.input.id, partitionId: target.partitionId, requestId: 'operator-review', analysisRef: target.analysisRef, diagnostic, evidencePaths }
   let recorded: Awaited<ReturnType<SyncApplication['challengeP0']>>
   if (mode === 'accept') {
     const listener = createServer().listen(0, '127.0.0.1')
@@ -11761,6 +11770,12 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
       for (const [patch, status, code] of [
         [{ operationId: 'foreign-operation' }, 400, 'sync_p0_challenge_invalid'],
         [{ forgedTrace: target.analysis.traces[1] }, 400, 'sync_p0_challenge_invalid'],
+        [{ evidencePaths: undefined }, 400, 'sync_p0_challenge_invalid'],
+        [{ evidencePaths: [] }, 400, 'sync_p0_challenge_invalid'],
+        [{ evidencePaths: ['../outside.ts'] }, 400, 'sync_p0_challenge_invalid'],
+        [{ evidencePaths: ['.spex-sync-drafts/protocol.json'] }, 400, 'sync_p0_challenge_invalid'],
+        [{ evidencePaths: ['tests/.env'] }, 400, 'sync_p0_challenge_invalid'],
+        [{ evidencePaths: ['missing.ts'] }, 409, 'sync_p0_challenge_binding'],
         [{ inputId: 'foreign-input' }, 409, 'sync_p0_challenge_stale'],
         [{ expectedRevision: request.expectedRevision - 1 }, 409, 'sync_p0_challenge_binding'],
         [{ partitionId: 'foreign-owner' }, 409, 'sync_p0_challenge_binding'],
@@ -11781,11 +11796,12 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
       const diagnosticFile = join(f.parent, 'diagnostic.txt')
       writeFileSync(diagnosticFile, diagnostic, 'utf8')
       recorded = JSON.parse(cli(['challenge', paused.id, '--request-id', request.requestId, '--expected-revision', String(request.expectedRevision),
-        '--input-id', request.inputId, '--partition', request.partitionId, '--analysis', request.analysisRef.sha256, '--diagnostic-file', diagnosticFile])) as typeof recorded
+        '--input-id', request.inputId, '--partition', request.partitionId, '--analysis', request.analysisRef.sha256, '--diagnostic-file', diagnosticFile,
+        '--evidence-paths', JSON.stringify([evidencePaths[1], ...evidencePaths])])) as typeof recorded
       const replay = await post(`${operation}/challenge`, request)
       assert.equal(replay.status, 200)
       assert.deepEqual(await replay.json(), recorded)
-      const conflict = await post(`${operation}/challenge`, { ...request, diagnostic: 'different diagnostic' })
+      const conflict = await post(`${operation}/challenge`, { ...request, evidencePaths: evidencePaths.slice(1) })
       assert.equal(conflict.status, 409)
       assert.equal((await conflict.json() as { code: string }).code, 'SYNC_IDEMPOTENCY_CONFLICT')
       assert.equal(readCurrentSyncAnalysis(store, recorded.operation), null)
@@ -11803,6 +11819,7 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
     assert.equal(readCurrentSyncAnalysis(store, recorded.operation), null)
     store.requestControl(paused.id, 'run')
   }
+  assert.equal(recorded.challenge.version, 'p0-review-challenge-v2')
   assert.equal(recorded.operation.phase, 'paused')
   assert.equal(recorded.operation.callsUsed, paused.callsUsed)
   assert.deepEqual(store.readAttempt(origin.id), origin)
@@ -11816,7 +11833,18 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
     const physical = store.readPhysicalControl(paused.input.source)
     assert.equal(physical.control, 'pause')
     store.requestPhysicalControl(paused.input.source, 'run', physical.revision)
-    pauseWholeAt = 2
+    pauseWholeAt = 3
+    pauseFailureAt = 2
+    const rejected = await runSyncOperation(store, active.id, f.options)
+    assert.equal(rejected.operation.phase, 'paused')
+    assert.equal(store.readAttempt(rejected.operation.currentAttemptId!).failure?.code, 'behavior_review_coverage_missing')
+    assert.equal(rejected.operation.callsUsed, paused.callsUsed + 1)
+    assert.equal(readCurrentSyncAnalysis(store, rejected.operation), null)
+    protocol.close()
+    protocol = openProtocol(join(f.parent, 'sync.sqlite'))
+    useColdStore()
+    pauseFailureAt = 0
+    store.requestControl(active.id, 'run')
   } else {
     pauseWholeAt = 0
     for (const attempt of [2, 3, 4]) {
@@ -11864,8 +11892,8 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
   const afterOrigin = calls.slice(6).map(call => call.split(':').slice(1).join(':'))
   if (mode === 'accept') {
     assert.deepEqual(currentLocal.analysis.traces[0], target.analysis.traces[0])
-    assert.deepEqual(afterOrigin, [`2:${target.partitionId}:code_behavior_review`])
-    assert.equal(resumed.callsUsed, paused.callsUsed + 1)
+    assert.deepEqual(afterOrigin, [`2:${target.partitionId}:code_behavior_review`, `3:${target.partitionId}:code_behavior_review`])
+    assert.equal(resumed.callsUsed, paused.callsUsed + 2)
   } else {
     assert.notEqual(currentLocal.analysis.traces[0].sessionId, target.analysis.traces[0].sessionId)
     assert.deepEqual(afterOrigin, [`2:${target.partitionId}:code_behavior_review`, `3:${target.partitionId}:code_behavior_review`, `4:${target.partitionId}:code_behavior_review`, `5:${target.partitionId}:code_behavior_review`, `1:${target.partitionId}:code_behavior_review`, `2:${target.partitionId}:code_behavior_analyze`, `2:${target.partitionId}:code_behavior_review`])

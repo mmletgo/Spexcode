@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+writer67 追加 SELECT 1 marker，保护 [[sync-p0-review-challenge]] v2 证据路径绑定及冻结独审覆盖。writer66 在写入或派发前拒绝新版。升级先停稳并正式结算旧 writer，再保存一致 v66 SQLite online backup 与配套 enabled、Git/CAS。回滚先停稳并结算新 writer，再完整恢复该套备份。历史授权、派发及迁移保持原字节。
+
 writer66 追加 SELECT 1 marker，保护 [[sync-coordinator]] P0 按精确正常取消冻结的未批准提交稿。writer65 在写入和派发前拒绝新版。升级先停稳并结算旧 writer，再保存一致 v65 SQLite online backup 及配套 enabled、Git/CAS。回滚先停稳并结算新 writer，再恢复整套备份。原记录及旧迁移逐字保留。
 
 writer65 追加 SELECT 1 marker，保护 [[sync-p0-review-challenge]] 的不可变授权及已批准缓存失效。writer64 拒绝新版。升级先停稳并正式结算旧 writer，保存一致 v64 SQLite online backup 与配套 enabled、Git/CAS。回滚先停稳并结算新 writer，再恢复整套 v64 备份，不删除 marker。

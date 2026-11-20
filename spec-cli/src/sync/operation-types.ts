@@ -50,7 +50,7 @@ export type BaselineBinding = { resource: { kind: 'path'; path: string }; bytePa
 export type FrozenBaselineSelection = { version: 'sync-baseline-selection-v1'; source: WorktreeIdentity; bindings: BaselineBinding[]; digest: string }
 export type BaselineSelectionResult = { selection: FrozenBaselineSelection } | { failure: SyncFailure }
 export type P0ReviewChallenge = {
-  version: 'p0-review-challenge-v1'
+  version: 'p0-review-challenge-v1' | 'p0-review-challenge-v2'
   requestId: string; expectedRevision: number; inputId: string; partitionId: string
   analysisRef: BlobRef; diagnosticRef: BlobRef; scopeDigest: string
   origin: { operationId: string; attemptId: string; approvalCheckpointRef: BlobRef; continuationRef: BlobRef; partitionPlanRef: BlobRef; analysisDigest: string }

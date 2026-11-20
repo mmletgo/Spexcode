@@ -1,3 +1,4 @@
+import { Ajv } from 'ajv'
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
@@ -2277,12 +2278,15 @@ for (const mode of ['empty', 'shared'] as const) test(`P0 v6 分区changedPaths�
   assert.equal(readStageDraft(commonDir, failedDraft, failedDraft), JSON.stringify(bad))
 })
 
-for (const mode of ['empty', 'nonempty'] as const) test(`P0 v6 独审自检核冻结覆盖 ${mode}`, async t => {
+for (const mode of ['empty', 'nonempty', 'challenge'] as const) test(`P0 v6 独审自检核冻结覆盖 ${mode}`, async t => {
   const f = await fixture(t), sourcePath = 'src/export.js', contextFile = 'tests/export.test.mjs'
+  const challenge = mode === 'challenge'
+  const diagnostic = { ref: { sha256: contentHash('coverage challenge') }, text: '独立核实际证据。', evidencePaths: [contextFile] }
   const requiredPaths = mode === 'empty' ? [] : [sourcePath]
   if (requiredPaths.length) writeFileSync(join(f.root, sourcePath), f.source + '\n// checked coverage fixture\n')
   const prepared = await f.input(), commonDir = prepared.snapshot.source.commonDir
   const input: CodeBehaviorInput = { ...prepared, draftProtocol: 'code-behavior-draft-v1', contextTransport: 'git-json-v6', origin: 'spec',
+    ...(challenge ? { operatorReviewDiagnostic: diagnostic, reviewCoveragePreflight: true as const } : {}),
     partition: { id: 'review-coverage', changedPaths: requiredPaths, factSourcePaths: [sourcePath] },
     plan: { ...prepared.plan, version: 'sync-coordinator-v2', direction: 'spec_to_code', agentWorkflow: 'native-worktree-v1',
       sourcePaths: ['src'], partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 } },
@@ -2325,7 +2329,13 @@ for (const mode of ['empty', 'nonempty'] as const) test(`P0 v6 独审自检核�
         assert.deepEqual(readFileSync(schemaPath), schema)
       }
       const review = { inputDigest: request.inputDigest, analysisDigest: pendingAnalysis.analysisDigest, verdict: 'accept', checkedPaths: [contextFile, ...requiredPaths], checkedChangeIds: changeIds, findings: [] }
-      if (!originalReview) {
+      if (!originalReview && challenge) {
+        output = { ...review, checkedPaths: requiredPaths }
+        const validateCoverage = new Ajv().compile(JSON.parse(schema.toString()))
+        assert.equal(validateCoverage(output), false)
+        assert.equal(validateCoverage(review), true)
+        originalReview = { request, schema, draft: JSON.stringify(output), analysisDigest: pendingAnalysis.analysisDigest }
+      } else if (!originalReview) {
         assert.equal(contentHash(check[4]), '9a9b7fb87c9b331bf74f1d7c392077d72d9a447d9bbcd7fa3a67bb68b5e37cb2', '历史v6自检脚本原字节')
         output = { ...review, checkedPaths: [contextFile], checkedChangeIds: foreignIds }
         const invalid = JSON.stringify(output)
@@ -2338,7 +2348,7 @@ for (const mode of ['empty', 'nonempty'] as const) test(`P0 v6 独审自检核�
         assert.deepEqual(schema, originalReview.schema)
         assert.equal(git(workspace, 'rev-parse', `HEAD:${draftPath}`), checkpoints.load()!.drafts.code_behavior_review!.oid)
         assert.equal(readFileSync(draft, 'utf8'), originalReview.draft)
-        run(1, { ...dispositions, missingCheckedPaths: requiredPaths, missingChangeIds: changeIds, unknownChangeIds: foreignIds })
+        run(1, { ...dispositions, missingCheckedPaths: challenge ? [contextFile] : requiredPaths, missingChangeIds: challenge ? [] : changeIds, unknownChangeIds: challenge ? [] : foreignIds })
         writeFileSync(draft, JSON.stringify(review))
         run(0, dispositions)
         output = review
@@ -2349,7 +2359,7 @@ for (const mode of ['empty', 'nonempty'] as const) test(`P0 v6 独审自检核�
     const receipt = { summary: '已提交唯一JSON草稿' }
     return { sessionId: `coverage-session-${calls.length}`, threadId: `coverage-thread-${calls.length}`, turnId: 'turn', output: receipt, resultDigest: contentHash(JSON.stringify(receipt)), worktree: nativeWorktreeResult(workspace, seed) }
   }
-  await assert.rejects(analyzeCodeBehavior(input, dispatch, undefined, checkpoints), { code: 'behavior_review_failed', message: 'P0 行为校验未通过' })
+  await assert.rejects(analyzeCodeBehavior(input, dispatch, undefined, checkpoints), { code: challenge ? 'behavior_review_coverage_missing' : 'behavior_review_failed', message: 'P0 行为校验未通过' })
   const failed = checkpoints.load()!, rejected = failed.drafts.code_behavior_review!
   assert.ok(failed.readyAnalysis)
   const coverage = { reviewCoveragePreflight: true } as const

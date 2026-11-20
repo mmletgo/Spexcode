@@ -941,6 +941,7 @@ export class SyncApplication {
         if (prior.diagnosticRef.sha256 !== p0ReviewDiagnosticRef(input).sha256) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', input.requestId)
         return { operation, challenge: prior }
       }
+      if (!input.evidencePaths) throw new SyncApplicationError('sync_p0_challenge_invalid', '新复审须指定非空证据文件路径', 400)
       const current = await captureInputSnapshot(this.root, { committed: operation.input.captureKind === 'commit' })
       this.requireEnabled(current, operation)
       const plan = this.operationPlan(operation)

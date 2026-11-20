@@ -11,11 +11,11 @@ import type { Contract, ContractFinding } from '@spexcode/spec-core/contracts'
 import { candidateReviewError, candidateReviewLocationError } from './candidate-review.js'
 import { actualTreeDiff, exportCandidate, isHostPrivatePath, verifyCandidate } from './candidate.js'
 import type { CodeBehaviorContinuation, CodeBehaviorMaterialRequest, CodeBehaviorPostGateReview } from './code-behavior.js'
-import { analyzeCodeBehavior, authoredContractChanges, CODE_BEHAVIOR_DRAFT_COMMIT_MISSING, CODE_BEHAVIOR_FAILURE_STATUS, CODE_BEHAVIOR_GUIDANCE_VERSION, LEGACY_CODE_BEHAVIOR_GUIDANCE_VERSION, codeBehaviorReviewSchema, codeBehaviorContinuationStatus, codeBehaviorDraftStatus, deriveBehaviorAuthorization, isCodeBehaviorContextTransport, readCodeBehaviorContext, type CodeBehaviorContextTransport, type CodeBehaviorReviewReference } from './code-behavior.js'
+import { analyzeCodeBehavior, authoredContractChanges, CODE_BEHAVIOR_DRAFT_COMMIT_MISSING, CODE_BEHAVIOR_FAILURE_STATUS, CODE_BEHAVIOR_GUIDANCE_VERSION, CODE_BEHAVIOR_REVIEW_COVERAGE_MISSING, LEGACY_CODE_BEHAVIOR_GUIDANCE_VERSION, codeBehaviorReviewSchema, codeBehaviorContinuationStatus, codeBehaviorDraftStatus, deriveBehaviorAuthorization, isCodeBehaviorContextTransport, readCodeBehaviorContext, type CodeBehaviorContextTransport, type CodeBehaviorReviewReference } from './code-behavior.js'
 import type { CodeBehaviorAnalysis, CodeBehaviorEvidence, SyncDecisionInput } from './writeback-types.js'
 import { adoptedDeliveryPaths, baselineResourceKey, baselineSelectionDigest, extendsWithUninitializedResources, isUtf8Text, readCompositionEvidence, selectedRetiredIds, verifyBaselineSelection } from './composition.js'
 import { readHistoryRequest, readReceiptHistoryRestorations } from './history-input.js'
-import { p0ReviewDiagnosticRef, readP0ReviewDiagnostic, type P0ReviewChallengeRequest } from './behavior-review-challenge.js'
+import { p0ReviewDiagnosticMatches, p0ReviewDiagnosticRef, readP0ReviewDiagnostic, type P0ReviewChallengeRequest } from './behavior-review-challenge.js'
 import { composeAuthoredInput } from './author-input.js'
 import { elaborate, hasApprovedElaborationReview, elaborationGapRepairFindings, elaborationMaterialContext, freezeElaborationInput, gapBlockedFinding, isParentInterfaceImplementationReviewRejection, verifyElaborationDraftCache } from './elaboration.js'
 import { outputErrors } from './elaboration-schema.js'
@@ -76,7 +76,7 @@ export const freezeSyncPlanEvidence = (commonDir: string, plan: SyncCoordinatorP
 const within = (path: string, paths: readonly string[]): boolean => paths.some(parent => path === parent || path.startsWith(`${parent}/`))
 const overlap = (a: string, b: string): boolean => within(a, [b]) || within(b, [a])
 const unique = (ids: readonly string[]): string[] => [...new Set(ids)].sort()
-const behaviorAnalysisRepairCodes = new Set(['behavior_analysis_invalid', 'behavior_review_failed', 'behavior_output_json', 'behavior_output_schema'])
+const behaviorAnalysisRepairCodes = new Set(['behavior_analysis_invalid', 'behavior_review_failed', 'behavior_output_json', 'behavior_output_schema', CODE_BEHAVIOR_REVIEW_COVERAGE_MISSING])
 const structuredAnalysisRepairCodes = new Set(['structured_output_retries_exhausted', 'structured_output_format_invalid', 'native_worktree_result_invalid'])
 const reviewFormatRepairCodes = new Set(['structured_output_retries_exhausted', 'structured_output_format_invalid'])
 const completedReviewRepairCodes = new Set(['review_location_format'])
@@ -1554,7 +1554,7 @@ function authenticateApprovedBehaviorPartition(store: SyncStore, source: SyncOpe
   const { reviewDiagnosticRef } = local
   const analysisDigest = behaviorCandidateDigest(local)
   if (!local.reviewPassed || local.traces.length !== 2 || local.traces[0].purpose !== 'code_behavior_analyze' || local.traces[1].purpose !== 'code_behavior_review' || local.traces[0].sessionId === local.traces[1].sessionId || local.traces[0].threadId === local.traces[1].threadId) return false
-  let reviewOutput: unknown
+  let reviewOutput: unknown, requiredCheckedPaths: readonly string[] | undefined
   if (stage<{ version: string }>(store, source, origin, 'behavior-draft-protocol', 'automatic', original)?.version === 'code-behavior-draft-v1') {
     if (!local.traces.every(trace => behaviorTraceBinding(store, source, origin, key, trace, selection, checkpoints, true, nativeOnly))) return false
     const continuation = partitionStage<CodeBehaviorContinuation>(store, source, origin, `${key}:continuation`, selection, original)?.result
@@ -1562,10 +1562,13 @@ function authenticateApprovedBehaviorPartition(store: SyncStore, source: SyncOpe
     if (reviewDiagnosticRef) {
       const request = JSON.parse(readEvidence(commonDir, continuation!.reviewResult!.requestRef).toString('utf8')) as ElaborationSessionRequest
       const context = readCodeBehaviorContext(request, commonDir)
-      if (context.operatorReviewDiagnostic?.ref.sha256 !== reviewDiagnosticRef.sha256 || context.pendingAnalysis?.analysisDigest !== analysisDigest) return false
+      const diagnostic = context.operatorReviewDiagnostic
+      if (diagnostic?.ref.sha256 !== reviewDiagnosticRef.sha256 || context.pendingAnalysis?.analysisDigest !== analysisDigest
+        || !p0ReviewDiagnosticMatches(commonDir, diagnostic)) return false
+      requiredCheckedPaths = context.requiredCheckedPaths
     }
     if (!draft || analysisSchemaDigest !== undefined && drafts.code_behavior_analyze?.schemaDigest !== analysisSchemaDigest
-      || (nativeOnly || analysisSchemaDigest !== undefined) && draft.schemaDigest !== contentHash(JSON.stringify(codeBehaviorReviewSchema(local.inputDigest, analysisDigest)))) return false
+      || (nativeOnly || analysisSchemaDigest !== undefined || requiredCheckedPaths) && draft.schemaDigest !== contentHash(JSON.stringify(codeBehaviorReviewSchema(local.inputDigest, analysisDigest, requiredCheckedPaths)))) return false
     reviewOutput = JSON.parse(readStageDraft(commonDir, draft, draft))
   } else {
     if (analysisSchemaDigest !== undefined || nativeOnly || reviewDiagnosticRef) return false
@@ -1593,6 +1596,7 @@ function authenticateApprovedBehaviorPartition(store: SyncStore, source: SyncOpe
   return review?.verdict === 'accept' && review.inputDigest === local.inputDigest
     && review.analysisDigest === analysisDigest
     && Array.isArray(review.findings) && review.findings.length === 0 && Array.isArray(review.checkedPaths) && Array.isArray(review.checkedChangeIds) && new Set(review.checkedPaths).size === review.checkedPaths.length && changedPaths.every(path => review.checkedPaths.includes(path))
+    && (!requiredCheckedPaths || requiredCheckedPaths.every(path => review.checkedPaths.includes(path)))
     && new Set(review.checkedChangeIds).size === review.checkedChangeIds.length && review.checkedChangeIds.length === local.changes.length && local.changes.every(change => review.checkedChangeIds.includes(change.id))
 }
 
@@ -1601,7 +1605,7 @@ export function readP0ReviewChallenges(store: SyncStore, operation: SyncOperatio
   const challenges = new Map<string, { operationId: string; challenge: P0ReviewChallenge }>()
   for (const source of retryOperationLineage(store, operation)) {
     for (const challenge of (source.p0ReviewChallenges ?? []).slice().reverse()) {
-      if (challenge.version !== 'p0-review-challenge-v1') fail('sync_p0_challenge_binding', '持久复审授权版本不受支持')
+      if (challenge.version !== 'p0-review-challenge-v1' && challenge.version !== 'p0-review-challenge-v2') fail('sync_p0_challenge_binding', '持久复审授权版本不受支持')
       if (!challenges.has(challenge.partitionId)) challenges.set(challenge.partitionId, { operationId: source.id, challenge })
     }
   }
@@ -1614,7 +1618,7 @@ function behaviorChallengesAnswered(analysis: CodeBehaviorAnalysis | null, chall
 }
 
 /** 阶段预检只读取真实冻结来源、已批准原件与曾有的 Native 派发。 */
-export async function prepareP0ReviewChallenge(store: SyncStore, operation: SyncOperation, plan: SyncCoordinatorPlan, request: P0ReviewChallengeRequest): Promise<P0ReviewChallenge> {
+export async function prepareP0ReviewChallenge(store: SyncStore, operation: SyncOperation, plan: SyncCoordinatorPlan, request: P0ReviewChallengeRequest & { evidencePaths: readonly string[] }): Promise<P0ReviewChallenge> {
   function reject(message: string): never { return fail('sync_p0_challenge_binding', message) }
   if (plan.version !== 'sync-coordinator-v2' || plan.agentWorkflow !== 'native-worktree-v1' || syncPlanDigest(plan) !== operation.policyDigest
     || !operation.baselineSelection || operation.revision !== request.expectedRevision || operation.input.id !== request.inputId) reject('复审须绑定当前 revision 与同一冻结原生分区输入和计划')
@@ -1662,7 +1666,11 @@ export async function prepareP0ReviewChallenge(store: SyncStore, operation: Sync
       return wrapper.stage === key && wrapper.resultRef?.sha256 === local.resultRef.sha256
     })?.ref
     if (!approvalCheckpointRef) reject('局部批准没有原阶段引用')
-    return { version: 'p0-review-challenge-v1', requestId: request.requestId, expectedRevision: request.expectedRevision, inputId: request.inputId, partitionId: request.partitionId,
+    if (!reviewRequest.worktree) return reject('原待审候选没有冻结 Git 树')
+    const readable = new Set(readTree(commonDir, reviewRequest.worktree.tree).map(entry => entry.path))
+    const missing = request.evidencePaths.filter(path => !readable.has(path))
+    if (missing.length) return reject(`复审证据不在原待审冻结 Git 树：${JSON.stringify(missing)}`)
+    return { version: 'p0-review-challenge-v2', requestId: request.requestId, expectedRevision: request.expectedRevision, inputId: request.inputId, partitionId: request.partitionId,
       analysisRef: local.resultRef, diagnosticRef: p0ReviewDiagnosticRef(request), scopeDigest,
       origin: { operationId: source.id, attemptId: origin.id, approvalCheckpointRef, continuationRef: continuation.resultRef, partitionPlanRef: partitionPlan.resultRef, analysisDigest: pendingAnalysis.analysisDigest } }
   }
@@ -3142,10 +3150,11 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
                 const reviewRequest = JSON.parse(readEvidence(commonDir, reviewedResult.requestRef).toString()) as ElaborationSessionRequest
                 const review = JSON.parse(readObject(commonDir, reviewDraft.oid).toString()) as { inputDigest: string; analysisDigest: string; verdict: string; checkedPaths: string[]; checkedChangeIds: string[]; findings: unknown[] }
                 const reviewSchema = readTree(commonDir, reviewDraft.seed.tree).find(entry => entry.path === reviewDraft.path.replace(/\.json$/, '.schema.json'))!
-                const { pendingAnalysis: reviewed, task } = readCodeBehaviorContext(reviewRequest, commonDir)
+                const { pendingAnalysis: reviewed, task, requiredCheckedPaths, operatorReviewDiagnostic } = readCodeBehaviorContext(reviewRequest, commonDir)
+                if (operatorReviewDiagnostic && !p0ReviewDiagnosticMatches(commonDir, operatorReviewDiagnostic)) fail('behavior_review_material_binding', '业务续修的复审证据不匹配原诊断')
                 if (!reviewed) fail('behavior_review_material_binding', '业务续修缺少原完整待审分析')
                 if (outputErrors(review, JSON.parse(readObject(commonDir, reviewSchema.oid).toString()) as Record<string, unknown>).length || reviewRequest.inputDigest !== continuation!.result.inputDigest || review.inputDigest !== inputDigest || reviewed.analysis.inputDigest !== inputDigest || review.analysisDigest !== reviewed.analysisDigest || reviewed.analysisDigest !== contentHash(JSON.stringify(reviewed.analysis))
-                  || (task.requiredChangedPaths as string[]).some(path => !review.checkedPaths.includes(path)) || new Set(review.checkedPaths).size !== review.checkedPaths.length || new Set(review.checkedChangeIds).size !== reviewed.analysis.changes.length || review.checkedChangeIds.some(id => !reviewed.analysis.changes.some(change => change.id === id))) fail('behavior_review_material_binding', '业务续修诊断未绑定原完整分析、schema或独审范围')
+                  || (requiredCheckedPaths ?? task.requiredChangedPaths as string[]).some(path => !review.checkedPaths.includes(path)) || new Set(review.checkedPaths).size !== review.checkedPaths.length || new Set(review.checkedChangeIds).size !== reviewed.analysis.changes.length || review.checkedChangeIds.some(id => !reviewed.analysis.changes.some(change => change.id === id))) fail('behavior_review_material_binding', '业务续修诊断未绑定原完整分析、schema或独审范围')
                 if (review.verdict === 'repair' && review.findings.length) errors.push({ code: 'behavior_review_failed', message: JSON.stringify({ approved: false, review }) })
               }
               saveStage(store, fence!, `${key}:${purpose}:draft-material-provenance`, { fromOperationId: owner.id, fromAttemptId: prior.id, resultRef: continuation!.resultRef, resultCommit: materialDraft.resultCommit, oid: materialDraft.oid })
@@ -3396,11 +3405,12 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           const output = JSON.parse(readObject(commonDir, draft.oid).toString()) as { verdict: string; findings: unknown[]; checkedPaths: string[]; checkedChangeIds: string[] }
           if (output.verdict !== 'repair' || !output.findings.length) return null
           const request = JSON.parse(readEvidence(commonDir, review.requestRef).toString()) as ElaborationSessionRequest
-          const { pendingAnalysis, task } = readCodeBehaviorContext(request, commonDir)
+          const { pendingAnalysis, task, requiredCheckedPaths, operatorReviewDiagnostic } = readCodeBehaviorContext(request, commonDir)
+          if (operatorReviewDiagnostic && !p0ReviewDiagnosticMatches(commonDir, operatorReviewDiagnostic)) fail('behavior_review_material_binding', '业务续修的复审证据不匹配原诊断')
           if (!pendingAnalysis || request.inputDigest !== inputDigest || pendingAnalysis.analysis.inputDigest !== inputDigest
             || pendingAnalysis.analysisDigest !== contentHash(JSON.stringify(pendingAnalysis.analysis))
-            || outputErrors(output, codeBehaviorReviewSchema(inputDigest, pendingAnalysis.analysisDigest)).length
-            || (task.requiredChangedPaths as string[]).some(path => !output.checkedPaths.includes(path))
+            || outputErrors(output, codeBehaviorReviewSchema(inputDigest, pendingAnalysis.analysisDigest, requiredCheckedPaths)).length
+            || (requiredCheckedPaths ?? task.requiredChangedPaths as string[]).some(path => !output.checkedPaths.includes(path))
             || new Set(output.checkedPaths).size !== output.checkedPaths.length
             || canonical(unique(output.checkedChangeIds)) !== canonical(unique(pendingAnalysis.analysis.changes.map(change => change.id)))
             || output.checkedChangeIds.length !== pendingAnalysis.analysis.changes.length) fail('behavior_review_material_binding', '业务续修未绑定原完整分析、schema或独审范围')

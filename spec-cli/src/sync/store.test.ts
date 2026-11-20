@@ -3270,7 +3270,7 @@ for (const prior of [34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44] as const) test(
   } finally { backup?.close(); f.cleanup() }
 })
 
-for (const prior of [46, 47, 48, 49, 51, 52, 54, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65] as const) test(`从writer${prior}升级保留自动采纳索引及原件，旧writer拒绝且备份可回滚`, async () => {
+for (const prior of [46, 47, 48, 49, 51, 52, 54, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66] as const) test(`从writer${prior}升级保留自动采纳索引及原件，旧writer拒绝且备份可回滚`, async () => {
   assert.equal(SYNC_MIGRATIONS[prior]?.version, prior + 1, '新持久语义必须有独立 writer 围栏')
   const f = await fixture()
   let backup: ReturnType<typeof openProtocol> | undefined
@@ -3292,6 +3292,10 @@ for (const prior of [46, 47, 48, 49, 51, 52, 54, 56, 57, 58, 59, 60, 61, 62, 63,
       registry: tx.query('SELECT * FROM schema_migrations WHERE component!=? OR version<=? ORDER BY component,version', SYNC_COMPONENT, prior),
     }))
     const before = read(f.protocol), backupPath = join(f.root, `v${prior}-before-program-context.backup`)
+    if (prior === 66) {
+      await assert.rejects(migrateSyncStore(f.protocol, { backupPath: join(f.root, 'missing-backup-dir', 'before-v67.sqlite') }), { code: 'PROTOCOL_PATH_PARENT_MISSING' })
+      assert.deepEqual(read(f.protocol), before)
+    }
     const next = SYNC_MIGRATIONS[prior]
     assert.throws(() => applyComponentMigrations(f.protocol, SYNC_COMPONENT, [...versions, { ...next, sql: `${next.sql}\nINSERT INTO missing_writer_migration_table VALUES(1);` }]), { code: 'PROTOCOL_SQLITE_ERROR' })
     assert.deepEqual(read(f.protocol), before)

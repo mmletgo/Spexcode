@@ -98,6 +98,8 @@ P0 只在本次 attempt 尚无阶段检查点和 code_behavior saved/reserved �
 
 P0 分析的精确 owner 请求首次派发保留前，可沿既有 Native 停止资格观察原正常提交，复用 [[sync-stage-worktree]] 的已提交草稿核验，包括从原冻结树重建的托管投影。全量保护文件、索引与原停止身份均通过时，冻结真实草稿 Git 引用及当前 input、seed、owner、schema。续入先读取该冻结稿，旧已保留请求沿原规则。原稿仍待新分析及独审，原批准分区和诊断运输协议保持原绑定。
 
+[[sync-p0-review-challenge]] v2 批准及业务返修均使用真实产出独审的冻结 context 和 schema。冷验从原诊断 CAS 复算必审集合，要求与原请求及结果一致。覆盖拒绝沿同候选继续独审，同 operation 的其他已批准 owner 和历史 v1 审查仍按原依据承接。
+
 同一 operation 正式暂停并恢复时，未 reserve 的 P0 分析可读取正常取消前已提交的同 owner 草稿。原 attempt 须已 superseded，原生派发须完整绑定实际 session/thread/turn、请求与 frozen policy。canonical 会话和 removed 资源保存原 cancelled/stop，且无 failed 观察或已发布成果。按 [[zcode-structured-runtime]] 核实同轮取消及正常退出，按 [[sync-stage-worktree]] 核实唯一允许提交的正常 Git 草稿、完整索引和工作区保护面，已归档时还须匹配原归档的父提交和树。原计划、读集、选择、组合树、owner、模型、任务和 schema 逐项吻合后，当前 fence 冻结原 Git 对象与未批准材料来源。重启时凭原请求、资源与公开取消原件复验，沿已冻结的 Git 对象重放本轮 seed。只有新分析正常提交并经独立审查才有新结论。物理稿、审查稿、P1、跨 operation 和已有 reserve 但未冻结该材料的请求保持各自准入。
 
 P1权限/绑定非法的独审沿[[sync-elaboration]]现有同owner repairDiagnostics重审原合法候选。续审保留原generation trace，不要求新review轮号存在generate；按真实session/thread/turn命中该operation原attempt实际dispatch，再冷验完整保存Native请求、原结果/summary摘要及Git草稿seed/result身份。只有当前局部完整输入与原candidate机械校验保持、原review重新判为越界/绑定非法时才跳过生成；旧seed排除draft的边界、原请求字段缺席、控制attempt跳过判据、预算/资源/取消及全图seal保持。多次续审与后续只读owner返修均追溯同一真实generation来源，不把新审查轮当新生成。

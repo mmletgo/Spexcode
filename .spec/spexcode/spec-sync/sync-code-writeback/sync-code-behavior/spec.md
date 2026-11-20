@@ -112,6 +112,8 @@ Spec resolution沿原path/write/change/mode与完整读取门后，若同path任
 
 独审 Native 请求的 schema 用本轮单值字符串枚举冻结 inputDigest 与 analysisDigest，并在说明中给出精确值，不能让模型从其他上下文摘要猜测。findings 只承载需要修正的问题，accept 必须为空数组，不把肯定说明当问题提交；最终身份、完整覆盖、verdict 与问题数组门禁保持，不由程序删改模型 findings 或补写批准。
 
+[[sync-p0-review-challenge]] 的 v2 只读证据路径与原变化路径共同派生本轮必审集合，供精确 review schema、只读自检和正式验证使用。证据路径不进入分析的 changedPaths、inputDigest 或待审业务摘要，也不扩展原作者写权、事实归属或受影响范围。缺覆盖属于独审协议拒绝，保持原分析与实际独审 JSON；随后使用同一覆盖规则检查该稿。历史 v1 与普通独审沿已冻结 schema 和提示原件。
+
 所选裁决scope复用 [[sync-contract-evolution]]：旧FLOW/STEP仅取所选规则旧闭包与原所选finding affectedIds交集；共享上游REQ只在当前精确不可变请求/旧分析/所选finding绑定下加入REQ本身，不扩其消费者或借新图边授权其他旧目标。分析阶段只判断有限eligible来源范围；最终REQ改义仍须同一已审allowed_change及所选旧规则的实际政策定义变化，并接受原P1独审。AC仍绑定同一具体allowed_change、实际来源事实和精确提案，不能凭REQ扩大整个AC集合。
 
 P4精确selection存在时，分析/独审输入与输出摘要绑定 baselineSelectionDigest；path字节基准和每ID真实intent基准分别展示，不以最新文件pair来源冒充全部作者语义已消费。authorChanges从各真实owner对象求未消费残差，即使path三方source未变也强制进入changedPaths、requiredChangedPaths与native完整上下文。raw/shared prose/归属变化保真实完整作者对象；无法证明共同raw基准明确blocked。完整整合正文由程序核对每个未改ID的交付语义及VERIFY政策，AC不能局部删除；不能凭模型accept丢未选policy/验收义务。
