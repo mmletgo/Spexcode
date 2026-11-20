@@ -3281,6 +3281,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
               }
               if (grok && !physical?.committedOid) return null
               if (physical && !physical.committedOid) {
+                if (zcodeSource === 'cancelled-commit') return null
                 if (zcode && zcodeSource !== true) fail('stale_result', 'ZCode物理草稿没有原精确失败终态')
                 const context = readCodeBehaviorContext(native.request, operation.input.source.commonDir)
                 const materialRef = writeEvidence(operation.input.source.commonDir, { version: 'stopped-physical-draft-v1', path: binding.path, source: physical.source })

@@ -356,7 +356,7 @@ P1独审格式失败回归使用真实Git、隔离SQLite及受控Native资源桥
 
 ZCode P0 completed/events-RPC定向回归以真实分区协调器、Git/隔离SQLite及受控原生资源桥，先证A1的精确typed失败/removed/stop、原无draft/ready/result及唯一正常提交4228字节未批准稿，A2真实派发但seed漏稿；修后同场景以精确原HEAD/OID/SHA及checkpoint refs续稿，原record/Native文件/source/tests/index/failure不改，不读终态response取得成功。续稿保原业务错误与精确typed RPC诊断。错request/thread/turn/model/version、缺完整派发身份或canonical harness线程冲突、其它RPC、未结算或原失败观察/stop不符、缺/非法exit、非同turn idle、未close、坏terminal/未知结果、dirty/source/tests/schema及无新提交/失fence分别明确拒绝或沿原跳过，仅新分类的缺terminal和精确同身份失败/取消不授材料并沿原重试，即使非成功exit；普通pause/历史failed/缺exit保持。真实配置default/显式模型公开材料另走同adapter回归；受控执行不冒称实际模型、Docker或产品交付。
 
-ZCode P0 正常取消回归以真实分区调度、Git 提交和归档、隔离 SQLite 及受控原生资源桥，记录完整派发后经正式 pause/stop/removed。续跑以原 Git OID、字节和来源进入同 owner 新分析。用旧版复现无新派发的 stale_result。新版冷重启后保留请求摘要，同时重验原 Native，原 idle 失真则停在派发前。没有取消证明、未提交正文、越界路径、原身份不符或当前 fence 失效均无材料资格。原 Native/Git/index、source 和 tests 保持，原稿没有 ready 或独审批准。该回归验证恢复机制，真实模型运行证据单独留存。
+ZCode P0 正常取消回归以真实分区调度、Git 提交和归档、隔离 SQLite 及受控原生资源桥，记录完整派发后经正式 pause/stop/removed。续跑以原 Git OID、字节和来源进入同 owner 新分析。用旧版复现无新派发的 stale_result。新版冷重启后保留请求摘要，同时重验原 Native，原 idle 失真则停在派发前。正常取消仅有未提交正文时，旧版返回 stale_result 且零派发。修复后，若存在较早的合格 Git 稿，新分析沿其原 OID、字节和来源续稿；否则以无旧稿的 seed 派发。两种情况均不产生物理草稿来源。缺取消证明、越界路径、原身份不符或当前 fence 失效均无材料资格。原 Native/Git/index、source 和 tests 保持，原稿没有 ready 或独审批准。该回归验证恢复机制，真实模型运行证据单独留存。
 
 缺final回归同时覆盖typed格式失败无packet的已停Git稿，以及旧无errorCode/failedWorktree的真实SQLite资源。后者经正式pause/cancel/recover到removed，再由新attempt从最新两次正常提交的59388等价正文续修，不能回早seed。普通安全暂停走相同材料入口但无格式分类；新观察后旧record、Native原件、全部旧attempt/checkpoint/resource及source/index逐字保持。受控公开Native fixture不调用实际模型，不代表全树、Docker或正式采纳通过。
 
