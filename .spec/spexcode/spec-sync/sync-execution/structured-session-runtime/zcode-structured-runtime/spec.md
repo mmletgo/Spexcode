@@ -100,4 +100,4 @@ worktree 停止沿 [[native-worktree-runtime]] 正向任务域边界及 boundary
 
 操作员显式恢复同一 operation 中已结算的 P1 只读独审时，可只读认证上述 EPIPE provider 形状，要求唯一原 `turn.failed` 的 `payload.turnPhase=processing_input`。原 plan、send、模型快照及 ModelRequest 事件、input/query/turn 身份、workspace、PID/receipt 和完整退出原值须精确一致。保留失败时的 idle=false、closed=false 及已停止状态。认证不读取错误正文或消息历史，不启动或重新取消原生进程，不补签历史结果或增加持久字段。[[sync-coordinator]] 仍独立核原正式资源结算、候选及恢复权限。
 
-P1 已结算作者的未批准物理稿接续共用该认证。调用方须指定原 `elaboration_generate/edit` 或 `elaboration_review/read` 角色，适配器逐项核对。作者通过公开证据认证后，[[sync-coordinator]] 仍须核同一操作的恢复权限、精确 owner 和 Git 保护面。固定公开失败投影只定位待核记录，接续资格仍以完整原生证据为准。外部原件缺失、JSON 损坏或结构不符均明确拒绝认证，程序异常沿现有错误处理保留原诊断。
+P1 已结算作者的未批准物理稿接续共用该认证。调用方须指定原 `elaboration_generate/edit` 或 `elaboration_review/read` 角色，适配器逐项核对。作者通过公开证据认证后，[[sync-coordinator]] 仍须核正式恢复权限、精确 owner 和 Git 保护面。跨执行器重试使用原 ZCode 请求和模型证明。若公开归因的 statusCode 为 HTTP 429，则该终态不能授予跨执行器物理稿资格。固定公开失败投影只定位待核记录，接续资格仍以完整原生证据为准。外部原件缺失、JSON 损坏或结构不符均明确拒绝认证，程序异常沿现有错误处理保留原诊断。

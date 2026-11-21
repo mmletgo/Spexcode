@@ -343,7 +343,7 @@ function zcodeWorktreeTurnMatches(plan: NativePlan, snapshot: { sessionId: strin
 }
 
 /** 从原公开证据冷验指定 P1 角色的 provider EPIPE 和进程停止。 */
-export function assertZCodeSettledProviderFailure(sessionId: string, prompt: string, execution: ZCodeStructuredExecution, worktreePath: string, purpose: 'elaboration_generate' | 'elaboration_review'): void {
+export function assertZCodeSettledProviderFailure(sessionId: string, prompt: string, execution: ZCodeStructuredExecution, worktreePath: string, purpose: 'elaboration_generate' | 'elaboration_review', options?: { crossProviderRetry: boolean }): void {
   const native = execution.zcodeNative, realm = structuredRealmRoot(execution)
   if (execution.version !== 6 || execution.purpose !== purpose || execution.worktree?.mode !== (purpose === 'elaboration_generate' ? 'edit' : 'read') || !realm || !native
     || native.root !== join(realm, sessionId) || execution.state !== 'failed' || execution.errorCode !== 'unsupported' || !execution.turnStartRequested
@@ -362,9 +362,11 @@ export function assertZCodeSettledProviderFailure(sessionId: string, prompt: str
   if (plan.workspace !== worktreePath || !plan.pid || plan.receiptFile !== join(native.root, 'process.json') || !detachedRuntimeIsGone(plan.pid, plan.receiptFile))
     throw new StructuredSessionError('stale_result', 'ZCode provider failure differs from its original workspace or stopped process group')
   const terminals = events.filter(event => ['turn.completed', 'turn.failed', 'turn.cancelled'].includes(event.type))
-  const error = terminal.payload.error as { code?: unknown; attribution?: unknown } | undefined
+  const error = terminal.payload.error as { code?: unknown; attribution?: { statusCode?: unknown } } | undefined
+  const providerStatus = error?.attribution?.statusCode
   if (digest(send) !== digest(nativeSend(plan, prompt, execution)) || !zcodeWorktreeTurnMatches(plan, snapshot as { sessionId: string; model: NativeModel }, events, terminals, terminal)
     || terminal.type !== 'turn.failed' || terminal.payload.turnPhase !== 'processing_input' || !isZCodeProviderPipeFailure(error?.code, error?.attribution)
+    || options?.crossProviderRetry && (providerStatus === 429 || providerStatus === '429')
     || exit.stopped !== true || exit.code !== 0 || exit.signal !== null || exit.idle !== false || exit.closed !== false || exit.acknowledged !== execution.cancellation.acknowledged)
     throw new StructuredSessionError('stale_result', 'ZCode provider failure lacks its exact input, failure attribution or exit evidence')
 }

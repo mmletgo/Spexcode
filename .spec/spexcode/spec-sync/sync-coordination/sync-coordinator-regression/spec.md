@@ -131,6 +131,8 @@ ZCode P1 作者的 provider EPIPE 回归以真实 Git、SQLite 和受控 Native 
 
 授权稿缺席而原工作树仅留未跟踪辅助脚本时，精确 provider EPIPE 的新作者收到原 seed 和零材料，旧脚本逐字保留。夹具还核无稿但有 tracked 源码改动、以及有稿与额外未跟踪文件并存的原拒绝边界。
 
+正式跨执行器重试覆盖真实 Git、SQLite 及受控停止 ZCode 原生资源。从原正式失败 operation 启动独立 Cursor 夹具，查原 JSON 逐字进入新作者，正常提交后再独审。核同执行器、多跳祖先、错误原 seed/输入/模型、HTTP 429 及保护面越界不获材料。无稿沿空 seed。登记来源及保留派发两处冷停均拒绝 writer68，同一 attempt 的新 writer 恢复保持原材料 CAS 和已保留的派发摘要。
+
 另一路让接续的分析会话仅返回正常回执并保持原 seed。核其 Native 资源成功结算、原 Git 书证没有新提交、程序不产生批准，原 attempt 留缺少新提交的失败类别。下一 attempt 逐字续原草稿，正常提交后才开启独审；最终分析不得引用上轮无提交的回执。
 
 Native P0单体与分区使用真实临时worktree、Git提交和SQLite检查点，分析/独审syntax或schema拒绝后沿同operation/原预算续原草稿，独审格式拒绝不重跑已校验分析。独审accept的change.id尾字抄错须先持久拒绝并关闭重开SQLite，下一attempt只新派review，原JSON/schema字节及OID、完整missing/unknown诊断与分析trace/OID保持；原accept不成为批准。完整合法业务repair仍按analyze→review→analyze→review续原分析，新review不带旧稿；三attempt兄弟已审原件及各自provenance保持。旧reserved只读派发不补协议，其认证Native错误/CAS原bytes通过原资源桥进入下一真实草稿seed，记录native-material provenance；旧原件保持，不造历史Git witness或业务批准。只读源码/tests及原index保持，回归在P1前明确停止，不调用真实模型、Docker或采纳。

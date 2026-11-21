@@ -2809,11 +2809,16 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
               const completedEventsRpc = allowCommitted && zcode && !!state && isZCodeEventsRpcTimeout(state)
               const grok = native.request.model?.startsWith('grok:') === true
               const failure = source.result.failure
-              const providerDraft = zcode && owner.id === operation.id && prior.status === 'superseded'
-                && prior.failure?.kind === 'unsupported'
+              const providerFailure = zcode && prior.failure?.kind === 'unsupported'
                 && source.result.status === 'unsupported' && isZCodeProviderRejection(failure)
                 && !source.result.structurePassed && !source.result.reviewPassed && source.result.candidateDigest === null
                 && round.candidate === null && round.output === null && round.review === null && round.reviewOutput === null && !round.traces.length
+              const providerRetry = providerFailure && owner.id === operation.retryOf && owner.currentAttemptId === prior.id
+                && owner.phase === 'failed' && prior.status === 'failed' && model.split(':', 1)[0] !== syncModel(owner).split(':', 1)[0]
+                && owner.planBlob?.sha256 === operation.planBlob?.sha256 && owner.impactDigest === operation.impactDigest
+                && canonical(owner.input) === canonical(operation.input) && priorElaborationInputMatches(prior, binding, owner, checkpoints)
+                && settledApprovalSource(store, owner)
+              const providerDraft = providerFailure && (providerRetry || owner.id === operation.id && prior.status === 'superseded')
               const priorGuidance = grok && allowCommitted ? stage<{ generationGuidance?: ElaborationGenerationGuidance }>(store, owner, prior, 'elaboration-draft-protocol', 'automatic', checkpoints)?.generationGuidance : undefined
               const grokDraft = grok && allowCommitted && !binding?.interfaceSeed && request.binding.sourceInputId === operation.input.id
                 && record?.archived && state?.state === 'failed' && state.error === GROK_NATIVE_EXIT_DEADLINE_FAILURE
@@ -2834,7 +2839,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
                   const { session } = checkpoint
                   if (resource.generation !== prior.generation || native.schemaVersion !== 1 || checkpoint.schemaVersion !== 1
                     || request.binding.sourceInputId !== operation.input.id || source.result.inputDigest !== request.inputDigest || canonical(source.result.partitionBinding) !== canonical(binding)
-                    || native.request.model !== operation.model || native.request.root !== operation.input.source.canonicalRoot || native.request.base !== worktree.baseCommit
+                    || native.request.model !== syncModel(owner) || native.request.root !== operation.input.source.canonicalRoot || native.request.base !== worktree.baseCommit
                     || proof.record.base !== native.request.base || proof.record.forkCommit !== native.request.base
                     || native.request.inputDigest !== elaborationNativeInputDigest(source.result.inputDigest, native.request) || canonical(worktree) !== canonical(request.worktree)
                     || !checkpoint.nativeCallRequested || !checkpoint.nativeStarted || !session.threadId || !session.turnId
@@ -2852,7 +2857,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
                   let skipSource = false
                   const material = await withArchivedStructuredWorktree(proof.record, (): ElaborationDraftMaterial | null => {
                     const prompt = nativeWorktreePrompt(native.request.prompt, worktree)
-                    if (providerDraft) assertZCodeSettledProviderFailure(proof.record.session, prompt, proof.state as ZCodeStructuredExecution, proof.record.worktreePath, 'elaboration_generate')
+                    if (providerDraft) assertZCodeSettledProviderFailure(proof.record.session, prompt, proof.state as ZCodeStructuredExecution, proof.record.worktreePath, 'elaboration_generate', { crossProviderRetry: providerRetry })
                     const failed = providerDraft || (zcode ? assertZCodeStoppedDraftSource(prompt, (completedEventsRpc ? proof.state : state) as ZCodeStructuredExecution, proof.record.worktreePath) : undefined)
                     if (zcode && failed === null) { skipSource = true; return null }
                     if (grokDraft) assertGrokUnpublishedExitSource(proof.record.session, prompt, state, proof.record.worktreePath, 'elaboration_generate')
