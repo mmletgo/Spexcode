@@ -144,6 +144,8 @@ P4 裁决复现已结算选择后，另一真实 SQLite journal/receipt 推进�
 
 writer61→writer62 使用真实 SQLite 验证无 DDL、原表行与迁移记录保留、事务失败整体回滚、旧 writer 拒绝升级后数据库及一致 online backup 可按 writer61 读回。
 
+writer69→writer70 复用真实 SQLite 升级回归，验证故障注入时原库整体回滚，成功升级保留原业务行和自动采纳索引，旧 writer 拒绝新版库。升级前备份可按 writer69 读回。
+
 模拟旧版迁移库时移除目标旧代之后全部 marker，不能留下新增 writer marker 形成不存在的 schema gap；旧 writer 拒绝断言从当前迁移注册推导最高代数。 writer56 与 writer57 的隔离升级回归逐值核对旧数据、DDL 和自动采纳索引，验证事务失败回滚、旧 writer 拒绝及一致备份恢复。
 
 历史恢复结算仅接受与冻结计划逐项相同的 restoredIds；未获固定历史授权的验证元数据不能发布新资源头或解除退休状态。新 pair 的当前退休集合按真实恢复身份推进，原不可变退休审计保持；新版 writer 语义 marker 必须拒绝旧 writer 和未知未来版本写入。
