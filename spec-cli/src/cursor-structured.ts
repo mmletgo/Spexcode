@@ -280,8 +280,17 @@ async function observeAcp(stdout: Readable, plan: NativePlan, prompt: string, se
             send({ id: packet.id, result: outcome })
           } else send({ id: packet.id, error: { code: -32601, message: 'Client method unavailable' } })
         } else if (packet.method === 'session/update' && request && params?.sessionId === sessionId) {
-          if (terminal) throw pending('Cursor ACP emitted session updates after its original prompt terminal')
           const update = object(params?.update)
+          if (terminal) {
+            if (update?.sessionUpdate === 'available_commands_update' && !Object.hasOwn(packet, 'id')
+              && !Object.hasOwn(packet, 'result') && !Object.hasOwn(packet, 'error')
+              && Array.isArray(update.availableCommands) && update.availableCommands.every(value => {
+                const command = object(value)
+                return typeof command?.name === 'string' && typeof command.description === 'string'
+                  && (command.input == null || typeof object(command.input)?.hint === 'string')
+              })) continue
+            throw pending('Cursor ACP emitted session updates after its original prompt terminal')
+          }
           if (update?.sessionUpdate === 'tool_call' || update?.sessionUpdate === 'tool_call_update') chunks.length = 0
           else if (update?.sessionUpdate === 'agent_message_chunk') {
             const content = object(update.content)
