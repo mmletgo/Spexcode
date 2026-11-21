@@ -220,7 +220,8 @@ CREATE INDEX sync_apply_journals_operation ON sync_apply_journals(operation_id,a
 { version: 65, sql: 'SELECT 1; -- Protect a pending operator P0 review challenge from older writers.' },
 { version: 66, sql: 'SELECT 1; -- Protect frozen stopped ZCode P0 commits from exact cancelled turns.' },
 { version: 67, sql: 'SELECT 1; -- Protect P0 challenges with frozen required review evidence paths.' },
-{ version: 68, sql: 'SELECT 1; -- Protect stopped ZCode P1 author draft material and its reserved requests.' }]
+{ version: 68, sql: 'SELECT 1; -- Protect stopped ZCode P1 author draft material and its reserved requests.' },
+{ version: 69, sql: 'SELECT 1; -- Protect P1 stopped ZCode draft material across a formal provider retry.' }]
 
 /** 升级前以 SQLite online backup 保存一致性旧库；迁移本身由组件事务执行。 */
 export async function migrateSyncStore(protocol: SessionProtocol, options: { backupPath?: string } = {}): Promise<number> {

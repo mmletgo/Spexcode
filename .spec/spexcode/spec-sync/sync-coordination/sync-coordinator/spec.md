@@ -108,9 +108,11 @@ P1权限/绑定非法的独审沿[[sync-elaboration]]现有同owner repairDiagno
 
 ZCode 已结算的 provider 拒绝保留原 `unsupported` 结论。操作员显式暂停再恢复同一 operation 后，结构通过且尚未审定的 P1 Git 候选可沿同一接缝只续独审。[[zcode-structured-runtime]] 的固定公开错误投影只定位待核记录，其他 `unsupported` 沿既有流程。须同时核原只读原生终态归因、失败派发、canonical 会话、removed/stop 和候选冻结绑定。原件缺失、文件读取或解码失败，及身份、结算、候选绑定失配时以 `review_retry_binding` 停在新派发前。Git 进程启动失败和程序异常沿既有错误处理保留原诊断。新独审绑定同一候选、控制范围和模型，原失败、请求、Git 稿及生成追踪保持。此路径仅用于同 operation、同模型的显式恢复。
 
-P1 作者的 provider EPIPE 沿同一 operation 的显式暂停恢复接续未批准物理稿。先由原 attempt 的正式 `unsupported` 类结论和暂停后 `superseded` 证明非自动重试。分区可由同批另一 owner 的 `unsupported` 主导汇总，provider 资格由本 owner 的局部失败和 [[zcode-structured-runtime]] 原公开终态证明。原各派发资源须全部结算，本 owner 的 canonical failed 请求、模型、完整 session/thread/turn、removed/stop、输入、分区、seed 和 schema 逐项匹配，且没有原候选、生成结果或拒稿见证。沿 [[sync-stage-worktree]] 在原 HEAD/tree 等于 seed 时只读观察授权物理草稿，核对源、测试、其他路径和 index。原件以及原失败保持，当前 fence 只记录既有 `physical_draft` 未批准来源并复制精确字节。缺稿沿既有无稿流程，原件或保护面失配停止承接。新作者在该稿上续修并正常提交，照常执行结构检查和独立审查。跨 operation、其它 provider 归因、真实模型不支持以及未写出正式非自动失败的中断保持原材料资格。
+P1 作者的 provider EPIPE 沿同一 operation 的显式暂停恢复接续未批准物理稿。先由原 attempt 的正式 `unsupported` 类结论和暂停后 `superseded` 证明非自动重试。分区可由同批另一 owner 的 `unsupported` 主导汇总，provider 资格由本 owner 的局部失败和 [[zcode-structured-runtime]] 原公开终态证明。原各派发资源须全部结算，本 owner 的 canonical failed 请求、模型、完整 session/thread/turn、removed/stop、输入、分区、seed 和 schema 逐项匹配，且没有原候选、生成结果或拒稿见证。沿 [[sync-stage-worktree]] 在原 HEAD/tree 等于 seed 时只读观察授权物理草稿，核对源、测试、其他路径和 index。原件以及原失败保持，当前 fence 只记录既有 `physical_draft` 未批准来源并复制精确字节。缺稿沿既有无稿流程，原件或保护面失配停止承接。新作者在该稿上续修并正常提交，照常执行结构检查和独立审查。其它 provider 归因、真实模型不支持以及未写出正式非自动失败的中断保持原材料资格。
 
 授权草稿缺席且原工作区仅有其他未跟踪文件时，[[sync-stage-worktree]] 完整认证后按无稿派发。原文件留在作者工作区，新 seed 和证据使用原冻结输入。已有授权草稿的完整写范围检查继续执行。
+
+操作员沿正式 `retryOf` 切换原生执行器时，也可承接同形已停止的 ZCode P1 作者物理稿。只从直接父操作的当前正式失败 attempt 认证原稿，原操作和资源均须已经结算。原冻结输入、意图、政策、完整计划、读集、选择、范围及影响摘要保持，局部 P1、owner、精确 seed 和 schema 与新请求相同。用原操作的 ZCode 模型和原 Native 身份认证旧终态，由新操作固定的执行器收到未批准的原稿字节并重新提交及独立审查。同执行器换模型、多跳祖先、普通故障与 HTTP 429 不取得此材料资格。旧稿缺席沿原无稿规则，跨操作只复用已认证原字节和现有 provenance。
 
 P1的whole缓存沿[[sync-elaboration]]同时核身份与当前owner范围。分区whole不直接继承ready，必须回原local input逐owner核缓存资格并重新严格seal；单体的当前saved与历史accepted入口均须消费资格结果。scope失效只放弃当前ready复用，优先沿既有草稿来源，必要时用已冷验缓存末轮Git稿继续，不丢JSON或改原reviewPassed/trace/ref，重新生成及独审后才保存新结果。
 
