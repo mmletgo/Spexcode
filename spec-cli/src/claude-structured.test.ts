@@ -1105,19 +1105,18 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
         if (file === '/bin/ps' && args[0] === '-axo' && args[1] === censusColumns && execution.turnId) {
           const resultPath = join(root, 'result.json')
           const expired = observations.some(({ status }) => status === 'expired')
-          if (existsSync(resultPath)) finalProbes++
+          if (outcome !== 'periodic-result-first' && existsSync(resultPath)) finalProbes++
           if (outcome === 'periodic-result-first' && !heldForResult) {
             heldForResult = true
+            // 只用空 census 固定时序。真实宿主 census 可能先失败，导致下一探针已经属于正式停止。
             writeFileSync(release, 'true')
             return spawnOriginal(process.execPath, ['-e', `
 const { existsSync } = require('node:fs')
-const { execFileSync } = require('node:child_process')
 const waiting = setInterval(() => {
   if (!existsSync(process.argv[1])) return
   clearInterval(waiting)
-  process.stdout.write(execFileSync('/bin/ps', process.argv.slice(2)))
 }, 5)
-`, resultPath, ...args], options)
+`, resultPath], options)
           }
           if (!rejectedProbes || outcome === 'periodic-expired' && !expired || outcome === 'periodic-final-pending' || outcome === 'periodic-error-stop-unknown') {
             rejectedProbes++
@@ -1125,6 +1124,7 @@ const waiting = setInterval(() => {
             if (outcome === 'periodic-error' || outcome === 'periodic-error-stop-unknown' || outcome === 'periodic-result-first') throw samplingError
             return spawnOriginal(process.execPath, ['-e', 'process.exit(7)'], options)
           }
+          if (outcome === 'periodic-result-first' && existsSync(resultPath)) finalProbes++
         }
         return spawnOriginal(file, args, options)
       })
