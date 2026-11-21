@@ -25,7 +25,7 @@ import net from 'node:net'
 import { readdirSync, readFileSync, existsSync } from 'node:fs'
 import { join, resolve as resolvePath } from 'node:path'
 import {
-  adminCookieName, authorize, clearAdminPassword, clearProjectPassword, loadAuthStore, mintToken,
+  adminCookieName, authorize, clearAdminPassword, clearProjectPassword, isLoopback, loadAuthStore, mintToken,
   projectCookieName, setAdminPassword, setProjectPassword, verifyPassword, PEER_CREDENTIAL_HEADER,
   type AuthStore, type Entry,
 } from './gateway-auth.js'
@@ -36,6 +36,8 @@ import { spexcodeHome, encodeProject, runtimeRoot } from '@spexcode/spec-core'
 import { readEndpointRecord } from './endpoint-record.js'
 import { readGatewayIdentity, type ResolvedIdentity } from '@spexcode/spec-core'
 import { proxyHttp, proxySessionWeb, proxySessionWebUpgrade } from './gateway.js'
+import { applyLlmManagerSettings, llmManagerRequested, llmManagerSettingsFile, LlmManagerHostError } from './llm-manager-host.js'
+import { isLoopbackHost } from './loopback-transport.js'
 import { listMachinePeers, readPeerMachineId, peerSenderRef, validPeerSender, type MachinePeer } from './machine-peer.js'
 
 export type HubProject = { id: string; identity: ResolvedIdentity; url: string; port: number; gated: boolean }
@@ -301,6 +303,36 @@ export function startHubGateway(opts: HubOpts): http.Server {
       return sendHtml(res, 200, loginPage(false))
     }
     if (path === '/logout') return redirect(res, '/login', clearCookie(adminCookieName(port)))
+
+    if (path === '/llm-manager/' || path === '/llm-manager/settings') {
+      const base = URL.parse((secure ? 'https://' : 'http://') + (req.headers.host ?? ''))
+      if (!llmManagerRequested() || entry !== 'console' || !isLoopback(remote) || !base || !isLoopbackHost(base.hostname)
+        || base.username || base.password || base.pathname !== '/' || base.search || base.hash
+        || Number(base.port || (secure ? 443 : 80)) !== req.socket.localPort) return sendJson(res, 404, { error: 'not found' })
+      res.setHeader('Cache-Control', 'no-store')
+      if (!adminz().ok) return path.endsWith('/') ? denied(res, '/login') : sendJson(res, 401, { error: 'authentication required' })
+      if (path.endsWith('/')) {
+        if (req.method !== 'GET') return sendJson(res, 405, { error: 'GET required' })
+        const html = llmManagerSettingsFile()
+        if (!html) return sendJson(res, 404, { error: 'llm_manager_settings_not_installed' })
+        res.setHeader('Content-Security-Policy', "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+        return sendHtml(res, 200, readFileSync(html, 'utf8'))
+      }
+      if (req.method !== 'POST') return sendJson(res, 405, { error: 'POST required' })
+      if (req.headers.origin !== base.origin) return sendJson(res, 403, { error: 'same-origin request required' })
+      if (req.headers['content-type']?.split(';', 1)[0]?.trim() !== 'application/json')
+        return sendJson(res, 415, { error: 'JSON required' })
+      req.setEncoding('utf8')
+      let body: unknown
+      try { body = JSON.parse(await readBody(req, 128 * 1024)) }
+      catch { return sendJson(res, 400, { detail: { name: 'llm_manager_invalid' } }) }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) return sendJson(res, 400, { detail: { name: 'llm_manager_invalid' } })
+      try { return sendJson(res, 200, await applyLlmManagerSettings(body as Record<string, unknown>)) }
+      catch (error) {
+        if (!(error instanceof LlmManagerHostError)) throw error
+        return sendJson(res, error.code === 'llm_manager_host_unavailable' ? 503 : 400, { detail: { name: error.code } })
+      }
+    }
 
     if (path === '/projects' || path.startsWith('/projects/')) {
       // browser navigation (the `/` redirect lands here with Accept: text/html) wants the Projects UI,

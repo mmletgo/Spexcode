@@ -11,7 +11,10 @@
     "dist-public",
     "dist-public-single",
     "daemon.mjs",
-    "daemon-pty.mjs"
+    "daemon-pty.mjs",
+    "llm-manager/build.mjs",
+    "llm-manager/settings.css",
+    "llm-manager/settings.jsx"
   ],
   "dependencies": {
     "@hono/node-server": "^1.13.7",
@@ -30,6 +33,7 @@
     "test:identity-e2e": "node test/identity-chain.e2e.mjs",
     "prebuild": "node scripts/patch-xterm-sync-resize.mjs",
     "build": "vite build --base ./",
+    "build:llm-manager": "node llm-manager/build.mjs",
     "build:public": "VITE_PUBLIC_GRAPH_ONLY=1 vite build --outDir dist-public --base ./",
     "build:public-single": "VITE_PUBLIC_GRAPH_ONLY=1 vite build --config vite.config.single.mjs --outDir dist-public-single --base ./",
     "prepack": "npm run build && npm run build:public && npm run build:public-single",

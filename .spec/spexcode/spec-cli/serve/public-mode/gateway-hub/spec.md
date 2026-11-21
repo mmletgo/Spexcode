@@ -13,6 +13,8 @@ related:
 ---
 # gateway-hub
 
+`/llm-manager/` 和 `/llm-manager/settings` 只在登记完整管理的本机 console 提供。管理请求通过既有宿主管理员鉴权、实际 loopback 与同源检查。页面加载本机选装的 [[llm-manager-host]] 组件，脚本和设置数据遵循同一可信来源。此路由不通过项目后端或机器入口公开。
+
 Where [[public-mode]] exposes ONE project behind one password, the hub is the **multi-project face**: a
 single gateway fronting every `spex serve` this user runs, so one public endpoint serves many projects
 without duplicating TLS, login, or exposure decisions per project. The backends stay untouched loopback

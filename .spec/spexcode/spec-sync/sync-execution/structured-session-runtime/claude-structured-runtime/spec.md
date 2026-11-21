@@ -20,6 +20,8 @@ related:
 
 ## expanded spec
 
+[[llm-manager-host]] 的 Claude API 路线沿原 native-worktree 固定执行策略，使用同轮临时 loopback 转发。原生进程只接收本轮临时授权，启动时禁用会覆盖路线的外部设置和 hooks。macOS 子进程同一次沙箱同时限制 Git 共享配置写入和 Manager 私有文件读取。原生 init、消息、schema、进程组和结果照原路径核验。可信终态只投影原 429 状态码，真实 API 转发额度失败仍须原生停止。
+
 原生 worktree 只从同一原生 CLI `result.modelUsage` 读取计数。按字段跨全部模型汇总安全非负整数，分别保留未缓存输入、输出、缓存读和缓存创建；缺值、非法值或超安全整数范围的分量缺席，明确的零保留。仅以该轮固定请求的首个原生会话计数范围解释，涵盖 Claude Code query pipeline 报告的模型调用。规范化计数随本轮 result 快照保存，在精确原生终态和停止认证后才交给 [[structured-session-runtime]]。不使用只含主循环的 usage、价格、单消息或旧历史推估，不保留原始 modelUsage、模型分组、价格或其它 provider 字段。
 
 工作区schema拒绝仅在原plan/prompt/model/turn/终态与stop认证后保留不可信final诊断：success的structured_output schema拒绝可保存其原生JSON值的确定JSON表示；重试耗尽仅取最后一份已严格配对、被本schema拒绝的StructuredOutput input，不提取thinking/任意assistant文本。标明native_json表示与原请求/schema身份，仍不填成功output或写completed，原错误分类不变；没有可证final则缺席。

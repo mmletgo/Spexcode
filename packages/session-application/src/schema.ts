@@ -75,4 +75,8 @@ CREATE INDEX session_external_claims_history
   ON session_external_claims (session_id, harness);
 `,
   },
+  {
+    version: 6,
+    sql: 'SELECT 1; -- Do not launch a managed structured session from a writer that cannot authenticate its route.',
+  },
 ]

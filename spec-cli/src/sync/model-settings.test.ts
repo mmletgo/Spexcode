@@ -1,42 +1,38 @@
 import assert from 'node:assert/strict'
-import { once } from 'node:events'
-import { createServer } from 'node:http'
-import type { AddressInfo } from 'node:net'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
-import { readSyncModelSettings } from './model-selection.js'
+import { managedModel, managedRoute, nativeModelValue } from '../llm-manager-route.js'
+import { configuredSyncModel, readSyncModelSettings, resolveSyncModel } from './model-selection.js'
 
-test('Model settings reports native CLI and a local Claude API configuration page without reading providers', async t => {
-  const originalEnv = process.env
-  process.env = { ...originalEnv }
-  t.after(() => { process.env = originalEnv })
+test('settings and operation selection share the authoritative Manager bridge', async t => {
+  const original = process.env
+  process.env = { ...original }
+  t.after(() => { process.env = original })
   delete process.env.SPEX_LLM_MANAGER_PYTHON
-  delete process.env.SPEX_LLM_MANAGER_CLI_CONFIG
-  const calls: string[] = []
-  const server = createServer((request, response) => {
-    calls.push(`${request.method} ${request.url}`)
-    if (request.url === '/redirect') {
-      response.writeHead(302, { location: '/ui/' }).end()
-      return
-    }
-    response.writeHead(200, { 'content-type': 'text/html' }).end()
+  delete process.env.SPEX_LLM_MANAGER_CONFIG
+  delete process.env.SPEX_LLM_MANAGER_SETTINGS_HTML
+  const unmanaged = await readSyncModelSettings()
+  assert.deepEqual(unmanaged.llmManager, { configured: false })
+  assert.deepEqual(unmanaged.nativeVendors.map(({ id }) => id).sort(), ['claude', 'codex', 'cursor', 'grok', 'zcode'])
+
+  const root = mkdtempSync(join(tmpdir(), 'spex-manager-settings-'))
+  t.after(() => rmSync(root, { force: true, recursive: true }))
+  const python = join(root, 'rpc'), config = join(root, 'config.json'), html = join(root, 'manager.html')
+  const route = { routeId: 'a'.repeat(64), vendor: 'claude', model: 'fixture-model', kind: 'anthropic-messages' } as const
+  writeFileSync(config, JSON.stringify({ ok: true, value: route }))
+  writeFileSync(html, '<!doctype html><title>Manager fixture</title>')
+  writeFileSync(python, '#!/bin/sh\n[ "$1" = "-I" ] && [ "$3" = "rpc" ] || exit 2\n[ -z "\${SPEX_LLM_MANAGER_TEST_ENV_TRAP+x}" ] || exit 2\n/bin/cat >/dev/null\n/bin/cat "$4"\n', { mode: 0o700 })
+  Object.assign(process.env, { SPEX_LLM_MANAGER_PYTHON: python, SPEX_LLM_MANAGER_CONFIG: config, SPEX_LLM_MANAGER_SETTINGS_HTML: html, SPEX_LLM_MANAGER_TEST_ENV_TRAP: 'host-only' })
+
+  assert.deepEqual((await readSyncModelSettings()).llmManager, {
+    configured: true, authoritative: true, settingsPath: '/llm-manager/', selection: 'claude:fixture-model',
   })
-  t.after(() => new Promise<void>(resolve => { server.close(() => resolve()); server.closeAllConnections() }))
-  await once(server.listen(0, '127.0.0.1'), 'listening')
-  const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
-  const setupUrl = `${origin}/ui/`
-  process.env.SPEX_CLAUDE_API_SETTINGS_URL = setupUrl
-
-  const view = await readSyncModelSettings()
-  assert.deepEqual(view.claudeApi, { available: true, setupUrl })
-  assert.deepEqual(view.llmManager, { configured: false })
-  assert.deepEqual(view.nativeVendors.map(({ id }) => id).sort(), ['claude', 'cursor', 'grok', 'zcode'])
-  assert.deepEqual(calls, ['HEAD /ui/'])
-
-  process.env.SPEX_CLAUDE_API_SETTINGS_URL = `${origin}/redirect`
-  assert.deepEqual((await readSyncModelSettings()).claudeApi, { available: false })
-  assert.deepEqual(calls, ['HEAD /ui/', 'HEAD /redirect'])
-
-  process.env.SPEX_CLAUDE_API_SETTINGS_URL = 'http://example.invalid:3456/ui/'
-  assert.deepEqual((await readSyncModelSettings()).claudeApi, { available: false })
-  assert.deepEqual(calls, ['HEAD /ui/', 'HEAD /redirect'])
+  assert.equal(configuredSyncModel({ model: 'grok:default' }, true), 'llm-manager')
+  assert.equal(await resolveSyncModel('llm-manager', true), managedModel(route))
+  assert.deepEqual(managedRoute(managedModel(route)), route)
+  assert.equal(nativeModelValue(managedModel(route), 'claude'), route.model)
+  await assert.rejects(resolveSyncModel(managedModel(route), true), { code: 'sync_llm_manager_untrusted_route' })
+  await assert.rejects(resolveSyncModel('grok:default', true), { code: 'sync_llm_manager_managed' })
 })

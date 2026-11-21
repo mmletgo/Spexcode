@@ -1,3 +1,4 @@
+import { managedRoute, nativeModelValue } from './llm-manager-route.js'
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
@@ -53,9 +54,10 @@ function writeEvidence(root: string, name: string, value: unknown): void {
 }
 
 export function grokNativeModel(model: string | undefined): string | undefined {
-  if (!model?.startsWith('grok:') || !model.slice(5).trim() || model.includes('\0'))
+  const value = nativeModelValue(model, 'grok')
+  if (!value.trim() || value.includes('\0'))
     throw new StructuredSessionError('unsupported', 'Grok Build requires grok:<model> or grok:default')
-  return model === 'grok:default' ? undefined : model.slice(5)
+  return value === 'default' ? undefined : value
 }
 
 const candidateReviewPurposes = new Set(['elaboration_review', 'code_review'])
@@ -134,7 +136,7 @@ function observeNativeStderr(stderr: Readable, args: readonly string[]) {
       if (status) httpStatuses.add(status.code)
       const body = (status?.message ?? text.replace(/^error:[ \t]*/i, '')).trimStart()
       const message = body.startsWith(':') ? body.slice(1).trimStart() : body
-      if (/^usage balance exhausted[.!]?$/i.test(message)) usageBalanceExhausted = true
+      if (/^(?:usage balance exhausted|you hit your weekly limit)[.!]?$/i.test(message)) usageBalanceExhausted = true
     }
     lineBytes = 0
     discardLine = false
@@ -520,10 +522,11 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
     if (!stopped) throw Object.assign(pending(`Grok native stop remains unproven (${stopPhase})`), { cause: error })
     if (exitWindowFailure && error === exitWindowFailure && (callbacks.signal?.aborted || timedOut || existsSync(join(root, 'cancel.json')))) throw cancelled(timedOut)
     if (error instanceof StructuredSessionError && error.code === 'cancellation_pending' && error.message === MISSING_TERMINAL && launchBinding && observedExit) {
+      const stderr = stderrDiagnostic()
       try {
         writeEvidence(root, 'missing-terminal-diagnostic.json', {
           version: 1, launchDigest: digest(launchBinding), planDigest: launchBinding.planDigest,
-          stopDigest: stopObservation(root, launchBinding), exit: observedExit, stderr: stderrDiagnostic(),
+          stopDigest: stopObservation(root, launchBinding), exit: observedExit, stderr,
         })
       } catch (diagnosticError) {
         const io = diagnosticError as NodeJS.ErrnoException
@@ -531,7 +534,12 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
         const invalidStopEvidence = diagnosticError instanceof SyntaxError || diagnosticError instanceof StructuredSessionError && diagnosticError.code === 'stale_result'
         if (!fileIO && !invalidStopEvidence) throw diagnosticError
         console.warn('spex grok native missing-terminal diagnostic unavailable')
+        throw error
       }
+      if (managedRoute(execution.model) && !timedOut && !callbacks.signal?.aborted && !existsSync(join(root, 'cancel.json'))
+        && observedExit.signal === null && observedExit.code !== null && observedExit.code !== 0
+        && stderr.ended && !stderr.readError && !stderr.oversizedLine && (stderr.usageBalanceExhausted || stderr.httpStatuses.includes(429)))
+        throw new StructuredSessionError('provider_quota_exhausted', 'Grok provider reported quota exhaustion in the stopped native invocation')
     }
     throw error
   } finally {

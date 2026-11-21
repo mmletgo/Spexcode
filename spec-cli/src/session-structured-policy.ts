@@ -53,7 +53,7 @@ export type StructuredExecution = {
   resultDigest?: string
   nativeTokenUsage?: NativeTokenUsage
   error?: string
-  errorCode?: 'structured_output_retries_exhausted' | 'structured_output_format_invalid' | 'native_worktree_result_invalid' | 'native_rpc_timeout' | 'native_turn_transport_failed' | 'unsupported'
+  errorCode?: 'structured_output_retries_exhausted' | 'structured_output_format_invalid' | 'native_worktree_result_invalid' | 'native_rpc_timeout' | 'native_turn_transport_failed' | 'provider_quota_exhausted' | 'unsupported'
   rejectedOutput?: RejectedStructuredOutput
   worktree?: NativeWorktreeRequest
   zcodeToolPolicy?: ZCodeToolPolicy

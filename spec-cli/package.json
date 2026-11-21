@@ -16,7 +16,9 @@
     "bin",
     "dist",
     "templates",
-    "hooks"
+    "hooks",
+    "llm-manager/host.py",
+    "llm-manager/requirements.txt"
   ],
   "bundledDependencies": [
     "@spexcode/spec-core",

@@ -1,0 +1,119 @@
+:root {
+  color-scheme: dark;
+  --ground: #1b1b1b;
+  --paper: #262626;
+  --line: #454545;
+  --ink: #d1d1d1;
+  --heading: #ededed;
+  --muted: #aaa;
+  --accent: #94b7d1;
+  background: var(--ground);
+  color: var(--ink);
+  font: 1rem/1.55 system-ui, sans-serif;
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+main { width: min(64rem, 100%); margin: auto; padding: clamp(1rem, 4vw, 3rem); }
+h1, h2, h3 { color: var(--heading); font-weight: 600; line-height: 1.25; }
+h1 { margin: 0 0 1.5rem; font-size: 1.75rem; }
+h2 { margin: 0 0 .5rem; font-size: 1.25rem; }
+h3 { margin: 0; font-size: 1rem; }
+p { margin: 0 0 .75rem; }
+a { color: var(--accent); }
+button, input, select, textarea { color: inherit; font: inherit; }
+button, input:not([type="checkbox"]), select, textarea {
+  min-height: 2.75rem;
+  max-width: 100%;
+  padding: .35rem .65rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
+}
+button { color: var(--accent); cursor: pointer; }
+button:disabled { opacity: .5; cursor: default; }
+button:hover:not(:disabled) { border-color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+input:not([type="checkbox"]), select, textarea { width: 100%; }
+fieldset { min-width: 0; border: 1px solid var(--line); margin: 0; }
+nav, .llm-settings-actions, .llm-settings-member-add, .llm-settings-segments,
+.llm-settings-windows-days, .llm-settings-windows-presets {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .5rem;
+}
+nav { gap: 1rem; }
+.llm-settings-section, .llm-settings-keys {
+  border-top: 1px solid var(--line);
+  margin-top: 1.25rem;
+  padding-top: 1.25rem;
+}
+.llm-settings-section-head, .llm-settings-dialog-head, .llm-settings-card-head {
+  display: flex;
+  align-items: start;
+  flex-wrap: wrap;
+  gap: .5rem 1rem;
+  justify-content: space-between;
+  margin-bottom: .75rem;
+}
+.llm-settings-section-head > div { flex: 1 1 22rem; }
+.llm-settings-provider-list, .llm-settings-group-grid, .llm-settings-key-list,
+.llm-settings-form, .llm-settings-model, .llm-settings-tier, .llm-settings-field {
+  display: grid;
+  gap: .5rem;
+}
+.llm-settings-form > *, .llm-settings-member-add > * { min-width: 0; }
+.llm-settings-provider, .llm-settings-group {
+  padding: 1rem;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow-wrap: anywhere;
+}
+.llm-settings-lead, .llm-settings-empty, .llm-settings-badge, .llm-settings-metric-label,
+.llm-settings-note, .llm-settings-loading { color: var(--muted); }
+.llm-settings-error, .llm-settings-button-danger { color: #f2a3ae; }
+.llm-settings-warn { color: #e5b567; }
+.llm-settings-segment.is-active, .llm-settings-day[aria-pressed="true"] { border-color: var(--accent); }
+.llm-settings-members, .llm-settings-metrics, .llm-settings-breakers {
+  list-style: none;
+  padding: 0;
+}
+.llm-settings-member, .llm-settings-key, .llm-settings-key-main, .llm-settings-stats,
+.llm-settings-metrics, .llm-settings-field-check, .llm-settings-check {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: .5rem 1rem;
+}
+.llm-settings-member, .llm-settings-key, .llm-settings-model, .llm-settings-tier {
+  border-top: 1px solid var(--line);
+  padding-block: .625rem;
+}
+.llm-settings-stats dd { margin: 0; }
+.llm-settings-metrics > li { display: grid; }
+.llm-settings-mono, .llm-settings-metric-value { font-variant-numeric: tabular-nums; }
+.llm-settings-usage { overflow-x: auto; }
+.llm-settings-table { border-collapse: collapse; width: 100%; }
+.llm-settings-table th, .llm-settings-table td {
+  padding: .5rem;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+}
+.llm-settings-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgb(0 0 0 / .7);
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+}
+.llm-settings-dialog {
+  width: min(42rem, 100%);
+  max-height: 100%;
+  overflow: auto;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--ground);
+}

@@ -19,6 +19,8 @@ related:
 
 ## expanded spec
 
+[[llm-manager-host]] 的 ZCode 可从同一输入和 turn 的原 `turn.failed` 认证 provider HTTP 429。先独立确认原生停止，再记录正式续路分类。普通 provider EPIPE、非额度拒绝和其他执行协议维持原失败语义。
+
 原生 worktree 只从 `turn.completed.payload.usage` 中 source 为 provider 的同轮摘要投影安全非负整数。totalInputTokens 已包含缓存读写，cacheReadInputTokens 和 cacheWriteInputTokens 是其中的分量；输出另列。缺值或非法值缺席，明确的零保留。新终态文件只保存规范化计数，原始 usage blob 不进入该路径的终态文件；必须经既有同 session/input/query/turn、消息、模型与停止认证后才交给 [[structured-session-runtime]]。不从 tokenCount、cacheStats、会话累计值或历史记录补算。
 
 新fence观察已停ZCode edit的未批准Git稿时，复用原verifyPlan、send与public model snapshot，精确核workspace、原session/model、唯一turn.started的input/query/非空messageId、所有events身份与唯一terminal原摘要。只读核原receipt/进程组与正式canonical stop/removed，不能调用会改写旧观察的进程采样或要求messages/success/final。原exit须code0、signal:null、stopped:true，idle/closed原值保持；基础认证后，P0 的原 seed 或完整 Git tree 与 seed 相同的干净后代都只跳过无进度；常规有真实树差量仅原精确turn.failed可授Git材料；P0 同操作已结算的正常取消和 events RPC 另按下文认证。仅打开exit.json时遇到ENOENT返回缺证据（null），将此候选标为不合格；不会用canonical stop/removed替代exit或turn.failed证明。缺plan/send、其他读取错误、坏JSON及存在但非法exit仍显式失败。新failed和旧cancelled沿[[sync-checkpoint-evidence]]各自原证明认证，不附failedWorktree/rejectedOutput，不改原计划/策略/请求或错误分类。
