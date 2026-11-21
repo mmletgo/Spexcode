@@ -10887,14 +10887,14 @@ for (const transport of ['git-json-v5', 'git-json-v6'] as const) test(`P0已审w
   assert.equal(analysis.guidanceContractVersion, transport === 'git-json-v6' ? CODE_BEHAVIOR_GUIDANCE_VERSION : undefined, '旧analysis字段缺席保持')
 })
 
-for (const frozen of ['new', 'v1', 'v2-reserved', 'v3-reserved', 'v4-reserved', 'v5-reserved', 'v6-reserved', 'legacy-checkpoint', 'reserved', 'null', 'empty', 'future'] as const) test(`P0 context传输只在首次冻结选择，${frozen}保留旧字段缺席与请求绑定`, async t => {
+for (const frozen of ['new', 'v1', 'v2-reserved', 'v3-reserved', 'v4-reserved', 'v5-reserved', 'v6-reserved', 'v6-coverage-reserved', 'legacy-checkpoint', 'reserved', 'null', 'empty', 'future'] as const) test(`P0 context传输只在首次冻结选择，${frozen}保留旧字段缺席与请求绑定`, async t => {
   const f = await fixture(t, { maxAttempts: 1, maxCalls: 8, maxRepairs: 0, timeoutMs: 120_000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, 'code', 'claude:default')
   const claim = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30_000, expectedMessageId: f.operation.dispatchMessageId })
   let originalProtocol: { ref: { sha256: string }; bytes: Buffer } | undefined
   const rejectsTransport = ['null', 'empty', 'future'].includes(frozen)
-  const v6 = frozen === 'new' || frozen === 'v6-reserved'
+  const v6 = frozen === 'new' || frozen === 'v6-reserved' || frozen === 'v6-coverage-reserved'
   const expectedTransport = v6 ? 'git-json-v6' : frozen === 'v1' ? 'git-json-v1' : frozen === 'v2-reserved' ? 'git-json-v2' : frozen === 'v3-reserved' ? 'git-json-v3' : frozen === 'v4-reserved' ? 'git-json-v4' : frozen === 'v5-reserved' ? 'git-json-v5' : undefined
-  const protocolValue = { version: 'code-behavior-draft-v1', ...(expectedTransport ? { contextTransport: expectedTransport } : rejectsTransport ? { contextTransport: frozen === 'null' ? null : frozen === 'empty' ? '' : 'git-json-future' } : {}), ...(frozen === 'new' ? { exactChangedPathsPreflight: true, reviewCoveragePreflight: true } : {}) }
+  const protocolValue = { version: 'code-behavior-draft-v1', ...(expectedTransport ? { contextTransport: expectedTransport } : rejectsTransport ? { contextTransport: frozen === 'null' ? null : frozen === 'empty' ? '' : 'git-json-future' } : {}), ...(frozen === 'new' || frozen === 'v6-coverage-reserved' ? { exactChangedPathsPreflight: true, reviewCoveragePreflight: true } : {}), ...(frozen === 'new' ? { reviewDuplicatePreflight: true } : {}) }
   if (frozen !== 'new' && (expectedTransport || frozen === 'legacy-checkpoint' || rejectsTransport)) {
     const value = protocolValue, resultRef = writeEvidence(f.input.source.commonDir, value)
     const ref = writeEvidence(f.input.source.commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: claim.attempt.id, inputId: f.input.id, policyDigest: f.operation.policyDigest, stage: 'behavior-draft-protocol', resultRef })

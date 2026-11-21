@@ -23,7 +23,7 @@
 - writer70 保护跨执行器重试跳过已认证的旧额度拒绝，以及同操作显式恢复已通过结构门的候选只续失败独审。升级停稳结算、保存一致 v69 online backup 及配套 enabled、Git/CAS。
 - writer64 保护普通正式重试的 P0 跨 operation 续审来源。按真实来源分别核作者和新独审的原模型；同冻结计划、scope、读集、基线和 schema 才保 readyAnalysis，业务 repair 仍续原稿及真实发现。升级先停稳结算旧 writer，保存一致 v63 SQLite online backup 和配套 enabled、Git/CAS。回滚停稳并结算新 writer，再恢复整套备份。
 - writer63 保护已结算 ZCode P1 续审来源、已保留的只读派发及规范入口配置的仅分析承接。升级前停稳并结算旧 writer，保存一致 v62 SQLite online backup 和配套 enabled、Git/CAS。回滚先停稳并结算新 writer，再恢复整套备份。
-- 新 Native P0 独审按 `reviewCoveragePreflight` 只读检查原任务的必审路径与实际变化ID，沿原Git稿续审及完整正式门。writer61 升级停稳、结算并保存一致 v60 online backup 及配套 Git/CAS。
+- 新 Native P0 独审按 `reviewCoveragePreflight` 只读检查原任务的必审路径与实际变化ID，沿原Git稿续审及完整正式门。writer61 升级停稳、结算并保存一致 v60 online backup 及配套 Git/CAS。 新 attempt 的 `reviewDuplicatePreflight` 另报告重复项，旧字段缺席及原请求不补写。writer72 升级、回退沿 [[sync-migrations]]。
 - 跨 attempt 的新增完整叶 Native 草稿提示按 `draftRepairDisposition` 标记后续实现诊断。原 Git 及 findings 逐字保留，P1 只读/结构门和 V3 原执行保持。writer60 升级停稳、结算并保存一致 v59 online backup 及配套 Git/CAS。
 - 新 Native spec_to_code 的冻结父作者 REQ/RULE 差量按原 P0、独审父接口与显式叶引用证明，精确影响既选叶目标；局部与 strict seal 共用，既有验收授权和同候选冷复核保持。writer59 升级停稳、结算并保存一致 v58 online backup 及配套 Git/CAS。
 - 新 Native 纯父接口独审只核父层义务、事实来源与授权；实现和验收绑定由完整叶独审核对。提示由新attempt的`parentInterfaceReview`冻结。writer58 保护 `scope-v2` 的父误绑同候选续审。沿正式只读原件和 Git/Native 身份冷验，再独立派发。旧 `true` 提示逐字重放。
