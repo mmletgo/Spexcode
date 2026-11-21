@@ -82,6 +82,7 @@
     "spec-dashboard/test/spec-resident-shell.e2e.mjs": "dashboard-browser",
     "spec-dashboard/test/spec-resident-tab.e2e.mjs": "dashboard-browser",
     "spec-dashboard/test/split-region.e2e.mjs": "dashboard-browser",
+    "spec-dashboard/test/sync-model-settings.e2e.mjs": "dashboard-browser",
     "spec-dashboard/test/tab-click-activates.e2e.mjs": "dashboard-browser",
     "spec-dashboard/test/tab-close-focus-history.e2e.mjs": "dashboard-browser",
     "spec-dashboard/test/tab-context-menu.e2e.mjs": "dashboard-browser",
