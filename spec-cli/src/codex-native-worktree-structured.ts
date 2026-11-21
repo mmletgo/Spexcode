@@ -111,7 +111,7 @@ function resultFromFinal(final: Final, prompt: string, execution: Execution): Na
 function readFinalProof(root: string, prompt: string, execution: Execution, workspace: string, nativeModel: string | undefined): Final {
   const native = execution.codexNative
   if (!native || native.root !== root || !native.proofDigest || !native.threadId || !native.turnId || !native.pid)
-    throw stale('Codex completed execution has no exact native proof')
+    throw stale('Codex completed execution has no exact native settlement')
   try {
     const plan = read<Plan>(root, 'plan.json')
     assertPlan(plan, execution, native)
