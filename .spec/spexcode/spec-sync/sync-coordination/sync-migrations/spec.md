@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+writer68 追加 SELECT 1 marker，保护 [[sync-coordinator]] 的已结算 ZCode P1 作者物理稿接续。未批准来源已经登记或续稿请求已保留时，writer67 均在写入或派发前拒绝。升级先停稳结算旧 writer、资源、journal 和租约，保存一致 v67 SQLite online backup 及配套 enabled、Git/CAS。回滚先停稳结算新 writer，再恢复整套备份。原业务表、原请求和历史迁移逐值保留。
+
 writer67 追加 SELECT 1 marker，保护 [[sync-p0-review-challenge]] v2 证据路径绑定及冻结独审覆盖。writer66 在写入或派发前拒绝新版。升级先停稳并正式结算旧 writer，再保存一致 v66 SQLite online backup 与配套 enabled、Git/CAS。回滚先停稳并结算新 writer，再完整恢复该套备份。历史授权、派发及迁移保持原字节。
 
 writer66 追加 SELECT 1 marker，保护 [[sync-coordinator]] P0 按精确正常取消冻结的未批准提交稿。writer65 在写入和派发前拒绝新版。升级先停稳并结算旧 writer，再保存一致 v65 SQLite online backup 及配套 enabled、Git/CAS。回滚先停稳并结算新 writer，再恢复整套备份。原记录及旧迁移逐字保留。

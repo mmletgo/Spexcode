@@ -16,6 +16,8 @@ code:
 
 writer67 回归确认备份失败时保持一致 v66 原表和 marker，成功迁移后 v66 writer 拒写新版，备份可独立打开，重复迁移不重复备份。
 
+writer67→68 复用真实 SQLite 围栏回归，核对旧 writer 拒绝新版、原表及迁移记录保持、一致 v67 online backup 可独立恢复，重复迁移只备份一次。
+
 [[sync-p0-review-challenge]] 的 writer64→65 只增一条 marker。夹具核升级失败原子回滚、旧 writer 拒写及原备份可由 writer64 读取。
 
 writer58→59、writer59→60、writer60→61 、writer62→63 与 writer63→64 复用真实 SQLite 围栏回归，验证原业务、自动采纳索引和历史迁移逐值保持，旧 writer 拒绝写新版，且升级前的在线备份可由旧 writer 正常打开。

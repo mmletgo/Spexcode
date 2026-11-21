@@ -50,7 +50,7 @@ import { assertFrozenBinding, readFrozenManifest, readFrozenRange } from '../fro
 import { verifyStructuredFrozenReadProof } from '../structured-frozen-evidence.js'
 import { assertClaudeStoppedDraftSource, isClaudeFailedAnalysisDraftSource, observeClaudeStoppedWorktreeFailure } from '../claude-structured.js'
 import { assertGrokUnpublishedExitSource, GROK_NATIVE_EXIT_DEADLINE_FAILURE, isGrokNativeExitFailure } from '../grok-structured.js'
-import { assertZCodeSettledProviderReview, assertZCodeStoppedDraftSource, isZCodeEventsRpcTimeout, isZCodeProviderRejection, type ZCodeStructuredExecution } from '../zcode-structured.js'
+import { assertZCodeSettledProviderFailure, assertZCodeStoppedDraftSource, isZCodeEventsRpcTimeout, isZCodeProviderRejection, type ZCodeStructuredExecution } from '../zcode-structured.js'
 import { NATIVE_PERIODIC_OBSERVATION_FAILURE, NATIVE_PROCESS_OBSERVATION_PENDING, nativeWorktreePrompt, nativeWorktreeResult } from '../native-worktree-runtime.js'
 import { readRecord } from '../session-record.js'
 import { structuredExecutionPolicy, StructuredSessionError } from '../session-structured-policy.js'
@@ -503,7 +503,7 @@ function settledElaborationReview(store: SyncStore, operation: SyncOperation, pr
     || canonical(prior.dispatchPlans.find(dispatch => dispatch.key === key)?.session) !== canonical(session)
     || canonical(checkpoint.failure) !== canonical({ code: failure.code, message: failure.message, ...(rejection ? { rejectedOutput: checkpoint.failure?.rejectedOutput } : {}), ...(failedWorktree ? { failedWorktree } : {}) })
     || record.harnessSessionId !== session.threadId || state.resultWorktree || state.output !== undefined || state.resultDigest !== undefined) fail('review_retry_binding', '独审失败缺少同owner原只读请求及精确已结算的Native失败身份')
-  if (providerReview) assertZCodeSettledProviderReview(record.session, nativeWorktreePrompt(request.prompt, request.worktree), state as ZCodeStructuredExecution, record.worktreePath)
+  if (providerReview) assertZCodeSettledProviderFailure(record.session, nativeWorktreePrompt(request.prompt, request.worktree), state as ZCodeStructuredExecution, record.worktreePath, 'elaboration_review')
   const generation = elaborationGenerationSource(store, operation, prior, round)
   const generationOwner = generation && ownerKey.replace(`sync:${prior.id}:`, `sync:${generation.attempt.id}:`)
   if (!generation?.request || !generation.key.startsWith(`${generationOwner}:`) || generation.request.inputDigest !== elaborationNativeInputDigest(result.inputDigest, generation.request)
@@ -2809,6 +2809,11 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
               const completedEventsRpc = allowCommitted && zcode && !!state && isZCodeEventsRpcTimeout(state)
               const grok = native.request.model?.startsWith('grok:') === true
               const failure = source.result.failure
+              const providerDraft = zcode && owner.id === operation.id && prior.status === 'superseded'
+                && prior.failure?.kind === 'unsupported'
+                && source.result.status === 'unsupported' && isZCodeProviderRejection(failure)
+                && !source.result.structurePassed && !source.result.reviewPassed && source.result.candidateDigest === null
+                && round.candidate === null && round.output === null && round.review === null && round.reviewOutput === null && !round.traces.length
               const priorGuidance = grok && allowCommitted ? stage<{ generationGuidance?: ElaborationGenerationGuidance }>(store, owner, prior, 'elaboration-draft-protocol', 'automatic', checkpoints)?.generationGuidance : undefined
               const grokDraft = grok && allowCommitted && !binding?.interfaceSeed && request.binding.sourceInputId === operation.input.id
                 && record?.archived && state?.state === 'failed' && state.error === GROK_NATIVE_EXIT_DEADLINE_FAILURE
@@ -2819,23 +2824,44 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
                 && native.request.inputDigest === elaborationNativeInputDigest(source.result.inputDigest, native.request)
               const otherStoppedDraft = state && (zcode || native.request.model?.startsWith('claude:')) && (state.state === 'cancelled' || zcode && state.state === 'failed')
                 && (!state.errorCode || stoppedTransport || completedEventsRpc) && state.threadId && state.turnId
-              if (native.request.purpose === 'elaboration_generate' && native.request.worktree?.mode === 'edit' && !native.request.frozenContext && state?.cancellation?.nativeStopped && !state.failedWorktree && !state.resultWorktree && !state.rejectedOutput && (grokDraft || otherStoppedDraft)) {
-                const proof = authenticateNativeFailure(store, owner, prior, requestKey, grokDraft ? failure! : { code: completedEventsRpc ? 'native_rpc_timeout' : stoppedTransport ? 'native_turn_transport_failed' : 'failed', message: state.state === 'failed' ? state.error! : prior.failure?.message ?? '', sessionId: checkpoint.session.sessionId, threadId: checkpoint.session.threadId ?? undefined, turnId: checkpoint.session.turnId ?? undefined }, readRecord, true)
+              const worktree = native.request.worktree
+              const stoppedAuthor = native.request.purpose === 'elaboration_generate' && worktree?.mode === 'edit' && !native.request.frozenContext
+                && state?.cancellation?.nativeStopped && !state.failedWorktree && !state.resultWorktree && !state.rejectedOutput
+              if (providerDraft && !stoppedAuthor) fail('draft_material_binding', 'ZCode 原生成失败缺少精确作者请求或停止证明')
+              if (stoppedAuthor && (providerDraft || grokDraft || otherStoppedDraft)) {
+                const proof = authenticateNativeFailure(store, owner, prior, requestKey, providerDraft || grokDraft ? failure! : { code: completedEventsRpc ? 'native_rpc_timeout' : stoppedTransport ? 'native_turn_transport_failed' : 'failed', message: state.state === 'failed' ? state.error! : prior.failure?.message ?? '', sessionId: checkpoint.session.sessionId, threadId: checkpoint.session.threadId ?? undefined, turnId: checkpoint.session.turnId ?? undefined }, readRecord, true)
+                if (providerDraft) {
+                  const { session } = checkpoint
+                  if (resource.generation !== prior.generation || native.schemaVersion !== 1 || checkpoint.schemaVersion !== 1
+                    || request.binding.sourceInputId !== operation.input.id || source.result.inputDigest !== request.inputDigest || canonical(source.result.partitionBinding) !== canonical(binding)
+                    || native.request.model !== operation.model || native.request.root !== operation.input.source.canonicalRoot || native.request.base !== worktree.baseCommit
+                    || proof.record.base !== native.request.base || proof.record.forkCommit !== native.request.base
+                    || native.request.inputDigest !== elaborationNativeInputDigest(source.result.inputDigest, native.request) || canonical(worktree) !== canonical(request.worktree)
+                    || !checkpoint.nativeCallRequested || !checkpoint.nativeStarted || !session.threadId || !session.turnId
+                    || checkpoint.status !== 'failed' || checkpoint.nativeState !== 'failed' || checkpoint.stop?.nativeStatus !== 'stopped' || checkpoint.result || checkpoint.creationTermination
+                    || canonical(checkpoint.failure) !== canonical({ code: failure!.code, message: failure!.message })
+                    || canonical(prior.dispatchPlans.find(dispatch => dispatch.key === requestKey)?.session) !== canonical(session)
+                    || proof.record.harness !== 'zcode' || proof.record.harnessSessionId !== session.threadId || proof.state.output !== undefined || proof.state.resultDigest !== undefined
+                    || prior.dispatchPlans.some(dispatch => store.findResource(prior.id, dispatch.key)?.phase !== 'removed')) fail('draft_material_binding', 'ZCode 原生成失败缺少精确owner、seed、Native 派发或资源结算')
+                  if (proof.record.archived) continue
+                }
                 if (grokDraft) assertUnpublishedGrokFailure(operation, prior, resource, proof)
                 if (completedEventsRpc) assertStoppedEventsRpcDraft(prior, requestKey, proof)
                 const context = elaborationMaterialContext(operation.input.source.commonDir, native.request, request)
-                if (proof.record.base === native.request.worktree.baseCommit && proof.record.forkCommit === native.request.worktree.baseCommit && /草稿文件=([^\s；。]+)/.exec(native.request.prompt)?.[1] === request.binding.path && context) {
+                if (proof.record.base === worktree.baseCommit && proof.record.forkCommit === worktree.baseCommit && /草稿文件=([^\s；。]+)/.exec(native.request.prompt)?.[1] === request.binding.path && context) {
                   let skipSource = false
                   const material = await withArchivedStructuredWorktree(proof.record, (): ElaborationDraftMaterial | null => {
-                    const prompt = nativeWorktreePrompt(native.request.prompt, native.request.worktree!)
-                    const failed = zcode ? assertZCodeStoppedDraftSource(prompt, (completedEventsRpc ? proof.state : state) as ZCodeStructuredExecution, proof.record.worktreePath) : undefined
+                    const prompt = nativeWorktreePrompt(native.request.prompt, worktree)
+                    if (providerDraft) assertZCodeSettledProviderFailure(proof.record.session, prompt, proof.state as ZCodeStructuredExecution, proof.record.worktreePath, 'elaboration_generate')
+                    const failed = providerDraft || (zcode ? assertZCodeStoppedDraftSource(prompt, (completedEventsRpc ? proof.state : state) as ZCodeStructuredExecution, proof.record.worktreePath) : undefined)
                     if (zcode && failed === null) { skipSource = true; return null }
                     if (grokDraft) assertGrokUnpublishedExitSource(proof.record.session, prompt, state, proof.record.worktreePath, 'elaboration_generate')
                     else if (!zcode) assertClaudeStoppedDraftSource(prompt, state, proof.record.worktreePath)
                     assertMaterialFence()
                     store.assertWriteFence(fence!)
-                    const physical = readStoppedPhysicalDraft(commonDir, proof.record.worktreePath, native.request.worktree!, request.binding, { allowCommitted })
+                    const physical = readStoppedPhysicalDraft(commonDir, proof.record.worktreePath, worktree, request.binding, { allowCommitted: allowCommitted && !providerDraft, allowUntrackedWithoutDraft: providerDraft })
                     if (physical && (!(grokDraft || completedEventsRpc) || physical.committedOid)) {
+                      if (providerDraft && (physical.observedHeadCommit !== request.worktree.baseCommit || physical.observedTree !== request.worktree.tree)) fail('draft_material_binding', 'ZCode 原生成物理草稿必须位于原 seed')
                       if (zcode && failed !== true) fail('stale_result', 'ZCode物理细化草稿没有原精确失败终态')
                       const errors = [...existingDraft?.errors ?? [], ...round.findings, ...source.result.failure ? [{ code: source.result.failure.code, message: source.result.failure.message }] : []]
                       if (physical.committedOid) {

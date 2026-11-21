@@ -12,7 +12,7 @@ import { freezeContext, frozenReadTool, readFrozenRange } from './frozen-context
 import { ZCODE_FROZEN_TOOL, type ZCodeFrozenWitness, type ZCodeNativeEvent } from './zcode-frozen-evidence.js'
 import { structuredExecutionPolicy, structuredRealmRoot, type StructuredExecution } from './session-structured-policy.js'
 import { sampleNativeWorktreeProcesses } from './native-worktree-runtime.js'
-import { assertZCodeModelSnapshot, assertZCodeSettledProviderReview, assertZCodeStoppedDraftSource, decodeZCodeStructuredText, stopZCodeStructuredTurn, zcodeCapability, zcodeIdleObservation, zcodeNativeConfigModel, zcodeNativeConfigSelection, zcodeNativeModel, zcodeNativeSelection, zcodeProofEvent, zcodeRuntimeConfiguration, zcodeStructuredPrompt, zcodeStructuredTurn, ZCodeNativeTurnFailedError, type ZCodeStructuredExecution } from './zcode-structured.js'
+import { assertZCodeModelSnapshot, assertZCodeSettledProviderFailure, assertZCodeStoppedDraftSource, decodeZCodeStructuredText, stopZCodeStructuredTurn, zcodeCapability, zcodeIdleObservation, zcodeNativeConfigModel, zcodeNativeConfigSelection, zcodeNativeModel, zcodeNativeSelection, zcodeProofEvent, zcodeRuntimeConfiguration, zcodeStructuredPrompt, zcodeStructuredTurn, ZCodeNativeTurnFailedError, type ZCodeStructuredExecution } from './zcode-structured.js'
 
 test('Native failure diagnostics expose only safe errno codes and exact turn identity', () => {
   for (const code of ['EPIPE', 'UNTRUSTED_PROVIDER_BODY', '__proto__', null, { message: 'UNTRUSTED_PROVIDER_BODY' }]) {
@@ -375,13 +375,14 @@ for (const profile of ['cli-config-v1-explicit', 'cli-config-v1-default', 'cli-c
             writeFileSync(join(root, 'terminal.json'), JSON.stringify(event))
           }
           saveTerminal(rejected)
-          assert.doesNotThrow(() => assertZCodeSettledProviderReview(nativeId, prompt, review, workspace))
-          assert.throws(() => assertZCodeSettledProviderReview('different-session', prompt, review, workspace), { code: 'stale_result' })
-          assert.throws(() => assertZCodeSettledProviderReview(nativeId, prompt, { ...review, state: 'cancelled' }, workspace), { code: 'stale_result' })
+          assert.doesNotThrow(() => assertZCodeSettledProviderFailure(nativeId, prompt, review, workspace, 'elaboration_review'))
+          assert.throws(() => assertZCodeSettledProviderFailure('different-session', prompt, review, workspace, 'elaboration_review'), { code: 'stale_result' })
+          assert.throws(() => assertZCodeSettledProviderFailure(nativeId, prompt, { ...review, state: 'cancelled' }, workspace, 'elaboration_review'), { code: 'stale_result' })
+          assert.throws(() => assertZCodeSettledProviderFailure(nativeId, prompt, review, workspace, 'elaboration_generate'), { code: 'stale_result' })
           saveTerminal({ ...rejected, payload: { ...rejected.payload, turnPhase: 'other' } })
-          assert.throws(() => assertZCodeSettledProviderReview(nativeId, prompt, review, workspace), { code: 'stale_result' })
+          assert.throws(() => assertZCodeSettledProviderFailure(nativeId, prompt, review, workspace, 'elaboration_review'), { code: 'stale_result' })
           saveTerminal({ ...rejected, payload: { ...rejected.payload, error: { code: 'EPIPE', attribution: { ...attribution, retryable: true } } } })
-          assert.throws(() => assertZCodeSettledProviderReview(nativeId, prompt, review, workspace), { code: 'stale_result' })
+          assert.throws(() => assertZCodeSettledProviderFailure(nativeId, prompt, review, workspace, 'elaboration_review'), { code: 'stale_result' })
           return
         }
         const originalFiles = readdirSync(root, { withFileTypes: true }).filter(entry => entry.isFile()).map(entry => ({ path: join(root, entry.name), bytes: readFileSync(join(root, entry.name)) }))
