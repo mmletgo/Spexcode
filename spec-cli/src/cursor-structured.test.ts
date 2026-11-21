@@ -18,7 +18,7 @@ const sha256 = (text: string): string => createHash('sha256').update(text).diges
 const readJson = <T>(path: string): T => JSON.parse(readFileSync(path, 'utf8')) as T
 type Scenario = 'edit' | 'edit-sticky' | 'external-exit' | 'read' | 'bad-json' | 'bad-schema' | 'duplicate-terminal' | 'wrong-id' | 'auth' | 'rpc-error' | 'cancel' | 'cancel-blocked' | 'read-wrong-mode' | 'read-mode-refused' | 'periodic'
 
-function fixture(t: TestContext, scenario: Scenario, model = 'cursor:default') {
+function fixture(t: TestContext, scenario: Scenario, model = 'cursor:default', afterTerminal: ReadonlyArray<Record<string, unknown>> = []) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'spex-cursor-fixture-')))
   const bin = join(root, 'bin'), cli = join(bin, 'cursor-agent'), source = join(root, 'source'), workspace = join(root, 'workspace'), realm = join(root, 'realm')
   const originalPath = process.env.PATH
@@ -77,6 +77,8 @@ const finish = () => {
   text(value.slice(8))
   if (scenario === 'edit') update('config_option_update', { configOptions: [{ category: 'model', type: 'select', currentValue: 'fixture-current-model' }] })
   reply(scenario === 'wrong-id' ? 'some-other-request' : promptId, { stopReason: 'end_turn' })
+  for (const { update, ...envelope } of ${JSON.stringify(afterTerminal)})
+    send({ method: 'session/update', params: { sessionId, update }, ...envelope })
   if (scenario === 'duplicate-terminal') reply(promptId, { stopReason: 'end_turn' })
   if (scenario === 'external-exit') setImmediate(() => process.exit(143))
 }
@@ -439,6 +441,50 @@ test('Cursor does not accept an external 143 exit with an otherwise valid termin
   assert.equal(existsSync(join(f.sessionRoot, 'close.json')), false)
   assert.equal(existsSync(join(f.sessionRoot, 'settlement.json')), false)
 })
+
+const commandAdvertisement = {
+  sessionUpdate: 'available_commands_update',
+  availableCommands: [
+    { name: 'review', description: 'COMMAND_METADATA_CANARY', input: { hint: 'Select a scope' } },
+    { name: 'status', description: 'Show status', input: null },
+    { name: 'verify', description: 'Verify changes' },
+  ],
+}
+
+test('Cursor settles the original prompt despite a late ACP command advertisement', async t => {
+  const f = fixture(t, 'edit', 'cursor:fixture-model', [
+    { update: commandAdvertisement },
+    { update: { ...commandAdvertisement, availableCommands: [], _meta: { extension: true } } },
+  ])
+  const result = await f.run()
+  assert.deepEqual(result, { threadId: f.state().threadId, turnId: f.state().turnId, text: finalText })
+  const output = readJson<{ text: string; reportedModel: string; stopReason: string }>(join(f.sessionRoot, 'result.json'))
+  assert.equal(output.text, finalText)
+  assert.equal(output.reportedModel, 'fixture-current-model')
+  assert.equal(output.stopReason, 'end_turn')
+  assert(existsSync(join(f.sessionRoot, 'settlement.json')))
+  assert(!existsSync(join(f.sessionRoot, 'cancel.json')))
+  assert.deepEqual(await stopCursorStructuredTurn(f.state()), { nativeStopped: true, acknowledged: false, nativeStatus: 'stopped' })
+  assert.deepEqual(await f.run(f.state(), replayCallbacks), result)
+})
+
+for (const [label, update] of [
+  ['assistant text', { update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'late text' } } }],
+  ['tool', { update: { sessionUpdate: 'tool_call_update', toolCallId: 'late-call' } }],
+  ['mode', { update: { sessionUpdate: 'current_mode_update', currentModeId: 'ask' } }],
+  ['configuration', { update: { sessionUpdate: 'config_option_update', configOptions: [] } }],
+  ['unknown', { update: { sessionUpdate: 'unknown_update' } }],
+  ['malformed commands', { update: { ...commandAdvertisement, availableCommands: [{ name: 'invalid', input: { hint: 1 } }] } }],
+  ['malformed notification', { id: null, update: commandAdvertisement }],
+] as const) {
+  test(`Cursor rejects a late ACP ${label} update`, async t => {
+    const f = fixture(t, 'edit', 'cursor:fixture-model', [update])
+    await assert.rejects(f.run(), { code: 'cancellation_pending', message: 'Cursor ACP emitted session updates after its original prompt terminal' })
+    assert(!existsSync(join(f.sessionRoot, 'result.json')))
+    assert(!existsSync(join(f.sessionRoot, 'settlement.json')))
+    assert.deepEqual(await stopCursorStructuredTurn(f.state()), { nativeStopped: true, acknowledged: false, nativeStatus: 'stopped' })
+  })
+}
 
 for (const scenario of ['bad-json', 'bad-schema'] as const) {
   test(`Cursor ${scenario} leaves an authenticated rejected final and true Git draft for repair`, async t => {
