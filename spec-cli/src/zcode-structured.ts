@@ -56,6 +56,11 @@ function isZCodeProviderPipeFailure(nativeCode: unknown, nativeAttribution: unkn
   return nativeCode === 'EPIPE' && attribution?.source === 'provider' && attribution.exceptionKind === 'provider_business' && attribution.retryable === false
 }
 
+function isZCodePublicHttp429(error: unknown): boolean {
+  const statusCode = (error as { attribution?: { statusCode?: unknown } } | null | undefined)?.attribution?.statusCode
+  return statusCode === 429 || statusCode === '429'
+}
+
 /** 只认证本次精确失败终态；原生正文不进入错误诊断，停止权限仍由既有adapter独立证明。 */
 export class ZCodeNativeTurnFailedError extends StructuredSessionError {
   constructor(threadId: string, turnId: string, nativeCode: unknown, worktree: boolean, nativeAttribution?: unknown) {
@@ -362,17 +367,16 @@ export function assertZCodeSettledProviderFailure(sessionId: string, prompt: str
   if (plan.workspace !== worktreePath || !plan.pid || plan.receiptFile !== join(native.root, 'process.json') || !detachedRuntimeIsGone(plan.pid, plan.receiptFile))
     throw new StructuredSessionError('stale_result', 'ZCode provider failure differs from its original workspace or stopped process group')
   const terminals = events.filter(event => ['turn.completed', 'turn.failed', 'turn.cancelled'].includes(event.type))
-  const error = terminal.payload.error as { code?: unknown; attribution?: { statusCode?: unknown } } | undefined
-  const providerStatus = error?.attribution?.statusCode
+  const error = terminal.payload.error as { code?: unknown; attribution?: unknown } | undefined
   if (digest(send) !== digest(nativeSend(plan, prompt, execution)) || !zcodeWorktreeTurnMatches(plan, snapshot as { sessionId: string; model: NativeModel }, events, terminals, terminal)
     || terminal.type !== 'turn.failed' || terminal.payload.turnPhase !== 'processing_input' || !isZCodeProviderPipeFailure(error?.code, error?.attribution)
-    || options?.crossProviderRetry && (providerStatus === 429 || providerStatus === '429')
+    || options?.crossProviderRetry && isZCodePublicHttp429(error)
     || exit.stopped !== true || exit.code !== 0 || exit.signal !== null || exit.idle !== false || exit.closed !== false || exit.acknowledged !== execution.cancellation.acknowledged)
     throw new StructuredSessionError('stale_result', 'ZCode provider failure lacks its exact input, failure attribution or exit evidence')
 }
 
 /** 只读核原任务与公开终态。 */
-export function assertZCodeStoppedDraftSource(prompt: string, execution: ZCodeStructuredExecution, worktreePath: string, mode?: 'unpublished-completion' | 'cancelled-commit'): boolean | 'cancelled-commit' | null {
+export function assertZCodeStoppedDraftSource(prompt: string, execution: ZCodeStructuredExecution, worktreePath: string, mode?: 'unpublished-completion' | 'cancelled-commit' | 'p1-cross-provider-retry'): boolean | 'cancelled-commit' | null {
   const native = execution.zcodeNative
   if (execution.version !== 6 || execution.policy !== 'native-worktree-v1' || !execution.model?.startsWith('zcode:') || execution.worktree?.mode !== 'edit' || !native || !['failed', 'cancelled'].includes(execution.state ?? '') || !execution.cancellation?.nativeStopped)
     throw new StructuredSessionError('stale_result', 'stopped ZCode draft requires its original stopped native worktree')
@@ -431,6 +435,8 @@ export function assertZCodeStoppedDraftSource(prompt: string, execution: ZCodeSt
     return true
   }
   if (execution.errorCode === 'native_turn_transport_failed' && (terminal.type !== 'turn.failed' || (terminal.payload.error as { code?: unknown } | undefined)?.code !== 'EPIPE')) throw new StructuredSessionError('stale_result', 'ZCode turn transport failure differs from the original EPIPE terminal')
+  if (mode === 'p1-cross-provider-retry' && execution.purpose === 'elaboration_generate' && execution.state === 'failed' && execution.errorCode === undefined
+    && execution.cancellation.nativeStatus === 'stopped' && exit.stopped === true && terminal.type === 'turn.failed' && isZCodePublicHttp429(terminal.payload.error)) return null
   return terminal.type === 'turn.failed'
 }
 

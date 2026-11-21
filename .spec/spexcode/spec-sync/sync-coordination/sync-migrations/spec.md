@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+writer70 追加 SELECT 1 marker，保护 [[sync-coordinator]] 的已完成结构校验的 P1 候选在显式恢复后仅续独审，以及正式跨执行器重试对原生额度拒绝的草稿筛选。旧 writer 在来源恢复和只读请求派发前明确拒绝新版库。升级先停稳并结算旧 writer、资源、journal 和租约，保存一致 v69 SQLite online backup 及配套 enabled、Git/CAS。回退先停稳并结算新 writer，再恢复整套备份。原失败和验收记录逐值保留。
+
 writer69 追加 SELECT 1 marker，保护 [[sync-coordinator]] 正式跨执行器重试接续未批准 ZCode P1 作者物理稿。writer68 在来源已登记或新请求已保留的冷重入时，均在写入或派发前拒绝新版库。升级先停稳结算旧 writer、资源、journal 和租约，保存一致 v68 SQLite online backup 及配套 enabled、Git/CAS。回退先停稳并结算新 writer，再恢复整套备份。保持历史迁移及原业务记录。
 
 writer68 追加 SELECT 1 marker，保护 [[sync-coordinator]] 的已结算 ZCode P1 作者物理稿接续。未批准来源已经登记或续稿请求已保留时，writer67 均在写入或派发前拒绝。升级先停稳结算旧 writer、资源、journal 和租约，保存一致 v67 SQLite online backup 及配套 enabled、Git/CAS。回滚先停稳结算新 writer，再恢复整套备份。原业务表、原请求和历史迁移逐值保留。
