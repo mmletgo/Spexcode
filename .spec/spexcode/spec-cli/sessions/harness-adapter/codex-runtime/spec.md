@@ -15,7 +15,7 @@ related:
 
 # codex-runtime
 
-Every worktree's Codex thread runs on ONE project-scoped `codex app-server`, and that single fact is the root of
+Every ordinary worktree's Codex thread runs on ONE project-scoped `codex app-server`, and that single fact is the root of
 everything here: the daemon belongs to the project rather than to whoever launched it, a dispatched thread must
 clear three independent trust tiers before any hook fires, the backend rather than a capture hook owns each
 thread's id, liveness must be read from something a shared daemon cannot fake, and every lifecycle mutation must
@@ -62,6 +62,10 @@ the project root. Descriptor selection, turn control, retirement, close, and com
 from the record and still require its exact session/thread generation binding; an empty structured ledger never
 falls through to the project's legacy endpoint. The close contract is [[archive]], and structured execution owns
 the policy identity in [[structured-session-runtime]].
+
+Manager-owned native worktree turns use the per-turn runtime owned by [[codex-native-worktree-structured]].
+The shared descriptor resolver emits no generation for those records. Their exact stopped-process evidence
+governs stop, close and retirement.
 
 **Started once, under a portable lock.** Check-and-start is serialized by an atomic `mkdir` mutex with a bounded
 wait, not `flock` — absent on macOS, where it failed the whole bootstrap and left the pane at a shell. The lock

@@ -21,6 +21,10 @@ Version 5 records the project claim and revocation history of [[external-session
 existing protocol address, with one active claim per address. Claim writes leave lifecycle state, topology,
 events, and runtime bindings untouched.
 
+Version 6 is a writer marker for routes frozen by [[llm-manager-host]]. A writer must understand the
+frozen route before it can launch a queued structured call. Existing session rows and native
+evidence keep their original format.
+
 The migration list is this component's entire schema generation ledger, and it is append-only. A version that has
 been applied to any store is never rewritten or removed, because its checksum is verified on every open. Every build
 that may open a shared store carries the complete ledger, including generations whose tables it never reads: a build

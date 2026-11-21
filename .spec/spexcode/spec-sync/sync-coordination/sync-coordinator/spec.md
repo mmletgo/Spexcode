@@ -104,6 +104,8 @@ P0 分析的精确 owner 请求首次派发保留前，可沿既有 Native 停�
 
 P1权限/绑定非法的独审沿[[sync-elaboration]]现有同owner repairDiagnostics重审原合法候选。续审保留原generation trace，不要求新review轮号存在generate；按真实session/thread/turn命中该operation原attempt实际dispatch，再冷验完整保存Native请求、原结果/summary摘要及Git草稿seed/result身份。只有当前局部完整输入与原candidate机械校验保持、原review重新判为越界/绑定非法时才跳过生成；旧seed排除draft的边界、原请求字段缺席、控制attempt跳过判据、预算/资源/取消及全图seal保持。多次续审与后续只读owner返修均追溯同一真实generation来源，不把新审查轮当新生成。
 
+Codex 原生工作树独审的格式拒绝可按同一原稿续审。须核原生 thread、turn、原文、冻结 schema、精确停止及原候选的 Git 绑定，原拒绝通过 [[sync-checkpoint-evidence]] 冷验。
+
 同一operation的P1已通过结构但未获得独审输出，若原独审因 ZCode `session/events` 超时或 Grok 超过原生退出观察期限并正式结算，现有 repairDiagnostics 只重开独审。单体及分区均冷验原检查点、完整冻结输入、组合树、readSet与selection；分区同时核原计划及owner。原Native生成请求、summary及Git草稿须精确绑定同一候选。失败独审须有原只读请求、canonical 失败及逐值匹配的正式 removed 和停止原件。ZCode 核已启动的精确 session/thread/turn。Grok 核原未发布的 session、正式派发、原生启动和停止原件、归档的原只读种子，thread/turn 保持缺席。原失败保留，当前fence只沿现有provenance引用原resultRef。全局失败记录前暂停时，恢复须有同owner局部原件及同样完整的结算证明。较新生成派发或不同生成来源阻止旧候选优先，同一生成的只读续审被暂停仍可续审。其他方法超时、生成失败、业务repair、未知停止及跨operation按原准入处理。当前独审仍使用冻结提示政策，原请求和检查点无需补字段。
 
 ZCode 已结算的 provider 拒绝保留原 `unsupported` 结论。操作员显式暂停再恢复同一 operation 后，结构通过且尚未审定的 P1 Git 候选可沿同一接缝只续独审。[[zcode-structured-runtime]] 的固定公开错误投影只定位待核记录，其他 `unsupported` 沿既有流程。须同时核原只读原生终态归因、失败派发、canonical 会话、removed/stop 和候选冻结绑定。原件缺失、文件读取或解码失败，及身份、结算、候选绑定失配时以 `review_retry_binding` 停在新派发前。Git 进程启动失败和程序异常沿既有错误处理保留原诊断。新独审绑定同一候选、控制范围和模型，原失败、请求、Git 稿及生成追踪保持。此路径仅用于同 operation、同模型的显式恢复。

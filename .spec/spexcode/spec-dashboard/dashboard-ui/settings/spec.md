@@ -15,6 +15,9 @@ related:
   - spec-dashboard/src/i18n/zh.js
   - spec-dashboard/src/sessionSurface.js
   - spec-dashboard/src/SyncModelSettings.jsx
+  - spec-dashboard/llm-manager/settings.jsx
+  - spec-dashboard/llm-manager/settings.css
+  - spec-dashboard/llm-manager/build.mjs
 ---
 # settings
 
@@ -97,13 +100,17 @@ Settings page refit locally without claiming tmux geometry; returning to Session
   scrollbar geometry, and this component supplies only its centered content), and the single home for
   future settings. Today it owns the language picker, the terminal base-surface and font-size controls, the shortcuts editor,
   the theme-preset picker, the CLI-backed launcher profile list, and the optional raw project config editor.
-  The Sync model section reads the local project's saved model and uses the same revision-guarded project
-  config API to update only `sync.model` for an enabled project. Users can select the host's LLM Manager
-  feature group or choose a supported native CLI with its local default or an exact model. A revision
-  conflict requires a reload. After saving, the page explains how committing the config and re-enabling
-  sync takes effect for new operations under [[sync-model-selection]].
-  The separate Claude Code API action opens the Router's verified local setup page directly from a local
-  browser. Its availability reflects the setup page, while Claude Code retains native control of credentials.
+  The Sync model section takes its mode from the current host. When LLM Manager is authoritative, the section
+  shows the host's current route (or that no route is ready) and a single entry to the official LLM Manager
+  settings, when the local host has installed that page. The host's settings document mounts the official
+  React 19 component and sends its management actions to the same-origin settings endpoint. The dashboard's
+  React 18 build remains independent of that optional document. The management component supplies its own
+  localized copy. The project model picker and its save controls are absent in authoritative mode.
+  On an unmanaged host, the section reads the local project's saved model and uses the same revision-guarded
+  project config API to update only `sync.model` for an enabled project. Users can choose a supported native
+  CLI with its local default or an exact model. A revision conflict requires a reload. After saving, the page
+  explains how committing the config and re-enabling sync takes effect for new operations under
+  [[sync-model-selection]].
   Launcher profiles are read through the same `/api/settings` path as the New Session picker. The page can add
   multiple named launchers of the same harness type, including headless variants, by collecting a name, type, and
   command and writing the same `sessions.launchers` object the CLI reads. It also owns an optional raw
@@ -113,6 +120,22 @@ Settings page refit locally without claiming tmux geometry; returning to Session
   The direct route mounts that same page inside the phone shell above its tab bar, without inventing a
   mobile Settings clone or a fifth primary tab. `,` again routes home to the graph; Esc routes nothing
   ([[side-nav]] — it only closes in-page overlays).
+
+### optional LLM Manager settings page
+
+Use the compiled `dist` directory from the same pinned LLM Manager release as the host. With a permitted
+LLM Manager checkout, run its `npm ci` and `npm run build` there to produce that directory. From the
+SpexCode checkout run:
+
+```sh
+mkdir -p "$HOME/.spexcode"
+export SPEX_LLM_MANAGER_SETTINGS_HTML="$HOME/.spexcode/llm-manager-settings.html"
+npm run build:llm-manager -w @spexcode/spec-dashboard -- /path/to/llm_manager/dist "$SPEX_LLM_MANAGER_SETTINGS_HTML"
+```
+
+The build resolves React 19 and the bundler in a temporary workspace through the public npm registry.
+It produces a private single-file document outside SpexCode's distribution. Start the local SpexCode
+host with that environment variable so its settings endpoint can serve the document.
 
 ### the hotkey
 

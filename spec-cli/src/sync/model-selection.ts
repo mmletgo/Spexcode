@@ -1,65 +1,51 @@
 import { execFile } from 'node:child_process'
-import { dirname, isAbsolute } from 'node:path'
 import { promisify } from 'node:util'
-import { fetchBypassingLoopbackProxy, isLoopbackHost } from '../loopback-transport.js'
+import { llmManagerRequested, llmManagerSettingsPath, LlmManagerHostError, resolveManagedRoute } from '../llm-manager-host.js'
+import { managedModel, managedRoute, type ManagedRoute } from '../llm-manager-route.js'
 import { SyncApplicationError } from './settings.js'
 
 export const DEFAULT_SYNC_MODEL = 'gpt-6.1-sol'
 export const DEFAULT_NATIVE_SYNC_MODEL = 'claude:default'
 const MANAGED_SYNC_MODEL = 'llm-manager'
-const WORKTREE_PROGRAMS = { cursor: 'cursor-agent', claude: 'claude', zcode: 'zcode', grok: 'grok' }
+const WORKTREE_PROGRAMS = { cursor: 'cursor-agent', claude: 'claude', zcode: 'zcode', grok: 'grok', codex: 'codex' }
 const WORKTREE_VENDORS = Object.keys(WORKTREE_PROGRAMS)
-const runRouteBridge = promisify(execFile)
+const run = promisify(execFile)
 
 function installed(program: string): Promise<boolean> {
-  return runRouteBridge('/usr/bin/which', [program], {
-    encoding: 'utf8',
-    env: { PATH: process.env.PATH },
-    timeout: 1000,
-    maxBuffer: 4096,
+  return run('/usr/bin/which', [program], {
+    encoding: 'utf8', env: { PATH: process.env.PATH }, timeout: 1000, maxBuffer: 4096,
   }).then(({ stdout }) => Boolean(stdout.trim()), () => false)
 }
 
-async function claudeApiSetupUrl(): Promise<string | undefined> {
-  const registered = process.env.SPEX_CLAUDE_API_SETTINGS_URL
-  if (!registered && !await installed('ccr')) return undefined
-  const url = URL.parse(registered ?? 'http://127.0.0.1:3456/ui/')
-  if (!url || url.protocol !== 'http:' || !isLoopbackHost(url.hostname)
-    || !url.port || url.username || url.password || url.search || url.hash) return undefined
-  return fetchBypassingLoopbackProxy(url.href, {
-    method: 'HEAD',
-    redirect: 'error',
-    signal: AbortSignal.timeout(800),
-  }).then(response => response.ok && response.headers.get('content-type')?.startsWith('text/html') ? url.href : undefined,
-    () => undefined)
-}
-
-/** 供网页显示宿主可用入口，不替操作选路或探测上游凭据。 */
+/** 网页只显示宿主的公开选路能力，实际设置经同源管理入口。 */
 export async function readSyncModelSettings() {
-  const configured = Boolean(process.env.SPEX_LLM_MANAGER_PYTHON && process.env.SPEX_LLM_MANAGER_CLI_CONFIG)
-  const resolveManager = configured
-    ? resolveSyncModel(MANAGED_SYNC_MODEL, true).catch(error => {
-      if (error instanceof SyncApplicationError) return undefined
+  const authoritative = llmManagerRequested()
+  const resolveManager = authoritative
+    ? resolveManagedRoute().catch(error => {
+      if (error instanceof LlmManagerHostError) return null
       throw error
     })
-    : Promise.resolve(undefined)
-  const [nativeVendors, selection, setupUrl] = await Promise.all([
+    : Promise.resolve(null)
+  const [nativeVendors, selection] = await Promise.all([
     Promise.all(Object.entries(WORKTREE_PROGRAMS).map(async ([id, program]) => ({ id, installed: await installed(program) }))),
     resolveManager,
-    claudeApiSetupUrl(),
   ])
+  const settingsPath = llmManagerSettingsPath()
   return {
     nativeVendors,
-    llmManager: { configured, ...(selection ? { selection } : {}) },
-    claudeApi: setupUrl ? { available: true, setupUrl } : { available: false },
+    llmManager: { configured: authoritative, ...(authoritative ? { authoritative: true } : {}), ...(settingsPath ? { settingsPath } : {}),
+      ...(selection ? { selection: selection.vendor + ':' + selection.model } : {}) },
   }
 }
 
-/** 新准入采用项目或宿主配置；读取历史操作时保留原缺省身份。 */
+/** 读取已持久历史时保留原缺省模型。 */
 export function syncModel(input: { model?: string }, nativeWorkflow = false): string {
-  if (input.model !== undefined) return input.model
-  if (!nativeWorkflow) return DEFAULT_SYNC_MODEL
-  return process.env.SPEX_LLM_MANAGER_PYTHON || process.env.SPEX_LLM_MANAGER_CLI_CONFIG ? MANAGED_SYNC_MODEL : DEFAULT_NATIVE_SYNC_MODEL
+  return input.model ?? (nativeWorkflow ? DEFAULT_NATIVE_SYNC_MODEL : DEFAULT_SYNC_MODEL)
+}
+
+/** 宿主全托管只影响新准入，旧请求始终先读取原存档模型。 */
+export function configuredSyncModel(input: { model?: string }, nativeWorkflow: boolean): string {
+  return nativeWorkflow && llmManagerRequested() ? MANAGED_SYNC_MODEL : syncModel(input, nativeWorkflow)
 }
 
 /** 默认选择保留原持久载荷字节；只有非默认选择增加字段。 */
@@ -67,39 +53,31 @@ export function syncModelBinding(model?: string): { model?: string } {
   return model === undefined || model === DEFAULT_SYNC_MODEL ? {} : { model }
 }
 
-/** 在准入时解析宿主功能组，之后只使用固定的原生 CLI 选择。 */
-export async function resolveSyncModel(selection: string, nativeWorkflow: boolean, previouslyBound?: string): Promise<string> {
-  if (selection !== MANAGED_SYNC_MODEL) return selection
-  if (previouslyBound !== undefined) return previouslyBound
+/** 新请求固定 Manager 的路线；同请求、普通重试和恢复沿原绑定。 */
+export async function resolveSyncModel(
+  selection: string,
+  nativeWorkflow: boolean,
+  previouslyBound?: string,
+  nextAfter?: ManagedRoute,
+): Promise<string> {
+  if (previouslyBound !== undefined && (selection === MANAGED_SYNC_MODEL || selection === previouslyBound)) return previouslyBound
+  if (selection !== MANAGED_SYNC_MODEL) {
+    if (managedRoute(selection)) throw new SyncApplicationError('sync_llm_manager_untrusted_route', '只可从功能组取得 Manager 路线')
+    if (nativeWorkflow && llmManagerRequested() && previouslyBound === undefined)
+      throw new SyncApplicationError('sync_llm_manager_managed', '此宿主由 LLM Manager 功能组选路')
+    return selection
+  }
   if (!nativeWorkflow) throw new SyncApplicationError('sync_llm_manager_requires_native', 'llm-manager 需要原生工作树执行')
-  const python = process.env.SPEX_LLM_MANAGER_PYTHON, config = process.env.SPEX_LLM_MANAGER_CLI_CONFIG
-  if (!python || !config || !isAbsolute(python) || !isAbsolute(config)) throw new SyncApplicationError('sync_llm_manager_config', '宿主需登记 llm_manager 的 Python 与 CLI 路由配置绝对路径')
-  let stdout: string
-  try {
-    ({ stdout } = await runRouteBridge(python, ['-I', '-m', 'llm_manager.cli_route', '--config', config, ...WORKTREE_VENDORS.flatMap(vendor => ['--vendor', vendor])], {
-      cwd: dirname(config),
-      encoding: 'utf8',
-      env: {},
-      timeout: 5000,
-      maxBuffer: 4096,
-    }))
-  } catch (error) {
-    if ((error as { code?: string | number }).code === 3) throw new SyncApplicationError('sync_llm_manager_no_ready_cli', 'llm_manager 功能组没有已就绪的原生 CLI')
-    throw new SyncApplicationError('sync_llm_manager_unavailable', 'llm_manager CLI 选路失败，请检查宿主配置和 Python 安装')
-  }
-  let route: unknown
-  try { route = JSON.parse(stdout) }
-  catch { throw new SyncApplicationError('sync_llm_manager_route_invalid', 'llm_manager 返回了无法解析的 CLI 路由') }
-  if (typeof route !== 'object' || route === null || Array.isArray(route) || Object.keys(route).length !== 3
-    || !('version' in route) || route.version !== 'llm-manager-cli-route-v1'
-    || !('vendor' in route) || typeof route.vendor !== 'string' || !WORKTREE_VENDORS.includes(route.vendor)
-    || !('model' in route) || typeof route.model !== 'string' || !route.model || route.model !== route.model.trim() || /[\r\n\0]/.test(route.model)) {
-    throw new SyncApplicationError('sync_llm_manager_route_invalid', 'llm_manager 返回了无效或未受支持的 CLI 路由')
-  }
-  return `${route.vendor}:${route.model}`
+  if (!llmManagerRequested()) throw new SyncApplicationError('sync_llm_manager_config', '宿主尚未登记完整 LLM Manager 配置')
+  const route = await resolveManagedRoute(nextAfter).catch(error => {
+    if (error instanceof LlmManagerHostError) throw new SyncApplicationError(error.code, 'LLM Manager 未能完成正式选路')
+    throw error
+  })
+  if (!route) throw new SyncApplicationError('sync_llm_manager_no_ready_route', 'LLM Manager 功能组没有已就绪路线')
+  return managedModel(route)
 }
 
-/** 仅选择CLI执行器；模型和别名交给原生配置解析，不设模型允许名册。 */
+/** 仅选择 CLI 执行器；固定模型或别名由原生配置解析。 */
 export function assertWorktreeSyncModel(model: string): void {
-  if (!WORKTREE_VENDORS.some(vendor => model.startsWith(`${vendor}:`) && model.length > vendor.length + 1)) throw Object.assign(new Error('native-worktree 同步需要选择已支持的执行器，可用 default 沿用 CLI 配置或指定模型'), { code: 'unsupported' })
+  if (!WORKTREE_VENDORS.some(vendor => model.startsWith(vendor + ':') && model.length > vendor.length + 1)) throw Object.assign(new Error('native-worktree 同步需要选择已支持的执行器，可用 default 沿用 CLI 配置或指定模型'), { code: 'unsupported' })
 }

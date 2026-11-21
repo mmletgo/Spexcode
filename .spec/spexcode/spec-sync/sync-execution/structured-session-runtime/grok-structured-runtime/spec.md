@@ -15,6 +15,8 @@ Claude Code 或 ZCode 限流时，用户可以显式选择本机已配置的 Gro
 
 ## expanded spec
 
+[[llm-manager-host]] 管理的 Grok 工作树在原生 stdout 无原终态、真实非零退出且精确进程组已停止时，只用已排空且未截断的 stderr 诊断中的原 429 或明确额度耗尽，报告可申请正式续路的额度失败。用户取消、其他退出原因和未知停止不触发该分类。
+
 明确的 `grok:<模型或别名>` 仅进入 [[structured-session-runtime]] 的原生 worktree 路由。`grok:default` 沿用本机配置。每轮记录实际 CLI 版本和模型。选择、输入、预算、独审身份与正式重试规则沿 [[sync-model-selection]]。
 
 一轮只启动一次本机 CLI，使用实际托管工作树和预先绑定的会话 UUID。原生流必须以同一会话、同一工作目录且带唯一原生 request ID 的成功终态结束。终态的 request ID 是 turn 身份。最后一个工具之后的完整原生文本通过冻结 JSON schema。只读任务使用计划模式，并成对关闭进入和退出计划模式的工具。细化与最终候选的两类新只读独审在 Native plan 固定 native-review-table-read-v4，读取 Markdown 表格时先解释表格转义及代码跨度，再比较业务单元格与实现的字面内容。其他新只读派发继续固定 native-file-read-v2。已检出的证据使用原生只读文件工具，避免通用终端和动态工具发现。任务确需读取当前树未检出的历史 Git 对象时才用精确只读 Git 命令。细化独审的节点生命周期及候选代码独审的 priorRefs 可能要求核对当前工作树未检出的历史 Git 对象，因此新独审沿原生只读计划的工具面。独审核对实际候选、相关源码和测试，测试执行由独立验证阶段承担。冷复验按原计划标记重建并核对真实提示摘要，已保存 native-file-read-v2、native-candidate-read-v3 的独审按各自原提示认证。工具权限和必审范围沿原定义。编辑任务在独立工作树中使用明确授权。模型的工作和正常 Git 提交由 [[native-worktree-runtime]] 从实际 Git 对象核验。

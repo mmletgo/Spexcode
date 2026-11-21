@@ -377,8 +377,8 @@ export interface Harness {
   // references and protect a sibling-owned control plane without learning harness command names.
   sharedRuntimes?(runtimeDir: string, rec?: HarnessLivenessRecord): readonly SharedRuntimeDescriptor[]
   // Select the exact shared descriptor a record owns when an adapter has more than one resident generation.
-  // Null is an unproven binding and must fail closed before lifecycle mutation.
-  targetDescriptorKey?(rec: HarnessLivenessRecord & { harnessSessionId?: string | null }): string | null
+  // Null refuses mutation. Undefined declares a per-turn runtime and requires exact adapter stop proof.
+  targetDescriptorKey?(rec: HarnessLivenessRecord & { harnessSessionId?: string | null }): string | null | undefined
   // The one pane state where this harness swallows an immediate poke: given live pane text, return the reason
   // to skip that courtesy attempt or null when the pane can take it. sendText consults this after append;
   // absent on harnesses whose poke ignores pane state. Claude's

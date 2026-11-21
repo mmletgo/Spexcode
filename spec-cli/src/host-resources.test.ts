@@ -90,8 +90,14 @@ test('resource sweep keeps resolvable owners visible beside an unknown historica
     const report = await collectResourceReport({ persist: false })
     const knownOwner = report.owners.find((owner) => owner.kind === 'session' && owner.id === known)
     const unknownOwner = report.owners.find((owner) => owner.kind === 'session' && owner.id === unknown)
-    assert.ok(knownOwner, 'a resolvable owner remains in the host report')
-    assert.ok(!knownOwner?.findings.some((finding) => finding.startsWith('harness-unresolved:')), 'known owner is not contaminated by another row')
+    if (platform() === 'linux') {
+      assert.equal(report.available, true)
+      assert.ok(knownOwner, 'a resolvable owner remains in the host report')
+      assert.ok(!knownOwner?.findings.some((finding) => finding.startsWith('harness-unresolved:')), 'known owner is not contaminated by another row')
+    } else {
+      assert.equal(report.available, false)
+      assert.equal(knownOwner, undefined)
+    }
     assert.equal(unknownOwner?.liveness, 'unknown', 'an unresolvable historical row cannot claim liveness')
     assert.ok(unknownOwner?.findings.includes('harness-unresolved:removed-plugin-harness'))
     assert.equal(unknownOwner?.reclaim?.eligible, false, 'unknown adapter ownership is never reclaimable')
@@ -496,6 +502,14 @@ test('shared-runtime projection uses live adapter refs and fail-closed process i
     assert.ok(unproven?.references?.some((ref) => ref.ownerState === 'unowned'))
     assert.ok(unproven?.findings.includes('unowned-loaded-thread'))
     assert.ok(unproven?.findings.includes('turn-presence-unknown'))
+    if (platform() !== 'linux') {
+      assert.equal(beforeProof.available, false)
+      assert.deepEqual(unproven?.processes, [])
+      assert.equal(unproven?.pssMiB, null)
+      assert.equal(unproven?.reclaim, undefined)
+      return
+    }
+    assert.equal(beforeProof.available, true)
     const report = beforeProof
     const shared = unproven
     assert.ok(shared?.processes.some((proc) => proc.pid === sharedRoot), 'legacy fallback session env does not steal shared-root ownership')

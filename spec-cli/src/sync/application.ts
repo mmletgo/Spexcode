@@ -2,7 +2,8 @@ import { p0ReviewDiagnosticEvidence, p0ReviewDiagnosticRef, readP0ReviewChalleng
 import { finiteSyncBudget } from './budget.js'
 import { configuredVerificationTransport } from './verification-transport.js'
 import { randomUUID } from 'node:crypto'
-import { DEFAULT_SYNC_MODEL, resolveSyncModel, syncModel, syncModelBinding } from './model-selection.js'
+import { DEFAULT_SYNC_MODEL, configuredSyncModel, resolveSyncModel, syncModel, syncModelBinding } from './model-selection.js'
+import { managedRoute } from '../llm-manager-route.js'
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { loadSpecs, parseContract, parseParts, processStartToken, readConfig, repoRoot, runtimeRoot } from '@spexcode/spec-core'
@@ -486,7 +487,7 @@ export class SyncApplication {
         explicit = this.store.findExplicitCommittedInitial(snapshot, syncPlanDigest(explicitPlan), selection.digest)
         if (explicit) dispatchPlan = explicitPlan
       }
-      const model = explicit ? syncModel(explicit) : await resolveSyncModel(syncModel(settings, Boolean(plan.agentWorkflow)), Boolean(plan.agentWorkflow))
+      const model = explicit ? syncModel(explicit) : await resolveSyncModel(configuredSyncModel(settings, Boolean(plan.agentWorkflow)), Boolean(plan.agentWorkflow))
       const admission = await prepareSyncAdmission(snapshot, dispatchPlan, { ingressKey, rootCauseId: ingressKey, origin: observedOrigin, ...syncModelBinding(model), budget: settings.budget, managedRoot: this.managedRoot, baselineSelection: selection, automaticSourceAdoption: this.automaticSourceAdoption(snapshot) })
       if (!this.ownsObservation()) return
       if (!explicit) this.prepareTools(ingressKey, this.store.findOperationByIngressKey(ingressKey), model, plan.agentWorkflow)
@@ -777,8 +778,13 @@ export class SyncApplication {
         if (!request.changed) return { changed: false, operation: null }
         requestBlob = request.requestBlob
       }
-      const requested = input.model ?? (prior || retry ? syncModel(prior ?? retry!) : syncModel(settings, Boolean(plan.agentWorkflow)))
-      const model = await resolveSyncModel(requested, Boolean(plan.agentWorkflow), prior ? syncModel(prior) : undefined)
+      const requested = input.model ?? (prior || retry ? syncModel(prior ?? retry!) : configuredSyncModel(settings, Boolean(plan.agentWorkflow)))
+      const inherited = prior ?? (input.model === undefined ? retry : undefined)
+      const previous = !prior && retry && input.model === 'llm-manager' && retry.currentAttemptId
+        ? this.store.readAttempt(retry.currentAttemptId) : undefined
+      const nextAfter = retry && previous?.status === 'failed' && previous.failure?.code === 'provider_quota_exhausted'
+        ? managedRoute(syncModel(retry)) : undefined
+      const model = await resolveSyncModel(requested, Boolean(plan.agentWorkflow), inherited ? syncModel(inherited) : undefined, nextAfter)
       if (prior && (syncModel(prior) !== model || (ingress?.origin ?? prior.origin) !== origin || (prior.retryOf ?? null) !== (retry?.id ?? null) || (ingress?.input ?? prior.input).id !== snapshot.id || JSON.stringify((ingress?.input ?? prior.input).source) !== JSON.stringify(snapshot.source) || prior.policyDigest !== syncPlanDigest(plan) || ((ingress ?? prior).requestBlob?.sha256 ?? null) !== (requestBlob?.sha256 ?? null))) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
       const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: input.requestId, origin, ...syncModelBinding(model), ...(input.inheritRetryBudget ? { inheritRetryBudget: true } : {}), ...(recordUnverifiedCoverage ? { recordUnverifiedCoverage } : {}), ...(retry ? { retryOf: retry.id, ...(retry.baselineSelection ? { executionScope: retry.scope, impactDigest: retry.impactDigest } : {}) } : {}), budget: retry && (revalidation || input.inheritRetryBudget || readP0ReviewChallenges(this.store, retry).size) ? retry.budget : settings.budget, managedRoot: this.managedRoot, ...(requestBlob ? { requestBlob } : {}), previousBaselinePair, ...(frozen ? { baselineSelection: frozen.selection } : {}), automaticSourceAdoption }, businessSelection)
       if (prior) { admission.deliveryPlan = (ingress ?? prior).deliveryPlan; admission.budget = (ingress ?? prior).budget }
@@ -843,7 +849,7 @@ export class SyncApplication {
       for (const item of after.graph.items.values()) if (paths.includes(item.path) && item.kind !== 'VERIFY') { const resource = item.kind === 'FLOW' ? { kind: 'flow' as const, id: item.id } : { kind: 'contract' as const, id: item.id }; resources.set(JSON.stringify(resource), resource) }
       const selected = this.store.readBaselineSelection(snapshot.source, [...resources.values()])
       if ('failure' in selected) throw new SyncApplicationError(selected.failure.code, selected.failure.message)
-      const model = await resolveSyncModel(syncModel(settings, Boolean(plan.agentWorkflow)), Boolean(plan.agentWorkflow))
+      const model = await resolveSyncModel(configuredSyncModel(settings, Boolean(plan.agentWorkflow)), Boolean(plan.agentWorkflow))
       const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: original.rootCauseId, origin: 'combined', ...syncModelBinding(model), budget: settings.budget, managedRoot: this.managedRoot, requestBlob, baselineSelection: selected.selection })
       this.prepareTools(ingressKey, null, model, plan.agentWorkflow)
       const operation = this.store.admitAndEnqueue(admission)
@@ -920,7 +926,7 @@ export class SyncApplication {
       if (selected && 'failure' in selected) throw Object.assign(new SyncApplicationError(selected.failure.code, selected.failure.message), { syncFailure: selected.failure })
       const selection = selected?.selection, plan = this.operationPlan(original)
       plan.agentWorkflow = 'native-worktree-v1'
-      const model = await resolveSyncModel(syncModel(settings, true), true)
+      const model = await resolveSyncModel(configuredSyncModel(settings, true), true)
       this.decorateDecisionPlan(plan, snapshot, input, context.analysis, requestBlob, selection ?? previousBaselinePair)
       const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: original.rootCauseId, origin: 'decision', ...syncModelBinding(model), budget: settings.budget, managedRoot: this.managedRoot, requestBlob, previousBaselinePair, ...(selection ? { baselineSelection: selection, executionScope: original.scope, impactDigest: original.impactDigest } : {}) })
       this.prepareTools(ingressKey, null, model, plan.agentWorkflow)

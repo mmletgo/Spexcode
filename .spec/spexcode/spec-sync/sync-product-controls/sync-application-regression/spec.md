@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+完整托管的准入覆盖旧项目默认模型被宿主功能组接管、候选路由身份固定、同键不再选路、普通正式重试保持原路线，以及显式正式重试沿原冻结输入请求 Manager 选路。回归沿实际提交、暂停和队列存储入口核对原请求。
+
 模型交接的 CLI 回归检查真实 HTTP 请求同时携原操作、新模型和预算继承授权。缺少显式模型的命令在发送前报错。
 
 AC-APPLICATION-STOPPED-04 以真实 Git 元数据身份替换复现同 canonicalRoot、不同 repositoryId 的历史 queued 操作和未结算资源共存；当前来源 stopWriter 成功暂停，只返回当前仓库诊断及其真实未结算资源，旧操作、attempt、资源与物理控制逐值保持。使用隔离 SQLite 与受控 runner，不声称真实 Native 执行或生产恢复完成。

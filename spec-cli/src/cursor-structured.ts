@@ -1,3 +1,4 @@
+import { managedRoute, nativeModelValue } from './llm-manager-route.js'
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
@@ -55,9 +56,10 @@ function writeEvidence(root: string, name: string, value: unknown): void {
 }
 
 function cursorNativeModel(model: string | undefined): string | undefined {
-  if (!model?.startsWith('cursor:') || !model.slice(7).trim() || model.includes('\0'))
+  const value = nativeModelValue(model, 'cursor')
+  if (!value.trim() || value.includes('\0'))
     throw new StructuredSessionError('unsupported', 'Cursor CLI requires cursor:<model> or cursor:default')
-  return model === 'cursor:default' ? undefined : model.slice(7)
+  return value === 'default' ? undefined : value
 }
 
 function launchArgs(workspace: string, mode: NativePlan['mode'], model: string | undefined): string[] {
@@ -261,6 +263,7 @@ async function observeAcp(stdout: Readable, plan: NativePlan, prompt: string, se
   onSession(sessionId: string): Promise<void>
   startPrompt(request: NativeRequest): Promise<boolean>
   onTerminal(output: NativeOutput): void
+  onProviderQuota?(request: NativeRequest, evidence: 'http_429' | 'usage_limit'): void
   isInterrupted(): boolean
 }): Promise<NativeOutput> {
   const lines = createInterface({ input: stdout, crlfDelay: Infinity }), chunks: string[] = []
@@ -308,6 +311,15 @@ async function observeAcp(stdout: Readable, plan: NativePlan, prompt: string, se
       if (terminal || packet.id !== awaiting || Object.hasOwn(packet, 'result') === Object.hasOwn(packet, 'error'))
         throw pending('Cursor ACP response differs from its original request')
       const rpcError = object(packet.error), result = object(packet.result)
+      if (rpcError && request && hooks.onProviderQuota && !hooks.isInterrupted()) {
+        const data = object(rpcError.data)
+        const status = rpcError.code === 429 || data?.statusCode === 429
+        const usageLimit = typeof rpcError.message === 'string' && /^(?:Upgrade your plan to continue|You've hit your usage limit)[.!]?$/iu.test(rpcError.message.trim())
+        if (status || usageLimit) {
+          hooks.onProviderQuota(request, status ? 'http_429' : 'usage_limit')
+          throw new StructuredSessionError('provider_quota_exhausted', 'Cursor provider reported quota exhaustion for the original ACP prompt')
+        }
+      }
       if (rpcError?.code === -32000 && typeof rpcError.message === 'string' && /^authentication required[.!]?$/i.test(rpcError.message.trim()))
         throw failed('Cursor CLI authentication is required')
       if (!result) throw failed(typeof awaiting === 'number' ? 'Cursor ACP session could not be started' : 'Cursor ACP prompt returned an error')
@@ -453,6 +465,10 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
   })
   const observed = observeAcp(stdout, plan, promptBytes, send, {
     onSession: callbacks.onThread,
+    ...(managedRoute(execution.model) ? {
+      onProviderQuota: (request: NativeRequest, evidence: 'http_429' | 'usage_limit') =>
+        writeEvidence(root, 'provider-quota.json', { requestDigest: digest(request), sessionId: request.sessionId, requestId: request.requestId, evidence }),
+    } : {}),
     startPrompt: async request => {
       await callbacks.onNative({ ...native, pid: child.pid, receiptFile, sessionId: request.sessionId, requestId: request.requestId })
       await callbacks.onTurn(request.requestId)

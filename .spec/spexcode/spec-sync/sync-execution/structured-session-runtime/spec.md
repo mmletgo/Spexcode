@@ -20,6 +20,8 @@ related:
 
 ## expanded spec
 
+[[llm-manager-host]] 绑定的原生会话沿正式队列和原工具工作树运行。派发前在 Manager 取得原选项的组和供应商名额。已认证的实际完成、已证明从未启动或已认证停止才能结算名额。宿主通信或原进程状态未知时保留会话与名额恢复债务。只有原生终态或同轮可信 API 转发确认的额度失败在停止后发布 `provider_quota_exhausted`，代码和独审工件无成功授权。
+
 version6 原生 worktree 结算在既有 structuredExecution 内保存可选 nativeTokenUsage。只接受对应 adapter 在认证同一终态及停止后交付的已报告计数，随 completed 或已认证终态导致的 failed 一次写入；业务/schema/Git 后置拒绝仍保持原结果。无可证终态、取消、超时及历史缺席都不追补。读侧以同一 canonical session 的 thread/turn 与 nativeTokenUsage 为准；该字段不进入业务 output、resultDigest、请求/创建摘要、Sync 证据对象或 Git。无存储 schema 迁移。计数来源及输入口径见 [[claude-structured-runtime]] 和 [[zcode-structured-runtime]]。
 
 本次 ZCodeNativeTurnFailedError 的不可重试 provider 业务拒绝仅在精确原生身份匹配且 exact adapter.stop 确证 nativeStopped 后，以 failed/errorCode=unsupported 保存固定无正文摘要。停止未知仍 cancelling 占容量，不能先持久 unsupported；不授 output、rejectedOutput 或 failedWorktree。run、同键冷读取及 removed 回放保持原码和原 message；旧 native_turn_transport_failed/generic failed 不补读旧 terminal 或追补分类。P0/P1 材料读取对 unsupported 保守跳过，原成功、格式、Git、预算及停止门不变。
@@ -34,7 +36,7 @@ version6 原生 worktree 结算在既有 structuredExecution 内保存可选 nat
 
 资源专用恢复可在非持久取消选项中明确wakeQueue:false：仍刷新原queue candidate投影并保存精确取消/停止证明，只禁止本次主动requestQueueDrain。独立资源入口同时沿[[production-cutin]]静音本次canonical提交后的主动delivery wake；普通cancel默认行为保持。已有queued目标尚无nativeStopped时同样适用，资源结算不替旁置queued任务或watcher启动新turn；后续正常drain重新核目标stopped，仅推进仍合法的queued任务。
 
-真正新建的 Claude、ZCode、Grok 和 Cursor worktree 会话记录冻结 nativeConfiguration:cli-config-v1；已有记录按原字段或缺席恢复。内部 sessionCreateKey 已由资源桥冻结请求时，无记录也沿上游原字段或缺席，不再添加默认；显式不一致拒绝。新配置请求只核原生命名空间与选择形状，default 或不透明模型交给对应 adapter 及真实初始化验证；旧缺席仍执行原 parser。source/input、seed Git、schema、消息、预算与精确停止门禁不因配置选择而放宽。
+真正新建的 Claude、ZCode、Grok、Cursor 和 Codex worktree 会话记录冻结 nativeConfiguration:cli-config-v1；已有记录按原字段或缺席恢复。内部 sessionCreateKey 已由资源桥冻结请求时，无记录也沿上游原字段或缺席，不再添加默认；显式不一致拒绝。新配置请求只核原生命名空间与选择形状，default 或不透明模型交给对应 adapter 及真实初始化验证；旧缺席仍执行原 parser。source/input、seed Git、schema、消息、预算与精确停止门禁不因配置选择而放宽。
 
 ZCode worktree read 真正新建记录默认冻结 [[zcode-structured-runtime]] 的非交互工具策略；同创建键已有记录按原字段或缺席恢复，显式不同策略拒绝。内部 sessionCreateKey 表示资源桥已经冻结工具策略：尚无会话记录时原样保留上游显式字段或缺席，由固定策略构造严格验证 provider、mode 和精准 denylist，不能改成空策略或再补默认；已有记录仍优先核原记录。业务 requestKey、inputDigest 和创建实际键的语义保持。策略字段参与创建摘要，旧创建哈希和原 native 输入不改。
 
@@ -85,7 +87,7 @@ readerRuntime版本2在新结果发布、completed精确恢复和同步资源结
 Claude 新请求在首次冻结时把完整 task 和条目生成最多65536字节的直接 MCP 计划，现有 ref/prompt 原样恢复。其 threadId 是真实原生 session UUID，turnId 是经回显、history 与 result.user_message_uuid(s) 三方确认的原始 user UUID，promptId 另外持久绑定。result.uuid 只是结果事件身份。success、structured_output、当前 schema、原生完整读取证明和整个 CLI/MCP 进程组停止缺一不可。先持久完整原生终态/证明，再发布 completed；同键 completed 仅重读原证据，零新 CLI/API。未知 in-progress 保留 cancelling/recovery_required，禁止用 resume 追加 prompt 冒充同轮恢复；精确停止后由既有新 attempt 协议重试。
 
 
-原生 worktree 请求明确提供 worktree:{baseCommit,tree,mode} 时，走独立 version6/native-worktree-v1 策略及专属 realm，不调用 prepareFrozenPrompt，不产生 frozenReadProof，旧只读策略与证明仍完整保留。仅明确 Claude、ZCode、Grok 或 Cursor 的原生模型可执行。baseCommit 必须是完整不可变 seed commit SHA，tree 精确等于其 Git tree；创建固定 base 与 forkCommit 均为 seed，后续主 checkout 的 HEAD/index/WIP 不参与初始化。runner 用创建记录的真实 worktreePath 作为 cwd，允许正常文件读取、搜索、编辑与检查，schema 仅控制最终输出格式。read 模式完成要求 HEAD/tree 等于 seed 且工作区干净；edit 模式要求代理正常 Git add/commit（保留 hooks），HEAD 是 seed 后代且干净。结果及持久 envelope 保存 baseCommit/baseTree/headCommit/tree/worktreePath，所有差量由真实 Git 对象导出。精确原生模型、session/turn、终态、退出与完整进程停止仍必需；冷 completed 核原证据和同一不可变 Git 对象身份，正式 close 移除 worktree 不阻断复用、不重建工作区，零新派发。有限与 null 模型期限均支持，创建及取消期限独立。
+原生 worktree 请求明确提供 worktree:{baseCommit,tree,mode} 时，走独立 version6/native-worktree-v1 策略及专属 realm，不调用 prepareFrozenPrompt，不产生 frozenReadProof，旧只读策略与证明仍完整保留。支持明确选定的 Claude、ZCode、Grok、Cursor 或 Codex 原生模型；Codex 使用 [[codex-native-worktree-structured]] 的单轮执行。baseCommit 必须是完整不可变 seed commit SHA，tree 精确等于其 Git tree；创建固定 base 与 forkCommit 均为 seed，后续主 checkout 的 HEAD/index/WIP 不参与初始化。runner 用创建记录的真实 worktreePath 作为 cwd，允许正常文件读取、搜索、编辑与检查，schema 仅控制最终输出格式。read 模式完成要求 HEAD/tree 等于 seed 且工作区干净；edit 模式要求代理正常 Git add/commit（保留 hooks），HEAD 是 seed 后代且干净。结果及持久 envelope 保存 baseCommit/baseTree/headCommit/tree/worktreePath，所有差量由真实 Git 对象导出。精确原生模型、session/turn、终态、退出与完整进程停止仍必需；冷 completed 核原证据和同一不可变 Git 对象身份，正式 close 移除 worktree 不阻断复用、不重建工作区，零新派发。有限与 null 模型期限均支持，创建及取消期限独立。
 
 [[grok-structured-runtime]] 复用会话队列、原生 worktree、独立审查及正式停止归档。格式拒绝的原生证明在冷读取时再次核对。编辑轮次的真实 Git 草稿可以进入后续返修。只读独审的拒绝结果只续审原候选。
 

@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+writer71 和 [[application-state-schema]] generation 6 追加 writer 标记，保护 [[llm-manager-host]] 冻结路线、名额与真实额度续路关系。升级先停稳旧 writer、原生资源和租约，再备份一致的 v70/v5 会话库与配套证据。启用独立 Manager 数据库后，回退前也须结算其中的调用。恢复整套旧现场和配套 Git/CAS，原记录保持。
+
 writer70 追加 SELECT 1 marker，保护 [[sync-coordinator]] 的已完成结构校验的 P1 候选在显式恢复后仅续独审，以及正式跨执行器重试对原生额度拒绝的草稿筛选。旧 writer 在来源恢复和只读请求派发前明确拒绝新版库。升级先停稳并结算旧 writer、资源、journal 和租约，保存一致 v69 SQLite online backup 及配套 enabled、Git/CAS。回退先停稳并结算新 writer，再恢复整套备份。原失败和验收记录逐值保留。
 
 writer69 追加 SELECT 1 marker，保护 [[sync-coordinator]] 正式跨执行器重试接续未批准 ZCode P1 作者物理稿。writer68 在来源已登记或新请求已保留的冷重入时，均在写入或派发前拒绝新版库。升级先停稳结算旧 writer、资源、journal 和租约，保存一致 v68 SQLite online backup 及配套 enabled、Git/CAS。回退先停稳并结算新 writer，再恢复整套备份。保持历史迁移及原业务记录。

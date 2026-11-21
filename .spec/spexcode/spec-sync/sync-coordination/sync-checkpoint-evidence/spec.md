@@ -39,6 +39,8 @@ Grok 的格式拒绝须另核 [[grok-structured-runtime]] 的原生终态和确�
 
 Cursor 的格式拒绝沿 [[cursor-structured-runtime]] 核对原 ACP 会话和 prompt 请求身份、原响应终态及进程停止证明，再接入同一草稿返修。
 
+Codex 的原生工作树格式拒绝沿 [[codex-native-worktree-structured]] 冷验原 thread、turn、prompt、终态及脱离进程停止证明，按原冻结 schema 重新确认拒绝。
+
 同一store当前operation内可按commonDir与SHA复用纯JSON解码（包括语法拒绝），按原字节总量以32 MiB限制保留，超出时释放缓存后继续核验原件。每次扫描以传入的当前checkpointRefs建立独立读取快照，逐份重新读取并核CAS摘要；同次root/artifact/inspect共享已核字节与解码，下一次仍重新认证全部可达typed/失败来源、资源及canonical record。切换operation或commonDir清除纯解码作用域；返回独立对象，调用者修改不能污染后续扫描。当前refs改变、CAS损坏、role或原生状态变化仍按原门禁拒绝。
 
 协调器在同一历史查询内可保存已核的根stage wrapper与raw SHA索引，选定阶段后按精确resultRef重读正文并检查角色。索引与完整读取走同一原件认证，完整证据接口仍可查询原文及全量JSON。

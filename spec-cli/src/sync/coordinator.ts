@@ -492,7 +492,8 @@ function settledElaborationReview(store: SyncStore, operation: SyncOperation, pr
   const transportMatches = grokExit || (rejection
     ? state.state === 'failed' && (request.model?.startsWith('zcode:') && record.harness === 'zcode' || request.model?.startsWith('claude:') && record.harness === 'claude'
       || request.model?.startsWith('grok:') && record.harness === 'grok-structured' && state.grokNative?.sessionId === session.threadId && state.grokNative?.turnId === session.turnId
-      || request.model?.startsWith('cursor:') && record.harness === 'cursor-structured' && state.cursorNative?.sessionId === session.threadId && state.cursorNative?.requestId === session.turnId)
+      || request.model?.startsWith('cursor:') && record.harness === 'cursor-structured' && state.cursorNative?.sessionId === session.threadId && state.cursorNative?.requestId === session.turnId
+      || request.model?.startsWith('codex:') && record.harness === 'codex-headless' && state.codexNative?.threadId === session.threadId && state.codexNative?.turnId === session.turnId)
     : request.model?.startsWith('zcode:') && (providerReview ? request.model === operation.model : isZCodeEventsRpcTimeout(state)) && record.harness === 'zcode' && state.zcodeNative?.sessionId === session.threadId && state.zcodeNative.turnId === session.turnId && !state.rejectedOutput)
   const publishedIdentity = checkpoint.nativeStarted && !!session.threadId && !!session.turnId
   if (resource.attemptId !== prior.id || resource.generation !== prior.generation || plan.schemaVersion !== 1 || checkpoint.schemaVersion !== 1

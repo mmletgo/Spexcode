@@ -89,7 +89,7 @@ const codexDescriptorKey = (endpoint: CodexGenerationEndpoint) => endpoint.id ==
 function codexRuntimeDirForRecord(rec: HarnessLivenessRecord, dir = runtimeRoot()): string | null {
   if (rec.structuredExecution === undefined) return dir
   const execution = rec.structuredExecution as Partial<StructuredExecution> | null
-  if (!rec.harnessSessionId || !execution || execution.threadId !== rec.harnessSessionId) return null
+  if (!rec.harnessSessionId || !execution || execution.threadId !== rec.harnessSessionId || ephemeralWorktreeExecution(execution)) return null
   const realm = structuredRealmRoot(execution, dir)
   return realm ? join(realm, 'control') : null
 }
@@ -114,7 +114,7 @@ type JsonRpc = { id?: number; method?: string; params?: unknown; result?: unknow
 // it (that re-loads a thread the live TUI already owns). Instead `thread/loaded/list` PROVES the captured thread
 // is the one the pane is showing. The failure observer owns the active native turn id from app-server
 // notifications; delivery does not read the thread or replay its history — see codexInjectMessage.
-const codexTextInput = (text: string) => [{ type: 'text', text, text_elements: [] }]
+export const codexTextInput = (text: string) => [{ type: 'text', text, text_elements: [] }]
 export function codexHandshakeMessages(_threadId: string): JsonRpc[] {
   return [
     {
@@ -2610,6 +2610,13 @@ async function codexHeadlessReadinessProof(current: () => HarnessLaunchReadyReco
 // Codex headless is an independent adapter: its materialization and app-server delivery are exactly Codex's,
 // while launch only runs the backend-owned thread/start + first turn. There is no TUI to attach after that turn;
 // the shared project app-server keeps the thread addressable and idle sends use the inherited JSON-RPC channel.
+function ephemeralWorktreeExecution(value: unknown): StructuredExecution | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const execution = value as StructuredExecution
+  return execution.version === 6 && execution.policy === 'native-worktree-v1' && execution.model?.startsWith('codex:')
+    ? execution : undefined
+}
+
 export const codexHeadlessHarness: Harness = {
   ...codexHarness,
   id: 'codex-headless',
@@ -2617,6 +2624,26 @@ export const codexHeadlessHarness: Harness = {
   sessionEnvVar: harnessIdentity('codex-headless').sessionEnvVar,
   headless: true,
   runtimeOwnership: 'adapter',
+  targetDescriptorKey: (rec) => ephemeralWorktreeExecution(rec.structuredExecution) ? undefined : codexHarness.targetDescriptorKey!(rec),
+  coldPreflight: async (rec) => {
+    const execution = ephemeralWorktreeExecution(rec.structuredExecution)
+    if (!execution) return codexHarness.coldPreflight!(rec)
+    const { codexNativeWorktreeIsStopped } = await import('./codex-native-worktree-structured.js')
+    return await codexNativeWorktreeIsStopped(rec.session, rec.harnessSessionId, execution) ? { ok: true, alreadyCold: true } : { ok: false, reason: 'exact ephemeral Codex worktree stop is unproven' }
+  },
+  coldRuntime: async (rec, receipt) => {
+    const execution = ephemeralWorktreeExecution(rec.structuredExecution)
+    if (!execution) return codexHarness.coldRuntime!(rec, receipt)
+    const { codexNativeWorktreeIsStopped } = await import('./codex-native-worktree-structured.js')
+    return await codexNativeWorktreeIsStopped(rec.session, rec.harnessSessionId, execution) ? { ok: true } : { ok: false, reason: 'exact ephemeral Codex worktree stop is unproven' }
+  },
+  coldRetirementPreflight: async (rec) => {
+    const execution = ephemeralWorktreeExecution(rec.structuredExecution)
+    if (!execution) return codexHarness.coldRetirementPreflight!(rec)
+    const { codexNativeWorktreeIsStopped } = await import('./codex-native-worktree-structured.js')
+    return await codexNativeWorktreeIsStopped(rec.session, rec.harnessSessionId, execution) ? { ok: true, alreadyCold: true } : { ok: false, reason: 'exact ephemeral Codex worktree stop is unproven' }
+  },
+  restoreRuntime: async (rec, receipt) => ephemeralWorktreeExecution(rec.structuredExecution) ? { ok: true } : codexHarness.restoreRuntime!(rec, receipt),
   launchOneShot: true,
   launchCmd: (id, runtimeDir, cmd) => codexHeadlessLaunchCommandLocal(id, codexBaseCmd(cmd), runtimeDir ?? runtimeRoot()),
   // A headless thread has no pane to witness it. The shared app-server generation is therefore the adapter's

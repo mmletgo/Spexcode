@@ -2,8 +2,7 @@ import { useEffect, useId, useState } from 'react'
 import { apiUrl, PROJECT_ID, PROJECT_MACHINE_ID } from './project.js'
 import { loadProjectConfig, saveProjectConfig } from './projects.js'
 
-const vendors = ['claude', 'grok', 'zcode', 'cursor']
-const managed = 'llm-manager'
+const vendors = ['claude', 'grok', 'zcode', 'cursor', 'codex']
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
 const isLoopback = (host) => ['localhost', '127.0.0.1', '[::1]'].includes(host)
 
@@ -16,16 +15,6 @@ function readConfig(receipt) {
   if (!isObject(config.sync) || config.sync.version !== 'sync-settings-v1'
     || (config.sync.model !== undefined && typeof config.sync.model !== 'string')) return { status: 'syncModelConfigInvalid' }
   return { config, revision: receipt.revision }
-}
-
-function claudeSetupLink(claudeApi) {
-  if (claudeApi?.available !== true || typeof claudeApi.setupUrl !== 'string') return null
-  try {
-    const url = new URL(claudeApi.setupUrl)
-    if (['http:', 'https:'].includes(url.protocol) && isLoopback(url.hostname)
-      && !url.username && !url.password && !url.search && !url.hash) return url.href
-  } catch { return null }
-  return null
 }
 
 export default function SyncModelSettings({ t, Row }) {
@@ -48,25 +37,51 @@ export default function SyncModelSettings({ t, Row }) {
         return result.ok ? await result.json() : null
       } catch { return null }
     }
-    if (localProject) void Promise.all([loadProjectConfig(PROJECT_ID), readStatus('/api/sync/settings')]).then(([receipt, status]) => {
+    async function load() {
+      if (PROJECT_MACHINE_ID) return
+      const status = await readStatus('/api/sync/model-settings')
+      if (controller.signal.aborted) return
+      const available = isObject(status) && (status.llmManager?.authoritative === true || Array.isArray(status.nativeVendors))
+      setCapabilities(available ? status : null)
+      if (!available || status.llmManager?.authoritative === true || !localProject) return
+
+      const [receipt, activation] = await Promise.all([loadProjectConfig(PROJECT_ID), readStatus('/api/sync/settings')])
       if (controller.signal.aborted) return
       const loaded = readConfig(receipt)
-      if (loaded.config && (status?.enabled !== true || status.activation !== 'enabled')) {
-        setSnapshot({ status: status ? 'syncModelNotEnabled' : 'syncModelActivationFailed' })
+      if (loaded.config && (activation?.enabled !== true || activation.activation !== 'enabled')) {
+        setSnapshot({ status: activation ? 'syncModelNotEnabled' : 'syncModelActivationFailed' })
         return
       }
       setSnapshot(loaded)
       const stored = loaded.config?.sync.model
       const vendor = typeof stored === 'string' ? stored.split(':', 1)[0] : ''
-      setRoute(stored === managed || (vendors.includes(vendor) && stored.includes(':')) ? vendor : '')
-      const exact = vendors.includes(vendor) ? stored.slice(vendor.length + 1) : ''
+      const exact = vendors.includes(vendor) && stored.includes(':') ? stored.slice(vendor.length + 1) : ''
+      setRoute(exact ? vendor : '')
       setModel(exact === 'default' ? '' : exact)
-    })
-    void readStatus('/api/sync/model-settings').then((status) => {
-      if (!controller.signal.aborted) setCapabilities(isObject(status) && Array.isArray(status.nativeVendors) ? status : null)
-    })
+    }
+    void load()
     return () => controller.abort()
   }, [localProject, refresh])
+
+  const manager = capabilities?.llmManager
+  if (manager?.authoritative === true) {
+    return (
+      <>
+        <p className="set-hint set-section-copy" role="status">
+          {typeof manager.selection === 'string'
+            ? t('settings.syncModelManagerSelection', { model: manager.selection })
+            : t('settings.syncModelManagerNoRoute')}
+        </p>
+        {localBrowser && manager.settingsPath === '/llm-manager/'
+          ? <a className="set-action" style={{ display: 'inline-flex', alignItems: 'center' }} href={manager.settingsPath}>
+              {t('settings.syncModelManagerOpen')}
+            </a>
+          : <p className="set-hint" role="status">
+              {t(localBrowser ? 'settings.syncModelManagerUnavailable' : 'settings.syncModelManagerLocal')}
+            </p>}
+      </>
+    )
+  }
 
   const native = vendors.includes(route)
   const validModel = !native || (model === model.trim() && !/[\r\n\0]/.test(model)
@@ -76,8 +91,6 @@ export default function SyncModelSettings({ t, Row }) {
   const dirty = !!selection && selection !== snapshot.config?.sync.model
   const canSave = !!snapshot.config && dirty && validModel && !busy && !conflicted
   const detectedVendor = capabilities?.nativeVendors.find((vendor) => vendor?.id === route)
-  const manager = capabilities?.llmManager
-  const setupLink = localBrowser ? claudeSetupLink(capabilities?.claudeApi) : null
 
   const reload = () => {
     setSnapshot({ status: 'configLoading' })
@@ -107,13 +120,14 @@ export default function SyncModelSettings({ t, Row }) {
       <p className="set-hint set-section-copy">{t('settings.syncModelDescription')}</p>
       <form onSubmit={save}>
         {!localProject ? <p className="set-hint" role="status">{t(PROJECT_MACHINE_ID ? 'settings.syncModelRemote' : 'settings.syncModelNoProject')}</p>
-          : snapshot.status ? <p className="set-hint" role="status">{t(`settings.${snapshot.status}`)}</p> : <>
+          : (capabilities === null || snapshot.status) ? <p className="set-hint" role="status">
+              {t(capabilities === null ? 'settings.syncModelStatusFailed' : `settings.${snapshot.status}`)}
+            </p> : <>
             <Row label={t('settings.syncModelRoute')} htmlFor={routeId}>
               <div className="set-launcher-fields" style={{ display: 'contents' }}>
                 <select id={routeId} value={route} disabled={busy || conflicted} style={{ width: 'min(100%, 24rem)' }}
                   onChange={(event) => { setRoute(event.target.value); setModel(''); setMessage('') }}>
                   <option value="" disabled>{t(snapshot.config.sync.model === undefined ? 'settings.syncModelUnpinned' : 'settings.syncModelPick')}</option>
-                  <option value={managed}>{t('settings.syncModelManager')}</option>
                   {vendors.map((vendor) => <option key={vendor} value={vendor}>{t(`settings.syncVendor.${vendor}`)}</option>)}
                 </select>
               </div>
@@ -130,9 +144,6 @@ export default function SyncModelSettings({ t, Row }) {
                 : route === 'zcode' ? 'settings.syncModelZcodeHint' : 'settings.syncModelNativeHint')}</p>
               {detectedVendor?.installed === false && <p className="set-hint">{t('settings.syncModelCliMissing')}</p>}
             </>}
-            {route === managed && capabilities && <p className="set-hint" role="status">{manager?.configured
-              ? (typeof manager.selection === 'string' ? t('settings.syncModelManagerSelection', { model: manager.selection }) : t('settings.syncModelManagerNoRoute'))
-              : t('settings.syncModelManagerMissing')}</p>}
           </>}
         <div className="set-config-actions">
           {snapshot.config && <button className="set-action" type="submit" disabled={!canSave}>{t(busy ? 'settings.configSaving' : 'settings.configSave')}</button>}
@@ -140,14 +151,6 @@ export default function SyncModelSettings({ t, Row }) {
           {message && <span className="set-hint" role={message === 'syncModelSaved' ? 'status' : 'alert'}>{t(`settings.${message}`)}</span>}
         </div>
       </form>
-      <Row label={t('settings.claudeApi')}>
-        {setupLink
-          ? <a className="set-action" style={{ display: 'inline-flex', alignItems: 'center' }} href={setupLink} target="_blank" rel="noopener noreferrer">{t('settings.claudeApiOpen')}</a>
-          : <span className="set-hint" role="status">{t(!localBrowser ? 'settings.claudeApiLocal'
-            : capabilities === undefined ? 'settings.configLoading'
-              : capabilities === null ? 'settings.syncModelStatusFailed' : 'settings.claudeApiUnavailable')}</span>}
-      </Row>
-      {setupLink && <p className="set-hint">{t('settings.claudeApiDescription')}</p>}
     </>
   )
 }

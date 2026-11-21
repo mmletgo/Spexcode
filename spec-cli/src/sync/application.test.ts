@@ -2382,12 +2382,12 @@ test('没有冻结保护测试时拒绝未执行覆盖授权', async () => {
   } finally { await f.application.stopService(); f.cleanup() }
 })
 
-test('llm_manager 只在正式新准入解析，固定 CLI 选择并防止重放时换路', async t => {
-  const f = await fixture({ ...settings, model: undefined }, undefined, true)
+test('llm_manager 新准入固定正式路线、冷重放和普通重试均沿原绑定', async t => {
+  const f = await fixture({ ...settings, model: 'zcode:default' }, undefined, true)
   const command = join(f.temp, 'route-python'), config = join(f.temp, 'route.json'), calls = join(f.temp, 'route-calls')
-  const route = (vendor: string, model: string) => writeFileSync(config, JSON.stringify({ version: 'llm-manager-cli-route-v1', vendor, model }))
-  writeFileSync(command, '#!/bin/sh\n[ "$1" = "-I" ] && [ "$2" = "-m" ] && [ "$3" = "llm_manager.cli_route" ] && [ "$4" = "--config" ] || exit 2\n[ -z "${SPEX_LLM_MANAGER_TEST_ENV_TRAP+x}" ] || exit 2\nprintf "called\\n" >> route-calls\n/bin/cat "$5"\n', { mode: 0o700 })
-  for (const [key, value] of Object.entries({ SPEX_LLM_MANAGER_PYTHON: command, SPEX_LLM_MANAGER_CLI_CONFIG: config, SPEX_LLM_MANAGER_TEST_ENV_TRAP: 'host-only' })) {
+  const route = (vendor: string, model: string) => writeFileSync(config, JSON.stringify({ ok: true, value: { routeId: 'a'.repeat(64), vendor, model, kind: 'cli' } }))
+  writeFileSync(command, '#!/bin/sh\n[ "$1" = "-I" ] && [ "$3" = "rpc" ] || exit 2\n[ -z "\${SPEX_LLM_MANAGER_TEST_ENV_TRAP+x}" ] || exit 2\n/bin/cat >/dev/null\nprintf "called\\n" >> route-calls\n/bin/cat "$4"\n', { mode: 0o700 })
+  for (const [key, value] of Object.entries({ SPEX_LLM_MANAGER_PYTHON: command, SPEX_LLM_MANAGER_CONFIG: config, SPEX_LLM_MANAGER_TEST_ENV_TRAP: 'host-only' })) {
     const previous = process.env[key]
     process.env[key] = value
     t.after(() => { if (previous === undefined) delete process.env[key]; else process.env[key] = previous })
@@ -2397,24 +2397,28 @@ test('llm_manager 只在正式新准入解析，固定 CLI 选择并防止重放
     await f.application.enable()
     await f.application.automaticControl('pause')
     const first = (await f.application.submit({ nodeId: 'demo', requestId: 'manager-native' })).operation!
-    assert.equal(first.model, 'cursor:private-model[custom=true]')
+    const { managedRoute } = await import('../llm-manager-route.js')
+    assert.deepEqual(managedRoute(first.model), { routeId: 'a'.repeat(64), vendor: 'cursor', model: 'private-model[custom=true]', kind: 'cli' })
     assert.equal(readFileSync(calls, 'utf8'), 'called\n')
-    const description = JSON.parse(readFileSync(join(f.temp, 'runtime', 'artifacts', `application-runtime-${contentHash(first.ingressKey)}.json`), 'utf8'))
+    const description = JSON.parse(readFileSync(join(f.temp, 'runtime', 'artifacts', 'application-runtime-' + contentHash(first.ingressKey) + '.json'), 'utf8'))
     assert.equal(description.model, first.model)
     route('grok', 'default')
     const replay = (await f.application.submit({ nodeId: 'demo', requestId: 'manager-native', model: 'llm-manager' })).operation!
     assert.equal(replay.id, first.id)
     assert.equal(replay.model, first.model)
-    assert.equal(readFileSync(calls, 'utf8'), 'called\n')
     await f.application.control(first.id, 'cancel')
-    const next = (await f.application.submit({ nodeId: 'demo', requestId: 'manager-native-retry', retryOf: first.id, model: 'llm-manager' })).operation!
-    assert.equal(next.model, 'grok:default')
+    const next = (await f.application.submit({ nodeId: 'demo', requestId: 'manager-native-retry', retryOf: first.id })).operation!
+    assert.equal(next.model, first.model)
     assert.equal(next.input.id, first.input.id)
     assert.equal(next.policyDigest, first.policyDigest)
-    assert.equal(readFileSync(calls, 'utf8'), 'called\ncalled\n')
+    assert.equal(readFileSync(calls, 'utf8'), 'called\n')
     await f.application.control(next.id, 'cancel')
-    route('api', 'unknown')
-    await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'manager-native-invalid', retryOf: next.id, model: 'llm-manager' }), { code: 'sync_llm_manager_route_invalid' })
+    const selected = (await f.application.submit({ nodeId: 'demo', requestId: 'manager-native-retry-explicit', retryOf: next.id, model: 'llm-manager' })).operation!
+    assert.equal(managedRoute(selected.model)?.vendor, 'grok')
+    assert.equal(selected.input.id, first.input.id)
+    assert.equal(selected.policyDigest, first.policyDigest)
+    assert.equal(readFileSync(calls, 'utf8'), 'called\ncalled\n')
+    await f.application.control(selected.id, 'cancel')
     assert.equal(f.calls.length, 0)
   } finally { await f.application.stopService(); f.cleanup() }
 })

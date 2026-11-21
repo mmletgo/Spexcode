@@ -1,3 +1,4 @@
+import { managedRoute, nativeModelValue } from './llm-manager-route.js'
 import { nativeWorktreeLaunch, sampleNativeWorktreeProcesses, nativeWorktreeProcessesStopped } from './native-worktree-runtime.js'
 import { Ajv } from 'ajv'
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
@@ -63,10 +64,11 @@ function isZCodePublicHttp429(error: unknown): boolean {
 
 /** 只认证本次精确失败终态；原生正文不进入错误诊断，停止权限仍由既有adapter独立证明。 */
 export class ZCodeNativeTurnFailedError extends StructuredSessionError {
-  constructor(threadId: string, turnId: string, nativeCode: unknown, worktree: boolean, nativeAttribution?: unknown) {
+  constructor(threadId: string, turnId: string, nativeCode: unknown, worktree: boolean, nativeAttribution?: unknown, quota = false) {
     const code = typeof nativeCode === 'string' && Object.hasOwn(constants.errno, nativeCode) ? nativeCode : 'unavailable'
     const providerRejection = worktree && isZCodeProviderPipeFailure(code, nativeAttribution)
-    super(providerRejection ? 'unsupported' : worktree && code === 'EPIPE' ? 'native_turn_transport_failed' : 'failed', providerRejection ? ZCODE_PROVIDER_REJECTION : `ZCode native turn failed (code=${code})`, { threadId, turnId })
+    super(quota ? 'provider_quota_exhausted' : providerRejection ? 'unsupported' : worktree && code === 'EPIPE' ? 'native_turn_transport_failed' : 'failed',
+      quota ? 'ZCode provider returned HTTP 429' : providerRejection ? ZCODE_PROVIDER_REJECTION : `ZCode native turn failed (code=${code})`, { threadId, turnId })
   }
 }
 
@@ -125,10 +127,9 @@ export function zcodeNativeSelection(model: string | undefined, effort?: Structu
 
 /** 新配置只拆 provider/model 分隔符；SDK 仍负责解析具体模型与配置。 */
 export function zcodeNativeConfigModel(model: string | undefined): NativeModel | undefined {
-  if (model === 'zcode:default') return undefined
-  const prefix = 'zcode:'
-  if (!model?.startsWith(prefix)) throw new StructuredSessionError('unsupported', 'ZCode native configuration requires zcode:default or zcode:<provider>/<model>')
-  const value = model.slice(prefix.length), separator = value.indexOf('/')
+  const value = nativeModelValue(model, 'zcode')
+  if (value === 'default') return undefined
+  const separator = value.indexOf('/')
   if (separator <= 0 || separator === value.length - 1) throw new StructuredSessionError('unsupported', 'ZCode native configuration requires zcode:default or zcode:<provider>/<model>')
   return { providerId: value.slice(0, separator), modelId: value.slice(separator + 1) }
 }
@@ -789,7 +790,8 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
     writeJson(join(root, 'events.json'), events); writeJson(join(root, 'event-counts.json'), counts)
     if (terminal?.type === 'turn.failed') {
       const error = terminal.payload.error as { code?: unknown; attribution?: unknown } | undefined
-      throw new ZCodeNativeTurnFailedError(plan.sessionId, plan.turnId!, error?.code, worktree, error?.attribution)
+      throw new ZCodeNativeTurnFailedError(plan.sessionId, plan.turnId!, error?.code, worktree, error?.attribution,
+        Boolean(worktree && managedRoute(execution.model) && isZCodePublicHttp429(error)))
     }
     return terminal
   }

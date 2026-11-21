@@ -14,7 +14,7 @@ related:
 
 正式同步允许选择可用模型继续执行。每个项目可在版本化 `sync.model` 固定新操作的正式后端默认值，手动模型选择优先。旧操作缺省仍为 gpt-6.1-sol。选择不改变业务原意、预算、权限或独立审查门禁。
 
-选用 `llm-manager` 时，由宿主登记的 CLI 功能组决定原生执行路线。SpexCode 实际启动所选 CLI，在原工作树、独审和交付门禁内执行。
+宿主启用 LLM Manager 后，由同一功能组管理 API 供应商、凭据、模型、原生 CLI 和正式选路。SpexCode 在原工作树、独审和交付门禁内启动所选执行器。完整宿主合同见 [[llm-manager-host]]。
 
 ## expanded spec
 
@@ -28,9 +28,9 @@ related:
 
 `cursor:default` 选择 [[cursor-structured-runtime]] 并沿用本机 Cursor CLI 配置。`cursor:<模型或别名>` 原样交给 CLI。启用 llm_manager 的宿主功能组将 Cursor 放在首位时，已就绪的 Cursor 路线优先。
 
-`--model llm-manager` 和 `sync.model: llm-manager` 在新原生工作树操作准入时读取宿主功能组。宿主登记选路后，无操作级和项目级模型的新原生操作默认通过同一功能组选路。后端用绝对路径 `SPEX_LLM_MANAGER_PYTHON` 调用已安装的 `llm_manager.cli_route`，配置路径取 `SPEX_LLM_MANAGER_CLI_CONFIG`。只接收声明已支持的 CLI 厂商及模型，按原功能组的次序选路。进程没有继承的认证环境，输出只含厂商和模型。登记不完整或查不到已就绪路线时拒绝准入。具体 CLI 选择写入原 operation 和运行描述。相同请求复用已冻结选择，正式 retryOf 可重新显式选择 `llm-manager`。观察、重放、恢复及独审不重新选路。
+`--model llm-manager` 和 `sync.model: llm-manager` 选择 [[llm-manager-host]]。启用完整宿主管理的新原生工作树操作统一在登记的功能组准入。项目的原生默认值仍供未启用完整管理的宿主使用。相同请求和未另选路线的正式重试复用已冻结选择。显式正式重试由功能组选路，Manager 使用已有的真实额度结算和当前可用性返回新路线。观察、重放、恢复及同操作独审沿原冻结路线。
 
-工作台用只读宿主视图显示已安装的原生 CLI、LLM Manager 功能组当前选择和 Claude Code API 配置入口。宿主可用 `SPEX_CLAUDE_API_SETTINGS_URL` 登记已有的本机网关配置页，未登记且已安装 Claude Code Router 时检查其本机默认页面。验证仅发出不跟随重定向的 loopback HTTP HEAD 以确认页面可打开。API 地址和凭据在原生配置网页维护。视图不读写网页配置、凭据、操作或预算，也不代表模型连通性检查。
+工作台在已启用完整管理的宿主显示 LLM Manager 的当前可用路线和同源设置入口。默认执行器、API 地址、模型和凭据通过同一管理界面保存。设置变更用于后续准入，既有操作和冻结结果维持原身份。
 
 sync run/verify 的 API 和 CLI --model 接受操作级模型选择。选择进入不可变 admission/payload/ingress 身份，同 requestId 改模型拒绝；普通重复业务请求不能靠新 requestId 换模型取得新预算或归并到另一模型，换模型必须经正式 retryOf。显式 retry 未指定模型时继承原操作，显式另选模型仍复用原 source/input/policy/readset/request/origin 并保持既有已批准 P1 义务。
 

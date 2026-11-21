@@ -20,6 +20,8 @@ related:
 
 ## expanded spec
 
+[[llm-manager-host]] 的 Claude API 路线沿原 native-worktree 固定执行策略，使用同轮临时 loopback 转发。原生进程只接收本轮临时授权，启动时禁用会覆盖路线的外部设置和 hooks。macOS 子进程同一次沙箱同时限制 Git 共享配置写入和 Manager 私有文件读取。原生 init、消息、schema、进程组和结果照原路径核验。可信终态只投影原 429 状态码，真实 API 转发额度失败仍须原生停止。
+
 原生 worktree 只从同一原生 CLI `result.modelUsage` 读取计数。按字段跨全部模型汇总安全非负整数，分别保留未缓存输入、输出、缓存读和缓存创建；缺值、非法值或超安全整数范围的分量缺席，明确的零保留。仅以该轮固定请求的首个原生会话计数范围解释，涵盖 Claude Code query pipeline 报告的模型调用。规范化计数随本轮 result 快照保存，在精确原生终态和停止认证后才交给 [[structured-session-runtime]]。不使用只含主循环的 usage、价格、单消息或旧历史推估，不保留原始 modelUsage、模型分组、价格或其它 provider 字段。
 
 工作区schema拒绝仅在原plan/prompt/model/turn/终态与stop认证后保留不可信final诊断：success的structured_output schema拒绝可保存其原生JSON值的确定JSON表示；重试耗尽仅取最后一份已严格配对、被本schema拒绝的StructuredOutput input，不提取thinking/任意assistant文本。标明native_json表示与原请求/schema身份，仍不填成功output或写completed，原错误分类不变；没有可证final则缺席。
@@ -69,7 +71,7 @@ macOS 的新 worktree 版本探测与执行子进程沿 [[native-worktree-runtim
 
 新建 worktree 请求显式冻结 `nativeConfiguration: cli-config-v1`，对应 Native plan/version2，不能替已有 saved、reserved 或旧 plan1 补标记或重签。此分支只用 `claude:` 路由执行器：`claude:default` 完全省略 `--model`，由 CLI 现有配置选择；其它非空、无 NUL 的后缀原串作为单个 argv 交给 CLI，接受别名、供应商路径及上下文后缀，不维护模型、供应商、baseurl 或 CLI 版本名册，不拼 shell。CLI 实际 `--version` 和 binaryDigest 只记录本轮观测；旧未完成请求不能借新配置语义在另一 binary 冒充执行。
 
-新分支继承正常进程环境和 CLI 用户/项目/managed 配置解析；仅按现有 harness 身份枚举移除父会话的 SPEXCODE_SESSION_ID 与各 sessionEnvVar，再注入本轮创建记录的 SPEXCODE_SESSION_ID，避免原生 hooks/工具写入父会话。认证、provider/baseurl、SPEXCODE_HOME 和数据库路由等非身份环境仍正常继承；不设置私有 CLAUDE_CONFIG_DIR，不清空 setting-sources，不投影或读取 settings/credentials，不探测、改写、保存或打印认证值和实际 baseurl；CLI 自己沿原认证、替代供应商及路由执行。只隔离本轮 tmp/debug、进程 receipt 与公开证据；read/edit 权限、JSON schema 与原生内置工具模式保持，不添加冻结分块读取约束。配置来源可记为 native，协议缺少所需真实字段仍如实失败。
+新分支继承正常进程环境和 CLI 用户/项目/managed 配置解析；仅按现有 harness 身份枚举移除父会话的 SPEXCODE_SESSION_ID 与各 sessionEnvVar，同时清除父进程的 CLAUDECODE 启动标记，再注入本轮创建记录的 SPEXCODE_SESSION_ID。这样 CLI 可独立启动，原生 hooks/工具只写本轮会话。认证、provider/baseurl、SPEXCODE_HOME 和数据库路由等非身份环境仍正常继承；不设置私有 CLAUDE_CONFIG_DIR，不清空 setting-sources，不投影或读取 settings/credentials，不探测、改写、保存或打印认证值和实际 baseurl；CLI 自己沿原认证、替代供应商及路由执行。只隔离本轮 tmp/debug、进程 receipt 与公开证据；read/edit 权限、JSON schema 与原生内置工具模式保持，不添加冻结分块读取约束。配置来源可记为 native，协议缺少所需真实字段仍如实失败。
 
 本轮唯一 init 的非空 model 是 CLI 解析的选择表达式，沿既有 plan.resolvedModel 原串保存；plan.requestedModel 保留原请求选择，不回写 execution.model。init 选择表达式与各 api-request.model 的实际 wire 字符串属于不同命名空间：后者只按其原 requestId、同轮公开 history 来源及既有 historyDigest 认证，不要求与 init 字符串相等，也不要求各 API 请求的 wire model 相同；不去后缀、映射别名或猜供应商模型。schema 耗尽仍须以每个 assistant.requestRef 绑定已出现的实际 API request，再核原工具调用/回复及 schema 错误，不能因模型命名空间分离放宽身份或工具配对；缺实际 requestId/model、原摘要不符仍拒绝。新配置语义的冷恢复保留两类原观测各自绑定；旧 plan1 exact 语义不变，不用新规则重新解释其成功缓存。重复 init、外来 session/user、原 prompt/echo/result/exit 或缓存身份差异仍拒绝。调用前固定 CLI 实际配置根（继承非空 CLAUDE_CONFIG_DIR，未设或空串时使用 HOME/.claude），停止后只在其 projects 一层目录按本轮精确 UUID 查唯一原生 history；不扫全 home、不读取其它 session 正文。复用现有公开 history 过滤器，过滤私密块后以内容摘要封存本轮 public-history.json，completed 绑定其原 plan/init/echo/result/exit/prompt 与该摘要。冷完成仅认证本轮保存的公开 snapshot，不重读今天用户配置/认证、CLI 版本或全局 history，不启动新 CLI/API。缺少完整终态的旧请求仍只能停止并保留恢复债务，不能追加 prompt。
 
