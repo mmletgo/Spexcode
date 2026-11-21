@@ -448,30 +448,28 @@ export async function codexNativeWorktreeTurn(realm: string, id: string, prompt:
     const final: Final = { threadId, turnId, status: 'completed', itemId: answers[0].id, text: answers[0].text, ...(usage ? { tokenUsage: usage } : {}) }
     proof = { launchDigest: digest(launch), thread: { id: threadId, cwd: workspace, model: thread.model, cliVersion: row.cliVersion }, final, stopDigest: '' }
   } catch (cause) { error = cause }
-  finally {
-    closing = true
-    clearInterval(census)
-    const deadline = Date.now() + STOP_MS
-    try {
-      await interrupting
-      gate.destroy()
-      stdin.end()
-      const exit = await Promise.race([closed, delay(500).then(() => null)])
-      if (!exit && owned) signalGroup(owned)
-      if (!owned || !await waitForNativeWorktreeProcessesStopped(owned, deadline, !exit, () => launchMatches(owned!)))
-        throw pending('Codex exact native process stop remains unproven')
-      if (proof) {
-        const finalExit = exit ?? await Promise.race([closed, delay(Math.max(0, deadline - Date.now())).then(() => null)])
-        if (!finalExit || !(finalExit.code === 0 && finalExit.signal === null || !exit && finalExit.code === null && finalExit.signal === 'SIGTERM'))
-          throw failed('Codex app-server did not complete its native shutdown')
-        proof.stopDigest = stopDigest(owned)
-      }
-    } finally {
-      clearTimeout(timer)
-      callbacks.signal?.removeEventListener('abort', abort)
-      active.delete(root)
-      child.stdout!.destroy()
+  closing = true
+  clearInterval(census)
+  const deadline = Date.now() + STOP_MS
+  try {
+    await interrupting
+    gate.destroy()
+    stdin.end()
+    const exit = await Promise.race([closed, delay(500).then(() => null)])
+    if (!exit && owned) signalGroup(owned)
+    if (!owned || !await waitForNativeWorktreeProcessesStopped(owned, deadline, !exit, () => launchMatches(owned!)))
+      throw pending('Codex exact native process stop remains unproven')
+    if (proof) {
+      const finalExit = exit ?? await Promise.race([closed, delay(Math.max(0, deadline - Date.now())).then(() => null)])
+      if (!finalExit || !(finalExit.code === 0 && finalExit.signal === null || !exit && finalExit.code === null && finalExit.signal === 'SIGTERM'))
+        throw failed('Codex app-server did not complete its native shutdown')
+      proof.stopDigest = stopDigest(owned)
     }
+  } finally {
+    clearTimeout(timer)
+    callbacks.signal?.removeEventListener('abort', abort)
+    active.delete(root)
+    child.stdout!.destroy()
   }
   if (interrupted || callbacks.signal?.aborted || existsSync(cancelFile))
     throw new StructuredSessionError(timedOut ? 'timeout' : 'cancelled', 'Codex worktree turn was cancelled')

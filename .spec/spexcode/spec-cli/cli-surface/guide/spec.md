@@ -140,7 +140,7 @@ there is that feature's, not `guide`'s drift.
 
 The sync guide documents manual code/combined ingestion and bound business decisions via [[sync-cli]]. It explains trusted analysis/finding references and keep/adopt/new-rule choices; ordinary completion needs no extra confirmation, retry does not authorize business changes, and enabled sources are watched by the formal backend lifecycle.
 
-sync guide 说明 run/verify --model 固定全阶段及独审选择，默认 sol，省略 retry 继承；普通重复不刷新预算，恢复不换模型，原生目录仍验证可用性，遵循 [[sync-model-selection]]。
+sync guide 说明 [[sync-model-selection]] 的宿主托管组选路和原生缺省。功能组支持正式验收与日常同步，操作及独审使用同一冻结模型。普通重复不刷新预算，恢复及省略模型的重试保持原选择。显式正式重试可从所登记的组选取当前路线。
 
 sync guide 说明budget可精确配置mode=unlimited解除四种总cap、期限为null且继续记真实用量；callTimeoutMs仍有限正整数，缺省最多120000ms，仅有限预算要求不超过总timeoutMs。单次回收、验证timeout、lease/fence及完整独审交付门槛保持，不以无限模式改写旧操作。
 

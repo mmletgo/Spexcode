@@ -805,7 +805,8 @@ executionAvailability 显示 recovery_required 时，可用 recover 精确恢复
 当前canonicalRoot/commonDir必须与原来源一致。此入口只结算精确Native/Docker资源，不启动watcher/queue，
 不回放任何journal或创建receipt，不改变原失败、候选与输出摘要；未知停止仍保留资源。
 它不授予物理身份连续性，正常read/resume/adopt仍核完整来源身份；有未决journal时只列出并保留。
-run/verify 的 --model 固定本操作及全部独审模型，默认 gpt-6.1-sol；显式重试省略时继承原模型。普通重复请求不能换模型取得新预算，同 requestId 改模型拒绝；resume/recover 始终沿原选择。模型仍须通过实际 Native/catalog 校验，不自动 fallback。 操作模型采用 sync component v13 writer 语义；回滚旧二进制须先停 writer/结算资源并恢复升级前一致数据库备份，不能让旧 writer 直接读新 generation。
+宿主启用 LLM Manager 时，新原生 run/verify 由已登记的通用功能组选路。同步和正式验收可登记各自的组，共用供应商和凭据。--retry-of 与 --model llm-manager 可为正式重试请求组内当前路线。曾经冻结的请求在普通重复、未指定模型的正式重试与 resume/recover 时复用原路线。操作及全部独审使用同一冻结模型。
+未启用 Manager 的原生操作由显式 --model 或项目 sync.model 选路，原生缺省为 Claude Code。同 requestId 不得改模型，普通重复请求不会刷新预算。回滚 writer 前须停止写入并结算资源，再恢复升级前一致数据库备份。
 
 show/status 的 retryEligibility 给出能否显式重试及具体拒绝原因。--retry-of 为可重试的失败或未交付取消建立
 关联的新操作和新预算，继承原正文保存意图及来源；不能同时 --patch-file。普通重复请求不重置预算，
