@@ -64,7 +64,8 @@ falls through to the project's legacy endpoint. The close contract is [[archive]
 the policy identity in [[structured-session-runtime]].
 
 Manager-owned native worktree turns use the per-turn runtime owned by [[codex-native-worktree-structured]].
-Its exact stopped-process proof governs stop, close and retirement without joining a shared generation.
+The shared descriptor resolver emits no generation for those records. Their exact stopped-process evidence
+governs stop, close and retirement.
 
 **Started once, under a portable lock.** Check-and-start is serialized by an atomic `mkdir` mutex with a bounded
 wait, not `flock` — absent on macOS, where it failed the whole bootstrap and left the pane at a shell. The lock

@@ -89,7 +89,7 @@ const codexDescriptorKey = (endpoint: CodexGenerationEndpoint) => endpoint.id ==
 function codexRuntimeDirForRecord(rec: HarnessLivenessRecord, dir = runtimeRoot()): string | null {
   if (rec.structuredExecution === undefined) return dir
   const execution = rec.structuredExecution as Partial<StructuredExecution> | null
-  if (!rec.harnessSessionId || !execution || execution.threadId !== rec.harnessSessionId) return null
+  if (!rec.harnessSessionId || !execution || execution.threadId !== rec.harnessSessionId || ephemeralWorktreeExecution(execution)) return null
   const realm = structuredRealmRoot(execution, dir)
   return realm ? join(realm, 'control') : null
 }
@@ -2625,7 +2625,6 @@ export const codexHeadlessHarness: Harness = {
   headless: true,
   runtimeOwnership: 'adapter',
   targetDescriptorKey: (rec) => ephemeralWorktreeExecution(rec.structuredExecution) ? undefined : codexHarness.targetDescriptorKey!(rec),
-  sharedRuntimes: (dir, rec) => ephemeralWorktreeExecution(rec?.structuredExecution) ? [] : codexRuntimeDescriptors(dir, rec),
   coldPreflight: async (rec) => {
     const execution = ephemeralWorktreeExecution(rec.structuredExecution)
     if (!execution) return codexHarness.coldPreflight!(rec)
