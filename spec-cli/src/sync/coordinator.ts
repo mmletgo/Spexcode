@@ -2859,7 +2859,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
                     else if (!zcode) assertClaudeStoppedDraftSource(prompt, state, proof.record.worktreePath)
                     assertMaterialFence()
                     store.assertWriteFence(fence!)
-                    const physical = readStoppedPhysicalDraft(commonDir, proof.record.worktreePath, worktree, request.binding, { allowCommitted: allowCommitted && !providerDraft })
+                    const physical = readStoppedPhysicalDraft(commonDir, proof.record.worktreePath, worktree, request.binding, { allowCommitted: allowCommitted && !providerDraft, allowUntrackedWithoutDraft: providerDraft })
                     if (physical && (!(grokDraft || completedEventsRpc) || physical.committedOid)) {
                       if (providerDraft && (physical.observedHeadCommit !== request.worktree.baseCommit || physical.observedTree !== request.worktree.tree)) fail('draft_material_binding', 'ZCode 原生成物理草稿必须位于原 seed')
                       if (zcode && failed !== true) fail('stale_result', 'ZCode物理细化草稿没有原精确失败终态')

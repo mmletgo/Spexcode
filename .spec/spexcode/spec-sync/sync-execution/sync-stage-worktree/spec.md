@@ -19,6 +19,8 @@ StageDraftMaterialRequest仅在进程内传当前binding/真实seed/inputDigest�
 
 已认证原Native身份并正式stop/removed的owner编辑工作树，可由调用者在新有效fence只读观察精确UTF8普通JSON草稿。ZCode物理来源还须原精确turn.failed；原canonical cancelled可与该失败终态并存，普通暂停的turn.completed/turn.cancelled不在本轮physical_draft准入，既有正常Git暂停材料政策保持。仅打开原exit.json时遇到ENOENT，使该物理/Git候选不合格并在读取新进度前跳过；formal stop/removed不能替代缺失的exit或失败终态。缺plan/send、其他读取错误、坏JSON及存在但非法exit仍显式失败。HEAD仍为seed或其后代；Git提交、index及工作区仅此draft允许变化，schema/context/Spec/源码/tests的path-mode-OID与absence全部保持，含隐藏index标记也不豁免。允许untracked、tracked修改及仅draft暂存，并可与草稿命名空间外的普通ignored缓存并存；ignored的`.spex-sync-drafts`本身、子项、大小写别名及其他owner草稿/sidecar仍拒绝。材料始终只取最新工作区原draft bytes并记录原index SHA，ignored缓存不进入材料或候选，syntax/schema坏稿不修正文；完整严格状态仍在返回前逐字复核。只读Git命令禁optional locks，旧HEAD/index/工作文件/Native原件不改写。此来源是physical_draft，不能构造ElaborationDraft或旧Git结果；正常交付仍须真实clean正常提交。
 
+[[sync-coordinator]] 认证的同操作 ZCode P1 provider EPIPE 作者可报告无稿。要求原 HEAD/tree 等于 seed，授权路径在原 Git 树、index 和物理工作区都缺席，状态只列其他未跟踪路径。程序核完整 index、保护文件物理字节和观察稳定性后返回空材料。原未跟踪文件留在原工作区。已有授权稿时仍走严格物理稿边界。
+
 P0分析及独审同样复用此草稿捕获/读取能力；owner与purpose共同隔离临时路径，两个阶段只可提交各自精确draft，schema/Spec/源码/tests及其absence继续保持。P0独审seed可以含自身未批准JSON临时稿，但分析稿不混入独审业务tree；最终candidate与交付不含任何临时草稿。认证的旧Native final只作为新seed输入材料，不是旧Git witness，必须经下一真实Agent提交后才产生当前草稿身份。
 
 精确通过仓库、owner、原seed、schema和提交差量的旧物理草稿，若严格Git状态出现非ignored的授权范围外路径或状态，仍拒绝整份材料，并将此类工作区状态与身份、索引、物理字节和复查竞态失配区分。调用者不能把该拒绝当作空草稿后继续捕获同一来源的Git结果。

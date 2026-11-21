@@ -19,7 +19,7 @@
 - P1候选GAP只复核同operation新提议的code/derived missing_fact；原aggregate/local/Native refs冷验后只让命中owner续原Git稿、新独审及strict seal，其他业务字段与源码/tests保持。新checkpoint仅留refs和身份，诊断现读；真实未知及已处理负例不反复派发，旧批准不改签。
 - P1 V5完整叶只读事实返修只消费原candidate_review认证诊断的typed relatedIds与冻结owner交集：仅desc/expanded及命中RULE.basis可变，其余业务列/raw/绑定/AC/VERIFY严格保持；旧缺席不补写、不从message或草稿errors授信，局部与strict seal共用。
 - P1独审共用生成侧owner范围；仅要求冻结owner改写的repair或未知ID绑定须给具体拒因重审。原JSON/Git稿、候选与原Native生成身份冷验相同后只续独审；域内语义repair仍续生成。已结算的 ZCode session/events 超时与 Grok 独审退出逾期均可仅续审。沿同一 operation 冷验原只读请求、canonical 失败和正式 removed/stop。Grok 另核原生启动与停止原件和只读 Git 归档。ZCode provider EPIPE 仅在同一 operation 显式暂停恢复后，凭 adapter 认证的原只读终态和正式结算只续审。保留原失败及未批准状态。旧请求字段不追补。
-- ZCode P1 作者的 provider EPIPE 沿 [[sync-coordinator]] 的同操作显式暂停恢复。等 attempt 正式 `unsupported` 且资源结算后，按每个 owner 的局部终态和精确原 seed 读取未批准物理稿。正常提交后仍独立审查，沿既有 provenance 格式。writer68 保护来源已登记和请求已保留的冷恢复，升级与回滚沿 [[sync-migrations]] 的一致 v67 备份。
+- ZCode P1 作者的 provider EPIPE 沿 [[sync-coordinator]] 的同操作显式暂停恢复。等 attempt 正式 `unsupported` 且资源结算后，按每个 owner 的局部终态和精确原 seed 读取未批准物理稿。无稿且仅有旧未跟踪文件时，经完整保护面校验按无稿派发。正常提交后仍独立审查，沿既有 provenance 格式。writer68 保护来源已登记和请求已保留的冷恢复，升级与回滚沿 [[sync-migrations]] 的一致 v67 备份。
 - writer64 保护普通正式重试的 P0 跨 operation 续审来源。按真实来源分别核作者和新独审的原模型；同冻结计划、scope、读集、基线和 schema 才保 readyAnalysis，业务 repair 仍续原稿及真实发现。升级先停稳结算旧 writer，保存一致 v63 SQLite online backup 和配套 enabled、Git/CAS。回滚停稳并结算新 writer，再恢复整套备份。
 - writer63 保护已结算 ZCode P1 续审来源、已保留的只读派发及规范入口配置的仅分析承接。升级前停稳并结算旧 writer，保存一致 v62 SQLite online backup 和配套 enabled、Git/CAS。回滚先停稳并结算新 writer，再恢复整套备份。
 - 新 Native P0 独审按 `reviewCoveragePreflight` 只读检查原任务的必审路径与实际变化ID，沿原Git稿续审及完整正式门。writer61 升级停稳、结算并保存一致 v60 online backup 及配套 Git/CAS。

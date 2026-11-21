@@ -110,6 +110,8 @@ ZCode 已结算的 provider 拒绝保留原 `unsupported` 结论。操作员显�
 
 P1 作者的 provider EPIPE 沿同一 operation 的显式暂停恢复接续未批准物理稿。先由原 attempt 的正式 `unsupported` 类结论和暂停后 `superseded` 证明非自动重试。分区可由同批另一 owner 的 `unsupported` 主导汇总，provider 资格由本 owner 的局部失败和 [[zcode-structured-runtime]] 原公开终态证明。原各派发资源须全部结算，本 owner 的 canonical failed 请求、模型、完整 session/thread/turn、removed/stop、输入、分区、seed 和 schema 逐项匹配，且没有原候选、生成结果或拒稿见证。沿 [[sync-stage-worktree]] 在原 HEAD/tree 等于 seed 时只读观察授权物理草稿，核对源、测试、其他路径和 index。原件以及原失败保持，当前 fence 只记录既有 `physical_draft` 未批准来源并复制精确字节。缺稿沿既有无稿流程，原件或保护面失配停止承接。新作者在该稿上续修并正常提交，照常执行结构检查和独立审查。跨 operation、其它 provider 归因、真实模型不支持以及未写出正式非自动失败的中断保持原材料资格。
 
+授权草稿缺席且原工作区仅有其他未跟踪文件时，[[sync-stage-worktree]] 完整认证后按无稿派发。原文件留在作者工作区，新 seed 和证据使用原冻结输入。已有授权草稿的完整写范围检查继续执行。
+
 P1的whole缓存沿[[sync-elaboration]]同时核身份与当前owner范围。分区whole不直接继承ready，必须回原local input逐owner核缓存资格并重新严格seal；单体的当前saved与历史accepted入口均须消费资格结果。scope失效只放弃当前ready复用，优先沿既有草稿来源，必要时用已冷验缓存末轮Git稿继续，不丢JSON或改原reviewPassed/trace/ref，重新生成及独审后才保存新结果。
 
 最终分区独审的程序字段格式失败沿现有reviewRepair续审同一候选。旧Native completed而程序曾接受的无效定位也只在原dispatch、request/input、plan、candidate、输出digest/trace及removed终态完整认证后作为未批准材料读取；不改旧status/resultDigest，不伪造rejectedOutput或Native失败。待处理只读发现必须先取得合法位置，格式错误先续该review组，已accept兄弟按原完整输入及原件严格复用；新稿校验通过的真实repair再回原唯一P1。缺原件、身份/候选失配、未知/重复affectedIds或错误path/ID不得因草稿续修扩大业务权限。原失败请求冷重建及已accept组来源重验从既有aggregate的p2SpecWritePaths恢复同一瞬态写范围，再调用共享请求构造接缝，不将可写owner套入只读定位约束。复用同一stage-worktree临时稿与现有refs，无DB版本或持久字段变更。

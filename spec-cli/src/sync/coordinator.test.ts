@@ -251,7 +251,7 @@ const zcodeP0CommittedCase = ['zcode-new', 'ordinary-ignored'] as const
 const zcodeP0CancelledGitCases = (['archived', 'cold', 'cold-native-drift', 'idle', 'no-progress-idle', 'closed', 'idle-identity', 'stop', 'request', 'source', 'untracked', 'physical', 'physical-after-commit', 'fence'] as const).map(defect => ['zcode-paused-committed', defect] as const)
 const zcodeMaterialCases = [...(['zcode-old', 'zcode-new'] as const).flatMap(mode => (['none', 'prior-draft', 'session', 'send', 'turn', 'input', 'query', 'message', 'model', 'worktree', 'stop', 'seed', 'source', 'tests', 'schema', 'scope', 'request', 'exit', 'terminal', 'no-progress-cancelled', 'progress-cancelled', 'fence'] as const).map(defect => [mode, defect] as const)), ['zcode-old', 'no-progress-empty-commit-cancelled'] as const, ...(['sealed-unpublished', 'sealed-tampered', 'sealed-missing-exit', 'sealed-unobserved'] as const).map(defect => ['zcode-old', defect] as const), ['zcode-new', 'failed-observation'] as const, ...(['none', 'no-commit', 'provider-code'] as const).map(defect => ['zcode-transport-git', defect] as const), ['zcode-p1-transport-dirty', 'none'] as const, ...zcodeP1CommittedCases, ...zcodeP1CompletedRpcCases, ...zcodeCompletedRpcCases, ...(['none', 'prior-draft', 'older-physical', 'staged', 'review', 'review-foreign-path', 'session', 'stop', 'seed', 'source', 'tests', 'schema', 'context', 'index', 'scope', 'worktree', 'fence', 'cas', 'missing-exit'] as const).map(defect => ['zcode-dirty', defect] as const), ...(['none', 'prior-draft', 'older-physical', 'missing-exit'] as const).map(defect => ['zcode-p1-dirty', defect] as const)]
 const claudeFailedPhysicalCases = (['none', 'no-new-commit', 'cold-before-reserve', 'cold-after-reserve', 'cold-after-draft', 'v61-reserved', 'v61-planned', 'duplicate-init', 'session', 'user', 'failed-observation', 'known-stop', 'source', 'schema', 'index', 'fence'] as const).map(defect => ['claude-failed-physical', defect] as const)
-const zcodeP1ProviderDraftCases = (['none', 'mixed-unsupported', 'no-draft', 'source', 'extra-untracked', 'schema', 'input', 'stop', 'attribution', 'unrelated', 'other-operation', 'cold-provenance', 'cold-reserved'] as const).map(defect => ['zcode-p1-provider-draft', defect] as const)
+const zcodeP1ProviderDraftCases = (['none', 'mixed-unsupported', 'no-draft', 'no-draft-sidecars', 'no-draft-source', 'source', 'extra-untracked', 'schema', 'input', 'stop', 'attribution', 'unrelated', 'other-operation', 'cold-provenance', 'cold-reserved'] as const).map(defect => ['zcode-p1-provider-draft', defect] as const)
 for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'], ['native-failure', 'archived'], ['zcode-p1-transport-committed', 'archived'], ['native-failure', 'no-progress-143'], ['native-failure', 'no-progress-143-foreign'], ['native-failure', 'no-progress-143-stop'], ['native-failure', 'no-progress-143-process'], ['native-failure', 'progress-143'], ['native-failure', 'none'], ['native-failure', 'prior-draft'], ['native-failure', 'session'], ['native-failure', 'user'], ['native-failure', 'exit'], ['native-failure', 'unknown'], ['native-failure', 'source'], ['native-failure', 'tests'], ['native-failure', 'stop'], ['missing-final', 'none'], ['pause', 'none'], ['pause', 'prior-draft'], ['missing-final', 'prior-draft'], ['pause', 'older-pause'], ['pause', 'not-started'], ['pause', 'no-commit'], ['missing-final', 'session'], ['missing-final', 'user'], ['missing-final', 'exit'], ['missing-final', 'unknown'], ['missing-final', 'completed'], ['pause', 'source'], ['pause', 'tests'], ['pause', 'scope'], ['pause', 'seed'], ['pause', 'thread'], ['pause', 'turn'], ['pause', 'schema'], ['pause', 'worktree'], ['pause', 'stop'], ['pause', 'request'], ...zcodeMaterialCases, zcodeP0CommittedCase, ...zcodeP0CancelledGitCases, ...zcodeP1ProviderDraftCases] as const) test(`旧Native无typed witness的新attempt仅观察最新Git材料，旧原件不补签 mode=${mode}/${defect}`, async t => {
   const zcodeCancelledGit = mode === 'zcode-paused-committed'
   const priorCancelledCommit = zcodeCancelledGit && defect === 'physical-after-commit'
@@ -260,6 +260,9 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
   const rpcFailure = `ZCode native RPC timeout (${defect === 'rpc-method' ? 'session/messages' : 'session/events'})`
   const providerDraft = mode === 'zcode-p1-provider-draft'
   const providerCold = providerDraft && (defect === 'cold-provenance' || defect === 'cold-reserved')
+  const providerDraftAbsent = providerDraft && ['no-draft', 'no-draft-sidecars', 'no-draft-source'].includes(defect)
+  const authorSidecars = defect === 'no-draft-sidecars' || defect === 'no-draft-source'
+    ? ['.spex-sync-drafts/_gen_data_1.mjs', '.spex-sync-drafts/_gen_data_2.mjs'] : []
   const providerFailure = defect === 'unrelated' ? 'ZCode model is unsupported' : 'ZCode provider rejected the native turn (retryable=false)'
   const mixedProvider = defect === 'mixed-unsupported'
   const siblingPath = '.spec/project/io/alternate-contract/spec.md', siblingSource = 'src/io/alternate.js', siblingTest = 'tests/alternate.test.mjs', siblingFailure = 'ZCode model does not support the sibling tool policy'
@@ -418,7 +421,12 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
         assert.deepEqual(current.pendingAnalysis, previous.pendingAnalysis, '续审仍绑定同一已校验分析')
         assert.equal(analysisCalls, 1, '历史旧审稿不可采纳时只派发新的独审')
       }
-      if (!materialExpected) { assert.equal(existsSync(join(workspace, path)), false, '不合格或无稿的旧记录不能向新seed投影正文'); restartedWithoutMaterial = true; throw Object.assign(new Error('反例安全进入新派发且无旧材料'), { code: 'unsupported' }) }
+      if (!materialExpected) {
+        assert.equal(existsSync(join(workspace, path)), false, '不合格或无稿的旧记录不能向新seed投影正文')
+        assert.ok(authorSidecars.every(sidecar => !existsSync(join(workspace, sidecar))), '新 seed 不带入旧脚本')
+        restartedWithoutMaterial = true
+        throw Object.assign(new Error('反例安全进入新派发且无旧材料'), { code: 'unsupported' })
+      }
       if (claudeFailed) {
         if (coldAfterDraft) assert.equal(repairedCommit, undefined, '冷续必须读取原 Native 结果，无新分析执行')
         assert.ok(existsSync(join(workspace, path)), '正式retry的新分析seed缺少原物理草稿')
@@ -513,7 +521,9 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
     if (sibling) siblingRequestKey = request.requestKey
     else { originalRequest = request; originalAttemptNumber = attempt.number; oldPath = workspace }
     mkdirSync(join(workspace, path, '..'), { recursive: true })
-    for (const text of sibling || defect === 'not-started' || defect === 'no-commit' || defect === 'no-draft' || defect.startsWith('no-progress-') ? [] : firstCancelledCommit ? [priorText] : [priorText, latest]) {
+    for (const sidecar of authorSidecars) writeFileSync(join(workspace, sidecar), `// 原作者的未追踪辅助文件 ${sidecar}\n`)
+    if (defect === 'no-draft-source') writeFileSync(join(workspace, 'src/export.js'), '原作者越界修改的源码')
+    for (const text of sibling || providerDraftAbsent || defect === 'not-started' || defect === 'no-commit' || defect.startsWith('no-progress-') ? [] : firstCancelledCommit ? [priorText] : [priorText, latest]) {
       writeFileSync(join(workspace, path), text)
       if (!dirty && (!cancelledPhysical || firstCancelledCommit)) { execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '--allow-empty', '-m', 'normal native draft progress'], { stdio: 'pipe' }) }
     }
@@ -767,6 +777,7 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
     assert.deepEqual(checkpoint.failure, { code: 'unsupported', message: providerFailure })
     assert.equal(checkpoint.result, undefined); assert.equal(originalState.output, undefined)
     assert.equal(latestHead, originalRequest!.worktree!.baseCommit)
+    if (providerDraftAbsent) assert.equal(oldDraftBytes, null)
     if (defect === 'none' || providerCold) {
       assert.deepEqual(oldDraftBytes, Buffer.from(latest))
       assert.equal(execFileSync('git', ['-C', oldPath, '--no-optional-locks', 'status', '--porcelain=v1', '--untracked-files=all'], { encoding: 'utf8' }).trimEnd(), `?? ${oldDraftPath}`)
@@ -1091,7 +1102,8 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
   if (providerDraft) {
     const current = f.store.listAttempts(activeOperation.id).at(-1)!
     assert.deepEqual(current.dispatchPlans.filter(dispatch => dispatch.purpose.startsWith('elaboration_') && dispatch.key !== siblingRequestKey).map(dispatch => dispatch.purpose), materialExpected ? ['elaboration_generate', 'elaboration_review'] : restartedWithoutMaterial ? ['elaboration_generate'] : [])
-    assert.equal(restartedWithoutMaterial, ['no-draft', 'unrelated', 'other-operation'].includes(defect), JSON.stringify(result.failure))
+    assert.equal(restartedWithoutMaterial, ['no-draft', 'no-draft-sidecars', 'unrelated', 'other-operation'].includes(defect), JSON.stringify(result.failure))
+    for (const sidecar of authorSidecars) assert.equal(readFileSync(join(oldPath, sidecar), 'utf8'), `// 原作者的未追踪辅助文件 ${sidecar}\n`)
     assert.equal(current.candidate, null); assert.equal(current.verification, null)
     assert.equal(f.store.listJournals(activeOperation.id).length, 0)
     assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
