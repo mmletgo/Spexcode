@@ -16,6 +16,8 @@ related:
   - spec-dashboard/src/sessionSurface.js
   - spec-dashboard/src/SyncModelSettings.jsx
   - spec-dashboard/llm-manager/settings.jsx
+  - spec-dashboard/llm-manager/settings.css
+  - spec-dashboard/llm-manager/build.mjs
 ---
 # settings
 

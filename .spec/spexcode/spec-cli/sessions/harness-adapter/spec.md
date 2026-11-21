@@ -47,6 +47,9 @@ did not choose.
 
 [[grok-structured-runtime]] and [[cursor-structured-runtime]] register runtime identities for structured worktree execution and settled close. Materialization and configured launchers use the ordinary harness registry.
 
+A configured adapter may declare that a particular record owns a per-turn runtime. That record joins no
+shared generation. The adapter authenticates its exact stopped runtime before the lifecycle stop guard proceeds.
+
 ## acceptance
 
 An adapter is accepted by LIVE BEHAVIOR, never by artifact inspection: pi's stop-gate bridge shipped with every

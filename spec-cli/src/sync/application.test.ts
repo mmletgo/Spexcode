@@ -2407,13 +2407,18 @@ test('llm_manager 新准入固定正式路线、冷重放和普通重试均沿�
     assert.equal(replay.id, first.id)
     assert.equal(replay.model, first.model)
     await f.application.control(first.id, 'cancel')
-    await assert.rejects(f.application.submit({ nodeId: 'demo', requestId: 'manager-native-retry-explicit', retryOf: first.id, model: 'llm-manager' }), { code: 'sync_llm_manager_retry_requires_quota' })
     const next = (await f.application.submit({ nodeId: 'demo', requestId: 'manager-native-retry', retryOf: first.id })).operation!
     assert.equal(next.model, first.model)
     assert.equal(next.input.id, first.input.id)
     assert.equal(next.policyDigest, first.policyDigest)
     assert.equal(readFileSync(calls, 'utf8'), 'called\n')
     await f.application.control(next.id, 'cancel')
+    const selected = (await f.application.submit({ nodeId: 'demo', requestId: 'manager-native-retry-explicit', retryOf: next.id, model: 'llm-manager' })).operation!
+    assert.equal(managedRoute(selected.model)?.vendor, 'grok')
+    assert.equal(selected.input.id, first.input.id)
+    assert.equal(selected.policyDigest, first.policyDigest)
+    assert.equal(readFileSync(calls, 'utf8'), 'called\ncalled\n')
+    await f.application.control(selected.id, 'cancel')
     assert.equal(f.calls.length, 0)
   } finally { await f.application.stopService(); f.cleanup() }
 })

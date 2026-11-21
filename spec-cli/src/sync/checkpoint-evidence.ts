@@ -3,6 +3,7 @@ import { assertRejectedOutput, structuredExecutionPolicy, type RejectedStructure
 import { nativeWorktreePrompt } from '../native-worktree-runtime.js'
 import { assertGrokRejectedFinalSource, isGrokNativeExitFailure } from '../grok-structured.js'
 import { assertCursorRejectedFinalSource } from '../cursor-structured.js'
+import { assertCodexRejectedFinalSource } from '../codex-native-worktree-structured.js'
 import { sessionIdForCreateKey } from '../sessions.js'
 import { readRecord } from '../session-record.js'
 import { contentHash, readEvidence } from './snapshot.js'
@@ -172,6 +173,10 @@ export function authenticateNativeRejectedFinal(store: SyncStore, operation: Syn
   if (plan.request.model?.startsWith('cursor:')) {
     if (record.harness !== 'cursor-structured') fail('Cursor 拒绝结果没有原结构化执行器身份')
     assertCursorRejectedFinalSource(prompt, state, record.worktreePath)
+  }
+  if (plan.request.model?.startsWith('codex:') && state.version === 6) {
+    if (record.harness !== 'codex-headless') fail('Codex 拒绝结果没有原结构化执行器身份')
+    assertCodexRejectedFinalSource(record.session, prompt, state, record.worktreePath)
   }
   return state
 }

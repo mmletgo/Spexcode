@@ -1207,7 +1207,7 @@ export default {
     syncModelConflict: 'The project configuration changed. Reload before saving.',
     syncModelSaved: 'Saved to project config. Commit the change and re-enable sync to use it for new operations.',
     syncModelStatusFailed: 'Could not check which service manages sync models on this host.',
-    syncVendor: { claude: 'Claude Code', grok: 'Grok Build', zcode: 'ZCode', cursor: 'Cursor' },
+    syncVendor: { claude: 'Claude Code', grok: 'Grok Build', zcode: 'ZCode', cursor: 'Cursor', codex: 'Codex' },
     launchersDescription: 'Launcher profiles are read from the same CLI-backed project configuration used to start sessions.',
     launcherConfigPath: 'Optionally, you can also edit .spec/spexcode.json directly for advanced changes.',
     launcherName: 'launcher name',

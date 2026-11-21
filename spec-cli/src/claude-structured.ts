@@ -611,6 +611,7 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
     : { PATH: process.env.PATH, HOME: homedir(), TMPDIR: join(root, 'tmp'), CLAUDE_CONFIG_DIR: configHome, CLAUDE_CODE_TMPDIR: join(root, 'tmp'), CLAUDE_CODE_DEBUG_LOGS_DIR: join(root, 'debug'), MAX_MCP_OUTPUT_TOKENS: '500000' }
   if (nativeConfiguration) {
     for (const key of sessionIdentityEnvVars()) delete env[key]
+    delete env.CLAUDECODE
     env.SPEXCODE_SESSION_ID = id
   }
   const authenticationEnvironment = nativeConfiguration ? { environment: {}, source: 'native' } : prepareClaudeAuthenticationEnvironment(process.env)

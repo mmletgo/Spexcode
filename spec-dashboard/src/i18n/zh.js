@@ -1193,7 +1193,7 @@ export default {
     syncModelConflict: '项目配置已变化，请重新加载后再保存。',
     syncModelSaved: '已保存到项目配置。提交变更并重新启用同步后，新操作将使用此设置。',
     syncModelStatusFailed: '无法确认此宿主机由哪个服务管理同步模型。',
-    syncVendor: { claude: 'Claude Code', grok: 'Grok Build', zcode: 'ZCode', cursor: 'Cursor' },
+    syncVendor: { claude: 'Claude Code', grok: 'Grok Build', zcode: 'ZCode', cursor: 'Cursor', codex: 'Codex' },
     launchersDescription: '启动器配置来自与 CLI 启动会话相同的项目配置链路。',
     launcherConfigPath: '另外，你也可以直接编辑 .spec/spexcode.json 做高级修改。',
     launcherName: '启动器名称',

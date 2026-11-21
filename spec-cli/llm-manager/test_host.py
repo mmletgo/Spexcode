@@ -125,7 +125,7 @@ class HostTests(unittest.TestCase):
         self, route: dict[str, str], session: str, cli: Path, *args: str, sandbox: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         env = {**os.environ, "ANTHROPIC_API_KEY": "fixture-inherited", "ANTHROPIC_AUTH_TOKEN": "fixture-inherited",
-               "CLAUDE_CODE_OAUTH_TOKEN": "fixture-inherited", "CLAUDE_CODE_USE_BEDROCK": "1"}
+               "CLAUDE_CODE_OAUTH_TOKEN": "fixture-inherited", "CLAUDE_CODE_USE_BEDROCK": "1", "CLAUDECODE": "1"}
         options = ["--spex-sandbox-profile", sandbox] if sandbox is not None else []
         return subprocess.run(
             [sys.executable, "-IB", str(HOST), "claude", str(self.config), route["routeId"], session, str(cli), *options, *args],
@@ -223,7 +223,7 @@ assert os.getppid() == os.getpgrp()
 key = os.environ["ANTHROPIC_API_KEY"]
 assert len(key) >= 40 and "synthetic" not in key
 assert os.environ["ANTHROPIC_BASE_URL"].startswith("http://127.0.0.1:")
-assert not any(name in os.environ for name in ("ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK"))
+assert not any(name in os.environ for name in ("ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDECODE"))
 if sys.platform == "darwin":
     for path in sys.argv[3:6]:
         try:

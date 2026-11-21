@@ -681,6 +681,11 @@ def reserve(manager: LlmManager, config: HostConfig, request: ReserveRequest) ->
             ))
             return
         choice = manager.skip_option(choice)
+    # Manager.resolve also skips full groups and Providers. Ask the same acquisition
+    # gate, keeping the probe transaction from leaving a lease for an unavailable route.
+    with manager.session.begin_nested() as probe:
+        manager.acquire(frozen.group_id, frozen.provider_id)
+        probe.rollback()
     raise HostError("llm_manager_route_unavailable")
 
 
@@ -1225,7 +1230,7 @@ def launch_claude(
         relay = ClaudeRelay(config, route_id, session_id, exported.base_url, selected.secret, route.model, provider.timeout_seconds)
         inherited = {
             name: value for name, value in os.environ.items()
-            if not name.startswith(("ANTHROPIC_", "CLAUDE_CODE_OAUTH_", "CLAUDE_CODE_USE_", "SPEX_LLM_MANAGER_"))
+            if name != "CLAUDECODE" and not name.startswith(("ANTHROPIC_", "CLAUDE_CODE_OAUTH_", "CLAUDE_CODE_USE_", "SPEX_LLM_MANAGER_"))
         }
         bypass = ",".join(part for part in (inherited.get("NO_PROXY", inherited.get("no_proxy", "")), "127.0.0.1", "localhost") if part)
         inherited.update({

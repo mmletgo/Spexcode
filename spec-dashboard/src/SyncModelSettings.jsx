@@ -2,7 +2,7 @@ import { useEffect, useId, useState } from 'react'
 import { apiUrl, PROJECT_ID, PROJECT_MACHINE_ID } from './project.js'
 import { loadProjectConfig, saveProjectConfig } from './projects.js'
 
-const vendors = ['claude', 'grok', 'zcode', 'cursor']
+const vendors = ['claude', 'grok', 'zcode', 'cursor', 'codex']
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
 const isLoopback = (host) => ['localhost', '127.0.0.1', '[::1]'].includes(host)
 

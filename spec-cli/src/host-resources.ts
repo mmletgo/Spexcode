@@ -552,8 +552,12 @@ const sessionStopBlocker = async (
   const ownerBlocker = sessionOwnerBlocker(id, harnessId, recs)
   if (ownerBlocker) return ownerBlocker
   const target = targetRecord ? harnessRuntimeRecord(targetRecord) : null
-  const exactKey = targetHarness?.targetDescriptorKey?.(target ?? { session: id, harnessSessionId: null }) ?? null
+  const exactKey = targetHarness?.targetDescriptorKey?.(target ?? { session: id, harnessSessionId: null })
   const targetDescriptors = targetHarness?.sharedRuntimes?.(runtimeRoot(), target ?? undefined) ?? []
+  if (target && targetHarness?.targetDescriptorKey && exactKey === undefined && targetDescriptors.length === 0) {
+    const stopped = await targetHarness.coldRetirementPreflight?.(target)
+    return stopped?.ok ? null : stopped?.reason ?? 'exact per-turn runtime stop is unproven'
+  }
   if (targetRecord?.harness_session_id && targetHarness?.targetDescriptorKey && !exactKey)
     return `${targetHarness.id} target has no exact shared-runtime generation binding`
   if (targetHarness && targetDescriptors.length === 0) return null

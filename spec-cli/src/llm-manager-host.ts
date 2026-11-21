@@ -1,8 +1,10 @@
 import { execFile } from 'node:child_process'
 import { statSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
+import { setTimeout as wait } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { readManagedRoute, type ManagedRoute } from './llm-manager-route.js'
+import type { NativeTokenUsage } from './session-structured-policy.js'
 
 const bridge = fileURLToPath(new URL('../llm-manager/host.py', import.meta.url))
 const installedSettingsPath = '/llm-manager/'
@@ -64,17 +66,31 @@ export async function resolveManagedRoute(nextAfter?: ManagedRoute): Promise<Man
   return route === null ? null : readManagedRoute(route)
 }
 
-export async function reserveManagedRoute(route: ManagedRoute, sessionId: string): Promise<void> {
-  await managerCall({ action: 'reserve', route, sessionId })
+export async function reserveManagedRoute(route: ManagedRoute, sessionId: string, signal: AbortSignal): Promise<void> {
+  for (;;) {
+    signal.throwIfAborted()
+    try {
+      await managerCall({ action: 'reserve', route, sessionId })
+      return
+    } catch (error) {
+      if (!(error instanceof LlmManagerHostError) || error.code !== 'llm_manager_capacity') throw error
+      await wait(350, undefined, { signal })
+    }
+  }
 }
 
 export async function settleManagedRoute(
   route: ManagedRoute,
   sessionId: string,
   outcome: 'completed' | 'quota' | 'stopped',
-  usage?: { inputTokens?: number; cachedInputTokens?: number; cacheCreationInputTokens?: number; outputTokens?: number },
+  usage?: NativeTokenUsage,
 ): Promise<'completed' | 'quota' | 'stopped'> {
-  const result = await managerCall({ action: 'settle', route, sessionId, outcome, ...(usage ? { usage } : {}) })
+  const result = await managerCall({ action: 'settle', route, sessionId, outcome, ...(usage ? { usage: {
+    inputTokens: usage.totalInputTokens ?? usage.uncachedInputTokens,
+    cachedInputTokens: usage.cacheReadInputTokens,
+    cacheCreationInputTokens: usage.cacheWriteInputTokens,
+    outputTokens: usage.outputTokens,
+  } } : {}) })
   if (!result || typeof result !== 'object' || !('outcome' in result)
     || (result.outcome !== 'completed' && result.outcome !== 'quota' && result.outcome !== 'stopped'))
     throw new LlmManagerHostError('llm_manager_host_invalid_response')

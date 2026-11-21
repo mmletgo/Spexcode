@@ -780,12 +780,10 @@ export class SyncApplication {
       }
       const requested = input.model ?? (prior || retry ? syncModel(prior ?? retry!) : configuredSyncModel(settings, Boolean(plan.agentWorkflow)))
       const inherited = prior ?? (input.model === undefined ? retry : undefined)
-      const nextAfter = !prior && retry && input.model === 'llm-manager' ? managedRoute(syncModel(retry)) : undefined
-      if (!prior && retry && input.model === 'llm-manager') {
-        const attempt = retry.currentAttemptId ? this.store.readAttempt(retry.currentAttemptId) : null
-        if (!nextAfter || attempt?.status !== 'failed' || attempt.failure?.code !== 'provider_quota_exhausted')
-          throw new SyncApplicationError('sync_llm_manager_retry_requires_quota', '切换到功能组的下一条路线须有直属旧操作的额度耗尽证据')
-      }
+      const previous = !prior && retry && input.model === 'llm-manager' && retry.currentAttemptId
+        ? this.store.readAttempt(retry.currentAttemptId) : undefined
+      const nextAfter = retry && previous?.status === 'failed' && previous.failure?.code === 'provider_quota_exhausted'
+        ? managedRoute(syncModel(retry)) : undefined
       const model = await resolveSyncModel(requested, Boolean(plan.agentWorkflow), inherited ? syncModel(inherited) : undefined, nextAfter)
       if (prior && (syncModel(prior) !== model || (ingress?.origin ?? prior.origin) !== origin || (prior.retryOf ?? null) !== (retry?.id ?? null) || (ingress?.input ?? prior.input).id !== snapshot.id || JSON.stringify((ingress?.input ?? prior.input).source) !== JSON.stringify(snapshot.source) || prior.policyDigest !== syncPlanDigest(plan) || ((ingress ?? prior).requestBlob?.sha256 ?? null) !== (requestBlob?.sha256 ?? null))) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
       const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: input.requestId, origin, ...syncModelBinding(model), ...(input.inheritRetryBudget ? { inheritRetryBudget: true } : {}), ...(recordUnverifiedCoverage ? { recordUnverifiedCoverage } : {}), ...(retry ? { retryOf: retry.id, ...(retry.baselineSelection ? { executionScope: retry.scope, impactDigest: retry.impactDigest } : {}) } : {}), budget: retry && (revalidation || input.inheritRetryBudget || readP0ReviewChallenges(this.store, retry).size) ? retry.budget : settings.budget, managedRoot: this.managedRoot, ...(requestBlob ? { requestBlob } : {}), previousBaselinePair, ...(frozen ? { baselineSelection: frozen.selection } : {}), automaticSourceAdoption }, businessSelection)

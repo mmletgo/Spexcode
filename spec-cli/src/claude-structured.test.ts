@@ -1047,7 +1047,7 @@ test('native CLI configuration accepts opaque selections and omits --model for d
 for (const [selected, configMode, outcome] of [['default', 'unset', 'success'], ['default', 'empty', 'success'], ['sonnet', 'explicit', 'success'], ['provider/opaque[1m]', 'explicit', 'success'], ['provider/opaque[1m]', 'explicit', 'controlled-success-143'], ['provider/opaque[1m]', 'explicit', 'controlled-cancel-after-term'], ['provider/opaque[1m]', 'explicit', 'periodic-recovered'], ['provider/opaque[1m]', 'explicit', 'periodic-expired'], ['provider/opaque[1m]', 'explicit', 'periodic-cancelled'], ['provider/opaque[1m]', 'explicit', 'periodic-final-pending'], ['provider/opaque[1m]', 'explicit', 'periodic-error'], ['provider/opaque[1m]', 'explicit', 'periodic-error-stop-unknown'], ['provider/opaque[1m]', 'explicit', 'periodic-result-first'], ['any/alias + context', 'explicit', 'schema-exhaustion']] as const) test(`native CLI configuration fixture preserves configuration and model observations for ${selected}/${configMode}/${outcome}`, async t => {
   const directory = mkdtempSync(join(tmpdir(), 'spex-claude-native-config-')), bin = join(directory, 'bin'), config = selected === 'default' ? join(directory, 'home', '.claude') : join(directory, 'native-config'), workspace = join(directory, 'worktree'), realm = join(directory, 'realm'), root = join(realm, 'native')
   const identityKeys = [...new Set(['SPEXCODE_SESSION_ID', ...HARNESS_IDENTITIES.map(harness => harness.sessionEnvVar)])].filter(Boolean)
-  const environmentKeys = [...identityKeys, 'PATH', 'HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_USE_BEDROCK', 'ANTHROPIC_MODEL', 'ANTHROPIC_BASE_URL', 'PUBLIC_CLAUDE_FIXTURE_LOG'] as const
+  const environmentKeys = [...identityKeys, 'PATH', 'HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDECODE', 'CLAUDE_CODE_USE_BEDROCK', 'ANTHROPIC_MODEL', 'ANTHROPIC_BASE_URL', 'PUBLIC_CLAUDE_FIXTURE_LOG'] as const
   const before = Object.fromEntries(environmentKeys.map(key => [key, process.env[key]]))
   const periodic = outcome.startsWith('periodic-'), release = join(directory, 'release-result')
   const controlled = outcome.startsWith('controlled-') || outcome === 'periodic-recovered', lateCancel = outcome === 'controlled-cancel-after-term', controller = new AbortController()
@@ -1069,7 +1069,7 @@ for (const [selected, configMode, outcome] of [['default', 'unset', 'success'], 
     writeFileSync(cli, `#!${process.execPath}
 const fs=require('node:fs'),path=require('node:path'),readline=require('node:readline');
 if(process.argv.includes('--version')){console.log('9.8.7 (Claude Code)');process.exit(0)}
-const exhausted=${JSON.stringify(outcome === 'schema-exhaustion')},output=exhausted?{ok:'bad'}:{ok:true};const args=process.argv.slice(2);fs.writeFileSync(process.env.PUBLIC_CLAUDE_FIXTURE_LOG,JSON.stringify({args,config:process.env.CLAUDE_CONFIG_DIR,provider:process.env.CLAUDE_CODE_USE_BEDROCK,model:process.env.ANTHROPIC_MODEL,baseUrl:process.env.ANTHROPIC_BASE_URL,identity:Object.fromEntries(${JSON.stringify(identityKeys)}.filter(key=>process.env[key]!==undefined).map(key=>[key,process.env[key]])),store:{SPEXCODE_HOME:process.env.SPEXCODE_HOME,SPEX_SESSION_DATABASE_PATH:process.env.SPEX_SESSION_DATABASE_PATH}}));
+const exhausted=${JSON.stringify(outcome === 'schema-exhaustion')},output=exhausted?{ok:'bad'}:{ok:true};const args=process.argv.slice(2);fs.writeFileSync(process.env.PUBLIC_CLAUDE_FIXTURE_LOG,JSON.stringify({args,config:process.env.CLAUDE_CONFIG_DIR,provider:process.env.CLAUDE_CODE_USE_BEDROCK,nested:process.env.CLAUDECODE,model:process.env.ANTHROPIC_MODEL,baseUrl:process.env.ANTHROPIC_BASE_URL,identity:Object.fromEntries(${JSON.stringify(identityKeys)}.filter(key=>process.env[key]!==undefined).map(key=>[key,process.env[key]])),store:{SPEXCODE_HOME:process.env.SPEXCODE_HOME,SPEX_SESSION_DATABASE_PATH:process.env.SPEX_SESSION_DATABASE_PATH}}));
 const emit=x=>console.log(JSON.stringify(x));
 readline.createInterface({input:process.stdin}).on('line',line=>{
   const input=JSON.parse(line);
@@ -1090,7 +1090,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
 });
 `)
     chmodSync(cli, 0o755)
-    process.env.PATH = `${bin}:${before.PATH}`; process.env.HOME = join(directory, 'home'); if (configMode === 'unset') delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = configMode === 'empty' ? '' : config; process.env.CLAUDE_CODE_USE_BEDROCK = '1'; process.env.ANTHROPIC_MODEL = 'native-user-default'; process.env.ANTHROPIC_BASE_URL = 'https://public-provider.invalid/arbitrary-route'; process.env.PUBLIC_CLAUDE_FIXTURE_LOG = log
+    process.env.PATH = `${bin}:${before.PATH}`; process.env.HOME = join(directory, 'home'); if (configMode === 'unset') delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = configMode === 'empty' ? '' : config; process.env.CLAUDECODE = '1'; process.env.CLAUDE_CODE_USE_BEDROCK = '1'; process.env.ANTHROPIC_MODEL = 'native-user-default'; process.env.ANTHROPIC_BASE_URL = 'https://public-provider.invalid/arbitrary-route'; process.env.PUBLIC_CLAUDE_FIXTURE_LOG = log
     for (const key of identityKeys) process.env[key] = `PUBLIC_PARENT_${key}`
     const schema = { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false }
     let execution: StructuredExecution = { ...structuredExecutionPolicy({ schema, inputDigest: 'fixture', purpose: 'native-config-fixture', timeoutMs: controlled || periodic ? null : 10000, model: `claude:${selected}`, worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'read' } }), nativeConfiguration: 'cli-config-v1' }
@@ -1228,8 +1228,9 @@ const waiting = setInterval(() => {
     assert(!Object.hasOwn(terminal, 'modelUsage'))
     assert(!Object.hasOwn(terminal, 'usage'))
     assert.equal(execution.model, `claude:${selected}`)
-    const observed = JSON.parse(readFileSync(log, 'utf8')) as { args: string[]; config?: string; provider: string; model: string; baseUrl: string; identity: Record<string, string>; store: Record<string, string | undefined> }
+    const observed = JSON.parse(readFileSync(log, 'utf8')) as { args: string[]; config?: string; provider: string; nested?: string; model: string; baseUrl: string; identity: Record<string, string>; store: Record<string, string | undefined> }
     assert.equal(observed.config, configMode === 'unset' ? undefined : configMode === 'empty' ? '' : config); assert.equal(observed.provider, '1'); assert.equal(observed.model, 'native-user-default'); assert.equal(observed.baseUrl, 'https://public-provider.invalid/arbitrary-route')
+    assert.equal(observed.nested, undefined)
     assert.deepEqual(observed.identity, { SPEXCODE_SESSION_ID: 'native' })
     assert.deepEqual(observed.store, { SPEXCODE_HOME: process.env.SPEXCODE_HOME, SPEX_SESSION_DATABASE_PATH: process.env.SPEX_SESSION_DATABASE_PATH })
     assert.equal(observed.args.includes('--model'), selected !== 'default')
