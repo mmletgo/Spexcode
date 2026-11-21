@@ -14,6 +14,7 @@ related:
   - spec-dashboard/src/i18n/en.js
   - spec-dashboard/src/i18n/zh.js
   - spec-dashboard/src/sessionSurface.js
+  - spec-dashboard/src/SyncModelSettings.jsx
 ---
 # settings
 
@@ -96,6 +97,13 @@ Settings page refit locally without claiming tmux geometry; returning to Session
   scrollbar geometry, and this component supplies only its centered content), and the single home for
   future settings. Today it owns the language picker, the terminal base-surface and font-size controls, the shortcuts editor,
   the theme-preset picker, the CLI-backed launcher profile list, and the optional raw project config editor.
+  The Sync model section reads the local project's saved model and uses the same revision-guarded project
+  config API to update only `sync.model` for an enabled project. Users can select the host's LLM Manager
+  feature group or choose a supported native CLI with its local default or an exact model. A revision
+  conflict requires a reload. After saving, the page explains how committing the config and re-enabling
+  sync takes effect for new operations under [[sync-model-selection]].
+  The separate Claude Code API action opens the Router's verified local setup page directly from a local
+  browser. Its availability reflects the setup page, while Claude Code retains native control of credentials.
   Launcher profiles are read through the same `/api/settings` path as the New Session picker. The page can add
   multiple named launchers of the same harness type, including headless variants, by collecting a name, type, and
   command and writing the same `sessions.launchers` object the CLI reads. It also owns an optional raw

@@ -1,13 +1,59 @@
 import { execFile } from 'node:child_process'
 import { dirname, isAbsolute } from 'node:path'
 import { promisify } from 'node:util'
+import { fetchBypassingLoopbackProxy, isLoopbackHost } from '../loopback-transport.js'
 import { SyncApplicationError } from './settings.js'
 
 export const DEFAULT_SYNC_MODEL = 'gpt-6.1-sol'
 export const DEFAULT_NATIVE_SYNC_MODEL = 'claude:default'
 const MANAGED_SYNC_MODEL = 'llm-manager'
-const WORKTREE_VENDORS: readonly string[] = ['cursor', 'claude', 'zcode', 'grok']
+const WORKTREE_PROGRAMS = { cursor: 'cursor-agent', claude: 'claude', zcode: 'zcode', grok: 'grok' }
+const WORKTREE_VENDORS = Object.keys(WORKTREE_PROGRAMS)
 const runRouteBridge = promisify(execFile)
+
+function installed(program: string): Promise<boolean> {
+  return runRouteBridge('/usr/bin/which', [program], {
+    encoding: 'utf8',
+    env: { PATH: process.env.PATH },
+    timeout: 1000,
+    maxBuffer: 4096,
+  }).then(({ stdout }) => Boolean(stdout.trim()), () => false)
+}
+
+async function claudeApiSetupUrl(): Promise<string | undefined> {
+  const registered = process.env.SPEX_CLAUDE_API_SETTINGS_URL
+  if (!registered && !await installed('ccr')) return undefined
+  const url = URL.parse(registered ?? 'http://127.0.0.1:3456/ui/')
+  if (!url || url.protocol !== 'http:' || !isLoopbackHost(url.hostname)
+    || !url.port || url.username || url.password || url.search || url.hash) return undefined
+  return fetchBypassingLoopbackProxy(url.href, {
+    method: 'HEAD',
+    redirect: 'error',
+    signal: AbortSignal.timeout(800),
+  }).then(response => response.ok && response.headers.get('content-type')?.startsWith('text/html') ? url.href : undefined,
+    () => undefined)
+}
+
+/** 供网页显示宿主可用入口，不替操作选路或探测上游凭据。 */
+export async function readSyncModelSettings() {
+  const configured = Boolean(process.env.SPEX_LLM_MANAGER_PYTHON && process.env.SPEX_LLM_MANAGER_CLI_CONFIG)
+  const resolveManager = configured
+    ? resolveSyncModel(MANAGED_SYNC_MODEL, true).catch(error => {
+      if (error instanceof SyncApplicationError) return undefined
+      throw error
+    })
+    : Promise.resolve(undefined)
+  const [nativeVendors, selection, setupUrl] = await Promise.all([
+    Promise.all(Object.entries(WORKTREE_PROGRAMS).map(async ([id, program]) => ({ id, installed: await installed(program) }))),
+    resolveManager,
+    claudeApiSetupUrl(),
+  ])
+  return {
+    nativeVendors,
+    llmManager: { configured, ...(selection ? { selection } : {}) },
+    claudeApi: setupUrl ? { available: true, setupUrl } : { available: false },
+  }
+}
 
 /** 新准入采用项目或宿主配置；读取历史操作时保留原缺省身份。 */
 export function syncModel(input: { model?: string }, nativeWorkflow = false): string {

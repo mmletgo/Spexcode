@@ -6,6 +6,7 @@ import { keysOf, isCustom, setBinding, resetBindings } from './bindings.js'
 import { THEMES, getTheme, applyTheme } from './theme.js'
 import { PageScroll } from './PageScroll.jsx'
 import { Segmented } from './Segmented.jsx'
+import SyncModelSettings from './SyncModelSettings.jsx'
 import { PROJECT_ID } from './project.js'
 import { useLaunchers } from './launch.js'
 import { loadProjectConfig, saveProjectConfig } from './projects.js'
@@ -36,10 +37,10 @@ function Section({ title, children }) {
   )
 }
 
-function Row({ label, children }) {
+function Row({ label, htmlFor, children }) {
   return (
     <div className="set-row">
-      <span className="set-label">{label}</span>
+      {htmlFor ? <label className="set-label" htmlFor={htmlFor}>{label}</label> : <span className="set-label">{label}</span>}
       <div className="set-control">{children}</div>
     </div>
   )
@@ -248,6 +249,9 @@ export default function Settings() {
               <output>{terminalFontSize}px</output>
             </label>
           </Row>
+        </Section>
+        <Section title={t('settings.secSyncModel')}>
+          <SyncModelSettings t={t} Row={Row} />
         </Section>
         <LauncherProfiles t={t} launchers={launcherState.launchers} refreshLaunchers={launcherState.refreshLaunchers} />
         <ProjectConfigEditor t={t} />

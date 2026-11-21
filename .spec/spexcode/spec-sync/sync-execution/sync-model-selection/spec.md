@@ -3,6 +3,8 @@ title: 同步操作的固定模型选择
 status: active
 code:
   - spec-cli/src/sync/model-selection.ts
+related:
+  - spec-cli/src/sync/model-settings.test.ts
 ---
 # 同步操作的固定模型选择
 
@@ -27,6 +29,8 @@ code:
 `cursor:default` 选择 [[cursor-structured-runtime]] 并沿用本机 Cursor CLI 配置。`cursor:<模型或别名>` 原样交给 CLI。启用 llm_manager 的宿主功能组将 Cursor 放在首位时，已就绪的 Cursor 路线优先。
 
 `--model llm-manager` 和 `sync.model: llm-manager` 在新原生工作树操作准入时读取宿主功能组。宿主登记选路后，无操作级和项目级模型的新原生操作默认通过同一功能组选路。后端用绝对路径 `SPEX_LLM_MANAGER_PYTHON` 调用已安装的 `llm_manager.cli_route`，配置路径取 `SPEX_LLM_MANAGER_CLI_CONFIG`。只接收声明已支持的 CLI 厂商及模型，按原功能组的次序选路。进程没有继承的认证环境，输出只含厂商和模型。登记不完整或查不到已就绪路线时拒绝准入。具体 CLI 选择写入原 operation 和运行描述。相同请求复用已冻结选择，正式 retryOf 可重新显式选择 `llm-manager`。观察、重放、恢复及独审不重新选路。
+
+工作台用只读宿主视图显示已安装的原生 CLI、LLM Manager 功能组当前选择和 Claude Code API 配置入口。宿主可用 `SPEX_CLAUDE_API_SETTINGS_URL` 登记已有的本机网关配置页，未登记且已安装 Claude Code Router 时检查其本机默认页面。验证仅发出不跟随重定向的 loopback HTTP HEAD 以确认页面可打开。API 地址和凭据在原生配置网页维护。视图不读写网页配置、凭据、操作或预算，也不代表模型连通性检查。
 
 sync run/verify 的 API 和 CLI --model 接受操作级模型选择。选择进入不可变 admission/payload/ingress 身份，同 requestId 改模型拒绝；普通重复业务请求不能靠新 requestId 换模型取得新预算或归并到另一模型，换模型必须经正式 retryOf。显式 retry 未指定模型时继承原操作，显式另选模型仍复用原 source/input/policy/readset/request/origin 并保持既有已批准 P1 义务。
 
