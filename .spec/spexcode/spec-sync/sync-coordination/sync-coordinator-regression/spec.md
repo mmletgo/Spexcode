@@ -187,6 +187,8 @@ P4 显式重试回归先经实际 P1 扩展源码路径和业务 ID，再以明�
 
 当前独立证据：真实Linux/arm64 Node固定镜像的完整成功链（真实CLI init与正常hooks、source/index保留、receipt重入）、断言失败新attempt修复、V4中途输入变化、Git commit后DB未结算恢复、GAP独立完整FLOW部分receipt均通过。明确注入模型业务行，V1使用实际Tree-sitter/图/意图门禁，V2程序检查独立session/thread/result摘要，V3与Git均实际执行；不声称已跑真实LLM或P3–P5。未知历史native创建终态保留resource与recovery_required，不假removed。
 
+`code_to_spec` 的同候选 V3 续验回归由临时 Git、隔离 SQLite 及受控验证驱动先产生真实编排的失败阶段和结算回执。经公开提交入口两次正式重试，第一次仍失败，第二次以新 V3 结果完成同候选 Git 交付。两次均为零模型调用，原资源与失败原件保持。删除原 V3 失败阶段时须在新验证和模型派发前拒绝。
+
 V3失败后修复的模型若再次收到P1会返回弱化AC，因此测试必须证明不会再次派发P1、后续生成prompt使用精确相同accepted契约/AC内容摘要，callsUsed仅计两次代码调用不重置。数据库重启后失败attempt同样从原P1 evidence复用，不依赖内存状态。
 
 P3 容量失败回归使用真实 SQLite/Git 及明确 native 接缝：已通过行为独审，P1 合法候选仅有 warning/deferredImplementation 缺测试时，独审基础设施失败不能成为业务 seed。live 与 SQLite 重启均在同预算和冻结 inputDigest 内重新生成及独审；此前具体业务拒绝先经 seed 续修，随后容量失败必须清 seed，不借旧 review。取消/总调用预算耗尽及终态重入不增加 calls，source/index/快照身份不变；用例在独立 code review 停止，不冒称 Docker 或交付成功。

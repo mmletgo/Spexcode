@@ -2074,7 +2074,7 @@ export async function recoverSyncOperationResources(store: SyncStore, operationI
 }
 
 /** 正式重试只沿原失败链冷验已冻结候选；缺证据必须报错，不能退回模型重做。 */
-async function verificationRetrySource(store: SyncStore, operation: SyncOperation, view: InputView, renew: () => Promise<void>): Promise<{ operation: SyncOperation; attempt: SyncAttempt; generation: SavedGeneration; elaboration: SavedElaboration; analysis: CodeBehaviorEvidence; partitions: SyncPartitionPlan } | null> {
+async function verificationRetrySource(store: SyncStore, operation: SyncOperation, view: InputView, codeToSpec: boolean, renew: () => Promise<void>): Promise<{ operation: SyncOperation; attempt: SyncAttempt; generation: SavedGeneration; elaboration: SavedElaboration; analysis: CodeBehaviorEvidence; partitions: SyncPartitionPlan } | null> {
   if (!operation.retryOf) return null
   let owner = store.readOperation(operation.retryOf)
   if (syncModel(owner) !== syncModel(operation) || owner.recordUnverifiedCoverage !== operation.recordUnverifiedCoverage) return null
@@ -2088,11 +2088,11 @@ async function verificationRetrySource(store: SyncStore, operation: SyncOperatio
     first = ancestor.currentAttemptId ? store.readAttempt(ancestor.currentAttemptId) : null
   }
   if (syncModel(ancestor) !== syncModel(operation) || ancestor.recordUnverifiedCoverage !== operation.recordUnverifiedCoverage) return null
-  if (first?.failure?.code !== 'verification_unsupported') return null
+  if (first?.failure?.code !== 'verification_unsupported' && !(codeToSpec && first?.failure?.code === 'verification_failed')) return null
   function reject(message: string): never { return fail('candidate_retry_binding', message) }
   const candidate = first.candidate
   if (!candidate) reject('原验证失败缺少冻结候选，不能作为续验或重新生成')
-  const seen = new Set<string>(), verifiedCarriers: { operation: SyncOperation; attempt: SyncAttempt }[] = []
+  const seen = new Set<string>(), verificationSources: { operation: SyncOperation; attempt: SyncAttempt; executedFailure: boolean }[] = []
   for (;;) {
     if (seen.has(owner.id)) reject('正式续验来源链存在循环')
     seen.add(owner.id)
@@ -2111,17 +2111,22 @@ async function verificationRetrySource(store: SyncStore, operation: SyncOperatio
       owner = store.readOperation(owner.retryOf); continue
     }
     const generation = stage<SavedGeneration>(store, owner, prior, 'generation')
+    const executedFailure = codeToSpec && prior.failure.code === 'verification_failed'
+    if (executedFailure && prior.failure.kind !== 'repairable') reject('原V3失败分类与已执行测试不匹配')
     if (!generation) {
       const history = store.listAttempts(owner.id)
       if (!owner.retryOf || owner.callsUsed !== 0 || owner.delivery !== null || history.length !== 1 || history[0].id !== prior.id || prior.dispatchPlans.length || prior.currentSession !== null) reject('候选续验后继已有模型派发或不完整历史，不能跳过它复用祖先候选')
       if (prior.failure.code !== 'verification_unsupported') {
-        verifiedCarriers.push({ operation: owner, attempt: prior })
+        verificationSources.push({ operation: owner, attempt: prior, executedFailure })
         owner = store.readOperation(owner.retryOf); continue
       }
     }
-    if (prior.failure.code !== 'verification_unsupported' || prior.failure.kind !== 'unsupported') reject('原冻结候选没有V3前置unsupported失败，不能取得续验资格')
-    const unsupported = readSyncCheckpoints(store, owner, prior).json.map(({ value }) => value as Stage).filter(value => value.version === 'sync-stage-v1' && value.stage?.startsWith('v3:') && value.operationId === owner.id && value.attemptId === prior.id && value.inputId === owner.input.id && value.policyDigest === owner.policyDigest && stageSelectionMatches(store, owner, value))
-    if (unsupported.length !== 1 || !prior.failure.evidenceRefs.some(ref => ref.sha256 === unsupported[0].resultRef.sha256) || stage<VerificationResult>(store, owner, prior, unsupported[0].stage)?.status !== 'unsupported' || store.findResource(prior.id, `verification:${contentHash(`${prior.id}:${unsupported[0].stage.slice(3)}`)}`) || !generation && store.listResources(prior.id).length) reject('续验缺少原V3前置unsupported原件，或原验证已经登记资源')
+    if (executedFailure) verificationSources.push({ operation: owner, attempt: prior, executedFailure })
+    else {
+      if (prior.failure.code !== 'verification_unsupported' || prior.failure.kind !== 'unsupported') reject('原冻结候选没有V3前置unsupported失败，不能取得续验资格')
+      const unsupported = readSyncCheckpoints(store, owner, prior).json.map(({ value }) => value as Stage).filter(value => value.version === 'sync-stage-v1' && value.stage?.startsWith('v3:') && value.operationId === owner.id && value.attemptId === prior.id && value.inputId === owner.input.id && value.policyDigest === owner.policyDigest && stageSelectionMatches(store, owner, value))
+      if (unsupported.length !== 1 || !prior.failure.evidenceRefs.some(ref => ref.sha256 === unsupported[0].resultRef.sha256) || stage<VerificationResult>(store, owner, prior, unsupported[0].stage)?.status !== 'unsupported' || store.findResource(prior.id, `verification:${contentHash(`${prior.id}:${unsupported[0].stage.slice(3)}`)}`) || !generation && store.listResources(prior.id).length) reject('续验缺少原V3前置unsupported原件，或原验证已经登记资源')
+    }
     if (!generation) { owner = store.readOperation(owner.retryOf!); continue }
     const elaboration = stage<SavedElaboration>(store, owner, prior, 'elaboration'), analysis = readCurrentSyncAnalysis(store, owner)
     const partitions = reviewPlanStage(store, owner, prior, 'candidate-partition-plan')?.result, originalPlan = reviewPlanStage(store, owner, prior, 'partition-plan')?.result
@@ -2129,7 +2134,7 @@ async function verificationRetrySource(store: SyncStore, operation: SyncOperatio
     const guidance = analysis!.analysis.guidanceContractVersion
     if (guidance === 'code-behavior-guidance-v8') {
       if (analysisStageBinding(store, owner, analysis!.analysis)?.guidanceContractVersion !== guidance) reject('旧v8指导与原P0阶段原件失配')
-      if (verifiedCarriers.length || store.listResources(prior.id).some(resource => resource.plan.kind === 'verification')) reject('旧v8指导的候选来源链已有V3执行记录，不能按预检失败重新生成')
+      if (verificationSources.length || store.listResources(prior.id).some(resource => resource.plan.kind === 'verification')) reject('旧v8指导的候选来源链已有V3执行记录，不能按预检失败重新生成')
       verifyCandidate(owner.input.source.commonDir, candidate!)
       return null
     }
@@ -2191,28 +2196,36 @@ async function verificationRetrySource(store: SyncStore, operation: SyncOperatio
     if (!budget || !Array.isArray(budget.requiredKeys) || canonical(budget.requiredKeys.filter(key => key.endsWith(':code_review')).sort()) !== canonical(dispatch.requiredKeys.filter(key => key.endsWith(':code_review')).sort()) || canonical(unique(p2.partitionEvidence!.map(member => member.partitionId))) !== canonical(unique(dispatch.reviews.map(review => review.id)))) reject('最终独审集合未精确覆盖原冻结派发计划的全部就绪local与依赖edge')
     if (new Set(p2.partitionEvidence!.map(item => item.partitionId)).size !== p2.partitionEvidence!.length || [...owner.readyScope.contractIds, ...owner.readyScope.flowIds].some(id => !checked.has(id)) || canonical(p2.traces.filter(trace => trace.purpose === 'code_review')) !== canonical(traces)) reject('最终独审缺少真实完整覆盖或身份并集')
     verifyCandidate(owner.input.source.commonDir, candidate!)
-    if (verifiedCarriers.length) {
+    if (verificationSources.length) {
       const historical = new Set([...(owner.previousBaselinePair?.retiredIds ?? []), ...(owner.baselineSelection ? selectedRetiredIds(store.readBusinessBaselineSelection(owner.id)!) : [])])
       const before = await readFrozenContracts(owner.input.source.canonicalRoot, priorDeliveryFiles({ ...owner, baselineSelection: store.readBusinessBaselineSelection(owner.id) }, view, [...policy.readPaths, ...owner.scope.paths], policy))
       const frozen = await candidateContext(store, owner, candidate, p1)
       const runs = acceptanceRuns(frozen, owner.readyScope, policy, { before, ids: p1.retiredIds.filter(id => !historical.has(id)) }, unexecutedCandidateIds(owner, frozen, owner.readyScope))
-      for (const carrier of verifiedCarriers) {
+      for (const carrier of verificationSources) {
         await renew()
-        const { operation: source, attempt } = carrier, commonDir = source.input.source.commonDir
+        const { operation: source, attempt, executedFailure } = carrier, commonDir = source.input.source.commonDir
         const exported = stage<{ path: string; digest: string }>(store, source, attempt, 'export')
         const intent = stage<{ path: string; tree: string; candidateDigest: string }>(store, source, attempt, 'export-intent')
-        const resources = store.listResources(attempt.id)
+        const resources = store.listResources(attempt.id).filter(resource => source.id !== owner.id || resource.plan.kind === 'verification')
         if (!resources.length || !exported || !intent || intent.path !== exported.path || intent.tree !== candidate.tree || intent.candidateDigest !== candidate.digest || exported.digest !== await verificationExportDigest(exported.path)) reject('候选续验后继缺少原冻结导出或真实已结算验收资源')
+        const runOutcomes = new Map<string, VerificationResult['status']>()
         for (const resource of resources) {
           const run = runs.find(run => resource.plan.key === `verification:${contentHash(`${attempt.id}:${run.verificationId}`)}`)
           if (!run || resource.plan.kind !== 'verification' || resource.phase !== 'removed' || resource.operationId !== source.id || resource.attemptId !== attempt.id || resource.generation !== attempt.generation || resource.plan.inputId !== source.input.id || resource.plan.candidateDigest !== candidate.digest) reject('候选续验后继存在未知、未结算或绑定失配的验证资源')
           const request = JSON.parse(readEvidence(commonDir, resource.plan.planBlob).toString()) as Omit<VerificationRequest, 'previousCheckpoint'>
           if (request.runId !== contentHash(`${attempt.id}:${run.verificationId}`) || canonical(request.policy) !== canonical(run.policy) || request.candidateExportPath !== exported!.path || request.candidateExportDigest !== exported!.digest || contentHash(JSON.stringify(request)) !== resource.plan.payloadDigest) reject('候选续验后继原验证请求、政策或导出绑定失配')
           const recovered = await runAttemptVerification(store, fenceFor(source, attempt), request, { driver: async () => reject('只读冷验不得派发验证driver'), onCheckpointRecorded: async () => reject('只读冷验不得写入旧验证checkpoint') })
-          const checkpoint = recovered.result.checkpoint, evidence = recovered.result.evidence
-          if (recovered.resourceId !== resource.id || recovered.result.status !== 'passed' || !checkpoint || !evidence || checkpoint.notCreated || evidence.outcome !== 'passed' || evidence.exitCode !== 0 || evidence.logsTruncated || evidence.reportFormat !== 'node-test-events-v1' || evidence.runId !== request.runId || evidence.inputDigest !== source.input.id || evidence.candidateDigest !== candidate.digest || evidence.exportDigest !== exported!.digest || evidence.policyDigest !== checkpoint.policyDigest || evidence.configDigest !== checkpoint.configDigest || evidence.runnerDigest !== checkpoint.config.runnerDigest || evidence.containerId !== checkpoint.containerId || canonical(checkpoint.config.policy) !== canonical(run.policy)) reject('候选续验后继原真实验证没有完整passed回执或内容绑定失配')
+          const { checkpoint, evidence, status } = recovered.result
+          const failedRun = executedFailure && status === 'failed'
+          if (recovered.resourceId !== resource.id || !(status === 'passed' || failedRun) || !checkpoint || !evidence || checkpoint.notCreated || evidence.outcome !== status || !failedRun && evidence.exitCode !== 0 || evidence.logsTruncated || evidence.reportFormat !== 'node-test-events-v1' || evidence.runId !== request.runId || evidence.inputDigest !== source.input.id || evidence.candidateDigest !== candidate.digest || evidence.exportDigest !== exported!.digest || evidence.policyDigest !== checkpoint.policyDigest || evidence.configDigest !== checkpoint.configDigest || evidence.runnerDigest !== checkpoint.config.runnerDigest || evidence.containerId !== checkpoint.containerId || canonical(checkpoint.config.policy) !== canonical(run.policy)) reject('原真实验证回执缺失或内容绑定失配')
           const report = parseVerificationReport(evidence.stdout, run.policy.expectedTestIds)
-          if (!report.reportComplete || report.reportTruncated || report.unmatchedTestIds.length || report.tests.some(test => test.status !== 'passed') || canonical(report.tests) !== canonical(evidence.tests) || canonical(report.unmatchedTestIds) !== canonical(evidence.unmatchedTestIds) || evidence.reportComplete !== report.reportComplete) reject('候选续验后继原业务测试失败、缺失或报告不完整')
+          const reportPassed = report.reportComplete && !report.unmatchedTestIds.length && report.tests.every(test => test.status === 'passed')
+          if (!failedRun && !reportPassed || report.reportTruncated || canonical(report.tests) !== canonical(evidence.tests) || canonical(report.unmatchedTestIds) !== canonical(evidence.unmatchedTestIds) || evidence.reportComplete !== report.reportComplete) reject('原业务测试报告与真实执行不一致')
+          if (executedFailure) {
+            const originalStage = partitionStage<VerificationResult>(store, source, attempt, `v3:${run.verificationId}`)
+            if (!originalStage || canonical(originalStage.result) !== canonical(recovered.result) || failedRun && !attempt.failure!.evidenceRefs.some(ref => ref.sha256 === originalStage.resultRef.sha256)) reject('原V3阶段或正式失败没有绑定真实已结算报告')
+          }
+          runOutcomes.set(run.verificationId, status)
           const terminal = resource.checkpoints.filter(item => item.phase === 'terminal').map(item => JSON.parse(readEvidence(commonDir, item.checkpointRef).toString()) as NonNullable<typeof checkpoint>)
           if (!resource.checkpoints.some(item => item.phase === 'created') || !terminal.length || terminal.some(item => canonical(item.evidence) !== canonical(evidence) || item.configDigest !== checkpoint.configDigest || item.containerId !== checkpoint.containerId)) reject('候选续验后继缺少原真实created及terminal验证回执')
           if (checkpoint.version === 'verification-checkpoint-v2') {
@@ -2221,6 +2234,10 @@ async function verificationRetrySource(store: SyncStore, operation: SyncOperatio
             const cleanup = transport?.cleanup as { effect?: unknown; settled?: boolean; cleaned?: boolean } | undefined
             if (!transport || canonical(transport.plan) !== canonical(checkpoint.config.transport) || transport.attestation?.exportDigest !== exported!.digest || transport.attestation.runnerDigest !== checkpoint.config.runnerDigest || !closed?.closed || !closed.rebuildersDrained || !Array.isArray(closed.effects) || !Array.isArray(closed.fencedNotExecuted) || closed.fencedNotExecuted.length || !cleanup?.settled || !cleanup.cleaned || !transport.effects.some(effect => canonical(effect) === canonical(cleanup.effect)) || transport.effects.filter(effect => effect.kind !== 'cleanup').some(effect => !closed.effects!.some(item => item.receipt?.settled && !item.receipt.rejected && canonical(item.receipt.effect) === canonical(effect)))) reject('候选续验后继缺少原远端closed排空、完整effect或staging移除证明')
           }
+        }
+        if (executedFailure) {
+          const failedIndex = runs.findIndex(run => runOutcomes.get(run.verificationId) === 'failed')
+          if (failedIndex < 0 || runOutcomes.size !== failedIndex + 1 || runs.slice(0, failedIndex).some(run => runOutcomes.get(run.verificationId) !== 'passed')) reject('原V3未保留完整通过前序及唯一失败命令')
         }
       }
     }
@@ -2535,7 +2552,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
       if (signal.aborted) fail('cancelled', '协调执行已停止')
       store.renewLease(fence, leaseMs); await yieldToControl(); store.renewLease(fence, leaseMs)
       store.bindComposedInput(fence, view.composed)
-      const retrySource = await verificationRetrySource(store, operation, view, async () => { store.renewLease(fence!, leaseMs); await yieldToControl(); store.renewLease(fence!, leaseMs) })
+      const retrySource = await verificationRetrySource(store, operation, view, options.plan.version === 'sync-coordinator-v2' && options.plan.direction === 'code_to_spec', async () => { store.renewLease(fence!, leaseMs); await yieldToControl(); store.renewLease(fence!, leaseMs) })
       if (retrySource) {
         if (attempt.dispatchPlans.length) fail('candidate_retry_binding', '本次重试已有模型派发，不能把原候选当作其新生成或独审结果')
         const { elaboration, analysis, generation, partitions } = retrySource, source = retrySource.operation

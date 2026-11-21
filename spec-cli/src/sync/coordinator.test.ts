@@ -8965,7 +8965,8 @@ test('Coordinator Native Spec→Code scratch构建后6→1→1沿原builder来�
   assert.equal(f.store.listJournals(f.operation.id).length, 0); assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
 })
 
-for (const defect of ['none', 'stale-v8', 'stale-v8-carrier', 'recording-continuation', 'recording-continuation-failed', 'recording-continuation-resource', 'failed-continuation', 'failed-continuation-drift', 'deferred-implementation', 'deferred-native-mismatch', 'metadata-parent', 'edge', 'edge-valid', 'review-budget', 'review-budget-keys', 'model', 'source', 'oracle', 'configuration', 'request', 'policy', 'impact', 'readset', 'scope', 'partial', 'candidate', 'generation', 'analysis', 'elaboration', 'review', 'v3', 'publication'] as const) test(`正式retryOf在V3前置unsupported后${defect.startsWith('stale-v8') ? '核对旧指导资格' : '零模型调用续验真实冻结候选'} defect=${defect}`, { timeout: 180000 }, async t => {
+for (const defect of ['none', 'executed-v3', 'executed-v3-missing-stage', 'stale-v8', 'stale-v8-carrier', 'recording-continuation', 'recording-continuation-failed', 'recording-continuation-resource', 'failed-continuation', 'failed-continuation-drift', 'deferred-implementation', 'deferred-native-mismatch', 'metadata-parent', 'edge', 'edge-valid', 'review-budget', 'review-budget-keys', 'model', 'source', 'oracle', 'configuration', 'request', 'policy', 'impact', 'readset', 'scope', 'partial', 'candidate', 'generation', 'analysis', 'elaboration', 'review', 'v3', 'publication'] as const) test(`正式retryOf在V3失败后${defect.startsWith('stale-v8') ? '核对旧指导资格' : '零模型调用续验真实冻结候选'} defect=${defect}`, { timeout: 180000 }, async t => {
+  const executedV3 = defect === 'executed-v3' || defect === 'executed-v3-missing-stage'
   const staleV8 = defect === 'stale-v8' || defect === 'stale-v8-carrier'
   const recording = defect.startsWith('recording-continuation') || defect === 'stale-v8-carrier'
   const multiple = ['edge', 'edge-valid', 'review-budget-keys'].includes(defect)
@@ -8983,10 +8984,10 @@ for (const defect of ['none', 'stale-v8', 'stale-v8-carrier', 'recording-continu
     syncSettings.verifications.push({ ...syncSettings.verifications[0], definition: { id: verify.id, command: verify.command, cwd: verify.cwd, timeoutMs: verify.timeoutMs } })
   }
   const extras: Readonly<Record<string, string>> = multiple ? { [importedPath]: imported, 'src/import/import.js': readFileSync(new URL('src/export.js', fixturePath), 'utf8'), 'tests/import.test.mjs': readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', 'IMPORT').replaceAll('src/export.js', 'src/import/import.js') } : {}
-  const f = await fixture(t, { mode: 'unlimited' }, false, original, 'project', original, { version: 'sync-coordinator-v2', agentWorkflow: 'native-worktree-v1', direction: 'spec_to_code', targets: definitions.map(({ nodeId, path }) => ({ nodeId, path })), sourcePaths: ['src'], executionScope, ...(multiple ? { verifications: syncSettings.verifications } : {}), partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, commitTrigger: { before: null, paths: definitions.map(item => item.path) } }, undefined, 'spec', 'claude:default', true, extras, true, syncSettings, defect === 'metadata-parent')
+  const f = await fixture(t, { mode: 'unlimited' }, false, original, 'project', original, { version: 'sync-coordinator-v2', agentWorkflow: 'native-worktree-v1', direction: executedV3 ? 'code_to_spec' : 'spec_to_code', targets: definitions.map(({ nodeId, path }) => ({ nodeId, path })), sourcePaths: ['src'], executionScope, ...(multiple ? { verifications: syncSettings.verifications } : {}), partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, commitTrigger: { before: null, paths: definitions.map(item => item.path) } }, undefined, executedV3 ? 'code' : 'spec', 'claude:default', true, extras, true, syncSettings, defect === 'metadata-parent')
   await f.realTools()
   let currentStore = f.store
-  let active = f.operation, preflightFails = true, containerExists = false, containerState = 'created'
+  let active = f.operation, preflightFails = !executedV3, testFails = executedV3, containerExists = false, containerState = 'created'
   const calls: string[] = [], versionCalls: string[] = []
   const ok = (stdout = ''): VerificationCommandResult => ({ exitCode: 0, stdout, stderr: '', truncated: false })
   f.options.verificationDriver = async argv => {
@@ -8994,15 +8995,16 @@ for (const defect of ['none', 'stale-v8', 'stale-v8-carrier', 'recording-continu
     if (argv[0] === 'image') return ok(JSON.stringify([{ Id: 'sha256:image', Os: 'linux', Architecture: 'arm64', Config: { Env: ['PATH=/usr/local/bin'], Volumes: null } }]))
     const resource = currentStore.listRecoverableResources().find(item => item.operation.id === active.id && item.resource.plan.kind === 'verification')!.resource
     const checkpoint = JSON.parse(readEvidence(f.input.source.commonDir, resource.checkpointRef).toString()) as VerificationCheckpoint, config = checkpoint.config
-    if (argv[1] === 'inspect') return containerExists ? ok(JSON.stringify([{ Id: 'a'.repeat(64), Name: `/${checkpoint.uniqueContainerName}`, Image: config.imageId, Platform: 'linux', Config: { Image: config.image, User: '1000:1000', WorkingDir: config.policy.cwd === '.' ? '/candidate' : `/candidate/${config.policy.cwd}`, Entrypoint: [config.argv[0]], Cmd: config.argv.slice(1), Labels: checkpoint.labels, Env: config.environment, Healthcheck: { Test: ['NONE'] } }, HostConfig: { ReadonlyRootfs: true, NetworkMode: 'none', Privileged: false, CapDrop: ['ALL'], CapAdd: null, SecurityOpt: ['no-new-privileges'], Init: true, AutoRemove: false, CgroupnsMode: 'private', RestartPolicy: { Name: 'no' }, Memory: config.policy.memoryBytes, MemorySwap: config.policy.memoryBytes, NanoCpus: config.policy.cpus * 1e9, PidsLimit: config.policy.pidsLimit, Tmpfs: { '/tmp': `rw,noexec,nosuid,nodev,size=${config.policy.scratchBytes},mode=1777` }, LogConfig: { Type: 'local', Config: { 'max-size': String(config.policy.logBytes), 'max-file': '1', compress: 'false' } }, Binds: null, Devices: [], PidMode: '', IpcMode: 'private' }, Mounts: [{ Type: 'bind', Source: config.candidatePath, Destination: '/candidate', RW: false }, { Type: 'bind', Source: config.runnerPath, Destination: '/runner', RW: false }], State: { Status: containerState, Running: false, ExitCode: 0, OOMKilled: false, Error: '' } }])) : { ...ok(), exitCode: 1, stderr: 'Error: No such container' }
+    if (argv[1] === 'inspect') return containerExists ? ok(JSON.stringify([{ Id: 'a'.repeat(64), Name: `/${checkpoint.uniqueContainerName}`, Image: config.imageId, Platform: 'linux', Config: { Image: config.image, User: '1000:1000', WorkingDir: config.policy.cwd === '.' ? '/candidate' : `/candidate/${config.policy.cwd}`, Entrypoint: [config.argv[0]], Cmd: config.argv.slice(1), Labels: checkpoint.labels, Env: config.environment, Healthcheck: { Test: ['NONE'] } }, HostConfig: { ReadonlyRootfs: true, NetworkMode: 'none', Privileged: false, CapDrop: ['ALL'], CapAdd: null, SecurityOpt: ['no-new-privileges'], Init: true, AutoRemove: false, CgroupnsMode: 'private', RestartPolicy: { Name: 'no' }, Memory: config.policy.memoryBytes, MemorySwap: config.policy.memoryBytes, NanoCpus: config.policy.cpus * 1e9, PidsLimit: config.policy.pidsLimit, Tmpfs: { '/tmp': `rw,noexec,nosuid,nodev,size=${config.policy.scratchBytes},mode=1777` }, LogConfig: { Type: 'local', Config: { 'max-size': String(config.policy.logBytes), 'max-file': '1', compress: 'false' } }, Binds: null, Devices: [], PidMode: '', IpcMode: 'private' }, Mounts: [{ Type: 'bind', Source: config.candidatePath, Destination: '/candidate', RW: false }, { Type: 'bind', Source: config.runnerPath, Destination: '/runner', RW: false }], State: { Status: containerState, Running: false, ExitCode: containerState === 'exited' && testFails ? 1 : 0, OOMKilled: false, Error: '' } }])) : { ...ok(), exitCode: 1, stderr: 'Error: No such container' }
     if (argv[1] === 'create') { containerExists = true; containerState = 'created'; return ok('a'.repeat(64)) }
     if (argv[1] === 'start') { containerState = 'exited'; return ok('a'.repeat(64)) }
-    if (argv[1] === 'logs') return ok([...config.policy.expectedTestIds.map(id => JSON.stringify({ type: defect === 'recording-continuation-failed' ? 'test:fail' : 'test:pass', data: { name: `${id} controlled`, nesting: 0 } })), JSON.stringify({ type: 'test:summary', data: { counts: { tests: config.policy.expectedTestIds.length }, success: defect !== 'recording-continuation-failed' } })].join('\n'))
+    if (argv[1] === 'logs') return ok([...config.policy.expectedTestIds.map(id => JSON.stringify({ type: testFails || defect === 'recording-continuation-failed' ? 'test:fail' : 'test:pass', data: { name: `${id} controlled`, nesting: 0 } })), JSON.stringify({ type: 'test:summary', data: { counts: { tests: config.policy.expectedTestIds.length }, success: !testFails && defect !== 'recording-continuation-failed' } })].join('\n'))
     if (argv[1] === 'rm') { containerExists = false; return ok('a'.repeat(64)) }
     assert.fail(`unexpected controlled verification command ${argv}`)
   }
   f.options.runner = async request => {
     calls.push(request.purpose)
+    if (executedV3 && active.id !== f.operation.id) throw new StructuredSessionError('unsupported', '同候选的V3续验不应重新派发模型')
     if (defect === 'model' || defect === 'stale-v8') assert.equal(request.model, active.model, '正规重算沿操作冻结的模型')
     else assert.equal(active.id, f.operation.id, '同model续验不能重新派发P0/P1/builder/独审')
     const attempt = currentStore.readAttempt(currentStore.readOperation(active.id).currentAttemptId!), dispatch = attempt.dispatchPlans.find(item => item.key === request.requestKey)!
@@ -9031,12 +9033,12 @@ for (const defect of ['none', 'stale-v8', 'stale-v8-carrier', 'recording-continu
   }
   const produce = staleV8 ? await historicalBehaviorCoordinator(f.parent, 'v8') : runSyncOperation
   const failed = await produce(f.store, active.id, f.options)
-  assert.equal(failed.failure?.code, 'verification_unsupported', JSON.stringify({ failure: failed.failure, calls }))
+  assert.equal(failed.failure?.code, executedV3 ? 'verification_failed' : 'verification_unsupported', JSON.stringify({ failure: failed.failure, calls }))
   const parent = failed.operation, origin = currentStore.readAttempt(parent.currentAttemptId!)
   assert.ok(origin.candidate); assert.equal(origin.verification, null)
   assert.equal(currentStore.listRecoverableResources().length, 0); assert.equal(currentStore.listJournals(parent.id).length, 0)
   const originalCalls = calls.length
-  if (!multiple) assert.deepEqual(calls, ['code_behavior_analyze', 'code_behavior_review', 'elaboration_generate', 'elaboration_review', 'code_generate', 'code_review'])
+  if (!multiple) assert.deepEqual(calls, ['code_behavior_analyze', 'code_behavior_review', 'elaboration_generate', 'elaboration_review', ...(executedV3 ? [] : ['code_generate']), 'code_review'])
   else assert.equal(calls.filter(purpose => purpose === 'code_review').length, 3, '双owner完整候选包含两个local及一个真实edge独审')
   if (defect === 'metadata-parent') assert.notEqual(origin.publicationBase!.parentCommit, parent.input.headCommit, '只读oracle工作区字节形成真实metadata parent')
   if (defect.startsWith('deferred-')) {
@@ -9067,6 +9069,49 @@ for (const defect of ['none', 'stale-v8', 'stale-v8-carrier', 'recording-continu
   const store = application.store; f.useStore(store); currentStore = store
   f.options.managedRoot = join(applicationRuntime, 'managed'); f.options.artifactRoot = join(applicationRuntime, 'artifacts')
   const originalRefs = origin.checkpointRefs.map(ref => ({ ref, stage: (JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as { stage?: string }).stage }))
+  if (executedV3) {
+    const failure = originalRefs.find(item => item.stage === `v3:${verification.id}`)!.ref
+    const resource = store.findResource(origin.id, `verification:${contentHash(`${origin.id}:${verification.id}`)}`)!
+    const oldResource = structuredClone(resource)
+    assert.equal(resource.phase, 'removed')
+    const report = JSON.parse(readEvidence(f.input.source.commonDir, resource.checkpointRef).toString()) as VerificationCheckpoint
+    assert.equal(report.evidence?.outcome, 'failed')
+    assert.equal(report.evidence?.exitCode, 1)
+    assert.equal(report.evidence?.reportComplete, false)
+    const readAttempt = store.readAttempt.bind(store)
+    if (defect === 'executed-v3-missing-stage') store.readAttempt = id => {
+      const attempt = readAttempt(id)
+      return id === origin.id ? { ...attempt, checkpointRefs: attempt.checkpointRefs.filter(ref => ref.sha256 !== failure.sha256) } : attempt
+    }
+    let retryOf = parent.id
+    for (let retry = 1; retry <= 2; retry++) {
+      testFails = retry === 1
+      active = (await application.submit({ nodeId: 'export-contract', requestId: `executed-v3-retry-${retry}`, retryOf })).operation!
+      active = store.ackDispatch(f.input.source.repositoryId, active.dispatchMessageId); f.useOperation(active)
+      const continued = await runSyncOperation(store, active.id, f.options)
+      const fresh = store.readAttempt(continued.operation.currentAttemptId!)
+      assert.equal(continued.operation.callsUsed, 0, JSON.stringify({ failure: continued.failure, calls }))
+      assert.equal(calls.length, originalCalls)
+      assert.deepEqual(fresh.dispatchPlans, [])
+      if (defect === 'executed-v3-missing-stage') {
+        assert.equal(continued.failure?.code, 'candidate_retry_binding', JSON.stringify(continued.failure))
+        assert.equal(store.listResources(fresh.id).length, 0)
+        break
+      }
+      assert.deepEqual(fresh.candidate, origin.candidate)
+      assert.equal(continued.operation.phase, retry === 1 ? 'failed' : 'workspace_synced', JSON.stringify(continued.failure))
+      if (retry === 1) assert.equal(continued.failure?.code, 'verification_failed')
+      else assert.ok(continued.receipt)
+      const freshResource = store.findResource(fresh.id, `verification:${contentHash(`${fresh.id}:${verification.id}`)}`)!
+      assert.equal(freshResource.phase, 'removed')
+      assert.notEqual(freshResource.id, resource.id)
+      retryOf = continued.operation.id
+    }
+    store.readAttempt = readAttempt
+    assert.deepEqual(store.findResource(origin.id, resource.plan.key), oldResource)
+    assert.deepEqual({ ...store.readAttempt(origin.id), status: origin.status }, origin)
+    return
+  }
   if (defect === 'stale-v8') {
     const request = { nodeId: 'export-contract', requestId: 'retry-with-current-guidance', retryOf: parent.id }
     active = (await application.submit(request)).operation!
