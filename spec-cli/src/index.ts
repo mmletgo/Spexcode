@@ -56,6 +56,7 @@ import { configuredSyncApplication, configuredSyncResourceRecoveryApplication, s
 import { withReadonlySnapshotQuery } from './sync/snapshot.js'
 import type { SyncDecisionInput } from './sync/writeback-types.js'
 import { SyncApplicationError } from './sync/settings.js'
+import { readSyncModelSettings } from './sync/model-selection.js'
 import { SyncStoreError } from './sync/store.js'
 import { readSyncFileDiff, SyncDiffReadError } from './sync/diff-read.js'
 const { serve, Hono, cors, etag, createNodeWebSocket } = await daemonRuntime()
@@ -131,6 +132,7 @@ async function syncApplication(queryTree?: string, bodyTree?: unknown) {
   return configuredSyncApplication(await syncTargetRoot(queryTree, bodyTree))
 }
 app.get('/api/sync/settings', async c => c.json(await (await syncApplication(c.req.query('targetTree'))).readSettings()))
+app.get('/api/sync/model-settings', async c => c.json(await readSyncModelSettings()))
 app.post('/api/sync/settings', async c => {
   const body = await syncRequestBody(c.req)
   if (body.expectedConfigDigest !== undefined && typeof body.expectedConfigDigest !== 'string') throw new SyncApplicationError('sync_request_invalid', '配置摘要必须为字符串', 400)
