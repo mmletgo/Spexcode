@@ -125,6 +125,10 @@ Grok P1 只读独审退出超时以真实 SQLite、Git、原生资源桥和受�
 
 ZCode P1 父接口用真实 Git、SQLite 和受控 Native 资源桥保存原结构通过候选与独审 `unsupported`。验证首次失败后没有自动派发，显式暂停、关闭重开数据库和恢复后，新 fence 仅派发一个独立只读审查。原失败、候选、草稿对象、生成追踪和源索引保持。固定公开失败投影一致时，篡改 provider 归因、turn、停止或原发送输入，以及原件缺失、CAS 摘要不符和 JSON 损坏，均在新调用前以 `review_retry_binding` 停止。其他 `unsupported` 走原恢复流程。注入程序异常、只有 errno 码的错误和 Git 进程启动失败均保留原诊断和零派发。对已持久化候选来源及已保留独审派发两处分别冷重启，旧 writer62 均拒绝，新 writer63 在同 fence 仅重开精确独审。测试在父接口审查结果持久化后停止。
 
+ZCode P1 作者的 provider EPIPE 回归以真实 Git、SQLite 和受控 Native 资源桥留下原 seed 上唯一未提交的 JSON。原失败不会在自动轮询时派发。显式暂停、资源结算、冷开并恢复同一操作后，新作者只续该未批准稿，正常提交后由独立会话审查。双 owner 并发中由另一 `unsupported` 主导汇总时，仍只按本 owner 的原失败认证。验证原 Git、index、Native 文件、请求、失败和资源证明逐字保留。无稿、普通模型不支持及正式跨操作重试不复制该材料。额外工作区文件、源码或 schema 变化、错误输入、归因漂移或未知停止拒绝接续。夹具在 P1 与 P2 之间停止。
+
+物理稿来源已保存及续稿请求已保留两处冷停后，writer67 均在写入和派发前拒绝新版 SQLite。writer68 在原 attempt 恢复，使用同一未批准原稿 SHA，已保留的请求摘要逐值一致。[[sync-migrations]] 所需 online backup、事务及原历史记录由 [[sync-store-regression]] 验证。
+
 另一路让接续的分析会话仅返回正常回执并保持原 seed。核其 Native 资源成功结算、原 Git 书证没有新提交、程序不产生批准，原 attempt 留缺少新提交的失败类别。下一 attempt 逐字续原草稿，正常提交后才开启独审；最终分析不得引用上轮无提交的回执。
 
 Native P0单体与分区使用真实临时worktree、Git提交和SQLite检查点，分析/独审syntax或schema拒绝后沿同operation/原预算续原草稿，独审格式拒绝不重跑已校验分析。独审accept的change.id尾字抄错须先持久拒绝并关闭重开SQLite，下一attempt只新派review，原JSON/schema字节及OID、完整missing/unknown诊断与分析trace/OID保持；原accept不成为批准。完整合法业务repair仍按analyze→review→analyze→review续原分析，新review不带旧稿；三attempt兄弟已审原件及各自provenance保持。旧reserved只读派发不补协议，其认证Native错误/CAS原bytes通过原资源桥进入下一真实草稿seed，记录native-material provenance；旧原件保持，不造历史Git witness或业务批准。只读源码/tests及原index保持，回归在P1前明确停止，不调用真实模型、Docker或采纳。
