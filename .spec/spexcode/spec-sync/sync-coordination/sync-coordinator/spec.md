@@ -88,6 +88,8 @@ P0 只在本次 attempt 尚无阶段检查点和 code_behavior saved/reserved �
 
 新 Native P0 attempt 首次冻结 `behavior-draft-protocol` 时登记 `reviewCoveragePreflight`，供 [[sync-code-behavior]] 的独审现场自检沿原候选与当前 Git 评审稿核必审路径与变化 ID。历史已冻结协议及已有派发保持原提示。
 
+支持重复项自检的新 attempt 在同一协议检查点登记 `reviewDuplicatePreflight`。恢复已冻结 attempt 时按原字段生成请求，原先没有该字段的覆盖自检继续保持原字节；新 attempt 只增强评审自检，不改变待审分析和原批准条件。
+
 新 P0 attempt 在首次冻结原 behavior-draft-protocol 时登记 exactChangedPathsPreflight，启用 [[sync-code-behavior]] 的分区分析越界路径自检。已冻结协议或已有 saved/reserved 派发时沿原冻结值，历史缺席保持。该标记只改变新分区分析请求的自检提示，原任务、草稿 schema、业务摘要和独审继续沿原绑定，重新派发的同 owner 可接续已认证原草稿。[[sync-migrations]] writer56 保护提示冻结。
 
 显式 retryOf 只沿正式已结算祖先复用通过独审的局部 P0。冻结来源、输入、原意、计划、读集、业务基线、组合及局部 schema 和范围均一致时，认证原分析与独审、Git 原件和旧模型绑定，保存来源和原 resultRef。新操作只派发未批准分区，允许选择不同模型。原 attempt、调用、草稿及独审不补签。更早祖先因新准入被替代时，仍须重新核对已终结 attempt、活租约、资源和 journal 的结算。当前重新装配完整 P0；P1 仅分析资格及候选续验回到原操作复验该批准，全部当前封口和验证继续执行。

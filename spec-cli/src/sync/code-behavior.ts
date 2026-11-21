@@ -55,7 +55,7 @@ export type CodeBehaviorPostGateReview = {
   findings: { finding: ContractFinding; before: ContractItem; after: ContractItem; changedPaths: string[] }[]
   codeDiff: string
 }
-export type CodeBehaviorInput = { operatorReviewDiagnostic?: P0ReviewDiagnostic; contextTransport?: CodeBehaviorContextTransport; exactChangedPathsPreflight?: true; reviewCoveragePreflight?: true; postGateReview?: readonly CodeBehaviorPostGateReview[]; draftProtocol?: 'code-behavior-draft-v1'; partition?: { id: string; changedPaths: readonly string[]; factSourcePaths: readonly string[]; authorizedParentSpecPaths?: readonly string[] }; model?: string; snapshot: InputSnapshot; baseline: BaselinePair | null; baselineSelection?: FrozenBaselineSelection; composed: ComposedInputRef; readSetDigest: string; policyDigest: string; plan: SyncCoordinatorPlan; requestKey: string; timeoutMs: number | null; signal?: AbortSignal; origin?: 'initial' | 'spec' | 'code' | 'combined' | 'reconcile' | 'decision'; decision?: { request: SyncDecisionInput; previous: CodeBehaviorEvidence; previousComposed?: ComposedInputRef; previousReadPaths?: readonly string[] }; repairDiagnostics?: readonly { code: string; message: string }[] }
+export type CodeBehaviorInput = { operatorReviewDiagnostic?: P0ReviewDiagnostic; contextTransport?: CodeBehaviorContextTransport; exactChangedPathsPreflight?: true; reviewCoveragePreflight?: true; reviewDuplicatePreflight?: true; postGateReview?: readonly CodeBehaviorPostGateReview[]; draftProtocol?: 'code-behavior-draft-v1'; partition?: { id: string; changedPaths: readonly string[]; factSourcePaths: readonly string[]; authorizedParentSpecPaths?: readonly string[] }; model?: string; snapshot: InputSnapshot; baseline: BaselinePair | null; baselineSelection?: FrozenBaselineSelection; composed: ComposedInputRef; readSetDigest: string; policyDigest: string; plan: SyncCoordinatorPlan; requestKey: string; timeoutMs: number | null; signal?: AbortSignal; origin?: 'initial' | 'spec' | 'code' | 'combined' | 'reconcile' | 'decision'; decision?: { request: SyncDecisionInput; previous: CodeBehaviorEvidence; previousComposed?: ComposedInputRef; previousReadPaths?: readonly string[] }; repairDiagnostics?: readonly { code: string; message: string }[] }
 type BehaviorPurpose = 'code_behavior_analyze' | 'code_behavior_review'
 type CompletedBehaviorDraft = { trace: ElaborationTrace; draftOid: string; resultCommit: string; requestRef: BlobRef; receipt: unknown }
 /** 未批准临时稿只记录真实Git身份；readyAnalysis仅省去独审协议失败后的重复分析，不批准独审。 */
@@ -734,8 +734,9 @@ const invalidAcceptanceBasis = acceptanceChanges.flatMap(({ id, ruleIds, source 
 if (missingChangedPaths.length || missingOwnerPaths.length${acceptancePreflight ? ' || invalidAcceptanceBasis.length' : ''}${exactChangedPaths ? ' || invalidChangedPaths.length' : ''}) process.exitCode = 1
 SPEX_P0_COVERAGE`
     const reviewCoverage = input.contextTransport === 'git-json-v6' && (input.reviewCoveragePreflight === true || challengeEvidencePaths !== undefined)
+    const reviewDuplicates = reviewCoverage && input.reviewDuplicatePreflight === true
     if ((input.contextTransport === 'git-json-v4' || input.contextTransport === 'git-json-v5' || input.contextTransport === 'git-json-v6') && purpose === 'code_behavior_review') prompt += `
-在续审开头对已有评审稿运行下方只读检查，提交前再次检查。checkedPaths 只记录已实际独立检查的冻结文件。输出中的路径须重新核对，改用真实已检查文件的精确仓库相对路径；只读了目录、临时文件或不存在的路径时，先检查真正相关的文件。全部必审路径、业务证据、拒因和独立审查继续按原要求完成。${reviewCoverage ? '\ncheckedChangeIds 精确使用 pendingAnalysis.analysis.changes 中的变化 id。该集合为空时填 []。用输出的缺失及越界项核对原草稿，需求、规则与验收 ID 只作为事实和条款证据。' : ''}
+在续审开头对已有评审稿运行下方只读检查，提交前再次检查。checkedPaths 只记录已实际独立检查的冻结文件。输出中的路径须重新核对，改用真实已检查文件的精确仓库相对路径；只读了目录、临时文件或不存在的路径时，先检查真正相关的文件。全部必审路径、业务证据、拒因和独立审查继续按原要求完成。${reviewCoverage ? '\ncheckedChangeIds 精确使用 pendingAnalysis.analysis.changes 中的变化 id。该集合为空时填 []。用输出的缺失及越界项核对原草稿，需求、规则与验收 ID 只作为事实和条款证据。' : ''}${reviewDuplicates ? '\ncheckedPaths 和 checkedChangeIds 内的每个值仅记录一次。按输出的重复项核对原稿，保留实际检查过的值。' : ''}
 node - ${contextPath} ${binding.path} ${worktree!.tree} <<'SPEX_P0_REVIEW_PATHS'
 const { readFileSync } = require('node:fs')
 const { execFileSync } = require('node:child_process')
@@ -751,8 +752,19 @@ ${reviewCoverage ? `const expectedIds = new Set(pendingAnalysis.analysis.changes
 const missingCheckedPaths = ${challengeEvidencePaths ? 'requiredCheckedPaths' : 'task.requiredChangedPaths'}.filter(path => !checkedPaths.includes(path))
 const missingChangeIds = [...expectedIds].filter(id => !checkedChangeIds.includes(id))
 const unknownChangeIds = checkedChangeIds.filter(id => !expectedIds.has(id))
-` : ''}console.log(JSON.stringify({ invalidCheckedPaths${reviewCoverage ? ', missingCheckedPaths, missingChangeIds, unknownChangeIds' : ''} }, null, 2))
-if (invalidCheckedPaths.length${reviewCoverage ? ' || missingCheckedPaths.length || missingChangeIds.length || unknownChangeIds.length' : ''}) process.exitCode = 1
+` : ''}${reviewDuplicates ? `function duplicateValues(values) {
+  const seen = new Set()
+  const duplicates = new Set()
+  for (const value of values) {
+    if (seen.has(value)) duplicates.add(value)
+    else seen.add(value)
+  }
+  return [...duplicates]
+}
+const duplicateCheckedPaths = duplicateValues(checkedPaths)
+const duplicateChangeIds = duplicateValues(checkedChangeIds)
+` : ''}console.log(JSON.stringify({ invalidCheckedPaths${reviewCoverage ? ', missingCheckedPaths, missingChangeIds, unknownChangeIds' : ''}${reviewDuplicates ? ', duplicateCheckedPaths, duplicateChangeIds' : ''} }, null, 2))
+if (invalidCheckedPaths.length${reviewCoverage ? ' || missingCheckedPaths.length || missingChangeIds.length || unknownChangeIds.length' : ''}${reviewDuplicates ? ' || duplicateCheckedPaths.length || duplicateChangeIds.length' : ''}) process.exitCode = 1
 SPEX_P0_REVIEW_PATHS`
     const nativeSchema = draftMode ? DRAFT_RECEIPT_SCHEMA : schema
     const request = { root: input.snapshot.source.canonicalRoot, base: seed?.baseCommit ?? input.snapshot.headCommit, ...(seed ? { worktree: seed } : {}), requestKey: `${input.requestKey}:${purpose}`, inputDigest, purpose, prompt, schema: nativeSchema, timeoutMs: input.timeoutMs, signal, model: syncModel(input), effort: 'high' as const, ...(frozenEntries?.length ? { frozenEntries } : {}) }
