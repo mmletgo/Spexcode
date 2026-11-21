@@ -251,22 +251,25 @@ const zcodeP0CommittedCase = ['zcode-new', 'ordinary-ignored'] as const
 const zcodeP0CancelledGitCases = (['archived', 'cold', 'cold-native-drift', 'idle', 'no-progress-idle', 'closed', 'idle-identity', 'stop', 'request', 'source', 'untracked', 'physical', 'physical-after-commit', 'fence'] as const).map(defect => ['zcode-paused-committed', defect] as const)
 const zcodeMaterialCases = [...(['zcode-old', 'zcode-new'] as const).flatMap(mode => (['none', 'prior-draft', 'session', 'send', 'turn', 'input', 'query', 'message', 'model', 'worktree', 'stop', 'seed', 'source', 'tests', 'schema', 'scope', 'request', 'exit', 'terminal', 'no-progress-cancelled', 'progress-cancelled', 'fence'] as const).map(defect => [mode, defect] as const)), ['zcode-old', 'no-progress-empty-commit-cancelled'] as const, ...(['sealed-unpublished', 'sealed-tampered', 'sealed-missing-exit', 'sealed-unobserved'] as const).map(defect => ['zcode-old', defect] as const), ['zcode-new', 'failed-observation'] as const, ...(['none', 'no-commit', 'provider-code'] as const).map(defect => ['zcode-transport-git', defect] as const), ['zcode-p1-transport-dirty', 'none'] as const, ...zcodeP1CommittedCases, ...zcodeP1CompletedRpcCases, ...zcodeCompletedRpcCases, ...(['none', 'prior-draft', 'older-physical', 'staged', 'review', 'review-foreign-path', 'session', 'stop', 'seed', 'source', 'tests', 'schema', 'context', 'index', 'scope', 'worktree', 'fence', 'cas', 'missing-exit'] as const).map(defect => ['zcode-dirty', defect] as const), ...(['none', 'prior-draft', 'older-physical', 'missing-exit'] as const).map(defect => ['zcode-p1-dirty', defect] as const)]
 const claudeFailedPhysicalCases = (['none', 'no-new-commit', 'cold-before-reserve', 'cold-after-reserve', 'cold-after-draft', 'v61-reserved', 'v61-planned', 'duplicate-init', 'session', 'user', 'failed-observation', 'known-stop', 'source', 'schema', 'index', 'fence'] as const).map(defect => ['claude-failed-physical', defect] as const)
-const zcodeP1ProviderDraftCases = (['none', 'mixed-unsupported', 'no-draft', 'no-draft-sidecars', 'no-draft-source', 'source', 'extra-untracked', 'schema', 'input', 'stop', 'attribution', 'unrelated', 'other-operation', 'cold-provenance', 'cold-reserved', 'retry-cross-provider', 'retry-cross-cold-provenance', 'retry-cross-cold-reserved', 'retry-cross-ancestor', 'retry-cross-seed', 'retry-cross-input', 'retry-cross-model', 'retry-cross-extra-untracked', 'retry-cross-no-draft-sidecars', 'retry-cross-quota'] as const).map(defect => ['zcode-p1-provider-draft', defect] as const)
+const zcodeP1ProviderDraftCases = (['none', 'mixed-unsupported', 'no-draft', 'no-draft-sidecars', 'no-draft-source', 'source', 'extra-untracked', 'schema', 'input', 'stop', 'attribution', 'unrelated', 'other-operation', 'cold-provenance', 'cold-reserved', 'retry-cross-provider', 'retry-cross-cold-provenance', 'retry-cross-cold-reserved', 'retry-cross-ancestor', 'retry-cross-seed', 'retry-cross-input', 'retry-cross-model', 'retry-cross-extra-untracked', 'retry-cross-no-draft-sidecars', 'retry-cross-quota', 'retry-cross-legacy-quota'] as const).map(defect => ['zcode-p1-provider-draft', defect] as const)
 for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'], ['native-failure', 'archived'], ['zcode-p1-transport-committed', 'archived'], ['native-failure', 'no-progress-143'], ['native-failure', 'no-progress-143-foreign'], ['native-failure', 'no-progress-143-stop'], ['native-failure', 'no-progress-143-process'], ['native-failure', 'progress-143'], ['native-failure', 'none'], ['native-failure', 'prior-draft'], ['native-failure', 'session'], ['native-failure', 'user'], ['native-failure', 'exit'], ['native-failure', 'unknown'], ['native-failure', 'source'], ['native-failure', 'tests'], ['native-failure', 'stop'], ['missing-final', 'none'], ['pause', 'none'], ['pause', 'prior-draft'], ['missing-final', 'prior-draft'], ['pause', 'older-pause'], ['pause', 'not-started'], ['pause', 'no-commit'], ['missing-final', 'session'], ['missing-final', 'user'], ['missing-final', 'exit'], ['missing-final', 'unknown'], ['missing-final', 'completed'], ['pause', 'source'], ['pause', 'tests'], ['pause', 'scope'], ['pause', 'seed'], ['pause', 'thread'], ['pause', 'turn'], ['pause', 'schema'], ['pause', 'worktree'], ['pause', 'stop'], ['pause', 'request'], ...zcodeMaterialCases, zcodeP0CommittedCase, ...zcodeP0CancelledGitCases, ...zcodeP1ProviderDraftCases] as const) test(`旧Native无typed witness的新attempt仅观察最新Git材料，旧原件不补签 mode=${mode}/${defect}`, async t => {
   const zcodeCancelledGit = mode === 'zcode-paused-committed'
   const priorCancelledCommit = zcodeCancelledGit && defect === 'physical-after-commit'
   const cancelledPhysical = zcodeCancelledGit && (defect === 'physical' || priorCancelledCommit)
   const completedP1Rpc = mode === 'zcode-p1-completed-rpc', completedRpc = mode === 'zcode-completed-rpc' || completedP1Rpc
   const rpcFailure = `ZCode native RPC timeout (${defect === 'rpc-method' ? 'session/messages' : 'session/events'})`
-  const providerDraft = mode === 'zcode-p1-provider-draft'
+  const providerDraft = mode === 'zcode-p1-provider-draft', legacyQuota = defect === 'retry-cross-legacy-quota'
   const crossProviderRetry = defect.startsWith('retry-cross-')
   const providerFormalRetry = providerDraft && (crossProviderRetry || defect === 'other-operation')
   const providerCold = providerDraft && (defect.endsWith('cold-provenance') || defect.endsWith('cold-reserved'))
-  const providerDraftAbsent = providerDraft && ['no-draft', 'no-draft-sidecars', 'no-draft-source', 'retry-cross-no-draft-sidecars'].includes(defect)
-  const authorSidecars = defect.endsWith('no-draft-sidecars') || defect === 'no-draft-source'
-    ? ['.spex-sync-drafts/_gen_data_1.mjs', '.spex-sync-drafts/_gen_data_2.mjs'] : []
-  const providerFailure = defect === 'unrelated' ? 'ZCode model is unsupported' : 'ZCode provider rejected the native turn (retryable=false)'
-  const mixedProvider = defect === 'mixed-unsupported'
+  const providerDraftAbsent = providerDraft && ['no-draft', 'no-draft-sidecars', 'no-draft-source', 'retry-cross-no-draft-sidecars', 'retry-cross-legacy-quota'].includes(defect)
+  const authorSidecars = legacyQuota
+    ? ['.spex-sync-drafts/.build/rows.py']
+    : defect.endsWith('no-draft-sidecars') || defect === 'no-draft-source'
+      ? ['.spex-sync-drafts/_gen_data_1.mjs', '.spex-sync-drafts/_gen_data_2.mjs'] : []
+  const providerFailure = legacyQuota ? 'ZCode native turn failed (code=unavailable)'
+    : defect === 'unrelated' ? 'ZCode model is unsupported' : 'ZCode provider rejected the native turn (retryable=false)'
+  const mixedProvider = defect === 'mixed-unsupported' || legacyQuota
   const siblingPath = '.spec/project/io/alternate-contract/spec.md', siblingSource = 'src/io/alternate.js', siblingTest = 'tests/alternate.test.mjs', siblingFailure = 'ZCode model does not support the sibling tool policy'
   const committedP1 = mode === 'zcode-p1-transport-committed' || completedP1Rpc
   const typedTransport = mode === 'zcode-transport-git' || mode === 'zcode-p1-transport-dirty' || mode === 'zcode-p1-transport-committed'
@@ -278,7 +281,7 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
   const zcode = mode === 'zcode-old' || freshZCode || zcodeCancelledGit, older = defect === 'older-pause' || defect === 'older-physical'
   const partitionedP1 = providerDraft || completedP1Rpc && defect === 'partition'
   const sealed = defect.startsWith('sealed-'), archiveSource = defect === 'archived' || sealed
-  const rejectedReview = defect === 'review-foreign-path', onlyReview = defect === 'review' || rejectedReview, materialExpected = defect === 'archived' || defect === 'cold' || defect === 'cold-native-drift' || defect === 'none' || defect === 'ordinary-ignored' || defect === 'prior-draft' || older || defect === 'staged' || defect === 'review' || completedP1Rpc && partitionedP1 || mixedProvider || providerCold || defect === 'retry-cross-provider' || coldClaude || priorCancelledCommit || claudeFailed && defect === 'no-new-commit'
+  const rejectedReview = defect === 'review-foreign-path', onlyReview = defect === 'review' || rejectedReview, materialExpected = defect === 'archived' || defect === 'cold' || defect === 'cold-native-drift' || defect === 'none' || defect === 'ordinary-ignored' || defect === 'prior-draft' || older || defect === 'staged' || defect === 'review' || completedP1Rpc && partitionedP1 || mixedProvider && !legacyQuota || providerCold || defect === 'retry-cross-provider' || coldClaude || priorCancelledCommit || claudeFailed && defect === 'no-new-commit'
   const sourcePaths = mixedProvider ? ['src/export.js', siblingSource] : ['src/export.js']
   const siblingFiles = mixedProvider ? {
     [siblingPath]: original.replaceAll('EXPORT', 'ALTERNATE').replaceAll('export-job', 'alternate-job').replaceAll('src/export.js', siblingSource).replaceAll('tests/export.test.mjs', siblingTest).replaceAll('decision:ALTERNATE-POLICY', 'decision:EXPORT-POLICY'),
@@ -524,7 +527,10 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
     if (sibling) siblingRequestKey = request.requestKey
     else { originalRequest = request; originalAttemptNumber = attempt.number; oldPath = workspace }
     mkdirSync(join(workspace, path, '..'), { recursive: true })
-    for (const sidecar of authorSidecars) writeFileSync(join(workspace, sidecar), `// 原作者的未追踪辅助文件 ${sidecar}\n`)
+    for (const sidecar of authorSidecars) {
+      mkdirSync(join(workspace, sidecar, '..'), { recursive: true })
+      writeFileSync(join(workspace, sidecar), `// 原作者的未追踪辅助文件 ${sidecar}\n`)
+    }
     if (defect === 'no-draft-source') writeFileSync(join(workspace, 'src/export.js'), '原作者越界修改的源码')
     for (const text of sibling || providerDraftAbsent || defect === 'not-started' || defect === 'no-commit' || defect.startsWith('no-progress-') ? [] : firstCancelledCommit ? [priorText] : [priorText, latest]) {
       writeFileSync(join(workspace, path), text)
@@ -566,7 +572,10 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
           const event = (type: string, seq: number, payload: Record<string, unknown>) => ({ sessionId: native.sessionId, turnId: native.turnId, type, seq, eventId: `event-${seq}`, payload })
           const response = JSON.stringify({ summary: '正常完成原Native轮次，Git结果尚未发布' })
           const cancelledTurn = zcodeCancelledGit || defect.endsWith('cancelled')
-          const failurePayload = providerDraft && !sibling ? { turnPhase: 'processing_input', error: { code: 'EPIPE', attribution: { source: 'provider', exceptionKind: 'provider_business', retryable: false } } } : { error: { code: sibling ? 'ENOTSUP' : 'EPIPE' } }
+          const failurePayload = providerDraft && !sibling
+            ? { turnPhase: 'processing_input', error: legacyQuota ? { code: '1310', attribution: { source: 'provider', statusCode: 429, providerErrorCode: '1310' } }
+              : { code: 'EPIPE', attribution: { source: 'provider', exceptionKind: 'provider_business', retryable: false } } }
+            : { error: { code: sibling ? 'ENOTSUP' : 'EPIPE' } }
           const terminal = event(completedRpc || sealed || cancelledTurn ? 'turn.completed' : 'turn.failed', 3, { inputId: native.inputId, ...(completedRpc ? { resultType: 'success', response: 'untrusted terminal text, never a successful output' } : sealed ? { resultType: 'success', response } : cancelledTurn ? { resultType: 'cancelled', response: zcodeCancelledGit ? 'untrusted terminal text, never a successful output' : '' } : failurePayload) }), events = [event('turn.started', 1, { inputId: native.inputId, queryId, messageId: 'exact-user' }), event('session.updated', 2, { providerId: model.providerId, modelId: model.modelId, toolCount: 3 }), terminal]
           const send = { sessionId: native.sessionId, content: nativePrompt, inputId: native.inputId, modelSelection: model }
           const idleAndClosed = completedRpc || sealed || zcodeCancelledGit
@@ -584,7 +593,7 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
           const identity = { threadId: native.sessionId, turnId: native.turnId }, failure = sibling ? siblingFailure : providerDraft ? providerFailure : completedRpc ? rpcFailure : freshZCode ? 'ZCode native turn failed (code=EPIPE)' : 'ZCode exact terminal has no matching idle runtime', policy = { ...execution, ...identity, zcodeNative: native, turnStartRequested: true }
           const stop = freshZCode ? await stopZCodeStructuredTurn(policy as ZCodeStructuredExecution) : { nativeStopped: false, acknowledged: false, error: failure }
           configuredSessionApplication().createSession({ sessionId: session, status: 'error' })
-          const errorCode = providerDraft ? 'unsupported' : completedRpc ? 'native_rpc_timeout' : typedTransport ? 'native_turn_transport_failed' : undefined
+          const errorCode = providerDraft && (!legacyQuota || sibling) ? 'unsupported' : completedRpc ? 'native_rpc_timeout' : typedTransport ? 'native_turn_transport_failed' : undefined
           writeRecord({ session, governed: true, worktreePath: workspace, base: seed.baseCommit, forkCommit: seed.baseCommit, branch: null, title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(), harness: 'zcode', harnessSessionId: identity.threadId, runtimeStartToken: null, status: 'error', stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: 'zcode', launchOwner: null, createRequestId: contentHash(actual.sessionCreateKey!), createPayloadHash: hash({ prompt, parent: null, launcher: null, base: actual.worktree!.baseCommit, structuredExecution: execution }), structuredExecution: { ...policy, state: freshZCode || sealed && defect !== 'sealed-unobserved' ? 'failed' : 'cancelling', ...(errorCode ? { errorCode } : {}), error: failure, cancellation: { reason: 'cancelled', requestedAt: Date.now(), ...stop } } })
           if (!sibling) { oldSession = session; oldNativeRoot = root }
           if (defect === 'missing-exit' && !completedRpc) f.store.requestControl(operation.id, 'pause')
@@ -758,7 +767,7 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
   if (defect === 'source' || defect === 'tests' || defect === 'scope' || defect === 'schema' || defect === 'context' || defect === 'index') { const path = defect === 'source' || defect === 'index' ? 'src/export.js' : defect === 'tests' ? 'tests/export.test.mjs' : defect === 'scope' ? '.spex-sync-drafts/foreign.json' : /草稿文件=([^\s；]+)/.exec(originalRequest!.prompt)![1].replace(/\.json$/, defect === 'context' ? '.context.json' : '.schema.json'); writeFileSync(join(oldPath, path), 'foreign unauthorized edit'); if (!dirty || defect === 'index') execFileSync('git', ['-C', oldPath, 'add', path], { stdio: 'pipe' }); if (!dirty) execFileSync('git', ['-C', oldPath, 'commit', '-m', 'negative unauthorized edit'], { stdio: 'pipe' }) }
   if ((mode === 'pause' || mode === 'native-failure') && (defect === 'none' || defect === 'prior-draft' || older)) { rmSync(join(oldNativeRoot, 'public-history.json')); rmSync(join(oldNativeRoot, 'claude-home'), { recursive: true }) }
   let originalRecord = readRecord(oldSession)!; const originalState = originalRecord.structuredExecution!, oldAttempts = f.store.listAttempts(f.operation.id).filter(attempt => !p1 || attempt.number <= originalAttemptNumber)
-  assert.equal(originalState.state, claudeFailed || freshZCode ? 'failed' : 'cancelled'); assert.equal(originalState.cancellation?.nativeStopped, true); assert.equal(originalState.errorCode, providerDraft ? 'unsupported' : completedRpc ? 'native_rpc_timeout' : typedTransport ? 'native_turn_transport_failed' : undefined); assert.equal(originalState.failedWorktree, undefined)
+  assert.equal(originalState.state, claudeFailed || freshZCode ? 'failed' : 'cancelled'); assert.equal(originalState.cancellation?.nativeStopped, true); assert.equal(originalState.errorCode, providerDraft && !legacyQuota ? 'unsupported' : completedRpc ? 'native_rpc_timeout' : typedTransport ? 'native_turn_transport_failed' : undefined); assert.equal(originalState.failedWorktree, undefined)
   const oldResources = oldAttempts.flatMap(attempt => attempt.dispatchPlans.map(dispatch => f.store.findResource(attempt.id, dispatch.key))).filter(resource => resource !== null)
   assert(oldResources.every(resource => resource.phase === 'removed'))
   const completedRpcResource = completedRpc ? oldResources.find(resource => (JSON.parse(readEvidence(f.input.source.commonDir, resource.plan.planBlob).toString()) as NativeRunPlan).expectedSessionId === oldSession) : undefined
@@ -779,7 +788,7 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
     assert.match(dispatch.key, /:elaborate:partition:[^:]+:0:elaboration_generate$/)
     assert.equal(checkpoint.phase, 'removed'); assert.equal(checkpoint.nativeState, 'failed'); assert.equal(checkpoint.status, 'failed')
     assert.deepEqual(dispatch.session, checkpoint.session)
-    assert.deepEqual(checkpoint.failure, { code: 'unsupported', message: providerFailure })
+    assert.deepEqual(checkpoint.failure, { code: legacyQuota ? 'failed' : 'unsupported', message: providerFailure })
     assert.equal(checkpoint.result, undefined); assert.equal(originalState.output, undefined)
     assert.equal(latestHead, originalRequest!.worktree!.baseCommit)
     if (providerDraftAbsent) assert.equal(oldDraftBytes, null)
@@ -1119,7 +1128,7 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
   if (providerDraft) {
     const current = f.store.listAttempts(activeOperation.id).at(-1)!
     assert.deepEqual(current.dispatchPlans.filter(dispatch => dispatch.purpose.startsWith('elaboration_') && dispatch.key !== siblingRequestKey).map(dispatch => dispatch.purpose), materialExpected ? ['elaboration_generate', 'elaboration_review'] : restartedWithoutMaterial ? ['elaboration_generate'] : [], JSON.stringify({ result: result.failure, attempt: current.failure }))
-    assert.equal(restartedWithoutMaterial, ['no-draft', 'no-draft-sidecars', 'unrelated', 'other-operation', 'retry-cross-ancestor', 'retry-cross-no-draft-sidecars'].includes(defect), JSON.stringify(result.failure))
+    assert.equal(restartedWithoutMaterial, ['no-draft', 'no-draft-sidecars', 'unrelated', 'other-operation', 'retry-cross-ancestor', 'retry-cross-no-draft-sidecars', 'retry-cross-legacy-quota'].includes(defect), JSON.stringify(result.failure))
     for (const sidecar of authorSidecars) assert.equal(readFileSync(join(oldPath, sidecar), 'utf8'), `// 原作者的未追踪辅助文件 ${sidecar}\n`)
     assert.equal(current.candidate, null); assert.equal(current.verification, null)
     assert.equal(f.store.listJournals(activeOperation.id).length, 0)
@@ -5067,7 +5076,7 @@ for (const target of ['code_behavior_analyze', 'elaboration_generate'] as const)
   assert.equal(f.calls.some(call => call.purpose === 'code_generate'), false)
 })
 
-for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read-witness', 'format-read-witness-twice', 'format-wrong-witness', 'format-formal-retry', 'format-wrong-packet', 'format-wrong-candidate', 'legacy-review', 'v3-review', 'paused', 'paused-review', 'newer-generation', 'wrong-stop', 'wrong-candidate', 'wrong-task', 'partition-settled-interrupted-review'] as const) test(`P1已结算${mode.startsWith('format') ? '格式失败独审' : mode === 'partition-settled-interrupted-review' ? '中断前独审绑定拒绝' : 'session/events独审超时'}只重审同一Git候选 ${mode}`, async t => {
+for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read-witness', 'format-read-witness-twice', 'format-wrong-witness', 'format-formal-retry', 'format-sibling-stopped-draft', 'format-wrong-packet', 'format-wrong-candidate', 'legacy-review', 'v3-review', 'paused', 'paused-review', 'newer-generation', 'wrong-stop', 'wrong-candidate', 'wrong-task', 'partition-settled-interrupted-review'] as const) test(`P1已结算${mode.startsWith('format') ? '格式失败独审' : mode === 'partition-settled-interrupted-review' ? '中断前独审绑定拒绝' : 'session/events独审超时'}只重审同一Git候选 ${mode}`, async t => {
   const formatFailure = mode.startsWith('format')
   const formatTwice = mode === 'format-twice' || mode === 'format-read-witness-twice'
   const readWitness = mode === 'format-read-witness' || mode === 'format-read-witness-twice' || mode === 'format-wrong-witness'
@@ -5077,10 +5086,24 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
   const failureCode = formatFailure ? 'structured_output_format_invalid' : 'native_rpc_timeout'
   const formalRetry = mode === 'format-formal-retry', codeToSpec = formatTwice || formalRetry
   const interruptedReview = mode === 'partition-settled-interrupted-review'
-  const partitioned = mode === 'partition' || codeToSpec || interruptedReview
+  const siblingStoppedDraft = mode === 'format-sibling-stopped-draft'
+  const partitioned = mode === 'partition' || codeToSpec || interruptedReview || siblingStoppedDraft
   const plan = partitioned ? { version: 'sync-coordinator-v2' as const, direction: codeToSpec ? 'code_to_spec' as const : 'spec_to_code' as const, sourcePaths: ['src/export.js'], ...(codeToSpec ? { writePaths: ['.spec'], commitTrigger: { before: null, paths: ['src/export.js'] } } : {}), partitionPolicy: { version: 'sync-partition-policy-v1' as const, maxReadBytes: 524288, maxParallel: 1 } } : {}
   const f = await fixture(t, { maxAttempts: ['newer-generation', 'paused-review', 'wrong-task', 'format-formal-retry', 'format-wrong-packet'].includes(mode) || formatTwice ? 3 : 2, maxCalls: 30, maxRepairs: ['wrong-task', 'format-wrong-packet'].includes(mode) || formatTwice ? 2 : 1, timeoutMs: 120_000 }, false, original, 'project', original, { ...plan, agentWorkflow: 'native-worktree-v1', ...(formalRetry ? { executionScope: { paths: [contractPath], contractIds: [], flowIds: [] } } : {}) }, undefined, codeToSpec ? 'code' : 'spec', 'zcode:default', partitioned)
   const calls: ElaborationSessionRequest[] = []
+  if (siblingStoppedDraft) {
+    const checkpoint = f.store.checkpoint.bind(f.store)
+    f.store.checkpoint = (fence, ref) => {
+      const saved = checkpoint(fence, ref)
+      if (f.store.readAttempt(fence.attemptId).number !== 1) return saved
+      const commonDir = f.input.source.commonDir
+      const wrapper = JSON.parse(readEvidence(commonDir, ref).toString()) as { stage: string; resultRef: { sha256: string } }
+      if (!wrapper.stage.startsWith('partition:') || !wrapper.stage.endsWith(':elaboration')) return saved
+      const value = JSON.parse(readEvidence(commonDir, wrapper.resultRef).toString()) as ElaborationResult
+      assert.equal(value.failure?.code, failureCode)
+      throw new Error('已停物理草稿的owner/seed、只读文件或index发生越界变化')
+    }
+  }
   if (interruptedReview) {
     const recordFailure = f.store.recordFailure.bind(f.store)
     f.store.recordFailure = (fence, issue) => {
@@ -5221,6 +5244,18 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
     } })(request)
   }
   let result = await runSyncOperation(f.store, f.operation.id, f.options)
+  if (siblingStoppedDraft) {
+    const [failed] = f.store.listAttempts(f.operation.id)
+    assert.equal(failed.status, 'failed')
+    assert.equal(failed.failure?.code, 'coordinator_failed')
+    assert.equal(failed.failure?.kind, 'unsupported')
+    assert.equal(f.store.listAttempts(f.operation.id).length, 1)
+    assert.ok(failed.dispatchPlans.every(dispatch => f.store.findResource(failed.id, dispatch.key)?.phase === 'removed'))
+    assert.ok(!failed.checkpointRefs.some(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()).stage === 'elaboration'))
+    assert.equal(f.store.requestControl(f.operation.id, 'pause').phase, 'paused')
+    f.store.requestControl(f.operation.id, 'run')
+    result = await runSyncOperation(f.store, f.operation.id, f.options)
+  }
   if (interruptedReview) {
     const persisted = f.store.listAttempts(f.operation.id)
     assert.equal(persisted.length, 1)
@@ -5266,7 +5301,7 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
     return
   }
   assert.equal(old.status, 'superseded')
-  assert.equal(old.failure?.kind, mode === 'paused' ? undefined : 'repairable')
+  assert.equal(old.failure?.kind, mode === 'paused' ? undefined : siblingStoppedDraft ? 'unsupported' : 'repairable')
   assert.equal(originalResult.failure?.code, failureCode, JSON.stringify({ failure: originalResult.failure, findings: originalRound.findings }))
   assert.equal(originalResult.structurePassed, true)
   assert.equal(originalResult.reviewPassed, false)

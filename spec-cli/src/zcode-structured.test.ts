@@ -310,7 +310,8 @@ for (const profile of ['cli-config-v1-explicit', 'cli-config-v1-default', 'cli-c
     const zcodeToolPolicy = profile === 'legacy-v2' || providerReview ? { version: 1 as const, toolDenylist: ['ExitPlanMode'] as const } : undefined
     const schema = { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false }, prompt = 'Return the completed response.'
     const worktree = { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: zcodeToolPolicy ? 'read' as const : 'edit' as const }
-    const policy = structuredExecutionPolicy({ schema, inputDigest: 'snapshot-input', purpose: providerReview ? 'elaboration_review' : 'runtime-snapshot', timeoutMs: 1000, model: modelRoute, ...(effort ? { effort } : {}), worktree, ...(zcodeToolPolicy ? { zcodeToolPolicy } : {}), ...(generic ? { nativeConfiguration: 'cli-config-v1' as const } : {}) })
+    const purpose = providerReview ? 'elaboration_review' : defaultModel ? 'elaboration_generate' : 'runtime-snapshot'
+    const policy = structuredExecutionPolicy({ schema, inputDigest: 'snapshot-input', purpose, timeoutMs: 1000, model: modelRoute, ...(effort ? { effort } : {}), worktree, ...(zcodeToolPolicy ? { zcodeToolPolicy } : {}), ...(generic ? { nativeConfiguration: 'cli-config-v1' as const } : {}) })
     const realm = providerReview ? structuredRealmRoot(policy)! : join(directory, 'realm')
     const nativeId = providerReview ? basename(directory) : 'native', root = join(realm, nativeId)
     mkdirSync(join(root, 'runtime'), { recursive: true })
@@ -388,6 +389,41 @@ for (const profile of ['cli-config-v1-explicit', 'cli-config-v1-default', 'cli-c
         const originalFiles = readdirSync(root, { withFileTypes: true }).filter(entry => entry.isFile()).map(entry => ({ path: join(root, entry.name), bytes: readFileSync(join(root, entry.name)) }))
         assert.equal(assertZCodeStoppedDraftSource(prompt, stoppedExecution, workspace), true, 'v3 explicit/default原失败不用messages或success身份取得未批准材料源认证')
         assert.equal(assertZCodeStoppedDraftSource(prompt, { ...stoppedExecution, state: 'cancelled' }, workspace), true)
+        if (defaultModel) await t.test('P1 cross-provider retry skips an authenticated generic HTTP 429 without taking its worktree', subtest => {
+          const mode = 'p1-cross-provider-retry' as const
+          const crossRetry = (state = stoppedExecution, sourcePrompt = prompt) => assertZCodeStoppedDraftSource(sourcePrompt, state, workspace, mode)
+          const terminalPath = join(root, 'terminal.json'), eventsPath = join(root, 'events.json')
+          const quota = { ...failed, payload: { inputId, turnPhase: 'processing_input', error: { code: '1310', attribution: { statusCode: 429 as number | string, providerErrorCode: '1310', retryable: false } } } }
+          const saveTerminal = (event: typeof quota) => {
+            writeFileSync(terminalPath, JSON.stringify(event))
+            writeFileSync(eventsPath, JSON.stringify([...events.slice(0, -1), event]))
+          }
+          subtest.after(() => {
+            writeFileSync(terminalPath, JSON.stringify(failed))
+            writeFileSync(eventsPath, JSON.stringify([...events.slice(0, -1), failed]))
+          })
+          const scratch = join(workspace, '.spex-sync-drafts', '.build')
+          mkdirSync(scratch, { recursive: true })
+          const residue = join(scratch, 'rows.py')
+          writeFileSync(residue, '# original author scratch\n')
+          saveTerminal(quota)
+          const terminalBytes = readFileSync(terminalPath), eventsBytes = readFileSync(eventsPath)
+          assert.equal(crossRetry(), null)
+          assert.equal(assertZCodeStoppedDraftSource(prompt, stoppedExecution, workspace), true)
+          assert.deepEqual(readFileSync(terminalPath), terminalBytes)
+          assert.deepEqual(readFileSync(eventsPath), eventsBytes)
+          assert.equal(readFileSync(residue, 'utf8'), '# original author scratch\n')
+          assert.throws(() => crossRetry(stoppedExecution, prompt + ' foreign'), { code: 'stale_result' })
+          assert.throws(() => crossRetry({ ...stoppedExecution, cancellation: { ...stoppedExecution.cancellation!, nativeStopped: false, nativeStatus: 'unknown' } }), { code: 'stale_result' })
+          saveTerminal({ ...quota, turnId: 'foreign-turn' })
+          assert.throws(() => crossRetry(), { code: 'stale_result' })
+          saveTerminal({ ...quota, payload: { ...quota.payload, error: { ...quota.payload.error, attribution: { ...quota.payload.error.attribution, statusCode: '429' } } } })
+          assert.equal(crossRetry(), null)
+          saveTerminal({ ...quota, payload: { ...quota.payload, error: { ...quota.payload.error, code: '429', attribution: { ...quota.payload.error.attribution, statusCode: 503 } } } })
+          assert.equal(crossRetry(), true)
+          saveTerminal({ ...quota, payload: { ...quota.payload, error: { ...quota.payload.error, code: 'EPIPE' } } })
+          assert.equal(crossRetry({ ...stoppedExecution, errorCode: 'native_turn_transport_failed' }), true)
+        })
         const exitPath = join(root, 'exit.json'), exitBytes = readFileSync(exitPath)
         rmSync(exitPath)
         assert.equal(assertZCodeStoppedDraftSource(prompt, stoppedExecution, workspace), null, '缺少exit只使此物理/Git候选失去资格')

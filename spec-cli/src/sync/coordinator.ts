@@ -2813,7 +2813,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
                 && source.result.status === 'unsupported' && isZCodeProviderRejection(failure)
                 && !source.result.structurePassed && !source.result.reviewPassed && source.result.candidateDigest === null
                 && round.candidate === null && round.output === null && round.review === null && round.reviewOutput === null && !round.traces.length
-              const providerRetry = providerFailure && owner.id === operation.retryOf && owner.currentAttemptId === prior.id
+              const providerRetry = zcode && owner.id === operation.retryOf && owner.currentAttemptId === prior.id
                 && owner.phase === 'failed' && prior.status === 'failed' && model.split(':', 1)[0] !== syncModel(owner).split(':', 1)[0]
                 && owner.planBlob?.sha256 === operation.planBlob?.sha256 && owner.impactDigest === operation.impactDigest
                 && canonical(owner.input) === canonical(operation.input) && priorElaborationInputMatches(prior, binding, owner, checkpoints)
@@ -2858,7 +2858,8 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
                   const material = await withArchivedStructuredWorktree(proof.record, (): ElaborationDraftMaterial | null => {
                     const prompt = nativeWorktreePrompt(native.request.prompt, worktree)
                     if (providerDraft) assertZCodeSettledProviderFailure(proof.record.session, prompt, proof.state as ZCodeStructuredExecution, proof.record.worktreePath, 'elaboration_generate', { crossProviderRetry: providerRetry })
-                    const failed = providerDraft || (zcode ? assertZCodeStoppedDraftSource(prompt, (completedEventsRpc ? proof.state : state) as ZCodeStructuredExecution, proof.record.worktreePath) : undefined)
+                    const failed = providerDraft || (zcode ? assertZCodeStoppedDraftSource(prompt, (completedEventsRpc ? proof.state : state) as ZCodeStructuredExecution,
+                      proof.record.worktreePath, providerRetry ? 'p1-cross-provider-retry' : undefined) : undefined)
                     if (zcode && failed === null) { skipSource = true; return null }
                     if (grokDraft) assertGrokUnpublishedExitSource(proof.record.session, prompt, state, proof.record.worktreePath, 'elaboration_generate')
                     else if (!zcode) assertClaudeStoppedDraftSource(prompt, state, proof.record.worktreePath)
@@ -2954,9 +2955,11 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
             fail('review_retry_binding', 'ZCode 原独审失败不匹配当前冻结输入或owner')
           if (saved && (!source || saved.inputDigest !== inputDigest || saved.phase === 'partitioned_final' || saved.reviewPassed)) return null
           const failure = source?.result.failure, round = source?.result.rounds.at(-1), requestKey = `sync:${prior.id}:${ownerSuffix}`
+          const formatAfterAbort = prior.status === 'superseded' && prior.failure?.kind === 'unsupported' && prior.failure.code === 'coordinator_failed'
+            && failure && reviewFormatRepairCodes.has(failure.code)
           if (!newerGeneration && source && round && failure
             && (!carriedGenerations.size || carriedGenerations.size === 1 && carriedGenerations.has(canonical(round.traces.find(trace => trace.purpose === 'elaboration_generate'))))
-            && (providerReview || (prior.failure?.kind === 'repairable' || prior.status === 'superseded' && !prior.failure)
+            && (providerReview || (prior.failure?.kind === 'repairable' || prior.status === 'superseded' && !prior.failure || formatAfterAbort)
               && (failure.code === 'native_rpc_timeout' || reviewFormatRepairCodes.has(failure.code) || isGrokNativeExitFailure(failure)) && priorElaborationInputMatches(prior, binding))) {
             let settledReview: ElaborationRepairDiagnostics['settledReview']
             try { settledReview = settledElaborationReview(store, operation, prior, requestKey, source.result, round, failure) }
