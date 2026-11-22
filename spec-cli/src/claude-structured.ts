@@ -252,9 +252,9 @@ function terminalStopOutcome(plan: NativePlan, result: ClaudeFrozenWitness['resu
 }
 
 /** 自有终态清理只解释实际退出形态，不替代原生结果与停止认证。 */
-function controlledClaudeWorktreeSuccess(plan: NativePlan, execution: StructuredExecution, result: ClaudeFrozenWitness['result'], exit: { code: number | null; signal: string | null; stopped: boolean }, signal?: AbortSignal): boolean {
+function controlledClaudeWorktreeTerminalExit(plan: NativePlan, execution: StructuredExecution, result: ClaudeFrozenWitness['result'], exit: { code: number | null; signal: string | null; stopped: boolean }, signal?: AbortSignal): boolean {
   if (!(exit.code === 143 && exit.signal === null || exit.code === null && exit.signal === 'SIGTERM') || exit.stopped !== true
-    || result.type !== 'result' || result.subtype !== 'success' || result.is_error !== false || result.structured_output === undefined
+    || result.type !== 'result' || result.subtype !== 'success' || result.is_error !== false
     || signal?.aborted || execution.cancellation || execution.error !== undefined || execution.errorCode !== undefined
     || execution.state !== undefined && execution.state !== 'running' && execution.state !== 'completed'
     || existsSync(join(plan.root, 'interrupt-request.json'))) return false
@@ -299,7 +299,7 @@ async function settleClaudeWorktreeResult(plan: NativePlan, prompt: string, exec
     if (execution.state === 'completed' || existsSync(join(root, 'completed.json')) || !naturalExit && !controlledExit || result.type !== 'result' || result.is_error !== true) throw new StructuredSessionError('stale_result', 'Claude worktree schema exhaustion terminal differs')
     throw worktreeSchemaRetryError(history, original, execution, prompt, plan.version === 2 ? undefined : selection, nativeTokenUsage)
   }
-  const controlled = controlledClaudeWorktreeSuccess(plan, execution, result, exit, signal)
+  const controlled = controlledClaudeWorktreeTerminalExit(plan, execution, result, exit, signal)
   if (!controlled && execution.state !== 'completed' && terminalStopOutcome(plan, result) === 'sent') throw new StructuredSessionError('failed', 'Claude terminal success required process-group termination and is not a completed result')
   if (!controlled && (exit.code !== 0 || exit.signal !== null) || result.type !== 'result' || result.subtype !== 'success' || result.is_error !== false) throw new StructuredSessionError('stale_result', 'Claude worktree success evidence differs')
   if (result.structured_output === undefined) throw new StructuredSessionError(execution.state === 'completed' || existsSync(join(root, 'completed.json')) ? 'stale_result' : 'structured_output_format_invalid', 'Claude worktree success is missing required structured_output', { threadId: plan.sessionId, turnId: plan.userUuid, nativeTokenUsage })
@@ -821,7 +821,7 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
           { threadId: plan.sessionId, turnId: plan.userUuid, nativeTokenUsage: publicResult.nativeTokenUsage })
       }
     }
-    if (exit.code !== 0 && result.subtype !== 'error_max_structured_output_retries' && !(worktree && controlledClaudeWorktreeSuccess(plan, execution, result, { ...exit, stopped }, callbacks.signal))) throw new StructuredSessionError('failed', unsuccessfulClaudeExitMessage(exit, result))
+    if (exit.code !== 0 && result.subtype !== 'error_max_structured_output_retries' && !(worktree && controlledClaudeWorktreeTerminalExit(plan, execution, result, { ...exit, stopped }, callbacks.signal))) throw new StructuredSessionError('failed', unsuccessfulClaudeExitMessage(exit, result))
     const history = worktree ? claudeWorktreeHistory(plan, false) : readClaudePublicHistory(nativeHistoryPath(root, native.sessionId), native.sessionId), original = history.find(row => row.type === 'user' && row.uuid === native.userUuid)
     if (!original?.promptId) throw new StructuredSessionError('stale_result', 'Claude original native promptId is missing')
     await callbacks.onNative({ ...native, pid: child.pid, receiptFile: plan.receiptFile, promptId: original.promptId })
