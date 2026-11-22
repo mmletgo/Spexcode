@@ -91,7 +91,7 @@ v6 Claude 原生工作树在登记实际启动意图之前完成强制的同 UID
 
 模型观测命名空间修复不增加持久字段、profile或数据库版本：已有 init/plan 与已封存 history 足以分别认证两类事实。旧 plan2 的正式 failed 操作及原件保留失败，不通过离线补签、改变真实状态或手工改写对侧恢复；后续正式调用沿原协调恢复入口。离线真实公开原件回归如需重绑定测试 policy、目录或自有停止 receipt，必须逐项记录受控差异并证明原字节逐 SHA 未变，只能声称协议谓词的失败到通过，不能声称原业务、Git、操作或真实新调用已通过。
 
-原生worktree在原plan/policy/session/user、init/回显/公开history、exit0/success/is_error:false和完整停止均认证后，唯独缺少必需structured_output时，返回structured_output_format_invalid及原thread/turn；诊断固定指出缺字段，不从assistant文本、空对象或任意JSON合成final/rejectedOutput，不发布completed。已有canonical completed或完成缓存被删改仍stale_result，非零退出、signal、未知subtype、错身份或未知停止仍沿原拒绝路径。新attempt对历史缺字段仅沿共用纯读取认证核已封存history、原计划/输入与进程receipt；不封存旧缺席、不写completed或修改原Native文件。正式已停编辑稿的材料观察另核原plan/policy/init/echo、同一owned cwd与已消失原进程组，不能给普通暂停赋缺字段分类。
+原生 worktree 缺少必需的 structured_output 时，原计划、请求、session/user、init、回显、公开 history、success/is_error:false 和完整停止仍须认证。自然 exit0 和同一终态清理已实际发送 SIGTERM 的 143/null 或 null/SIGTERM 均返回 structured_output_format_invalid 及原 thread/turn。走既有失败稿入口保留已核验的 Git 材料与原诊断，后续仅续原失败阶段。无原生输出时保留字段缺席及真实退出，不生成 final、rejectedOutput 或 completed。已 canonical completed 或完成缓存被删改、错绑定、未知停止以及其他退出形态仍沿原拒绝路径。当前执行的冷读取复验原结果和原终态控制，不新开会话。既有历史缺字段观察继续按自然退出、原计划和已停止的 owned cwd 核验，旧原件与旧权限保持。
 
 正式已停owned edit的实际错误投影（type=result/subtype=success/is_error:true、无structured_output、原session/user集合精确匹配、exit1/signal:null/stopped）可仅作为新attempt未批准Git材料；不要求本次原生失败前尚未封存的public-history，不给予success、格式码、raw或业务批准。原exit0/is_error:false精准missing-final仍须完整sealed认证，未知形状和身份差异仍拒绝。新观察只读原件，旧record/plan/结果与缺席字段不追补。
 

@@ -8,7 +8,7 @@ import { HARNESS_IDENTITIES, verifyDetachedRuntime, writeDetachedRuntimeReceipt 
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { prepareFrozenPrompt, readFrozenManifest, claudeFrozenContextPrompt, freezeContext, readFrozenRange, proveClaudeFrozenReads, verifyFrozenReadProof, claudeMessageDigest, readClaudeApiSourceMetadata, readClaudePublicHistory, type ClaudeFrozenWitness, type ClaudePublicMessage, type ClaudePublicRecord } from './frozen-context.js'
-import { structuredExecutionPolicy, structuredRealmRoot, type StructuredExecution } from './session-structured-policy.js'
+import { StructuredSessionError, structuredExecutionPolicy, structuredRealmRoot, type StructuredExecution } from './session-structured-policy.js'
 import { sampleNativeWorktreeProcesses } from './native-worktree-runtime.js'
 import { claudeNativeModel, claudeWorktreeArgs, claudeStructuredArgs, claudeStructuredTurn, observeClaudeWorktreeMissingFinal, observeClaudeStoppedWorktreeFailure, assertClaudeStoppedDraftSource, prepareClaudeAuthenticationEnvironment } from './claude-structured.js'
 
@@ -1044,12 +1044,13 @@ test('native CLI configuration accepts opaque selections and omits --model for d
   for (const model of ['claude:', 'claude:   ', 'claude:a\0b', 'codex:model']) assert.throws(() => claudeNativeModel(model, 'cli-config-v1'))
 })
 
-for (const [selected, configMode, outcome] of [['default', 'unset', 'success'], ['default', 'empty', 'success'], ['sonnet', 'explicit', 'success'], ['provider/opaque[1m]', 'explicit', 'success'], ['provider/opaque[1m]', 'explicit', 'controlled-success-143'], ['provider/opaque[1m]', 'explicit', 'controlled-cancel-after-term'], ['provider/opaque[1m]', 'explicit', 'periodic-recovered'], ['provider/opaque[1m]', 'explicit', 'periodic-expired'], ['provider/opaque[1m]', 'explicit', 'periodic-cancelled'], ['provider/opaque[1m]', 'explicit', 'periodic-final-pending'], ['provider/opaque[1m]', 'explicit', 'periodic-error'], ['provider/opaque[1m]', 'explicit', 'periodic-error-stop-unknown'], ['provider/opaque[1m]', 'explicit', 'periodic-result-first'], ['any/alias + context', 'explicit', 'schema-exhaustion']] as const) test(`native CLI configuration fixture preserves configuration and model observations for ${selected}/${configMode}/${outcome}`, async t => {
+for (const [selected, configMode, outcome] of [['default', 'unset', 'success'], ['default', 'empty', 'success'], ['sonnet', 'explicit', 'success'], ['provider/opaque[1m]', 'explicit', 'success'], ['provider/opaque[1m]', 'explicit', 'controlled-success-143'], ['provider/opaque[1m]', 'explicit', 'controlled-missing-final-143'], ['provider/opaque[1m]', 'explicit', 'controlled-cancel-after-term'], ['provider/opaque[1m]', 'explicit', 'periodic-recovered'], ['provider/opaque[1m]', 'explicit', 'periodic-expired'], ['provider/opaque[1m]', 'explicit', 'periodic-cancelled'], ['provider/opaque[1m]', 'explicit', 'periodic-final-pending'], ['provider/opaque[1m]', 'explicit', 'periodic-error'], ['provider/opaque[1m]', 'explicit', 'periodic-error-stop-unknown'], ['provider/opaque[1m]', 'explicit', 'periodic-result-first'], ['any/alias + context', 'explicit', 'schema-exhaustion']] as const) test(`native CLI configuration fixture preserves configuration and model observations for ${selected}/${configMode}/${outcome}`, async t => {
   const directory = mkdtempSync(join(tmpdir(), 'spex-claude-native-config-')), bin = join(directory, 'bin'), config = selected === 'default' ? join(directory, 'home', '.claude') : join(directory, 'native-config'), workspace = join(directory, 'worktree'), realm = join(directory, 'realm'), root = join(realm, 'native')
   const identityKeys = [...new Set(['SPEXCODE_SESSION_ID', ...HARNESS_IDENTITIES.map(harness => harness.sessionEnvVar)])].filter(Boolean)
   const environmentKeys = [...identityKeys, 'PATH', 'HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDECODE', 'CLAUDE_CODE_USE_BEDROCK', 'ANTHROPIC_MODEL', 'ANTHROPIC_BASE_URL', 'PUBLIC_CLAUDE_FIXTURE_LOG'] as const
   const before = Object.fromEntries(environmentKeys.map(key => [key, process.env[key]]))
   const periodic = outcome.startsWith('periodic-'), release = join(directory, 'release-result')
+  const missingFinal = outcome === 'controlled-missing-final-143'
   const controlled = outcome.startsWith('controlled-') || outcome === 'periodic-recovered', lateCancel = outcome === 'controlled-cancel-after-term', controller = new AbortController()
   let fixtureNative: StructuredExecution['claudeNative']
   const watchdog = periodic ? setTimeout(() => controller.abort(), 45_000) : undefined
@@ -1078,7 +1079,7 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
     process.exit(0);
   }
   if(input.type!=='user')return;
-  const session=input.session_id,user=input.uuid;const projects=path.join(process.env.CLAUDE_CONFIG_DIR||path.join(process.env.HOME,'.claude'),'projects','fixture');fs.mkdirSync(projects,{recursive:true});const history=[{type:'user',sessionId:session,uuid:user,parentUuid:null,promptId:'public-prompt',message:input.message},{type:'api-request',sessionId:session,id:'wire-request',params:{model:'wire-provider/actual-id'}},{type:'assistant',sessionId:session,uuid:'assistant',parentUuid:user,requestRef:'wire-request',message:{role:'assistant',content:[{type:'thinking',thinking:'SYNTHETIC_PRIVATE_THINKING'},{type:'tool_use',id:'final',name:'StructuredOutput',input:output}]}}];if(exhausted)history.push({type:'user',sessionId:session,uuid:'schema-error',parentUuid:'assistant',promptId:'public-prompt',sourceToolAssistantUUID:'assistant',message:{role:'user',content:[{type:'tool_result',tool_use_id:'final',is_error:true,content:'Output does not match required schema: /ok: must be boolean'}]}});fs.writeFileSync(path.join(projects,session+'.jsonl'),history.map(x=>JSON.stringify(x)).join('\\n')+'\\n');emit({type:'system',subtype:'init',session_id:session,model:${JSON.stringify(actualModel)},tools:['Read','Bash','StructuredOutput']});emit({type:'user',uuid:user,session_id:session,message:input.message});const finish=()=>{emit({type:'result',subtype:exhausted?'error_max_structured_output_retries':'success',is_error:exhausted,session_id:session,user_message_uuid:user,user_message_uuids:[user],...(exhausted?{}:{structured_output:output}),modelUsage:${JSON.stringify(usageModels)},usage:{input_tokens:5000,output_tokens:999}});process.exitCode=exhausted?1:0;if(${controlled}){process.stdin.once('end',()=>fs.writeFileSync(${JSON.stringify(join(directory, 'stdin-ended'))},'true'));setInterval(()=>{},1000);process.on('SIGTERM',()=>{if(!${lateCancel})process.exit(143);fs.writeFileSync(${JSON.stringify(join(directory, 'term-received'))},'true');setInterval(()=>{if(fs.existsSync(${JSON.stringify(join(directory, 'allow-exit'))}))process.exit(143)},10)})}};
+  const session=input.session_id,user=input.uuid;const projects=path.join(process.env.CLAUDE_CONFIG_DIR||path.join(process.env.HOME,'.claude'),'projects','fixture');fs.mkdirSync(projects,{recursive:true});const history=[{type:'user',sessionId:session,uuid:user,parentUuid:null,promptId:'public-prompt',message:input.message},{type:'api-request',sessionId:session,id:'wire-request',params:{model:'wire-provider/actual-id'}},{type:'assistant',sessionId:session,uuid:'assistant',parentUuid:user,requestRef:'wire-request',message:{role:'assistant',content:[{type:'thinking',thinking:'SYNTHETIC_PRIVATE_THINKING'},{type:'tool_use',id:'final',name:'StructuredOutput',input:output}]}}];if(exhausted)history.push({type:'user',sessionId:session,uuid:'schema-error',parentUuid:'assistant',promptId:'public-prompt',sourceToolAssistantUUID:'assistant',message:{role:'user',content:[{type:'tool_result',tool_use_id:'final',is_error:true,content:'Output does not match required schema: /ok: must be boolean'}]}});fs.writeFileSync(path.join(projects,session+'.jsonl'),history.map(x=>JSON.stringify(x)).join('\\n')+'\\n');emit({type:'system',subtype:'init',session_id:session,model:${JSON.stringify(actualModel)},tools:['Read','Bash','StructuredOutput']});emit({type:'user',uuid:user,session_id:session,message:input.message});const finish=()=>{emit({type:'result',subtype:exhausted?'error_max_structured_output_retries':'success',is_error:exhausted,session_id:session,user_message_uuid:user,user_message_uuids:[user],...(exhausted||${missingFinal}?{}:{structured_output:output}),modelUsage:${JSON.stringify(usageModels)},usage:{input_tokens:5000,output_tokens:999}});process.exitCode=exhausted?1:0;if(${controlled}){process.stdin.once('end',()=>fs.writeFileSync(${JSON.stringify(join(directory, 'stdin-ended'))},'true'));setInterval(()=>{},1000);process.on('SIGTERM',()=>{if(!${lateCancel})process.exit(143);fs.writeFileSync(${JSON.stringify(join(directory, 'term-received'))},'true');setInterval(()=>{if(fs.existsSync(${JSON.stringify(join(directory, 'allow-exit'))}))process.exit(143)},10)})}};
   if(${periodic}){
     const waiting=setInterval(()=>{
       if(fs.existsSync(${JSON.stringify(release)})){
@@ -1187,6 +1188,27 @@ const waiting = setInterval(() => {
       assert(!existsSync(join(root, 'completed.json')))
       const noDispatch = { onThread: async () => assert.fail('no new thread'), onTurn: async () => assert.fail('no new turn'), onNative: async () => assert.fail('no new CLI') }
       await assert.rejects(claudeStructuredTurn(realm, 'native', 'public native config task', { ...execution, state: 'running' }, noDispatch, workspace))
+      assert(!existsSync(join(root, 'completed.json')))
+      assert.deepEqual(readFileSync(join(root, 'terminal-stop.json')), stop)
+      return
+    }
+    if (missingFinal) {
+      const invalid = (error: unknown) => {
+        assert(error instanceof StructuredSessionError)
+        assert.equal(error.code, 'structured_output_format_invalid')
+        assert.match(error.message, /missing required structured_output/)
+        assert.equal(error.threadId, execution.threadId)
+        assert.equal(error.turnId, execution.turnId)
+        assert.equal(error.rejectedOutput, undefined)
+        return true
+      }
+      await assert.rejects(pending, invalid)
+      const exit = JSON.parse(readFileSync(join(root, 'exit.json'), 'utf8')) as { code: number; signal: string | null; stopped: boolean }
+      assert.deepEqual({ code: exit.code, signal: exit.signal, stopped: exit.stopped }, { code: 143, signal: null, stopped: true })
+      const stop = readFileSync(join(root, 'terminal-stop.json'))
+      assert.equal(JSON.parse(stop.toString('utf8')).outcome, 'sent')
+      const noDispatch = { onThread: async () => assert.fail('no new thread'), onTurn: async () => assert.fail('no new turn'), onNative: async () => assert.fail('no new CLI') }
+      await assert.rejects(claudeStructuredTurn(realm, 'native', 'public native config task', execution, noDispatch, workspace), invalid)
       assert(!existsSync(join(root, 'completed.json')))
       assert.deepEqual(readFileSync(join(root, 'terminal-stop.json')), stop)
       return
@@ -1443,7 +1465,7 @@ for (const close of [{ code: 143, signal: null }, { code: null, signal: 'SIGTERM
       writeFileSync(join(root, 'result.json'), JSON.stringify(invalidResult))
       writeFileSync(join(root, 'terminal-stop-request.json'), JSON.stringify(bound))
       writeFileSync(join(root, 'terminal-stop.json'), JSON.stringify({ ...observation, requestObservationDigest: hash(bound) }))
-      await assert.rejects(replay(), { code: 'failed' })
+      await assert.rejects(replay(), { code: invalidResult.structured_output === undefined ? 'structured_output_format_invalid' : 'failed' })
       assert(!existsSync(completion))
     }
   } finally { rmSync(directory, { recursive: true, force: true }) }
