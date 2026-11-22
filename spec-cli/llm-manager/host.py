@@ -13,6 +13,7 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict
 from datetime import UTC, datetime
+from functools import partial
 from hashlib import sha256
 from http.client import HTTPConnection, HTTPException, HTTPResponse, HTTPSConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -469,18 +470,18 @@ def manual_probe(request: ProbeRequest) -> ProbeResult:
     return probe_provider(request.base_url, request.api_format, request.secret, request.model_name, request.timeout_seconds)
 
 
-def revalidate_api(request: RevalidateRequest) -> ProbeResult:
+def revalidate_api(model: str, request: RevalidateRequest) -> ProbeResult:
     """
     Business Logic（为什么需要这个函数）:
         API 冷却到期须通过 Manager 试探后才能重新派发。
 
     Code Logic（这个函数做什么）:
-        用 Manager 提供的这把 Key 调同一 HTTP 探测，拒绝非法的跨种类请求。
+        用 Manager 选中路线的模型与试探请求提供的 Key 调同一 HTTP 探测，拒绝非法的跨种类请求。
     """
 
-    if request.base_url is None or request.api_format is None or request.secret is None or request.model_name is None:
+    if request.base_url is None or request.api_format is None or request.secret is None:
         raise HostError("llm_manager_route_stale")
-    return probe_provider(request.base_url, request.api_format, request.secret, request.model_name, request.timeout_seconds)
+    return probe_provider(request.base_url, request.api_format, request.secret, model, request.timeout_seconds)
 
 
 def frozen_choice(binding: RouteBinding) -> RouteChoice:
@@ -608,13 +609,13 @@ def ready_choice(manager: LlmManager, choice: RouteChoice | None) -> RouteChoice
     tried: set[tuple[str, str | None]] = set()
     while choice is not None:
         attempt = (choice.option_id, choice.key_id)
-        if choice.provider_id not in manager.provider_capabilities or attempt in tried:
+        if choice.provider_id not in manager.provider_capabilities:
             choice = manager.skip_option(choice)
         elif choice.disposition == RouteDisposition.ready:
             return choice
-        elif choice.kind == ProviderKind.api:
+        elif choice.kind == ProviderKind.api and attempt not in tried:
             tried.add(attempt)
-            choice = manager.revalidate(choice, revalidate_api)
+            choice = manager.revalidate(choice, partial(revalidate_api, choice.model_name))
         else:
             choice = manager.skip_option(choice)
     return None

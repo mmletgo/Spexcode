@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -277,6 +278,15 @@ sys.exit(19)
             self.assertEqual(self.rpc(action="settle", route=route, sessionId=session, outcome="stopped"), {"outcome": outcome})
         self.assertEqual(self.rpc(action="resolve", nextAfter=route)["vendor"], "grok")
         self.assertEqual(guard.read_text(encoding="utf-8"), "unchanged")
+
+        with sqlite3.connect(self.database) as database:
+            expired = database.execute(
+                "UPDATE llm_circuit_breaker SET cooldown_until = ? WHERE owner_id = ? AND key_id = ?",
+                ("2000-01-01 00:00:00.000000", "fixture-owner", "fixture-key"),
+            )
+            self.assertEqual(expired.rowcount, 1)
+        self.assertEqual(self.rpc(action="resolve"), route)
+        self.assertEqual(self.settings("status")["breakers"], [])
 
 
 if __name__ == "__main__":
