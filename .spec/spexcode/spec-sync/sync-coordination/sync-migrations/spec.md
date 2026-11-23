@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+writer73 也保护正式额度后继的接入身份和首次派发资格。无后继标记的旧接入摘要与既有迁移字节不变。
+
 writer71 和 [[application-state-schema]] generation 6 追加 writer 标记，保护 [[llm-manager-host]] 冻结路线、名额与真实额度续路关系。升级先停稳旧 writer、原生资源和租约，再备份一致的 v70/v5 会话库与配套证据。启用独立 Manager 数据库后，回退前也须结算其中的调用。恢复整套旧现场和配套 Git/CAS，原记录保持。
 
 writer72 只追加同步 writer 标记，保护 [[sync-code-behavior]] 新冻结的 P0 独审重复项自检请求。升级先停稳旧 writer、结算原生资源及租约，保存一致 writer71 online backup 和配套 Git/CAS。回退用原备份及配套原件，先停新版 writer。原检查点保持。

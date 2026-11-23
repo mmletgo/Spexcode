@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+正式额度续路回归先模拟组内前置路线已就绪，首个派发仍须兑现 Manager 批准的后继。下一新键回到组首，同键冷重放不调用 Manager 或重复计数。
+
 托管分组夹具使用真实 Git seed、SQLite 和受控 Native 接缝验证首选冷却回退、恢复后新键回归首选、旧键及仅预留请求重复恢复；并发预留以原子胜出绑定为准。功能组没有就绪路线时不发原生调用，旧字节重放不重选。
 
 真实Git/受控Native先复现失败正式close后原材料读取路径丢失，再证明临时恢复能取同一JSON/commit并finally消除checkout。覆盖failed/cancelled编辑稿、read空稿null、callback抛错、restore在checkout创建后失败、registry锁前插入matching checkout，以及原record/Native/checkpoint/archive SHA不变、零新增send/launch/wake；自动回收仅确证停止且clean，dirty/unknown保留，completed既有回归保持。
