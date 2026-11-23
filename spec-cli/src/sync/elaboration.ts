@@ -567,7 +567,15 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
       if (graph.items.get(id)?.kind === 'REQ') { traced = true; break }
       pending.push(...graph.dependencies.get(id) ?? [])
     }
-    if (!traced) findings.push(finding(input, 'untraceable_intent', `业务项无法经来源/依赖追踪到用户需求: ${item.id}`, item.id))
+    if (!traced) findings.push({
+      code: 'untraceable_intent',
+      severity: 'error',
+      nodeId: item.nodeId,
+      path: item.path,
+      line: item.line,
+      itemId: item.id,
+      message: `业务项无法经来源/依赖追踪到用户需求: ${item.id}`,
+    })
   }
   for (const boundary of ELABORATION_BOUNDARIES) {
     const entries = candidate.applicability.filter(entry => entry.boundary === boundary)
