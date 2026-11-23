@@ -427,7 +427,10 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
     if (change.beforeDigest !== target.sourceDigest) findings.push(finding(input, 'source_digest', `源摘要不符: ${change.path}`))
     const parsed = parseContract({ nodeId: change.nodeId, path: change.path, source: change.source })
     findings.push(...parsed.findings)
-    if (!parsed.contract) { findings.push(finding(input, 'contract_required', `候选必须启用sync-v1: ${change.path}`)); continue }
+    if (!parsed.contract) {
+      findings.push({ code: 'contract_required', severity: 'error', nodeId: change.nodeId, path: change.path, message: `候选必须启用sync-v1: ${change.path}` })
+      continue
+    }
     const before = target.source === null ? null : parseContract({ nodeId: target.nodeId, path: target.path, source: target.source }).contract
     if (before) findings.push(...inheritedParentScopeFindings(input, target, parsed.contract, before))
     if (input.phase === 'interface_seed') {
@@ -451,7 +454,9 @@ function checkCandidate(input: ElaborationInput, candidate: ElaborationCandidate
     const lifecycle = input.nodeChanges?.find(change => change.from.nodeId === target.nodeId && change.from.path === target.path)
     if (lifecycle?.action === 'retire') continue
     const identity = lifecycle?.action === 'move' ? lifecycle.to : target
-    if (!changed.has(identity.nodeId)) findings.push(finding(input, 'target_not_elaborated', `新目标或raw-only目标必须显式完成细化: ${identity.path}`))
+    if (!changed.has(identity.nodeId)) {
+      findings.push({ code: 'target_not_elaborated', severity: 'error', nodeId: identity.nodeId, path: identity.path, message: `新目标或raw-only目标必须显式完成细化: ${identity.path}` })
+    }
   }
   if (input.targets.some(target => target.nodeId === input.intent.nodeId) && !nodes.has(input.intent.nodeId) && !input.nodeChanges?.some(change => change.from.nodeId === input.intent.nodeId && (change.action === 'retire' || nodes.has(change.to.nodeId)))) findings.push(finding(input, 'intent_not_elaborated', '候选必须包含用户原意节点'))
   const contracts = [...changed.values()]

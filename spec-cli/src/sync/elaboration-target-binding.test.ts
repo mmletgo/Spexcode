@@ -109,6 +109,28 @@ test('未追溯业务项定位到实际叶节点并阻断独审', async () => {
   assert.deepEqual(fake.calls.map(call => call.purpose), ['elaboration_generate'])
 })
 
+test('无可解析契约的叶候选在同一目标定位结构与覆盖错误', async () => {
+  const frozen = input(), target = frozen.targets[1]
+  const fake = runner(request => {
+    const generated = leaf(request)
+    const tables = generated.tables as GeneratedTargetElaboration['changes'][number]['tables']
+    tables.FLOW = [{ id: 'FLOW-NESTED-ENTRY', req: ['REQ-EXPORT-01'], actors: '调用方', entry: '进入导出', preconditions: '项目已选择', steps: [], terminal: 'END', source: 'user:raw', 'depends-on': [] }]
+    return build(request, [generated])
+  })
+  const result = await elaborate(frozen, { runner: fake.run })
+  const round = result.rounds[0]
+  assert.ok(round.candidate?.changes.some(change => change.path === target.path))
+  assert.ok(round.findings.some(issue => issue.code === 'required-value' && issue.itemId === 'FLOW-NESTED-ENTRY'))
+  assert.deepEqual(round.findings.filter(issue => ['contract_required', 'target_not_elaborated'].includes(issue.code))
+    .map(({ code, severity, nodeId, path }) => ({ code, severity, nodeId, path })), [
+    { code: 'contract_required', severity: 'error', nodeId: target.nodeId, path: target.path },
+    { code: 'target_not_elaborated', severity: 'error', nodeId: target.nodeId, path: target.path },
+  ])
+  assert.equal(result.structurePassed, false)
+  assert.equal(result.reviewPassed, false)
+  assert.deepEqual(fake.calls.map(call => call.purpose), ['elaboration_generate'])
+})
+
 const ownerScopeInput = (): ElaborationInput => {
   const frozen = input()
   const source = `---\ntitle: 原父接口\ndesc: 保留原说明\ncontract-schema: sync-v1\nrelated:\n  - tests/export.test.mjs\n---\n# 原父标题\n\n## raw source\n\n父接口原意。\n\n## expanded spec\n\n父接口原解释。\n\n### VERIFY\n\n| id | command | cwd | timeout-ms |\n| --- | --- | --- | --- |\n| VERIFY-PARENT-01 | ["node","--version"] | . | 1000 |\n\n后置解释。\n\n### REQ\n\n| id | goal | source | constraints | success | depends-on |\n| --- | --- | --- | --- | --- | --- |\n| REQ-PARENT-01 | 保留父接口 | user:raw | 不改变接口 | 子叶可承接 | - |\n`.replace(/\n/g, '\r\n')
@@ -435,8 +457,8 @@ test('合法部分输出保留候选并反馈漏目标，schema最低数量不�
   const result = await elaborate(frozen, { runner: fake.run })
   assert.ok(result.rounds[0].candidate)
   assert.equal(result.reviewPassed, false)
-  assert.deepEqual(result.rounds[0].findings.filter(finding => finding.code === 'target_not_elaborated').map(finding => finding.message), [
-    '新目标或raw-only目标必须显式完成细化: .spec/export/raw-only/spec.md',
+  assert.deepEqual(result.rounds[0].findings.filter(finding => finding.code === 'target_not_elaborated').map(({ nodeId, path, message }) => ({ nodeId, path, message })), [
+    { nodeId: 'raw-only', path: '.spec/export/raw-only/spec.md', message: '新目标或raw-only目标必须显式完成细化: .spec/export/raw-only/spec.md' },
   ])
   assert.ok(!result.rounds[0].findings.some(finding => finding.code === 'output_schema'))
   const schema = fake.calls[0].schema.properties as Record<string, { minItems: number }>
