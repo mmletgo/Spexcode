@@ -2385,8 +2385,9 @@ test('没有冻结保护测试时拒绝未执行覆盖授权', async () => {
 test('llm_manager 新准入固定正式路线、冷重放和普通重试均沿原绑定', async t => {
   const f = await fixture({ ...settings, model: 'zcode:default' }, undefined, true)
   const command = join(f.temp, 'route-python'), config = join(f.temp, 'route.json'), calls = join(f.temp, 'route-calls')
+  const envelopes = join(f.temp, 'route-envelopes')
   const route = (vendor: string, model: string) => writeFileSync(config, JSON.stringify({ ok: true, value: { routeId: 'a'.repeat(64), vendor, model, kind: 'cli' } }))
-  writeFileSync(command, '#!/bin/sh\n[ "$1" = "-I" ] && [ "$3" = "rpc" ] || exit 2\n[ -z "\${SPEX_LLM_MANAGER_TEST_ENV_TRAP+x}" ] || exit 2\n/bin/cat >/dev/null\nprintf "called\\n" >> route-calls\n/bin/cat "$4"\n', { mode: 0o700 })
+  writeFileSync(command, '#!/bin/sh\n[ "$1" = "-I" ] && [ "$3" = "rpc" ] || exit 2\n[ -z "\${SPEX_LLM_MANAGER_TEST_ENV_TRAP+x}" ] || exit 2\n\n/bin/cat >> route-envelopes\n/bin/echo >> route-envelopes\nprintf "called\\n" >> route-calls\n/bin/cat "$4"\n', { mode: 0o700 })
   for (const [key, value] of Object.entries({ SPEX_LLM_MANAGER_PYTHON: command, SPEX_LLM_MANAGER_CONFIG: config, SPEX_LLM_MANAGER_TEST_ENV_TRAP: 'host-only' })) {
     const previous = process.env[key]
     process.env[key] = value
@@ -2395,7 +2396,7 @@ test('llm_manager 新准入固定正式路线、冷重放和普通重试均沿�
   try {
     route('cursor', 'private-model[custom=true]')
     await f.application.enable()
-    await f.application.automaticControl('pause')
+    f.application.start = () => {}
     const first = (await f.application.submit({ nodeId: 'demo', requestId: 'manager-native' })).operation!
     const { managedRoute } = await import('../llm-manager-route.js')
     assert.deepEqual(managedRoute(first.model), { routeId: 'a'.repeat(64), vendor: 'cursor', model: 'private-model[custom=true]', kind: 'cli' })
@@ -2418,7 +2419,26 @@ test('llm_manager 新准入固定正式路线、冷重放和普通重试均沿�
     assert.equal(selected.input.id, first.input.id)
     assert.equal(selected.policyDigest, first.policyDigest)
     assert.equal(readFileSync(calls, 'utf8'), 'called\ncalled\n')
-    await f.application.control(selected.id, 'cancel')
+    assert.deepEqual(readFileSync(envelopes, 'utf8').trim().split('\n').map(line => JSON.parse(line)), [
+      { action: 'resolve' }, { action: 'resolve', sameGroupAs: managedRoute(first.model) },
+    ])
+    const store = f.application.store, repositoryId = selected.input.source.repositoryId
+    for (let head = store.nextDispatch(repositoryId); head; head = store.nextDispatch(repositoryId)) {
+      assert.ok([first.id, next.id, selected.id].includes(head.operation.id))
+      store.ackDispatch(repositoryId, head.messageId)
+    }
+    const { fence } = store.claimQueuedAttempt({ operationId: selected.id, source: selected.input.source, scope: selected.scope, leaseMs: 30000, expectedRevision: store.readOperation(selected.id).revision })
+    f.application.store.recordFailure(fence, { code: 'provider_quota_exhausted', message: 'fixture quota', kind: 'unsupported', evidenceRefs: [] })
+    route('zcode', 'fallback/fixture')
+    const request = { nodeId: 'demo', requestId: 'manager-native-quota-retry', retryOf: selected.id, model: 'llm-manager' }
+    const quota = (await f.application.submit(request)).operation!
+    const previousRoute = managedRoute(selected.model)
+    assert.equal(quota.managedQuotaRetry, true)
+    assert.equal(f.application.store.findIngressReceipt(quota.ingressKey)?.managedQuotaRetry, true)
+    assert.deepEqual(JSON.parse(readFileSync(envelopes, 'utf8').trim().split('\n').at(-1)!), { action: 'resolve', nextAfter: previousRoute, sameGroupAs: previousRoute })
+    assert.deepEqual((await f.application.submit(request)).operation, quota)
+    assert.equal(readFileSync(calls, 'utf8'), 'called\ncalled\ncalled\n')
+    await f.application.control(quota.id, 'cancel')
     assert.equal(f.calls.length, 0)
   } finally { await f.application.stopService(); f.cleanup() }
 })

@@ -167,12 +167,19 @@ class NativeUsage(BaseModel):
 
 
 class RouteLookup(BaseModel):
-    """选路可以从功能组首项开始，或承接已确认额度失败的冻结路线。"""
+    """
+    Business Logic（为什么需要这个类）:
+        新会话按原功能组当前排序选路，额度失败后的后继选择可沿用原游标。
+
+    Code Logic（这个类做什么）:
+        校验选路请求中可独立提供的同组锚点和额度后继路由。
+    """
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
     action: Literal["resolve"]
     nextAfter: ManagedRoute | None = None
+    sameGroupAs: ManagedRoute | None = None
 
 
 class RouteRequest(BaseModel):
@@ -621,16 +628,19 @@ def ready_choice(manager: LlmManager, choice: RouteChoice | None) -> RouteChoice
     return None
 
 
-def resolve(manager: LlmManager, config: HostConfig, after: ManagedRoute | None) -> ManagedRoute | None:
+def resolve(manager: LlmManager, config: HostConfig, request: RouteLookup) -> ManagedRoute | None:
     """
     Business Logic（为什么需要这个函数）:
-        正常派发取当前首条可用路线，正式额度失败后的显式重试承接原游标。
+        新会话从原功能组选择当前首条可用路线，额度失败后的后继选择承接原游标。
 
     Code Logic（这个函数做什么）:
-        首次调用 Manager resolve；后继读取同路线的额度结算与保存的 Manager 后继。
-        后继已失效时沿后继游标再往下，避免回到已失败的本轮前缀。
+        按冻结绑定验证锚点的 owner 和组，再由 Manager 从组首选路。
+        带额度游标的请求读取已结算的后继，后继失效时继续沿游标向下。
     """
 
+    if request.sameGroupAs is not None:
+        require_binding(manager, config.group_id, request.sameGroupAs)
+    after = request.nextAfter
     if after is None:
         choice = ready_choice(manager, manager.resolve(config.group_id))
     else:
@@ -947,7 +957,7 @@ def rpc(config: HostConfig) -> object:
             return settings(manager, request.body)
         execution = execution_manager(manager, config, key)
         if isinstance(request, RouteLookup):
-            return resolve(execution, config, request.nextAfter)
+            return resolve(execution, config, request)
         if isinstance(request, SettleRequest):
             return settle(execution, config, request)
         return reserve(execution, config, request)

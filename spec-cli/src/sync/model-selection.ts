@@ -59,6 +59,7 @@ export async function resolveSyncModel(
   nativeWorkflow: boolean,
   previouslyBound?: string,
   nextAfter?: ManagedRoute,
+  sameGroupAs?: ManagedRoute,
 ): Promise<string> {
   if (previouslyBound !== undefined && (selection === MANAGED_SYNC_MODEL || selection === previouslyBound)) return previouslyBound
   if (selection !== MANAGED_SYNC_MODEL) {
@@ -69,7 +70,7 @@ export async function resolveSyncModel(
   }
   if (!nativeWorkflow) throw new SyncApplicationError('sync_llm_manager_requires_native', 'llm-manager 需要原生工作树执行')
   if (!llmManagerRequested()) throw new SyncApplicationError('sync_llm_manager_config', '宿主尚未登记完整 LLM Manager 配置')
-  const route = await resolveManagedRoute(nextAfter).catch(error => {
+  const route = await resolveManagedRoute(nextAfter, sameGroupAs).catch(error => {
     if (error instanceof LlmManagerHostError) throw new SyncApplicationError(error.code, 'LLM Manager 未能完成正式选路')
     throw error
   })

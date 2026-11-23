@@ -205,13 +205,68 @@ class HostTests(unittest.TestCase):
         self.assertEqual([report[name] for name in ("call_count", "input_tokens", "output_tokens", "cache_read_tokens")], [1, 11, 4, 2])
         self.assertIsNotNone(self.settings("status")["leases"][0]["released_at"])
 
-    def test_claude_exec_keeps_real_key_only_in_manager_and_follows_last_message(self) -> None:
+    def add_api_with_fixture(self) -> None:
         upstream = ThreadingHTTPServer(("127.0.0.1", 0), FixtureUpstream)
         thread = Thread(target=upstream.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(upstream.server_close)
         self.addCleanup(upstream.shutdown)
         self.add_api(f"http://127.0.0.1:{upstream.server_port}/tenant")
+
+    def expire_api_cooldown(self) -> None:
+        with sqlite3.connect(self.database) as database:
+            expired = database.execute(
+                "UPDATE llm_circuit_breaker SET cooldown_until = ? WHERE owner_id = ? AND key_id = ?",
+                ("2000-01-01 00:00:00.000000", "fixture-owner", "fixture-key"),
+            )
+            self.assertEqual(expired.rowcount, 1)
+
+    def test_same_group_anchor_restarts_preferred_order_after_cooldown(self) -> None:
+        self.add_api_with_fixture()
+        self.add_native("grok", "account")
+        self.group("api", "grok")
+        preferred = self.rpc(action="resolve")
+        self.assertEqual(preferred["kind"], "anthropic-messages")
+        self.assertTrue(self.reserve(preferred, "quota-fixture")["ok"])
+        self.assertEqual(self.rpc(action="settle", route=preferred, sessionId="quota-fixture", outcome="quota"), {"outcome": "quota"})
+
+        fallback = self.rpc(action="resolve")
+        self.assertEqual(fallback["vendor"], "grok")
+        self.assertEqual(self.rpc(action="resolve", sameGroupAs=fallback), fallback)
+
+        self.expire_api_cooldown()
+        self.assertEqual(self.rpc(action="resolve", sameGroupAs=fallback), preferred)
+        self.assertEqual(self.settings("status")["breakers"], [])
+        successor = self.rpc(action="resolve", nextAfter=preferred)
+        self.assertEqual(successor["vendor"], "grok")
+        self.assertEqual(self.rpc(action="resolve", nextAfter=preferred, sameGroupAs=fallback), successor)
+        self.assertEqual(self.call(action="resolve", nextAfter=fallback, sameGroupAs=fallback)["code"], "llm_manager_quota_required")
+
+        self.group("api")
+        self.assertEqual(self.reserve(fallback, "stale-fallback")["code"], "llm_manager_route_stale")
+        recovered = self.rpc(action="resolve", sameGroupAs=fallback)
+        self.assertEqual(recovered["kind"], "anthropic-messages")
+        self.assertEqual(recovered, self.rpc(action="resolve"))
+
+    def test_same_group_anchor_rejects_another_owner_or_group(self) -> None:
+        self.add_native("grok", "account")
+        self.group("grok")
+        anchor = self.rpc(action="resolve")
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        config["catalog"].append({"id": "other", "label": "Other", "fallback_when": "never", "max_concurrency": 1})
+        self.config.write_text(json.dumps({**config, "group_id": "other"}), encoding="utf-8")
+        self.settings("replace_group", group_id="other", members=[{
+            "id": "other-option", "model_id": "grok-model", "provider_version": 1,
+            "thinking_tier_id": None, "enabled": True,
+        }])
+        self.assertEqual(self.rpc(action="resolve")["vendor"], "grok")
+        self.assertEqual(self.call(action="resolve", sameGroupAs=anchor)["code"], "llm_manager_route_stale")
+
+        self.config.write_text(json.dumps({**config, "owner_id": "another-owner"}), encoding="utf-8")
+        self.assertEqual(self.call(action="resolve", sameGroupAs=anchor)["code"], "llm_manager_route_stale")
+
+    def test_claude_exec_keeps_real_key_only_in_manager_and_follows_last_message(self) -> None:
+        self.add_api_with_fixture()
         self.add_native("grok", "account")
         self.group("api", "grok")
         self.assertTrue(self.settings("test", request={"provider_id": "api", "model_id": "api-model"})["ok"])
@@ -279,12 +334,7 @@ sys.exit(19)
         self.assertEqual(self.rpc(action="resolve", nextAfter=route)["vendor"], "grok")
         self.assertEqual(guard.read_text(encoding="utf-8"), "unchanged")
 
-        with sqlite3.connect(self.database) as database:
-            expired = database.execute(
-                "UPDATE llm_circuit_breaker SET cooldown_until = ? WHERE owner_id = ? AND key_id = ?",
-                ("2000-01-01 00:00:00.000000", "fixture-owner", "fixture-key"),
-            )
-            self.assertEqual(expired.rowcount, 1)
+        self.expire_api_cooldown()
         self.assertEqual(self.rpc(action="resolve"), route)
         self.assertEqual(self.settings("status")["breakers"], [])
 

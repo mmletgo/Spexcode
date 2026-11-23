@@ -14,6 +14,7 @@ code:
 
 ## expanded spec
 
+正式额度重试的首次后继资格与派发及预算在同一事务检查。首次预留沿 Manager 已批准的后继，第二键起回到实时组内选路。请求重放保留原接入及派发绑定。
 [[sync-p0-review-challenge]] 的授权仅在已暂停、全部资源与执行权已结算且没有进入 P1 的原 operation 进行 revision CAS 及追加。确认来源引用仍在原 checkpoint；相同键和内容幂等。普通正式重试保留该授权的冻结范围、原预算族及截止时间。
 
 显式候选续审交接只接收有精确基线选择、已结算、无验证资源或交付日志的原生 code→Spec 父操作，保持其冻结业务范围与覆盖授权。新的模型与请求获得自己的 operation、fence 和 FIFO 位置，沿原预算根与截止时间继续计算调用、attempt 和返修。同一候选按模型去重；只有同一父操作此前的交接均已正式结算且未进入交付验证，才可交给下一模型。请求和 ingress receipt 冻结交接授权，重放不能改成独立预算。候选与全部原件由 [[sync-coordinator]] 在派发前认证。
@@ -55,6 +56,8 @@ freezeCandidate 核对实际 diff blob 的文件范围，recordVerification 绑�
 settleApply 原子保存 receipt、journal 结算、sourceInput+verifiedDelivery 成对 baseline 和真实 deliveredScope。部分交付只推进 coveredScope；根仍 needs_input/conflicted。源及交付物理身份不同的外部输入基线不得套到发布交付树后续编辑，交付树另建自己的 source=delivery 成对基线。pause/cancel 在 applying 只记请求并进入等待边界状态，写入单元完成登记结算后停；取消保留实际 receipt，不等于回滚。未结算副作用、过期 attempt 与未派发操作通过 listRecoverable 查询；pinnedBlobRefs 保护冻结输入、候选、证据、checkpoint 与基线引用。
 
 reserveDispatch 在每次原生调用前按key原子预留 callsUsed/maxCalls 与截止时间，bindSession 按已保存 plan 更新不可替换的原生身份。bindDelivery 绑定预先持久 deliveryPlan 的真实仓库/路径/分支；bindComposedInput 保存组合输入且保留原始source identity。冻结候选核对 composed→candidate 的实际模型差量；beginApply 按完整manifest重建 currentTarget→candidate 差量，允许包含原始用户输入，不把source先无journal写入交付树。四层验证 blob 的范围与外层引用一致，所有证据内容摘要在事务外核对。
+
+Manager 为新原生派发返回的实际路线随请求摘要原子登记。重复预留核对相同路线和摘要，冻结记录供资源创建前的冷恢复和后续证据认证使用。历史预留缺少该字段时保持旧身份和请求摘要。
 
 被取消、暂停或superseded的旧pending envelope可由discardDispatch精确FIFO消费；仅允许控制已停止或终态的operation，不能丢弃仍需attempt的有效输入。恢复不重置预算，retry核maxAttempts/maxRepairs/截止时间；recordBudgetExhaustion仅在真实预算已耗尽时写入budget_exhausted，applying则维持recovery_required。迟到native身份绑定不能将已applying attempt降回running而开放租约抢占。候选覆盖可大于模型diff，外部人类输入路径仍纳入真实应用和验证范围。
 

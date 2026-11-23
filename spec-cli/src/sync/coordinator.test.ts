@@ -8280,7 +8280,11 @@ for (const witness of ['missing', 'canonical', 'attachment'] as const) test(`P1�
   assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
 
-for (const tamper of ['none', 'attribution', 'turn', 'stop', 'source', 'unrelated', 'bad-json', 'bad-shape', 'missing', 'program-error', 'bare-errno', 'git-errno', 'cas-missing', 'cas-mismatch', 'cold-provenance', 'cold-reserved'] as const) test(`P1已结算ZCode provider独审失败仅显式恢复同Git候选 tamper=${tamper}`, async t => {
+for (const tamper of ['none', 'managed-failover', 'attribution', 'turn', 'stop', 'source', 'unrelated', 'bad-json', 'bad-shape', 'missing', 'program-error', 'bare-errno', 'git-errno', 'cas-missing', 'cas-mismatch', 'cold-provenance', 'cold-reserved'] as const) test(`P1已结算ZCode provider独审失败仅显式恢复同Git候选 tamper=${tamper}`, async t => {
+  const { managedModel } = await import('../llm-manager-route.js')
+  const managed = tamper === 'managed-failover'
+  const admitted = { vendor: 'claude', model: 'preferred', kind: 'anthropic-messages', routeId: '1'.repeat(64) } as const
+  const actualRoute = { vendor: 'zcode', model: 'bigmodel-api/GLM-5.3-Flash', kind: 'cli', routeId: '2'.repeat(64) } as const
   const parentPath = '.spec/project/spec.md', parentId = 'REQ-PARENT-01'
   const raw = '重复导出请求必须保留首次结果，具体下载由子叶实现。'
   const parent = `---\ntitle: 导出上层接口\nstatus: pending\n---\n## raw source\n\n${raw}\n`
@@ -8292,60 +8296,77 @@ for (const tamper of ['none', 'attribution', 'turn', 'stop', 'source', 'unrelate
     version: 'sync-coordinator-v2', direction: 'spec_to_code', agentWorkflow: 'native-worktree-v1', intentNodeId: 'project', sourcePaths: ['src'],
     targets: [{ nodeId: 'project', path: parentPath, rawSource: raw }, { nodeId: 'export-contract', path: contractPath }],
     partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524_288, maxParallel: 1 },
-  }, undefined, 'spec', 'zcode:bigmodel-api/GLM-5.3-Flash', false, { [parentPath]: parent })
+  }, undefined, 'spec', managed ? managedModel(admitted) : 'zcode:bigmodel-api/GLM-5.3-Flash', false, { [parentPath]: parent })
   const commonDir = f.input.source.commonDir, operationId = f.operation.id
   const failureCode = 'unsupported', error = tamper === 'unrelated' ? 'ZCode actual ModelRequest identity or toolCount differs' : 'ZCode provider rejected the native turn (retryable=false)'
   const calls: { attempt: number; request: ElaborationSessionRequest }[] = []
   const hash = (value: unknown): string => contentHash(JSON.stringify(value))
-  f.options.runner = async request => {
-    const { targets } = nativeTask(request, commonDir) as { targets: { path: string }[] }
-    const operation = f.store.readOperation(operationId), attempt = f.store.readAttempt(operation.currentAttemptId!)
-    if (targets[0].path !== parentPath) throw new StructuredSessionError('unsupported', '已观察父接口验收，在下游执行前停止')
-    calls.push({ attempt: attempt.number, request })
-    const fence = { operationId, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: f.input.source.physicalFingerprint }
-    return createAttemptRunner(f.store, fence, { pollMs: 2, runtime: {
-      readRecord, cancel: async () => assert.fail('隔离夹具不调用实际原生会话'),
-      run: async actual => {
-        const seed = actual.worktree!, key = actual.sessionCreateKey!, session = sessionIdForCreateKey(key), workspace = join(f.parent, `provider-review-${calls.length}`)
-        const generate = actual.purpose === 'elaboration_generate', failing = !generate && attempt.number === 1
-        const execution = structuredExecutionPolicy(actual), identity = { threadId: `thread-${session}`, turnId: `turn-${session}` }
-        const branch = `codex/provider-review-${session}`
-        if (!generate) f.git('worktree', 'add', '-b', branch, workspace, seed.baseCommit)
-        const worktree = generate ? committedDraftFixture(f, actual, adaptElaborationNativeOutput(actual, parentRows), workspace) : nativeWorktreeResult(workspace, seed)
-        if (generate) f.git('-C', workspace, 'switch', '-c', branch)
-        const prompt = nativeWorktreePrompt(actual.prompt, seed)
-        const output = generate ? { summary: '已提交父接口JSON草稿' } : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
-        let zcodeNative: ZCodeStructuredExecution['zcodeNative']
-        if (failing) {
-          const selection = zcodeNativeSelection(execution.model, execution.effort), { model } = selection
-          const nativeRoot = join(structuredRealmRoot(execution)!, session)
-          const receiptFile = join(nativeRoot, 'process.json'), inputId = `input-${session}`, queryId = `query-${session}`
-          const runtime = join(nativeRoot, 'runtime'), tmp = join(nativeRoot, 'tmp')
-          mkdirSync(runtime, { recursive: true }); mkdirSync(tmp)
-          const child = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { detached: true, stdio: 'ignore' })
-          assert.ok(child.pid)
-          const stopped = new Promise<void>(resolve => child.once('close', () => resolve()))
-          writeDetachedRuntimeReceipt(child.pid, receiptFile); process.kill(-child.pid, 'SIGTERM'); await stopped
-          zcodeNative = { version: 1, root: nativeRoot, sessionId: identity.threadId, inputId, turnId: identity.turnId, pid: child.pid, receiptFile }
-          const snapshot = { sessionId: identity.threadId, model }, nativePrompt = `Return exactly one JSON value matching this JSON Schema, without prose or Markdown: ${JSON.stringify(execution.schema)}\n\n${prompt}`
-          const plan = { ...zcodeNative, worktreeProcessBaseline: 1, queryId, workspace, runtime, tmp, cliVersion: zcodeCapability.cliVersion, cliSha256: zcodeCapability.cliSha256, builtinSha256: zcodeCapability.builtinSha256, ...selection, modelSnapshotDigest: hash(snapshot), policyDigest: hash(execution), requestDigest: hash({ prompt, nativePrompt, policy: execution, selection }) }
-          const event = (type: string, seq: number, payload: Record<string, unknown>) => ({ sessionId: identity.threadId, turnId: identity.turnId, type, seq, eventId: `event-${seq}`, payload })
-          const terminal = event('turn.failed', 3, { inputId, turnPhase: 'processing_input', error: { code: 'EPIPE', attribution: { source: 'provider', exceptionKind: 'provider_business', retryable: false } } })
-          const events = [event('turn.started', 1, { inputId, queryId, messageId: 'exact-user' }), event('session.updated', 2, model), terminal]
-          const send = { sessionId: identity.threadId, content: nativePrompt, inputId, modelSelection: model }
-          const exit = { code: 0, signal: null, stopped: true, acknowledged: false, idle: false, closed: false, stderrBytes: 0, stderrSha256: contentHash('') }
-          for (const [name, value] of Object.entries({ 'plan.json': plan, 'send.json': send, 'model-snapshot.json': snapshot, 'events.json': events, 'terminal.json': terminal, 'exit.json': exit })) writeFileSync(join(nativeRoot, name), JSON.stringify(value))
+  const runtime: NonNullable<import('./native-run.js').AttemptRunnerOptions['runtime']> = {
+    readRecord, cancel: async () => assert.fail('隔离夹具不调用实际原生会话'),
+    run: async actual => {
+      const { targets } = nativeTask(actual, commonDir) as { targets: { path: string }[] }
+      if (targets[0].path !== parentPath) throw new StructuredSessionError('unsupported', '已观察父接口验收，在下游执行前停止')
+      const operation = f.store.readOperation(operationId), attempt = f.store.readAttempt(operation.currentAttemptId!)
+      calls.push({ attempt: attempt.number, request: actual })
+      const seed = actual.worktree!, key = actual.sessionCreateKey!, session = sessionIdForCreateKey(key), workspace = join(f.parent, `provider-review-${calls.length}`)
+      const generate = actual.purpose === 'elaboration_generate', failing = !generate && attempt.number === 1
+      const execution = structuredExecutionPolicy(actual), identity = { threadId: `thread-${session}`, turnId: `turn-${session}` }
+      const branch = `codex/provider-review-${session}`
+      if (!generate) f.git('worktree', 'add', '-b', branch, workspace, seed.baseCommit)
+      const worktree = generate ? committedDraftFixture(f, actual, adaptElaborationNativeOutput(actual, parentRows), workspace) : nativeWorktreeResult(workspace, seed)
+      if (generate) f.git('-C', workspace, 'switch', '-c', branch)
+      const prompt = nativeWorktreePrompt(actual.prompt, seed)
+      const output = generate ? { summary: '已提交父接口JSON草稿' } : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+      let zcodeNative: ZCodeStructuredExecution['zcodeNative']
+      if (failing) {
+        const generic = execution.nativeConfiguration === 'cli-config-v1'
+        const selection = generic ? zcodeNativeConfigSelection(execution.model, execution.effort) : zcodeNativeSelection(execution.model, execution.effort)
+        const { model } = selection, toolDenylist = execution.zcodeToolPolicy?.toolDenylist
+        assert.ok(model)
+        const nativeRoot = join(structuredRealmRoot(execution)!, session)
+        const receiptFile = join(nativeRoot, 'process.json'), inputId = `input-${session}`, queryId = `query-${session}`
+        const runtime = join(nativeRoot, 'runtime'), tmp = join(nativeRoot, 'tmp')
+        mkdirSync(runtime, { recursive: true }); mkdirSync(tmp)
+        const child = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { detached: true, stdio: 'ignore' })
+        assert.ok(child.pid)
+        const stopped = new Promise<void>(resolve => child.once('close', () => resolve()))
+        writeDetachedRuntimeReceipt(child.pid, receiptFile); process.kill(-child.pid, 'SIGTERM'); await stopped
+        zcodeNative = { version: generic ? 3 : toolDenylist ? 2 : 1, root: nativeRoot, sessionId: identity.threadId, inputId, turnId: identity.turnId, pid: child.pid, receiptFile }
+        const snapshot = { sessionId: identity.threadId, model }
+        const policy = toolDenylist ? { toolDenylist } : {}
+        const nativePrompt = (toolDenylist ? 'This read-only turn must return the complete schema JSON. Do not request plan approval or call ExitPlanMode.\n' : '') + 'Return exactly one JSON value matching this JSON Schema, without prose or Markdown: ' + JSON.stringify(execution.schema) + '\n\n' + prompt
+        const plan = {
+          ...zcodeNative, ...policy, ...(generic ? { nativeConfiguration: 'cli-config-v1', builtinPath: zcodeCapability.builtinPath } : {}),
+          worktreeProcessBaseline: 1, queryId, workspace, runtime, tmp, cliVersion: zcodeCapability.cliVersion, cliSha256: zcodeCapability.cliSha256, builtinSha256: zcodeCapability.builtinSha256,
+          ...selection, modelSnapshotDigest: hash(snapshot), policyDigest: hash(execution), requestDigest: hash({ prompt, nativePrompt, policy: execution, selection, ...policy }),
         }
-        const resultDigest = hash(output)
-        configuredSessionApplication().createSession({ sessionId: session, status: failing ? 'error' : 'awaiting' })
-        writeRecord({ session, governed: true, worktreePath: workspace, base: seed.baseCommit, forkCommit: seed.baseCommit, branch, title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(), harness: 'zcode', harnessSessionId: identity.threadId, runtimeStartToken: null, status: failing ? 'error' : 'awaiting', stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: null, launchOwner: null, createRequestId: contentHash(key),
-          createPayloadHash: hash({ prompt, parent: null, launcher: null, base: seed.baseCommit, structuredExecution: execution }),
-          structuredExecution: { ...execution, ...identity, turnStartRequested: true, ...(failing ? { state: 'failed', errorCode: failureCode, error, zcodeNative, cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: true, acknowledged: false, nativeStatus: 'stopped' } } : { state: 'completed', output, resultDigest, resultWorktree: worktree }) },
-        })
-        if (failing) throw new StructuredSessionError(failureCode, error, { sessionId: session, ...identity })
-        return { sessionId: session, ...identity, output, resultDigest, worktree }
-      },
-    } })(request)
+        const event = (type: string, seq: number, payload: Record<string, unknown>) => ({ sessionId: identity.threadId, turnId: identity.turnId, type, seq, eventId: `event-${seq}`, payload })
+        const terminal = event('turn.failed', 3, { inputId, turnPhase: 'processing_input', error: { code: 'EPIPE', attribution: { source: 'provider', exceptionKind: 'provider_business', retryable: false } } })
+        const events = [event('turn.started', 1, { inputId, queryId, messageId: 'exact-user' }), event('session.updated', 2, model), terminal]
+        const send = { sessionId: identity.threadId, content: nativePrompt, inputId, modelSelection: model, ...policy }
+        const exit = { code: 0, signal: null, stopped: true, acknowledged: false, idle: false, closed: false, stderrBytes: 0, stderrSha256: contentHash('') }
+        for (const [name, value] of Object.entries({ 'plan.json': plan, 'send.json': send, 'model-snapshot.json': snapshot, 'events.json': events, 'terminal.json': terminal, 'exit.json': exit })) writeFileSync(join(nativeRoot, name), JSON.stringify(value))
+      }
+      const resultDigest = hash(output)
+      configuredSessionApplication().createSession({ sessionId: session, status: failing ? 'error' : 'awaiting' })
+      writeRecord({ session, governed: true, worktreePath: workspace, base: seed.baseCommit, forkCommit: seed.baseCommit, branch, title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(), harness: 'zcode', harnessSessionId: identity.threadId, runtimeStartToken: null, status: failing ? 'error' : 'awaiting', stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: null, launchOwner: null, createRequestId: contentHash(key),
+        createPayloadHash: hash({ prompt, parent: null, launcher: null, base: seed.baseCommit, structuredExecution: execution }),
+        structuredExecution: { ...execution, ...identity, turnStartRequested: true, ...(failing ? { state: 'failed', errorCode: failureCode, error, zcodeNative, cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: true, acknowledged: false, nativeStatus: 'stopped' } } : { state: 'completed', output, resultDigest, resultWorktree: worktree }) },
+      })
+      if (failing) throw new StructuredSessionError(failureCode, error, { sessionId: session, ...identity })
+      return { sessionId: session, ...identity, output, resultDigest, worktree }
+    },
+  }
+  if (managed) {
+    f.options.runner = undefined
+    f.options.nativeExecution = {
+      pollMs: 2, runtime,
+      resolveManagedRoute: async anchor => { assert.deepEqual(anchor, admitted); return actualRoute },
+    }
+  } else f.options.runner = async request => {
+    const operation = f.store.readOperation(operationId), attempt = f.store.readAttempt(operation.currentAttemptId!)
+    const fence = { operationId, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: f.input.source.physicalFingerprint }
+    return createAttemptRunner(f.store, fence, { pollMs: 2, runtime })(request)
   }
   const resultFor = (attempt: SyncAttempt) => {
     const stage = attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(commonDir, ref).toString()) as { stage: string; resultRef: BlobRef }).find(entry => entry.stage.startsWith('partition:') && entry.stage.endsWith(':elaboration'))
@@ -8363,6 +8384,7 @@ for (const tamper of ['none', 'attribution', 'turn', 'stop', 'source', 'unrelate
   assert.equal(prior.failure?.message, error)
   assert.deepEqual(calls.map(call => call.request.purpose), ['elaboration_generate', 'elaboration_review'])
   assert.ok(prior.dispatchPlans.every(dispatch => f.store.findResource(prior.id, dispatch.key)?.phase === 'removed'))
+  if (managed) assert.equal(prior.dispatchPlans.find(dispatch => dispatch.purpose === 'elaboration_review')?.managedModel, managedModel(actualRoute))
   const originalStage = resultFor(prior), originalResult = originalStage.result, originalRound = originalResult.rounds[0]
   assert.equal(originalResult.partitionBinding?.interfaceSeed?.parentPath, parentPath)
   assert.equal(originalResult.status, 'unsupported'); assert.equal(originalResult.structurePassed, true)
@@ -8470,7 +8492,7 @@ for (const tamper of ['none', 'attribution', 'turn', 'stop', 'source', 'unrelate
   assert.deepEqual(attempts[0].failure, prior.failure)
   assert.deepEqual(resultFor(attempts[0]), originalStage)
   const resumed = calls.filter(call => call.attempt === 2).map(call => call.request)
-  if (tamper === 'none' || cold) {
+  if (tamper === 'none' || managed || cold) {
     assert.deepEqual(resumed.map(request => request.purpose), ['elaboration_review'], JSON.stringify(replay.failure))
     assert.deepEqual(resumed[0].worktree, calls[1].request.worktree)
     const { result: accepted } = resultFor(attempts[1]), acceptedRound = accepted.rounds[0]

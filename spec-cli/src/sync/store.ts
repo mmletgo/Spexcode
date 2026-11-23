@@ -1,6 +1,7 @@
 import { finiteSyncBudget, syncDeadlineExpired } from './budget.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { syncModel, syncModelBinding } from './model-selection.js'
+import { managedRoute } from '../llm-manager-route.js'
 import { getBlob } from '@spexcode/spec-core'
 import { applyComponentMigrations, type ProtocolTransaction, type SessionProtocol } from '@spexcode/session-protocol'
 import { controlledDecisionIdentity, readControlledDecision, readControlledRequest } from './request-input.js'
@@ -59,7 +60,9 @@ const parseRecord = <T>(row: Record<string, unknown> | undefined): T | null => r
 const inputPayload = (input: InputSnapshot): Omit<InputSnapshot, 'capturedAtMs'> => ({ id: input.id, source: input.source, headCommit: input.headCommit, immutableTree: input.immutableTree, indexTree: input.indexTree, indexDigest: input.indexDigest, manifestBlob: input.manifestBlob, contentDigest: input.contentDigest })
 const revalidatable = (operation: SyncOperation): boolean => ['workspace_synced', 'awaiting_landing'].includes(operation.phase)
 type RevalidationProof = ReturnType<typeof proveUnadoptedDelivery>
-type NativeDispatchBinding = Pick<DispatchPlan, 'key' | 'purpose' | 'requestDigest'>
+type NativeDispatchBinding = Pick<DispatchPlan, 'key' | 'purpose' | 'requestDigest' | 'managedModel'>
+const sameDispatchBinding = (a: NativeDispatchBinding, b: NativeDispatchBinding): boolean =>
+  a.purpose === b.purpose && a.requestDigest === b.requestDigest && a.managedModel === b.managedModel
 type ObservedDispatchFence = {
   fenceDigest: string; dataVersion: number; totalChanges: number; expiresAtMs: number; deadlineAtMs: number | null
   dispatches: Map<string, NativeDispatchBinding>
@@ -386,7 +389,7 @@ export class SyncStore {
   private normalizedSemanticDigest(input: Parameters<typeof syncSemanticDigest>[0]): string {
     if (!input.requestBlob) return syncSemanticDigest(input)
     const evidence = JSON.parse(this.blob(input.requestBlob).toString('utf8')) as { type?: string }
-    const handoff = input.inheritRetryBudget ? { handoffModel: input.model } : {}
+    const handoff = { ...(input.inheritRetryBudget ? { handoffModel: input.model } : {}), ...(input.managedQuotaRetry ? { quotaSuccessor: input.model } : {}) }
     if (evidence.type === 'sync.decision') {
       const decision = readControlledDecision(input.input, input.requestBlob)
       return digest({ source: input.input.source, inputId: input.input.id, origin: input.origin, decision: controlledDecisionIdentity(decision), retryOf: input.retryOf ?? null, ...handoff })
@@ -400,7 +403,7 @@ export class SyncStore {
     return syncSemanticDigest({ ...input, requestBlob: { sha256: digest({ ...request, origin }) } })
   }
   private saveIngressReceipt(tx: ProtocolTransaction, input: AdmitSyncInput, operationId: string, payloadDigest: string): void {
-    const receipt: SyncIngressReceipt = { operationId, payloadDigest, ...syncModelBinding(input.model), input: clone(input.input), origin: input.origin, ...(input.inheritRetryBudget ? { inheritRetryBudget: true } : {}), ...(input.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), ...(input.automaticSourceAdoption ? { automaticSourceAdoption: input.automaticSourceAdoption } : {}), ...(input.requestBlob ? { requestBlob: input.requestBlob } : {}), budget: input.budget, deliveryPlan: input.deliveryPlan, previousBaselinePair: input.previousBaselinePair ?? null, ...(input.baselineSelection ? { baselineSelection: clone(input.baselineSelection) } : {}) }
+    const receipt: SyncIngressReceipt = { operationId, payloadDigest, ...syncModelBinding(input.model), ...(input.managedQuotaRetry ? { managedQuotaRetry: true } : {}), input: clone(input.input), origin: input.origin, ...(input.inheritRetryBudget ? { inheritRetryBudget: true } : {}), ...(input.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), ...(input.automaticSourceAdoption ? { automaticSourceAdoption: input.automaticSourceAdoption } : {}), ...(input.requestBlob ? { requestBlob: input.requestBlob } : {}), budget: input.budget, deliveryPlan: input.deliveryPlan, previousBaselinePair: input.previousBaselinePair ?? null, ...(input.baselineSelection ? { baselineSelection: clone(input.baselineSelection) } : {}) }
     tx.exec('INSERT INTO sync_ingress_receipts(ingress_key,operation_id,payload_digest,record_json) VALUES(?,?,?,?)', input.ingressKey, operationId, payloadDigest, JSON.stringify(receipt))
   }
   /** 稳定接入记录与既有消息派发计划共享一个 SQL 事务。 */
@@ -413,6 +416,7 @@ export class SyncStore {
     const { model, ...withoutModel } = input
     input = { ...withoutModel, ...syncModelBinding(model) }
     if (input.retryOf !== undefined && (typeof input.retryOf !== 'string' || !input.retryOf.trim())) fail('SYNC_RETRY_BINDING', '显式重试需要有效的原operation身份')
+    if (input.managedQuotaRetry && (!input.retryOf || !managedRoute(input.model) || observation)) fail('SYNC_DISPATCH_MODEL', '正式额度后继需要原操作和已登记的 Manager 路线')
     if (input.inheritRetryBudget !== undefined && (input.inheritRetryBudget !== true || !input.retryOf || !input.model || !input.planBlob || !input.baselineSelection || observation || input.delivery)) fail('SYNC_RETRY_BUDGET_BINDING', '候选续审交接需要已固定计划、精确基线选择、原操作及明确的新模型')
     this.blob(input.input.manifestBlob)
     if (input.retryOf && (this.readOperation(input.retryOf).requestBlob?.sha256 ?? null) !== (input.requestBlob?.sha256 ?? null)) fail('SYNC_RETRY_BINDING', '显式重试必须继承原始用户请求引用')
@@ -431,7 +435,7 @@ export class SyncStore {
       }
     }
     if (input.delivery && (input.delivery.canonicalRoot !== input.deliveryPlan.canonicalRoot || input.delivery.branch !== input.deliveryPlan.branch || input.delivery.repositoryId !== input.input.source.repositoryId)) fail('SYNC_DELIVERY_BINDING', 'bound delivery differs from durable plan')
-    const payload = { input: inputPayload(input.input), ...syncModelBinding(input.model), ...(input.inheritRetryBudget ? { inheritRetryBudget: true } : {}), ...(input.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), ...(input.automaticSourceAdoption ? { automaticSourceAdoption: input.automaticSourceAdoption } : {}), ...(input.requestBlob ? { requestBlob: input.requestBlob } : {}), ...(input.planBlob ? { planBlob: input.planBlob } : {}), ...(input.retryOf ? { retryOf: input.retryOf } : {}), scope: canonicalScope(input.scope), policyDigest: input.policyDigest, impactDigest: input.impactDigest, readSetDigest: input.readSetDigest, deliveryPlan: input.deliveryPlan, previousBaselinePairId: input.previousBaselinePair?.id ?? null, ...(input.baselineSelection ? { baselineSelectionDigest: input.baselineSelection.digest } : {}), budget: input.budget }
+    const payload = { input: inputPayload(input.input), ...syncModelBinding(input.model), ...(input.managedQuotaRetry ? { managedQuotaRetry: true } : {}), ...(input.inheritRetryBudget ? { inheritRetryBudget: true } : {}), ...(input.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), ...(input.automaticSourceAdoption ? { automaticSourceAdoption: input.automaticSourceAdoption } : {}), ...(input.requestBlob ? { requestBlob: input.requestBlob } : {}), ...(input.planBlob ? { planBlob: input.planBlob } : {}), ...(input.retryOf ? { retryOf: input.retryOf } : {}), scope: canonicalScope(input.scope), policyDigest: input.policyDigest, impactDigest: input.impactDigest, readSetDigest: input.readSetDigest, deliveryPlan: input.deliveryPlan, previousBaselinePairId: input.previousBaselinePair?.id ?? null, ...(input.baselineSelection ? { baselineSelectionDigest: input.baselineSelection.digest } : {}), budget: input.budget }
     const legacyPayloadDigest = digest(payload), payloadDigest = digest({ ...payload, origin: input.origin })
     const requestType = input.requestBlob ? JSON.parse(this.blob(input.requestBlob).toString('utf8')) as { type?: string } : null
     const decision = requestType?.type === 'sync.decision' ? readControlledDecision(input.input, input.requestBlob!) : null
@@ -454,6 +458,7 @@ export class SyncStore {
       if (observation && input.baselineSelection) this.assertSelection(tx, input.input.source, input.baselineSelection, scopeResources(input.scope))
       const finish = (operation: SyncOperation, outcome: 'admitted' | 'coalesced' | 'duplicate'): SyncOperation => {
         if (syncModel(operation) !== syncModel(input)) fail('SYNC_MODEL_RETRY_REQUIRED', '相同业务输入切换模型必须使用正式 retryOf')
+        if (operation.managedQuotaRetry !== input.managedQuotaRetry) fail('SYNC_DISPATCH_MODEL', '重放必须保留原额度后继绑定')
         if (operation.inheritRetryBudget !== input.inheritRetryBudget) fail('SYNC_RETRY_BUDGET_BINDING', '同一重试输入须保留原候选交接授权')
         if (operation.recordUnverifiedCoverage !== input.recordUnverifiedCoverage) fail('SYNC_COVERAGE_AUTHORITY', '接入与既有操作的验收覆盖授权不同')
         if (!observation && operation.automaticSourceAdoption !== input.automaticSourceAdoption) fail('SYNC_AUTOMATIC_ADOPTION_POLICY', '同一业务输入必须保留原自动采纳政策')
@@ -506,6 +511,8 @@ export class SyncStore {
       if (input.retryOf) {
         const previous = this.operation(tx, input.retryOf), eligibility = this.retryEligibility(tx, previous, revalidation)
         if (!eligibility.eligible) fail(eligibility.reason!.code, eligibility.reason!.message)
+        if (input.managedQuotaRetry && (!previous.currentAttemptId || this.attempt(tx, previous.currentAttemptId).failure?.code !== 'provider_quota_exhausted'))
+          fail('SYNC_DISPATCH_MODEL', '正式额度后继需要已结算的原额度失败')
         if (previous.automaticSourceAdoption !== input.automaticSourceAdoption) fail('SYNC_RETRY_BINDING', '正式重试必须保留原自动采纳政策')
         if ((previous.recordUnverifiedCoverage || revalidatable(previous)) && previous.recordUnverifiedCoverage !== input.recordUnverifiedCoverage) fail('SYNC_RETRY_BINDING', '重试必须保留原覆盖授权，已交付候选的重验亦不能改变选择')
         const selectionMatches = revalidation ? !!input.baselineSelection && this.revalidationSelection(tx, previous, input.baselineSelection) : (previous.baselineSelection?.digest ?? null) === (input.baselineSelection?.digest ?? null)
@@ -737,11 +744,15 @@ export class SyncStore {
       attempt.publicationBase = clone(base); this.saveAttempt(tx, attempt); return attempt
     })
   }
-  reserveDispatch(fence: WriteFence, input: NativeDispatchBinding): DispatchPlan {
+  reserveDispatch(fence: WriteFence, input: NativeDispatchBinding, useQuotaSuccessor = false): DispatchPlan {
     return this.write(tx => {
       const { operation, attempt } = this.checkFence(tx, fence)
       const prior = attempt.dispatchPlans.find(plan => plan.key === input.key)
-      if (prior) { if (prior.purpose !== input.purpose || prior.requestDigest !== input.requestDigest) fail('SYNC_DISPATCH_CONFLICT', input.key); return prior }
+      if (prior) { if (!sameDispatchBinding(prior, input)) fail('SYNC_DISPATCH_CONFLICT', input.key); return prior }
+      if (input.managedModel !== undefined && (!managedRoute(operation.model) || !managedRoute(input.managedModel))) fail('SYNC_DISPATCH_MODEL', 'native route must bind a Manager operation and a Manager model')
+      const firstQuotaDispatch = operation.managedQuotaRetry === true && operation.callsUsed === 0
+      if (firstQuotaDispatch !== useQuotaSuccessor) fail('SYNC_DISPATCH_QUOTA_ORDER', '首个额度后继的预留状态已改变')
+      if (firstQuotaDispatch && input.managedModel !== operation.model) fail('SYNC_DISPATCH_MODEL', '首次派发须沿 Manager 批准的额度后继')
       const budget = finiteSyncBudget(operation.budget)
       if (budget && this.family(tx, operation).calls >= budget.maxCalls || syncDeadlineExpired(operation.deadlineAtMs, this.now())) fail('SYNC_BUDGET_EXHAUSTED', 'native call budget or deadline exhausted')
       const plan: DispatchPlan = { ...clone(input), sessionCreateKey: `sync-call-${digest({ attemptId: attempt.id, key: input.key })}`, session: null }
@@ -764,7 +775,7 @@ export class SyncStore {
       if (observed.expiresAtMs <= now || syncDeadlineExpired(observed.deadlineAtMs, now)) fail('SYNC_FENCE_EXPIRED', 'write authority is expired or controlled')
       const dispatch = observed.dispatches.get(input.key)
       if (!dispatch) fail('SYNC_DISPATCH_UNKNOWN', input.key)
-      if (dispatch.purpose !== input.purpose || dispatch.requestDigest !== input.requestDigest) fail('SYNC_DISPATCH_CONFLICT', input.key)
+      if (!sameDispatchBinding(dispatch, input)) fail('SYNC_DISPATCH_CONFLICT', input.key)
       return observed
     })
   }

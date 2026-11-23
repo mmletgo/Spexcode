@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+协调器可透过 Native 执行接缝提供运行时与 Manager 解析器。真实 Native 桥仍负责原调用预留和证据绑定，现有替代模型输出接缝沿自己的独立派发约束。
+
 原生只读候选换模型的接入参数携显式 `inheritRetryBudget`。计划仍由原冻结政策、输入和 scope 构成，调用上限及截止时间沿原预算族核算。
 
 可选 historicalCoverage 仅承载 [[sync-historical-coverage]] 的版本、inputId、摘要和精确 pair/receipt/verificationRef/contractIds 描述，沿整个 plan 参与 policyDigest。它不增加新表、运行范围或显式未执行覆盖许可，旧字段缺席保持严格语义。

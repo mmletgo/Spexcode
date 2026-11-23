@@ -28,9 +28,9 @@ related:
 
 `cursor:default` 选择 [[cursor-structured-runtime]] 并沿用本机 Cursor CLI 配置。`cursor:<模型或别名>` 原样交给 CLI。启用 llm_manager 的宿主功能组将 Cursor 放在首位时，已就绪的 Cursor 路线优先。
 
-`--model llm-manager` 和 `sync.model: llm-manager` 选择 [[llm-manager-host]]。启用完整宿主管理的新原生工作树操作统一在登记的功能组准入。项目的原生默认值仍供未启用完整管理的宿主使用。相同请求和未另选路线的正式重试复用已冻结选择。显式正式重试由功能组选路，Manager 使用已有的真实额度结算和当前可用性返回新路线。观察、重放、恢复及同操作独审沿原冻结路线。
+`--model llm-manager` 和 `sync.model: llm-manager` 选择 [[llm-manager-host]]。启用完整宿主管理的新原生工作树操作在登记的功能组准入，并保留原准入身份。项目的原生默认值仍供未启用完整管理的宿主使用。相同请求和未另选路线的正式重试复用原准入绑定。每个真正新建的托管原生会话，包括独审，从同组首位按当时的可用性选路。首选路线冷却期满且通过 Manager 的恢复核验后，可承接下一次新派发。原已预留派发、进行中的会话及其观察、重放、恢复和结算保持该次冻结的执行路线。显式 Manager 重试仍锚定原功能组。遇到已结算的额度失败，Manager 以实际失败派发为游标选后继，后继用于重试操作的首个新会话。其后新会话重新从原组首位选路。
 
-工作台在已启用完整管理的宿主显示 LLM Manager 的当前可用路线和同源设置入口。默认执行器、API 地址、模型和凭据通过同一管理界面保存。设置变更用于后续准入，既有操作和冻结结果维持原身份。
+工作台在已启用完整管理的宿主显示 LLM Manager 的当前可用路线和同源设置入口。默认执行器、API 地址、模型和凭据通过同一管理界面保存。设置变更作用于后续新派发，既有操作和冻结结果维持各自已保存的身份。
 
 sync run/verify 的 API 和 CLI --model 接受操作级模型选择。选择进入不可变 admission/payload/ingress 身份，同 requestId 改模型拒绝；普通重复业务请求不能靠新 requestId 换模型取得新预算或归并到另一模型，换模型必须经正式 retryOf。显式 retry 未指定模型时继承原操作，显式另选模型仍复用原 source/input/policy/readset/request/origin 并保持既有已批准 P1 义务。
 

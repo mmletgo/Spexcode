@@ -4,6 +4,7 @@ import type { AdmitSyncInput, ApplyReceipt, BaselinePair, BlobRef, FrozenBaselin
 import type { DeliveryTools, PrivateDeliveryOptions } from './private-delivery.js'
 import type { RegisteredVerification } from './verification-plan.js'
 import type { VerificationDriver, VerificationTransportConfiguration } from './verification-executor-types.js'
+import type { AttemptRunnerOptions } from './native-run.js'
 import type { HistoricalCoverage } from './historical-coverage.js'
 
 /** 来源与执行政策由可信应用入口冻结，未来业务 ID 由真实细化结果登记。 */
@@ -49,6 +50,7 @@ export type SyncCoordinatorOptions = {
   readCurrentPlan: () => SyncCoordinatorPlan | Promise<SyncCoordinatorPlan>
   managedRoot: string; artifactRoot: string; tools: DeliveryTools
   recoveryOnly?: boolean
+  nativeExecution?: Pick<AttemptRunnerOptions, 'runtime' | 'resolveManagedRoute' | 'pollMs'>
   runner?: ElaborationRunner; verificationDriver?: VerificationDriver; verificationTransport?: VerificationTransportConfiguration; signal?: AbortSignal
   leaseMs?: number; heartbeatMs?: number; callTimeoutMs?: number
   /** 故障注入只暂停已有真实副作用，不能替换 Git 完成证据。 */
