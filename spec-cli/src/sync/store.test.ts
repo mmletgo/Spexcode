@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 import { applyComponentMigrations, openProtocol, type ProtocolTransaction, type SqlParam } from '@spexcode/session-protocol'
 import { gc, getBlob, putBlob } from '@spexcode/spec-core'
+import { managedModel } from '../llm-manager-route.js'
 import { migrateSyncStore, syncSemanticDigest, SYNC_COMPONENT, SYNC_MIGRATIONS } from './migrations.js'
 import type { AdmitSyncInput, ApplyFilePlan, ApplyPlan, ApplyReceipt, BlobRef, CandidateRef, ClaimedAttempt, InputSnapshot, SyncScope, VerificationRef, VerificationResultBlob, WorktreeIdentity } from './operation-types.js'
 import { captureInputSnapshot, readEvidence } from './snapshot.js'
@@ -777,6 +778,35 @@ test('claim exact message and all leases are one transaction, native dispatch bu
     for (let i = 2; i <= 4; i++) f.store.reserveDispatch(claimed.fence, { key: `call-${i}`, purpose: 'review', requestDigest: 'request' })
     assert.throws(() => f.store.reserveDispatch(claimed.fence, { key: 'call-5', purpose: 'review', requestDigest: 'request' }), /SYNC_BUDGET_EXHAUSTED/)
   } finally { f.cleanup() }
+})
+
+test('Manager 派发原子绑定模型和摘要，已有票据不补写或更换模型', async () => {
+  const f = await fixture()
+  const cold = openProtocol(f.path)
+  try {
+    const model = managedModel({ routeId: '1'.repeat(64), vendor: 'claude', model: 'local', kind: 'cli' })
+    const preferred = managedModel({ routeId: '2'.repeat(64), vendor: 'claude', model: 'preferred', kind: 'anthropic-messages' })
+    const managed = f.claim({ ...f.admit(), model })
+    const legacy = { key: 'old', purpose: 'generate', requestDigest: 'legacy-digest' }
+    const original = f.store.reserveDispatch(managed.fence, legacy)
+    assert.equal(Object.hasOwn(original, 'managedModel'), false)
+    assert.throws(() => f.store.reserveDispatch(managed.fence, { ...legacy, managedModel: model }), /SYNC_DISPATCH_CONFLICT/)
+    const binding = { key: 'fresh', purpose: 'review', requestDigest: 'native-digest', managedModel: preferred }
+    assert.throws(() => f.store.reserveDispatch(managed.fence, { ...binding, managedModel: 'claude:manual' }), /SYNC_DISPATCH_MODEL/)
+    const reserved = f.store.reserveDispatch(managed.fence, binding)
+    const reopened = new SyncStore(cold, f.options)
+    assert.deepEqual(reopened.readAttempt(managed.attempt.id).dispatchPlans, [original, reserved])
+    assert.deepEqual(reopened.reserveDispatch(managed.fence, binding), reserved)
+    reopened.assertObservedDispatch(managed.fence, binding)
+    for (const changed of [{ ...binding, requestDigest: 'different-digest' }, { ...binding, managedModel: model }, { ...binding, managedModel: undefined }]) {
+      assert.throws(() => reopened.reserveDispatch(managed.fence, changed), /SYNC_DISPATCH_CONFLICT/)
+      assert.throws(() => reopened.assertObservedDispatch(managed.fence, changed), /SYNC_DISPATCH_CONFLICT/)
+    }
+    assert.equal(reopened.readOperation(managed.operation.id).callsUsed, 2)
+    const manual = f.claim({ ...f.admit(source('other'), 'unmanaged', scope('other', 'RULE-B')), model: 'claude:manual' })
+    assert.throws(() => f.store.reserveDispatch(manual.fence, binding), /SYNC_DISPATCH_MODEL/)
+    assert.equal(f.store.readOperation(manual.operation.id).callsUsed, 0)
+  } finally { cold.close(); f.cleanup() }
 })
 
 test('native polling reuses one unchanged precise fence and detects local and external writes', async t => {
@@ -3270,7 +3300,7 @@ for (const prior of [34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44] as const) test(
   } finally { backup?.close(); f.cleanup() }
 })
 
-for (const prior of [46, 47, 48, 49, 51, 52, 54, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 71] as const) test(`从writer${prior}升级保留自动采纳索引及原件，旧writer拒绝且备份可回滚`, async () => {
+for (const prior of [46, 47, 48, 49, 51, 52, 54, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 71, 72] as const) test(`从writer${prior}升级保留自动采纳索引及原件，旧writer拒绝且备份可回滚`, async () => {
   assert.equal(SYNC_MIGRATIONS[prior]?.version, prior + 1, '新持久语义必须有独立 writer 围栏')
   const f = await fixture()
   let backup: ReturnType<typeof openProtocol> | undefined

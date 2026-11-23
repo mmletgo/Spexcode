@@ -6,8 +6,9 @@ import { assertCursorRejectedFinalSource } from '../cursor-structured.js'
 import { assertCodexRejectedFinalSource } from '../codex-native-worktree-structured.js'
 import { sessionIdForCreateKey } from '../sessions.js'
 import { readRecord } from '../session-record.js'
+import { managedRoute, type ManagedRoute } from '../llm-manager-route.js'
 import { contentHash, readEvidence } from './snapshot.js'
-import type { NativeRunCheckpoint, NativeRunPlan } from './native-run.js'
+import { matchesNativeDispatchModel, type NativeRunCheckpoint, type NativeRunPlan } from './native-run.js'
 import { partitionedElaborationCoverageMatches, partitionedElaborationInputDigest } from './elaboration-types.js'
 import type { ElaborationResult, ElaborationRound } from './elaboration-types.js'
 import type { CodeBehaviorAnalysis } from './writeback-types.js'
@@ -139,6 +140,7 @@ export function authenticateNativeFailure(store: SyncStore, operation: SyncOpera
   const resource = store.findResource(origin.id, key), dispatch = origin.dispatchPlans.find(item => item.key === key)
   if (!resource || !dispatch || origin.operationId !== operation.id || resource.operationId !== operation.id || resource.plan.kind !== 'native_session' || resource.plan.inputId !== operation.input.id) fail('失败缺少原正式Native资源与派发')
   const plan = read<NativeRunPlan>(resource.plan.planBlob), checkpoint = read<NativeRunCheckpoint>(resource.checkpointRef)
+  if (dispatch.managedModel !== undefined && !matchesNativeDispatchModel(operation, dispatch, plan.request)) fail('失败的Native路线与派发绑定不匹配')
   if (plan.operationId !== operation.id || plan.attemptId !== origin.id || plan.inputId !== operation.input.id || plan.request.requestKey !== key || plan.request.purpose !== dispatch.purpose || plan.requestDigest !== resource.plan.payloadDigest || plan.requestDigest !== dispatch.requestDigest || hash(plan.request) !== plan.requestDigest || plan.sessionCreateKey !== dispatch.sessionCreateKey || plan.expectedSessionId !== sessionIdForCreateKey(dispatch.sessionCreateKey) || failure.sessionId !== plan.expectedSessionId) fail('失败的原请求、身份或输入摘要不匹配')
   const { request } = plan
   const unpublishedGrok = allowStoppedSource && request.model?.startsWith('grok:') && isGrokNativeExitFailure(failure)
@@ -156,6 +158,52 @@ export function authenticateNativeFailure(store: SyncStore, operation: SyncOpera
   if (allowStoppedSource && dispatch.session && (dispatch.session.sessionId !== checkpoint.session.sessionId || dispatch.session.threadId !== null && dispatch.session.threadId !== checkpoint.session.threadId || dispatch.session.turnId !== null && dispatch.session.turnId !== checkpoint.session.turnId)) fail('停止来源缺少原派发的精确 Native 身份')
   if (allowStoppedSource && (state.state !== 'cancelled' && !(state.state === 'failed' && observedFailure) || resource.phase !== 'removed' || state.cancellation?.nativeStopped !== true)) fail('停止来源须有原正式取消或已认证失败及资源停止证明')
   return { plan, checkpoint, record, state, observedFailure }
+}
+
+function managedQuotaDispatch(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string): { route: ManagedRoute; ref: BlobRef } | undefined {
+  const dispatch = attempt.dispatchPlans.find(item => item.key === key)
+  const resource = store.findResource(attempt.id, key)
+  if (!dispatch?.session || resource?.phase !== 'removed' || attempt.operationId !== operation.id || resource.operationId !== operation.id || resource.attemptId !== attempt.id
+    || resource.generation !== attempt.generation || resource.plan.kind !== 'native_session' || resource.plan.key !== key || resource.plan.inputId !== operation.input.id
+    || resource.plan.payloadDigest !== dispatch.requestDigest) return
+  const plan = readCheckpointJson<NativeRunPlan>(store, operation, resource.plan.planBlob)
+  const checkpoint = readCheckpointJson<NativeRunCheckpoint>(store, operation, resource.checkpointRef)
+  if (checkpoint.schemaVersion !== 1 || checkpoint.failure?.code !== 'provider_quota_exhausted' || checkpoint.phase !== 'removed'
+    || checkpoint.status !== 'failed' || checkpoint.nativeState !== 'failed' || !checkpoint.nativeCallRequested
+    || checkpoint.stop?.nativeStopped !== true || checkpoint.stop.state !== 'failed' || checkpoint.stop.sessionId !== dispatch.session.sessionId
+    || (checkpoint.stop.threadId ?? null) !== dispatch.session.threadId || (checkpoint.stop.turnId ?? null) !== dispatch.session.turnId
+    || checkpoint.operationId !== operation.id || checkpoint.attemptId !== attempt.id || checkpoint.inputId !== operation.input.id
+    || checkpoint.expectedSessionId !== dispatch.session.sessionId || checkpoint.requestDigest !== dispatch.requestDigest
+    || !isDeepStrictEqual(checkpoint.session, dispatch.session) || checkpoint.candidateDigest !== resource.plan.candidateDigest
+    || plan.schemaVersion !== 1 || plan.candidateDigest !== resource.plan.candidateDigest
+    || plan.operationId !== operation.id || plan.attemptId !== attempt.id || plan.inputId !== operation.input.id
+    || plan.request.requestKey !== key || plan.request.purpose !== dispatch.purpose || plan.requestDigest !== dispatch.requestDigest
+    || hash(plan.request) !== dispatch.requestDigest || plan.sessionCreateKey !== dispatch.sessionCreateKey
+    || plan.expectedSessionId !== dispatch.session.sessionId || plan.expectedSessionId !== sessionIdForCreateKey(dispatch.sessionCreateKey)
+    || !matchesNativeDispatchModel(operation, dispatch, plan.request)) return
+  const route = managedRoute(plan.request.model)
+  if (route) return { route, ref: resource.checkpointRef }
+}
+
+/** 额度重试沿协调器实际采用的失败会话取得原 Manager 游标。 */
+export function managedQuotaFailureRef(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, failure: { code?: string; sessionId?: string } | null | undefined): BlobRef | undefined {
+  if (failure?.code !== 'provider_quota_exhausted' || !failure.sessionId || !managedRoute(operation.model)) return
+  const dispatch = attempt.dispatchPlans.find(item => item.session?.sessionId === failure.sessionId)
+  return dispatch && managedQuotaDispatch(store, operation, attempt, dispatch.key)?.ref
+}
+
+/** 动态派发只沿正式失败引用；旧操作仍用原准入路线。 */
+export function readManagedQuotaRetryRoute(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt): ManagedRoute | undefined {
+  const admitted = managedRoute(operation.model)
+  if (!admitted || !attempt.dispatchPlans.some(item => item.managedModel !== undefined)) return admitted
+  if (attempt.failure?.code !== 'provider_quota_exhausted') return
+  const refs = new Set(attempt.failure.evidenceRefs.map(ref => ref.sha256))
+  const sources = store.listResources(attempt.id).flatMap(item => {
+    if (!refs.has(item.checkpointRef.sha256) || item.plan.kind !== 'native_session') return []
+    const quota = managedQuotaDispatch(store, operation, attempt, item.plan.key)
+    return quota ? [quota.route] : []
+  })
+  if (sources.length === 1) return sources[0]
 }
 
 /** 原文另核其packet、SHA及CAS字节；Git材料不借raw权限。 */

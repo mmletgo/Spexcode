@@ -1,6 +1,7 @@
 import { finiteSyncBudget, syncDeadlineExpired } from './budget.js'
 import { createHash, randomUUID } from 'node:crypto'
 import { syncModel, syncModelBinding } from './model-selection.js'
+import { managedRoute } from '../llm-manager-route.js'
 import { getBlob } from '@spexcode/spec-core'
 import { applyComponentMigrations, type ProtocolTransaction, type SessionProtocol } from '@spexcode/session-protocol'
 import { controlledDecisionIdentity, readControlledDecision, readControlledRequest } from './request-input.js'
@@ -59,7 +60,9 @@ const parseRecord = <T>(row: Record<string, unknown> | undefined): T | null => r
 const inputPayload = (input: InputSnapshot): Omit<InputSnapshot, 'capturedAtMs'> => ({ id: input.id, source: input.source, headCommit: input.headCommit, immutableTree: input.immutableTree, indexTree: input.indexTree, indexDigest: input.indexDigest, manifestBlob: input.manifestBlob, contentDigest: input.contentDigest })
 const revalidatable = (operation: SyncOperation): boolean => ['workspace_synced', 'awaiting_landing'].includes(operation.phase)
 type RevalidationProof = ReturnType<typeof proveUnadoptedDelivery>
-type NativeDispatchBinding = Pick<DispatchPlan, 'key' | 'purpose' | 'requestDigest'>
+type NativeDispatchBinding = Pick<DispatchPlan, 'key' | 'purpose' | 'requestDigest' | 'managedModel'>
+const sameDispatchBinding = (a: NativeDispatchBinding, b: NativeDispatchBinding): boolean =>
+  a.purpose === b.purpose && a.requestDigest === b.requestDigest && a.managedModel === b.managedModel
 type ObservedDispatchFence = {
   fenceDigest: string; dataVersion: number; totalChanges: number; expiresAtMs: number; deadlineAtMs: number | null
   dispatches: Map<string, NativeDispatchBinding>
@@ -741,7 +744,8 @@ export class SyncStore {
     return this.write(tx => {
       const { operation, attempt } = this.checkFence(tx, fence)
       const prior = attempt.dispatchPlans.find(plan => plan.key === input.key)
-      if (prior) { if (prior.purpose !== input.purpose || prior.requestDigest !== input.requestDigest) fail('SYNC_DISPATCH_CONFLICT', input.key); return prior }
+      if (prior) { if (!sameDispatchBinding(prior, input)) fail('SYNC_DISPATCH_CONFLICT', input.key); return prior }
+      if (input.managedModel !== undefined && (!managedRoute(operation.model) || !managedRoute(input.managedModel))) fail('SYNC_DISPATCH_MODEL', 'native route must bind a Manager operation and a Manager model')
       const budget = finiteSyncBudget(operation.budget)
       if (budget && this.family(tx, operation).calls >= budget.maxCalls || syncDeadlineExpired(operation.deadlineAtMs, this.now())) fail('SYNC_BUDGET_EXHAUSTED', 'native call budget or deadline exhausted')
       const plan: DispatchPlan = { ...clone(input), sessionCreateKey: `sync-call-${digest({ attemptId: attempt.id, key: input.key })}`, session: null }
@@ -764,7 +768,7 @@ export class SyncStore {
       if (observed.expiresAtMs <= now || syncDeadlineExpired(observed.deadlineAtMs, now)) fail('SYNC_FENCE_EXPIRED', 'write authority is expired or controlled')
       const dispatch = observed.dispatches.get(input.key)
       if (!dispatch) fail('SYNC_DISPATCH_UNKNOWN', input.key)
-      if (dispatch.purpose !== input.purpose || dispatch.requestDigest !== input.requestDigest) fail('SYNC_DISPATCH_CONFLICT', input.key)
+      if (!sameDispatchBinding(dispatch, input)) fail('SYNC_DISPATCH_CONFLICT', input.key)
       return observed
     })
   }

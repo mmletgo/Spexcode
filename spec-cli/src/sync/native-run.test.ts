@@ -12,7 +12,9 @@ import { sessionIdForCreateKey, readSessionCreateTermination, recoverSessionCrea
 import { cancelStructuredSession, runStructuredSession, SettledSessionCreateTimeoutError, StructuredSessionError, type StructuredSessionRequest, type StructuredSessionResult } from '../session-structured.js'
 import { rejectedFinalOutput, structuredExecutionPolicy } from '../session-structured-policy.js'
 import { freezeContext, proveFrozenReads, readFrozenManifest, readFrozenRange } from '../frozen-context.js'
-import { createAttemptRunner, type AttemptRunnerOptions, type NativeRunCheckpoint, type NativeRunPlan, type NativeRunRecord } from './native-run.js'
+import { managedModel, type ManagedRoute } from '../llm-manager-route.js'
+import { nativeWorktreePrompt } from '../native-worktree-runtime.js'
+import { createAttemptRunner, pinSyncNativeRequest, type AttemptRunnerOptions, type NativeRunCheckpoint, type NativeRunPlan, type NativeRunRecord } from './native-run.js'
 import { migrateSyncStore } from './migrations.js'
 import type { BlobRef } from './operation-types.js'
 import { SyncStore } from './store.js'
@@ -222,7 +224,9 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 3000): Promise<vo
 }
 function published(request: StructuredSessionRequest): NativeRunRecord {
   const execution = structuredExecutionPolicy(request), createKey = request.sessionCreateKey ?? request.requestKey
-  return { session: sessionIdForCreateKey(createKey), status: 'queued', harnessSessionId: null, structuredExecution: execution, createRequestId: textHash(createKey), createPayloadHash: hash({ prompt: request.prompt, parent: null, launcher: null, ...(request.base?.trim() ? { base: request.base.trim() } : {}), structuredExecution: execution }) }
+  const prompt = request.worktree ? nativeWorktreePrompt(request.prompt, request.worktree) : request.prompt
+  const base = request.worktree?.baseCommit ?? request.base?.trim()
+  return { session: sessionIdForCreateKey(createKey), status: 'queued', harnessSessionId: null, structuredExecution: execution, createRequestId: textHash(createKey), createPayloadHash: hash({ prompt, parent: null, launcher: null, ...(base ? { base } : {}), structuredExecution: execution }) }
 }
 function completed(record: NativeRunRecord): StructuredSessionResult {
   const output = { answer: 'verified output' }, threadId = record.structuredExecution!.threadId ?? 'actual-thread', turnId = record.structuredExecution!.turnId ?? 'actual-turn'
@@ -248,6 +252,150 @@ async function fixture(existingRoot?: string, model?: string) {
   const runner = (runtime: AttemptRunnerOptions['runtime']) => createAttemptRunner(store, claimed.fence, { runtime, blobIO, pollMs: 2 })
   return { root, store, claimed, request, records, resource, checkpoint, blobIO, cache, runtimeBase, runner, cleanup: () => { protocol.close(); if (!existingRoot) rmSync(root, { recursive: true, force: true }) } }
 }
+
+const localRoute = { routeId: '1'.repeat(64), vendor: 'zcode', model: 'local/model', kind: 'cli' } satisfies ManagedRoute
+const preferredRoute = { routeId: '2'.repeat(64), vendor: 'claude', model: 'MiniMax-M3.1', kind: 'anthropic-messages' } satisfies ManagedRoute
+
+test('Manager 新派发回到首选路线，同键活跃与已完成请求保留原路线', async () => {
+  const f = await fixture(undefined, managedModel(localRoute))
+  const pending: Promise<StructuredSessionResult>[] = []
+  let finishFirst: (() => void) | undefined
+  try {
+    const git = (...args: string[]) => execFileSync('git', ['-C', f.root, ...args], { encoding: 'utf8' }).trim()
+    git('init', '-q'); git('-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'seed', '--allow-empty')
+    const base = git('rev-parse', 'HEAD'), tree = git('rev-parse', 'HEAD^{tree}')
+    const request = { ...f.request, base, worktree: { baseCommit: base, tree, mode: 'read' as const } }
+    let ready: ManagedRoute = localRoute, lookups = 0
+    const calls: StructuredSessionRequest[] = []
+    const run = createAttemptRunner(f.store, f.claimed.fence, {
+      blobIO: f.blobIO, pollMs: 2, resolveManagedRoute: async anchor => { assert.deepEqual(anchor, localRoute); lookups++; return ready },
+      runtime: { ...f.runtimeBase, run: async actual => {
+        calls.push(actual)
+        const record = published(actual)
+        f.records.set(record.session, record)
+        const finish = (): StructuredSessionResult => {
+          const worktree = { baseCommit: base, baseTree: tree, headCommit: base, tree, worktreePath: f.root }
+          const result = completed(record)
+          record.structuredExecution!.resultWorktree = worktree
+          return { ...result, worktree }
+        }
+        if (actual.requestKey !== request.requestKey) return finish()
+        record.status = 'active'; record.harnessSessionId = 'local-thread'
+        record.structuredExecution = { ...record.structuredExecution!, state: 'running', threadId: 'local-thread', turnId: 'local-turn' }
+        return new Promise(resolve => { finishFirst = () => resolve(finish()) })
+      } },
+    })
+    const first = run(request), concurrent = run(request)
+    pending.push(first, concurrent)
+    await waitUntil(() => f.resource()?.phase === 'created' && f.checkpoint().nativeStarted)
+    const firstDispatch = f.store.readAttempt(f.claimed.attempt.id).dispatchPlans[0]
+    const firstBytes = f.blobIO.read(f.resource().plan.planBlob)
+    const firstPlan = JSON.parse(firstBytes.toString()) as NativeRunPlan
+    assert.equal(firstDispatch.managedModel, managedModel(localRoute))
+    assert.equal(firstDispatch.requestDigest, hash(firstPlan.request))
+    ready = preferredRoute
+    const sameActive = run(request)
+    pending.push(sameActive)
+    await assert.rejects(run({ ...request, prompt: 'same key with other bytes' }), { code: 'key_reused' })
+    await assert.rejects(run({ ...request, model: managedModel(preferredRoute) }), { code: 'key_reused' })
+    const nextRequest = { ...request, requestKey: 'independent-review', purpose: 'review' }
+    await run(nextRequest)
+    assert.equal(f.resource().phase, 'created')
+    assert.ok(finishFirst)
+    finishFirst()
+    const original = await first
+    assert.deepEqual(await concurrent, original)
+    assert.deepEqual(await sameActive, original)
+    const coldReplay = createAttemptRunner(f.store, f.claimed.fence, { blobIO: f.blobIO,
+      resolveManagedRoute: async () => assert.fail('a saved resource cannot reselect'),
+      runtime: { ...f.runtimeBase, run: async () => assert.fail('a saved result cannot redispatch') },
+    })
+    assert.deepEqual(await coldReplay(firstPlan.request), original)
+    assert.deepEqual(await coldReplay(request), original)
+    assert.deepEqual(f.blobIO.read(f.resource().plan.planBlob), firstBytes)
+    const [savedFirst, savedNext] = f.store.readAttempt(f.claimed.attempt.id).dispatchPlans
+    assert.equal(savedFirst.sessionCreateKey, firstDispatch.sessionCreateKey)
+    assert.equal(savedNext.managedModel, managedModel(preferredRoute))
+    assert.deepEqual(calls.map(call => [call.model, call.nativeConfiguration, call.zcodeToolPolicy, call.effort]), [
+      [managedModel(localRoute), 'cli-config-v1', { version: 1, toolDenylist: ['ExitPlanMode'] }, undefined],
+      [managedModel(preferredRoute), 'cli-config-v1', undefined, undefined],
+    ])
+    assert.equal(lookups, 2)
+    assert.equal(f.store.readOperation(f.claimed.operation.id).callsUsed, 2)
+    assert.equal(f.store.readOperation(f.claimed.operation.id).model, managedModel(localRoute))
+  } finally { finishFirst?.(); await Promise.allSettled(pending); f.cleanup() }
+})
+
+for (const historical of [false, true]) test(`Manager 仅预留请求冷恢复保持原模型和完整字节，历史=${historical}`, async () => {
+  const f = await fixture(undefined, managedModel(preferredRoute))
+  const cold = openProtocol(join(f.root, 'db.sqlite'))
+  try {
+    const request = { ...f.request, worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'read' as const } }
+    const frozen = historical ? request : pinSyncNativeRequest({ ...request, model: managedModel(localRoute) }, null)
+    const dispatch = f.store.reserveDispatch(f.claimed.fence, { key: request.requestKey, purpose: request.purpose, requestDigest: hash(frozen), ...(historical ? {} : { managedModel: frozen.model }) })
+    const store = new SyncStore(cold, { readBlob: f.blobIO.read })
+    const calls: StructuredSessionRequest[] = []
+    const run = createAttemptRunner(store, f.claimed.fence, { blobIO: f.blobIO, pollMs: 2,
+      resolveManagedRoute: async () => assert.fail('a durable dispatch cannot reselect'),
+      runtime: { ...f.runtimeBase, run: async actual => { calls.push(actual); throw new StructuredSessionError('failed', 'mock cold recovery') } },
+    })
+    await assert.rejects(run({ ...request, prompt: 'changed prompt' }), { code: 'SYNC_DISPATCH_CONFLICT' })
+    assert.equal(f.resource(), null)
+    await assert.rejects(run(request), /mock cold recovery/)
+    const plan = JSON.parse(f.blobIO.read(f.resource().plan.planBlob).toString()) as NativeRunPlan
+    assert.deepEqual(plan.request, frozen)
+    assert.deepEqual(store.readAttempt(f.claimed.attempt.id).dispatchPlans, [dispatch])
+    assert.equal(calls[0].sessionCreateKey, dispatch.sessionCreateKey)
+    assert.equal(store.readOperation(f.claimed.operation.id).callsUsed, 1)
+  } finally { cold.close(); f.cleanup() }
+})
+
+test('Manager 同键原子预留竞态复用先提交路线，选路失败无派发', async () => {
+  const f = await fixture(undefined, managedModel(localRoute))
+  const other = openProtocol(join(f.root, 'db.sqlite'))
+  try {
+    const request = { ...f.request, worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'read' as const } }
+    const calls: StructuredSessionRequest[] = []
+    let route: ManagedRoute | null = null
+    const run = createAttemptRunner(f.store, f.claimed.fence, { blobIO: f.blobIO, pollMs: 2, resolveManagedRoute: async () => route,
+      runtime: { ...f.runtimeBase, run: async actual => { calls.push(actual); throw new StructuredSessionError('failed', 'mock race winner') } },
+    })
+    await assert.rejects(run(request), { code: 'sync_llm_manager_no_ready_route' })
+    route = { ...preferredRoute, routeId: 'invalid' }
+    await assert.rejects(run(request), /Invalid LLM Manager route identity/)
+    await assert.rejects(run({ ...request, model: 'claude:manual' }), { code: 'key_reused' })
+    assert.equal(f.resource(), null)
+    assert.deepEqual(f.store.readAttempt(f.claimed.attempt.id).dispatchPlans, [])
+    assert.equal(f.store.readOperation(f.claimed.operation.id).callsUsed, 0)
+    const competingStore = new SyncStore(other, { readBlob: f.blobIO.read })
+    const reserve = f.store.reserveDispatch.bind(f.store)
+    f.store.reserveDispatch = (fence, proposed) => {
+      assert.equal(proposed.managedModel, managedModel(preferredRoute))
+      competingStore.reserveDispatch(fence, { ...proposed, managedModel: managedModel(localRoute), requestDigest: hash(pinSyncNativeRequest(request, null)) })
+      return reserve(fence, proposed)
+    }
+    route = preferredRoute
+    await assert.rejects(run(request), /mock race winner/)
+    assert.deepEqual(calls.map(call => call.model), [managedModel(localRoute)])
+    assert.equal(f.store.readOperation(f.claimed.operation.id).callsUsed, 1)
+  } finally { other.close(); f.cleanup() }
+})
+
+test('显式手选原生模型不会查询 Manager，也不接受调用者提供的 Manager 路线', async () => {
+  const f = await fixture(undefined, 'claude:manual')
+  try {
+    const request = { ...f.request, worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'read' as const } }
+    const calls: StructuredSessionRequest[] = []
+    const run = createAttemptRunner(f.store, f.claimed.fence, { blobIO: f.blobIO, pollMs: 2,
+      resolveManagedRoute: async () => assert.fail('manual model cannot query Manager'),
+      runtime: { ...f.runtimeBase, run: async actual => { calls.push(actual); throw new StructuredSessionError('failed', 'mock manual model') } },
+    })
+    await assert.rejects(run({ ...request, model: managedModel(preferredRoute) }), { code: 'key_reused' })
+    await assert.rejects(run(request), /mock manual model/)
+    assert.deepEqual(calls.map(call => call.model), ['claude:manual'])
+    assert.equal(Object.hasOwn(f.store.readAttempt(f.claimed.attempt.id).dispatchPlans[0], 'managedModel'), false)
+  } finally { f.cleanup() }
+})
 
 for (const model of ['claude:default', 'zcode:default']) for (const historical of [false, true]) test(`原生CLI配置仅冻结新resource，历史缺席与摘要保持 ${model}/${historical}`, async t => {
   const f = await fixture(undefined, model)

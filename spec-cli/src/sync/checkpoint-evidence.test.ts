@@ -4,11 +4,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { gzipSync } from 'node:zlib'
+import { managedModel, type ManagedRoute } from '../llm-manager-route.js'
+import { sessionIdForCreateKey } from '../sessions.js'
 import { rejectedFinalOutput } from '../session-structured-policy.js'
 import { SyncApplication } from './application.js'
 import type { SyncOperationDetail } from './application.js'
-import { readSyncCheckpoints, syncCheckpointArtifacts } from './checkpoint-evidence.js'
-import type { SyncAttempt, SyncOperation } from './operation-types.js'
+import { managedQuotaFailureRef, readManagedQuotaRetryRoute, readSyncCheckpoints, syncCheckpointArtifacts } from './checkpoint-evidence.js'
+import type { NativeRunCheckpoint, NativeRunPlan } from './native-run.js'
+import type { DispatchPlan, SyncAttempt, SyncOperation, SyncResourceRecord } from './operation-types.js'
 import { contentHash, writeEvidence } from './snapshot.js'
 import type { SyncStore } from './store.js'
 import { remoteVerificationEnvironment } from './verification-transport.js'
@@ -70,4 +73,64 @@ test('内联日志保留原运输协议的字节长度和SHA校验', async () =>
   await assert.rejects(driver(['container', 'logs', 'fixture'], 1024), /远端日志原始字节\/SHA不匹配/)
   encoded.stdout = { ...inline, bytes: bytes.length + 1 }
   await assert.rejects(driver(['container', 'logs', 'fixture'], 1024), /远端日志原始字节\/SHA不匹配/)
+})
+
+
+test('Manager正式额度重试只沿被采纳的唯一已结算派发游标', t => {
+  const commonDir = mkdtempSync(join(tmpdir(), 'checkpoint-manager-quota-'))
+  t.after(() => rmSync(commonDir, { recursive: true, force: true }))
+  const preferred: ManagedRoute = { routeId: 'a'.repeat(64), vendor: 'claude', model: 'preferred', kind: 'anthropic-messages' }
+  const fallback: ManagedRoute = { ...preferred, routeId: 'b'.repeat(64), model: 'fallback' }
+  const operation = { id: 'operation', model: managedModel(fallback), input: { id: 'input', source: { commonDir } } } as SyncOperation
+  const attempt: SyncAttempt = {
+    id: 'attempt', operationId: operation.id, number: 3, generation: 3, dispatchKey: 'dispatch', sessionCreateKey: 'create',
+    status: 'failed', currentSession: null, dispatchPlans: [], composedInput: null, candidate: null, verification: null,
+    checkpointRefs: [], failure: { code: 'provider_quota_exhausted', message: 'quota', kind: 'unsupported', evidenceRefs: [] }, leaseToken: 'lease', expiresAtMs: 0,
+  }
+  const resources: SyncResourceRecord[] = []
+  const store = {
+    findResource: (_attemptId: string, key: string) => resources.find(resource => resource.plan.key === key),
+    listResources: () => resources,
+  } as unknown as SyncStore
+  const add = (key: string, route: ManagedRoute, checkpointCode: 'failed' | 'provider_quota_exhausted') => {
+    const sessionCreateKey = `sync-call-${key}`, expectedSessionId = sessionIdForCreateKey(sessionCreateKey)
+    const model = managedModel(route)
+    const request: NativeRunPlan['request'] = {
+      requestKey: key, purpose: 'code_review', root: commonDir, inputDigest: 'input-digest', prompt: 'review',
+      timeoutMs: null, schema: { type: 'object' }, model, worktree: { mode: 'read', baseCommit: 'commit', tree: 'tree' },
+    }
+    const requestDigest = contentHash(JSON.stringify(request))
+    const identity = { schemaVersion: 1 as const, operationId: operation.id, attemptId: attempt.id, inputId: operation.input.id, candidateDigest: null, requestDigest, expectedSessionId }
+    const session = { sessionId: expectedSessionId, threadId: 'thread', turnId: 'turn' }
+    const dispatch: DispatchPlan = { key, purpose: request.purpose, requestDigest, managedModel: model, session, sessionCreateKey }
+    const checkpoint: NativeRunCheckpoint = {
+      ...identity, phase: 'removed', status: 'failed', nativeState: 'failed', nativeCallRequested: true, nativeStarted: true, session,
+      failure: { code: checkpointCode, message: 'quota' },
+      stop: { ...session, state: 'failed', nativeStopped: true, acknowledged: true, nativeStatus: 'stopped' },
+    }
+    const ref = writeEvidence(commonDir, checkpoint)
+    const plan = { ...identity, request, sessionCreateKey } satisfies NativeRunPlan
+    resources.push({
+      id: key, operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, phase: 'removed',
+      plan: { key, kind: 'native_session', payloadDigest: requestDigest, inputId: operation.input.id, candidateDigest: null, planBlob: writeEvidence(commonDir, plan), checkpointRef: ref },
+      checkpointRef: ref, checkpoints: [{ phase: 'removed', checkpointRef: ref }], createdAtMs: 0, updatedAtMs: 1,
+    })
+    attempt.dispatchPlans.push(dispatch)
+    return { ref, dispatch }
+  }
+  assert.deepEqual(readManagedQuotaRetryRoute(store, operation, attempt), fallback, '旧准入可作历史游标')
+  const unrelated = add('unrelated', fallback, 'failed')
+  const actual = add('actual', preferred, 'provider_quota_exhausted')
+  const next = add('other-quota', fallback, 'provider_quota_exhausted')
+  assert.equal(readManagedQuotaRetryRoute(store, operation, attempt), undefined, '并发额度失败不能自行猜测采用哪个')
+  assert.equal(managedQuotaFailureRef(store, operation, attempt, { code: 'provider_quota_exhausted', sessionId: unrelated.dispatch.session!.sessionId }), undefined)
+  const ref = managedQuotaFailureRef(store, operation, attempt, { code: 'provider_quota_exhausted', sessionId: actual.dispatch.session!.sessionId })
+  assert.deepEqual(ref, actual.ref)
+  attempt.failure!.evidenceRefs = [unrelated.ref, actual.ref]
+  assert.deepEqual(readManagedQuotaRetryRoute(store, operation, attempt), preferred, '采用派发实际模型')
+  attempt.failure!.evidenceRefs.push(next.ref)
+  assert.equal(readManagedQuotaRetryRoute(store, operation, attempt), undefined, '拒绝歧义游标')
+  actual.dispatch.managedModel = operation.model
+  attempt.failure!.evidenceRefs = [actual.ref]
+  assert.equal(readManagedQuotaRetryRoute(store, operation, attempt), undefined, '路线必须与原生请求摘要对应')
 })

@@ -2,6 +2,8 @@ import { Ajv } from 'ajv'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { getBlob, putBlob, runtimeRoot } from '@spexcode/spec-core'
+import { resolveManagedRoute } from '../llm-manager-host.js'
+import { managedModel, managedRoute, type ManagedRoute } from '../llm-manager-route.js'
 import { readRecord, type SessRec } from '../session-record.js'
 import { GROK_NATIVE_EXIT_DEADLINE_FAILURE } from '../grok-structured.js'
 import { closeSession, sessionIdForCreateKey, readSessionCreateTermination, recoverSessionCreateTermination, verifyPreservedSessionCreateTermination, type SessionCreateTermination } from '../sessions.js'
@@ -14,12 +16,21 @@ import { verifyStageResult } from './stage-worktree.js'
 import { withoutSessionApplicationExecutionWake } from '../session-application.js'
 import { zcodeNativeModel } from '../zcode-structured.js'
 import { finiteSyncBudget } from './budget.js'
+import { syncModel } from './model-selection.js'
+import { SyncApplicationError } from './settings.js'
 import type { ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult } from './elaboration-types.js'
 import { SyncStoreError, type SyncStore } from './store.js'
-import type { BlobRef, NativeSessionRef, SyncResourcePhase, WriteFence } from './operation-types.js'
+import type { BlobRef, DispatchPlan, NativeSessionRef, SyncResourcePhase, WriteFence } from './operation-types.js'
 import type { SyncAttempt, SyncOperation } from './operation-types.js'
 
 type FrozenRequest = Omit<ElaborationSessionRequest, 'signal'> & { readerRuntime?: FrozenReaderRuntime }
+
+/** 原生原件的模型资格以同一持久派发为准，历史派发沿原操作模型。 */
+export function matchesNativeDispatchModel(operation: Pick<SyncOperation, 'model'>, dispatch: Pick<DispatchPlan, 'managedModel'>, request: Pick<FrozenRequest, 'model' | 'worktree' | 'frozenContext'>): boolean {
+  if (dispatch.managedModel === undefined) return request.model === syncModel(operation)
+  return !!request.worktree && !request.frozenContext && request.model === dispatch.managedModel
+    && !!managedRoute(operation.model) && !!managedRoute(dispatch.managedModel)
+}
 
 /** 同步冻结与原件冷验共用CLI配置规则；历史请求保持原字段及执行强度。 */
 export function pinSyncNativeRequest(request: FrozenRequest, saved: Pick<StructuredExecution, 'nativeConfiguration' | 'zcodeToolPolicy' | 'effort'> | null): FrozenRequest {
@@ -32,6 +43,7 @@ export type NativeRunRecord = Pick<SessRec, 'session' | 'status' | 'harnessSessi
 export type AttemptRunnerOptions = {
   resourceRecoveryOnly?: true
   retireSettledWorktrees?: true
+  resolveManagedRoute?: (anchor: ManagedRoute) => Promise<ManagedRoute | null>
   runtime?: { run: typeof runStructuredSession; cancel: typeof cancelStructuredSession; readRecord: (id: string) => NativeRunRecord | null; readCreateTermination?: typeof readSessionCreateTermination; recoverCreateTermination?: typeof recoverSessionCreateTermination }
   blobIO?: { put: (bytes: Buffer) => BlobRef; read: (ref: BlobRef) => Buffer }
   pollMs?: number
@@ -101,7 +113,8 @@ function hasSettledNativeFailure(store: SyncStore, operation: SyncOperation, att
     const settled = resource!.operationId === operation.id && resource!.attemptId === attempt.id && resource!.generation === attempt.generation && resource!.plan.inputId === operation.input.id && plan.operationId === operation.id && plan.attemptId === attempt.id && plan.inputId === operation.input.id && plan.expectedSessionId === failure.sessionId && plan.sessionCreateKey === dispatch.sessionCreateKey && plan.expectedSessionId === sessionIdForCreateKey(dispatch.sessionCreateKey) && plan.request.requestKey === dispatch.key && plan.requestDigest === dispatch.requestDigest && plan.requestDigest === resource!.plan.payloadDigest && plan.requestDigest === hash(plan.request)
       && (failure.requestKey === undefined || failure.requestKey === plan.request.requestKey) && (failure.inputDigest === undefined || failure.inputDigest === plan.request.inputDigest) && checkpoint.operationId === plan.operationId && checkpoint.attemptId === plan.attemptId && checkpoint.inputId === plan.inputId && checkpoint.candidateDigest === plan.candidateDigest && checkpoint.candidateDigest === resource!.plan.candidateDigest && checkpoint.requestDigest === plan.requestDigest && checkpoint.expectedSessionId === plan.expectedSessionId && checkpoint.phase === 'removed' && checkpoint.status === 'failed' && checkpoint.nativeState === 'failed' && checkpoint.failure?.code === failure.code && checkpoint.failure?.message === failure.message
       && stop?.nativeStopped === true && stop.state === 'failed' && stop.sessionId === failure.sessionId && checkpoint.session.sessionId === stop.sessionId && checkpoint.session.threadId === (stop.threadId ?? null) && checkpoint.session.turnId === (stop.turnId ?? null) && stop.threadId === failure.threadId && stop.turnId === failure.turnId
-    if (!settled || failure.code === 'native_rpc_timeout') return settled
+    if (!settled || dispatch.managedModel !== undefined && !matchesNativeDispatchModel(operation, dispatch, plan.request)) return false
+    if (failure.code === 'native_rpc_timeout') return true
     const { request } = plan
     if (resource!.plan.key !== dispatch.key || plan.schemaVersion !== 1 || checkpoint.schemaVersion !== 1
       || !request.worktree || request.frozenContext || dispatch.purpose !== request.purpose
@@ -112,7 +125,7 @@ function hasSettledNativeFailure(store: SyncStore, operation: SyncOperation, att
       && failure.requestKey === request.requestKey && failure.inputDigest === request.inputDigest && !!failure.threadId && !!failure.turnId
       && checkpoint.nativeStarted && !checkpoint.failure?.failedWorktree && !checkpoint.failure?.rejectedOutput && !checkpoint.result
     if (failure.code !== 'failed' || (request.purpose !== 'code_behavior_analyze' && request.purpose !== 'code_behavior_review')
-      || request.model !== operation.model || !request.model?.startsWith('grok:')
+      || !matchesNativeDispatchModel(operation, dispatch, request) || !request.model?.startsWith('grok:')
       || request.nativeConfiguration !== 'cli-config-v1' || request.root !== operation.input.source.canonicalRoot || request.base !== request.worktree.baseCommit
       || checkpoint.nativeCallRequested !== true || checkpoint.nativeStarted !== false
       || checkpoint.session.threadId !== null || checkpoint.session.turnId !== null || stop.threadId !== undefined || stop.turnId !== undefined
@@ -136,6 +149,7 @@ function hasSettledNativeFailure(store: SyncStore, operation: SyncOperation, att
 /** 为一个固定attempt连接既有结构化执行与资源证据，不承担候选发布或文件写入。 */
 export function createAttemptRunner(store: SyncStore, fence: WriteFence, options: AttemptRunnerOptions = {}): ElaborationRunner {
   const operation = store.readOperation(fence.operationId)
+  const routeAnchor = managedRoute(operation.model)
   const evidenceDir = join(operation.input.source.commonDir, 'spexcode', 'evidence')
   const blobs = options.blobIO ?? { put: (bytes: Buffer): BlobRef => ({ sha256: putBlob(bytes, evidenceDir) }), read: (ref: BlobRef): Buffer => {
     const bytes = getBlob(ref.sha256, evidenceDir)
@@ -144,6 +158,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
   } }
   const runtime = options.runtime ?? { run: runStructuredSession, cancel: cancelStructuredSession, readRecord, readCreateTermination: readSessionCreateTermination, recoverCreateTermination: recoverSessionCreateTermination }
   const flights = new Map<string, { digest: string; controller: AbortController; promise: Promise<ElaborationSessionResult> }>()
+  const routeLookups = new Map<string, Promise<ManagedRoute | null>>()
   const read = <T>(ref: BlobRef): T => {
     const bytes = blobs.read(ref)
     if (sha(bytes) !== ref.sha256) throw new StructuredSessionError('stale_result', 'native execution evidence object digest is invalid')
@@ -151,13 +166,19 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
   }
   const put = (value: unknown): BlobRef => blobs.put(Buffer.from(JSON.stringify(value)))
 
-  const execute = async (request: FrozenRequest, requestDigest: string, controller: AbortController): Promise<ElaborationSessionResult> => {
+  const execute = async (request: FrozenRequest, requestDigest: string, controller: AbortController, managedModel?: string): Promise<ElaborationSessionResult> => {
     if (request.frozenContext) assertFrozenBinding(request.frozenContext, { requestKey: request.requestKey, inputDigest: request.inputDigest, attemptId: fence.attemptId, policyDigest: operation.policyDigest })
+    const binding = { key: request.requestKey, purpose: request.purpose, requestDigest, ...(managedModel !== undefined ? { managedModel } : {}) }
     let resource = store.findResource(fence.attemptId, request.requestKey)
     const attempt = store.readAttempt(fence.attemptId)
     let dispatch = attempt.dispatchPlans.find(plan => plan.key === request.requestKey)
-    if (resource && (!dispatch || dispatch.requestDigest !== requestDigest || resource.plan.payloadDigest !== requestDigest)) throw new StructuredSessionError('key_reused', 'native dispatch key was reused with different request bytes')
-    if (!resource) dispatch = store.reserveDispatch(fence, { key: request.requestKey, purpose: request.purpose, requestDigest })
+    if (resource && (!dispatch || dispatch.purpose !== binding.purpose || dispatch.managedModel !== managedModel || dispatch.requestDigest !== requestDigest || resource.plan.payloadDigest !== requestDigest))
+      throw new StructuredSessionError('key_reused', 'native dispatch key was reused with different request bytes')
+    if (!resource) {
+      if (managedModel === undefined) dispatch = store.reserveDispatch(fence, binding)
+      else if (dispatch?.purpose !== binding.purpose || dispatch.managedModel !== managedModel || dispatch.requestDigest !== requestDigest)
+        throw new SyncStoreError('SYNC_DISPATCH_CONFLICT', binding.key)
+    }
     if (!dispatch) throw new StructuredSessionError('stale_result', 'native resource lost its durable dispatch plan')
     const expectedSessionId = sessionIdForCreateKey(dispatch.sessionCreateKey)
     const execution = structuredExecutionPolicy(request)
@@ -276,7 +297,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
     }
     const authority = (fresh = false): boolean => {
       try {
-        store.assertObservedDispatch(fence, { key: request.requestKey, purpose: request.purpose, requestDigest }, fresh)
+        store.assertObservedDispatch(fence, binding, fresh)
         return true
       }
       catch (error) { if (error instanceof SyncStoreError && error.code === 'SYNC_FENCE_EXPIRED') return false; throw error }
@@ -407,10 +428,38 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
       await new Promise<void>(resolve => setTimeout(resolve, options.pollMs ?? 50))
     }
   }
-  return async request => {
-    const { signal, ...value } = request
-    const resource = store.findResource(fence.attemptId, value.requestKey)
-    const dispatch = resource ? undefined : store.readAttempt(fence.attemptId).dispatchPlans.find(plan => plan.key === value.requestKey)
+  const run: ElaborationRunner = async request => {
+    const { signal, ...supplied } = request
+    const findDispatch = () => store.readAttempt(fence.attemptId).dispatchPlans.find(plan => plan.key === supplied.requestKey)
+    const dispatch = findDispatch()
+    const resource = store.findResource(fence.attemptId, supplied.requestKey)
+    const modelReused = (): StructuredSessionError => new StructuredSessionError('key_reused', 'native request key was reused with a different Manager model')
+    const exactModel = dispatch?.managedModel
+    if (supplied.model !== operation.model && (exactModel === undefined || supplied.model !== exactModel) && (routeAnchor || managedRoute(supplied.model)))
+      throw modelReused()
+    let selectedModel: string | undefined
+    if (!dispatch && !resource && routeAnchor && supplied.worktree && !supplied.frozenContext) {
+      if (options.resourceRecoveryOnly || signal?.aborted) throw new StructuredSessionError('cancelled', 'native request cancelled before Manager dispatch')
+      const key = supplied.requestKey
+      let lookup = routeLookups.get(key)
+      if (!lookup) {
+        store.assertWriteFence(fence)
+        const resolve = options.resolveManagedRoute ?? ((original: ManagedRoute) => resolveManagedRoute(undefined, original))
+        lookup = resolve(routeAnchor)
+        routeLookups.set(key, lookup)
+      }
+      // 等待宿主期间其他 runner 可以先提交；竞争后的请求仍按原模型和完整摘要重验。
+      let selection: ManagedRoute | null
+      try { selection = await lookup }
+      catch (error) { if (findDispatch()) return run(request); throw error }
+      finally { if (routeLookups.get(key) === lookup) routeLookups.delete(key) }
+      if (findDispatch()) return run(request)
+      if (!selection) throw new SyncApplicationError('sync_llm_manager_no_ready_route', 'LLM Manager 功能组没有已就绪路线')
+      selectedModel = managedModel(selection)
+    }
+    const effectiveModel = exactModel ?? selectedModel
+    const value = effectiveModel !== undefined ? { ...supplied, model: effectiveModel } : supplied
+    if (dispatch?.managedModel !== undefined && !matchesNativeDispatchModel(operation, dispatch, value)) throw modelReused()
     let saved = resource ? read<NativeRunPlan>(resource.plan.planBlob).request : dispatch?.requestDigest === hash(value) ? value : null
     const zcodeToolPolicy = pinZCodeToolPolicy(value, saved)
     if (!saved && dispatch) {
@@ -426,9 +475,16 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
     let flight = flights.get(frozen.requestKey)
     if (flight && flight.digest !== requestDigest) throw new StructuredSessionError('key_reused', 'native request key was reused with different bytes')
     if (!flight) {
+      if (selectedModel !== undefined) {
+        try { store.reserveDispatch(fence, { key: frozen.requestKey, purpose: frozen.purpose, requestDigest, managedModel: selectedModel }) }
+        catch (error) {
+          if (error instanceof SyncStoreError && error.code === 'SYNC_DISPATCH_CONFLICT' && findDispatch()) return run(request)
+          throw error
+        }
+      }
       const controller = new AbortController()
       if (signal?.aborted) controller.abort()
-      const promise = execute(frozen, requestDigest, controller)
+      const promise = execute(frozen, requestDigest, controller, effectiveModel)
       flight = { digest: requestDigest, controller, promise }; flights.set(frozen.requestKey, flight)
     }
     const current = flight
@@ -486,4 +542,5 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
     }
     finally { signal?.removeEventListener('abort', abort); if (flights.get(frozen.requestKey) === current) flights.delete(frozen.requestKey) }
   }
+  return run
 }

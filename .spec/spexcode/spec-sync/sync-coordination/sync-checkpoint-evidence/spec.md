@@ -3,6 +3,8 @@ title: 同步检查点的 JSON 与不可信原文边界
 status: active
 code:
   - spec-cli/src/sync/checkpoint-evidence.ts
+related:
+  - spec-cli/src/sync/checkpoint-evidence.test.ts
 ---
 
 ## raw source
@@ -10,6 +12,8 @@ code:
 结构化输出失败的原文必须完整可查并可续修，但不能被当作可信阶段或业务结果；真正损坏的阶段证据必须显式失败。
 
 ## expanded spec
+
+托管线路切换的正式额度重试以协调器记录的唯一实际失败资源为游标。核对同 operation、attempt、generation、输入、请求摘要、持久派发路线、候选和原生精确停止；缺证或歧义不派发。未记录派发级路线的历史 attempt 仍用原准入路线。
 
 含analysisOnlyPartitions的全局P1读取另核共同whole P0、同计划、每区精确原P0 ref/正文及两种分区证据的完整互斥并集，并用同一聚合算法重算新inputDigest。仅分析P0 ref保活为JSON证据，不作为P1 round或raw；原局部强认证继续仅沿partitionEvidence进行。
 
