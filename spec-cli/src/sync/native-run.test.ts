@@ -256,6 +256,48 @@ async function fixture(existingRoot?: string, model?: string) {
 const localRoute = { routeId: '1'.repeat(64), vendor: 'zcode', model: 'local/model', kind: 'cli' } satisfies ManagedRoute
 const preferredRoute = { routeId: '2'.repeat(64), vendor: 'claude', model: 'MiniMax-M3.1', kind: 'anthropic-messages' } satisfies ManagedRoute
 
+test('Manager 正式额度后继用于首个派发，后续新键回到已恢复的组首', async () => {
+  const f = await fixture(undefined, managedModel(localRoute))
+  try {
+    f.store.recordFailure(f.claimed.fence, { code: 'provider_quota_exhausted', message: 'quota', kind: 'unsupported', evidenceRefs: [] })
+    const { input, scope, budget, policyDigest, impactDigest, readSetDigest, deliveryPlan, origin } = f.claimed.operation
+    const successor = { routeId: '3'.repeat(64), vendor: 'claude', model: 'successor', kind: 'anthropic-messages' } satisfies ManagedRoute
+    const admission = {
+      input, scope, budget, policyDigest, impactDigest, readSetDigest, deliveryPlan, origin, delivery: null,
+      ingressKey: 'quota-retry', rootCauseId: 'quota-retry', retryOf: f.claimed.operation.id, model: managedModel(successor),
+      managedQuotaRetry: true as const,
+    }
+    const operation = f.store.admitAndEnqueue(admission)
+    const { fence } = f.store.claimAttempt({ operationId: operation.id, source: input.source, scope, leaseMs: 30000, expectedMessageId: operation.dispatchMessageId })
+    const git = (...args: string[]) => execFileSync('git', ['-C', f.root, ...args], { encoding: 'utf8' }).trim()
+    git('init', '-q'); git('-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'seed', '--allow-empty')
+    const base = git('rev-parse', 'HEAD'), tree = git('rev-parse', 'HEAD^{tree}')
+    const request = { ...f.request, base, model: admission.model, worktree: { baseCommit: base, tree, mode: 'read' as const } }
+    let lookups = 0
+    const models: string[] = []
+    const runner = () => createAttemptRunner(f.store, fence, {
+      blobIO: f.blobIO, pollMs: 2,
+      resolveManagedRoute: async anchor => { assert.deepEqual(anchor, successor); lookups++; return preferredRoute },
+      runtime: { ...f.runtimeBase, run: async actual => {
+        models.push(actual.model!)
+        const record = published(actual)
+        f.records.set(record.session, record)
+        const result = completed(record), worktree = { baseCommit: base, baseTree: tree, headCommit: base, tree, worktreePath: f.root }
+        record.structuredExecution!.resultWorktree = worktree
+        return { ...result, worktree }
+      } },
+    })
+    const first = await runner()(request)
+    assert.equal(lookups, 0, '首个派发兑现正式额度后继')
+    assert.deepEqual(await runner()(request), first)
+    await runner()({ ...request, requestKey: 'next-review' })
+    assert.deepEqual(models, [managedModel(successor), managedModel(preferredRoute)])
+    assert.equal(lookups, 1)
+    assert.deepEqual(f.store.readAttempt(fence.attemptId).dispatchPlans.map(plan => plan.managedModel), models)
+    assert.equal(f.store.readOperation(operation.id).callsUsed, 2)
+  } finally { f.cleanup() }
+})
+
 test('Manager 新派发回到首选路线，同键活跃与已完成请求保留原路线', async () => {
   const f = await fixture(undefined, managedModel(localRoute))
   const pending: Promise<StructuredSessionResult>[] = []

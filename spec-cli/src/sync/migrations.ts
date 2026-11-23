@@ -5,7 +5,7 @@ import { applyComponentMigrations, type ComponentMigration, type SessionProtocol
 export const SYNC_COMPONENT = 'spec-sync'
 export const SYNC_COORDINATOR_ADDRESS = 'spec-sync-coordinator'
 export const syncCoordinatorAddress = (repositoryId: string): string => `spec-sync-coordinator-${createHash('sha256').update(repositoryId).digest('hex')}`
-export function syncSemanticDigest(input: Pick<SyncOperation, 'input' | 'origin' | 'requestBlob' | 'policyDigest' | 'scope' | 'retryOf' | 'baselineSelection' | 'recordUnverifiedCoverage' | 'automaticSourceAdoption' | 'inheritRetryBudget' | 'model'>): string {
+export function syncSemanticDigest(input: Pick<SyncOperation, 'input' | 'origin' | 'requestBlob' | 'policyDigest' | 'scope' | 'retryOf' | 'baselineSelection' | 'recordUnverifiedCoverage' | 'automaticSourceAdoption' | 'inheritRetryBudget' | 'managedQuotaRetry' | 'model'>): string {
   const identity = {
     inputId: input.input.id,
     source: input.input.source,
@@ -22,6 +22,7 @@ export function syncSemanticDigest(input: Pick<SyncOperation, 'input' | 'origin'
     ...(input.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}),
     ...(input.automaticSourceAdoption ? { automaticSourceAdoption: input.automaticSourceAdoption } : {}),
     ...(input.inheritRetryBudget ? { handoffModel: input.model } : {}),
+    ...(input.managedQuotaRetry ? { quotaSuccessor: input.model } : {}),
   }
   return createHash('sha256').update(JSON.stringify(identity, (_key, entry: unknown) => entry && typeof entry === 'object' && !Array.isArray(entry) ? Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a.localeCompare(b))) : entry)).digest('hex')
 }

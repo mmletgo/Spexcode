@@ -437,25 +437,29 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
     const exactModel = dispatch?.managedModel
     if (supplied.model !== operation.model && (exactModel === undefined || supplied.model !== exactModel) && (routeAnchor || managedRoute(supplied.model)))
       throw modelReused()
-    let selectedModel: string | undefined
+    let selectedModel: string | undefined, useQuotaSuccessor = false
     if (!dispatch && !resource && routeAnchor && supplied.worktree && !supplied.frozenContext) {
       if (options.resourceRecoveryOnly || signal?.aborted) throw new StructuredSessionError('cancelled', 'native request cancelled before Manager dispatch')
-      const key = supplied.requestKey
-      let lookup = routeLookups.get(key)
-      if (!lookup) {
-        store.assertWriteFence(fence)
-        const resolve = options.resolveManagedRoute ?? ((original: ManagedRoute) => resolveManagedRoute(undefined, original))
-        lookup = resolve(routeAnchor)
-        routeLookups.set(key, lookup)
+      useQuotaSuccessor = operation.managedQuotaRetry === true && store.readOperation(operation.id).callsUsed === 0
+      if (useQuotaSuccessor) selectedModel = operation.model
+      else {
+        const key = supplied.requestKey
+        let lookup = routeLookups.get(key)
+        if (!lookup) {
+          store.assertWriteFence(fence)
+          const resolve = options.resolveManagedRoute ?? ((original: ManagedRoute) => resolveManagedRoute(undefined, original))
+          lookup = resolve(routeAnchor)
+          routeLookups.set(key, lookup)
+        }
+        // 等待宿主期间其他 runner 可以先提交；竞争后的请求仍按原模型和完整摘要重验。
+        let selection: ManagedRoute | null
+        try { selection = await lookup }
+        catch (error) { if (findDispatch()) return run(request); throw error }
+        finally { if (routeLookups.get(key) === lookup) routeLookups.delete(key) }
+        if (findDispatch()) return run(request)
+        if (!selection) throw new SyncApplicationError('sync_llm_manager_no_ready_route', 'LLM Manager 功能组没有已就绪路线')
+        selectedModel = managedModel(selection)
       }
-      // 等待宿主期间其他 runner 可以先提交；竞争后的请求仍按原模型和完整摘要重验。
-      let selection: ManagedRoute | null
-      try { selection = await lookup }
-      catch (error) { if (findDispatch()) return run(request); throw error }
-      finally { if (routeLookups.get(key) === lookup) routeLookups.delete(key) }
-      if (findDispatch()) return run(request)
-      if (!selection) throw new SyncApplicationError('sync_llm_manager_no_ready_route', 'LLM Manager 功能组没有已就绪路线')
-      selectedModel = managedModel(selection)
     }
     const effectiveModel = exactModel ?? selectedModel
     const value = effectiveModel !== undefined ? { ...supplied, model: effectiveModel } : supplied
@@ -476,9 +480,9 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
     if (flight && flight.digest !== requestDigest) throw new StructuredSessionError('key_reused', 'native request key was reused with different bytes')
     if (!flight) {
       if (selectedModel !== undefined) {
-        try { store.reserveDispatch(fence, { key: frozen.requestKey, purpose: frozen.purpose, requestDigest, managedModel: selectedModel }) }
+        try { store.reserveDispatch(fence, { key: frozen.requestKey, purpose: frozen.purpose, requestDigest, managedModel: selectedModel }, useQuotaSuccessor) }
         catch (error) {
-          if (error instanceof SyncStoreError && error.code === 'SYNC_DISPATCH_CONFLICT' && findDispatch()) return run(request)
+          if (error instanceof SyncStoreError && (error.code === 'SYNC_DISPATCH_QUOTA_ORDER' || error.code === 'SYNC_DISPATCH_CONFLICT' && findDispatch())) return run(request)
           throw error
         }
       }

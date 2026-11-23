@@ -2671,7 +2671,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         }
       }
       if (handoffParent && !reviewContinuation && !store.listAttempts(operation.id).some(prior => stage<SavedGeneration>(store, operation, prior, 'generation')?.candidate)) fail('review_handoff_binding', '显式交接未认证原候选的可续审分区，不能重做P0/P1')
-      const runner = options.runner ? injectedRunner(store, fence, options.runner) : createAttemptRunner(store, fence, { retireSettledWorktrees: true })
+      const runner = options.runner ? injectedRunner(store, fence, options.runner) : createAttemptRunner(store, fence, { retireSettledWorktrees: true, ...options.nativeExecution })
       const candidateHistoryCheckpoints = (prior: SyncAttempt): SyncCheckpointStageView => prior.id !== attempt!.id && ['failed', 'superseded', 'settled'].includes(prior.status)
         ? historyCheckpoints(prior.operationId === operation.id ? operation : store.readOperation(prior.operationId), prior) : readSyncCheckpointStageIndex(store, operation, prior)
       let readonlySourceHistory: ReturnType<typeof readonlyElaborationHistory> | undefined
@@ -2978,7 +2978,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number).reverse()) {
           if (!['failed', 'superseded', 'settled'].includes(prior.status)) return null
           const saved = stage<SavedElaboration>(store, operation, prior, key)
-          const providerReview = !newerGeneration && operation.model?.startsWith('zcode:') && prior.status === 'superseded'
+          const providerReview = !newerGeneration && prior.status === 'superseded'
             && prior.failure?.kind === 'unsupported' && isZCodeProviderRejection(prior.failure) && saved?.status === 'unsupported'
             && isZCodeProviderRejection(saved.failure) && saved.structurePassed && !saved.reviewPassed && saved.phase !== 'partitioned_final'
           const source = binding ? partitionElaborationStage(store, operation, prior, key, binding, inputDigest) : partitionStage<SavedElaboration>(store, operation, prior, key)

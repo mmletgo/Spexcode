@@ -786,9 +786,11 @@ export class SyncApplication {
       const nextAfter = quotaRetry ? readManagedQuotaRetryRoute(this.store, retry, previous) : undefined
       if (quotaRetry && managedRoute(syncModel(retry)) && !nextAfter)
         throw new SyncApplicationError('sync_llm_manager_quota_binding', '正式额度重试缺少实际失败派发的 Manager 路线')
-      const model = await resolveSyncModel(requested, Boolean(plan.agentWorkflow), inherited ? syncModel(inherited) : undefined, nextAfter)
+      const groupAnchor = retry && input.model === 'llm-manager' ? managedRoute(syncModel(retry)) : undefined
+      const model = await resolveSyncModel(requested, Boolean(plan.agentWorkflow), inherited ? syncModel(inherited) : undefined, nextAfter, groupAnchor)
       if (prior && (syncModel(prior) !== model || (ingress?.origin ?? prior.origin) !== origin || (prior.retryOf ?? null) !== (retry?.id ?? null) || (ingress?.input ?? prior.input).id !== snapshot.id || JSON.stringify((ingress?.input ?? prior.input).source) !== JSON.stringify(snapshot.source) || prior.policyDigest !== syncPlanDigest(plan) || ((ingress ?? prior).requestBlob?.sha256 ?? null) !== (requestBlob?.sha256 ?? null))) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
       const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: input.requestId, origin, ...syncModelBinding(model), ...(input.inheritRetryBudget ? { inheritRetryBudget: true } : {}), ...(recordUnverifiedCoverage ? { recordUnverifiedCoverage } : {}), ...(retry ? { retryOf: retry.id, ...(retry.baselineSelection ? { executionScope: retry.scope, impactDigest: retry.impactDigest } : {}) } : {}), budget: retry && (revalidation || input.inheritRetryBudget || readP0ReviewChallenges(this.store, retry).size) ? retry.budget : settings.budget, managedRoot: this.managedRoot, ...(requestBlob ? { requestBlob } : {}), previousBaselinePair, ...(frozen ? { baselineSelection: frozen.selection } : {}), automaticSourceAdoption }, businessSelection)
+      if (nextAfter || (ingress ?? prior)?.managedQuotaRetry) admission.managedQuotaRetry = true
       if (prior) { admission.deliveryPlan = (ingress ?? prior).deliveryPlan; admission.budget = (ingress ?? prior).budget }
       this.prepareTools(admission.ingressKey, prior, model, plan.agentWorkflow)
       const operation = this.store.admitAndEnqueue(admission)

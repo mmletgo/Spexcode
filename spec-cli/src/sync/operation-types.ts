@@ -73,6 +73,8 @@ export type SyncOperation = {
   inheritRetryBudget?: true
   /** 固定操作模型；缺省表示历史 gpt-6.1-sol，不随全局配置变化。 */
   model?: string
+  /** 正式额度重试由 Manager 选择的后继用于首次预留。 */
+  managedQuotaRetry?: true
   recordUnverifiedCoverage?: true
   automaticSourceAdoption?: 'canonical-source-v1'
   /** 可恢复的可信政策全文；内容摘要必须等于policyDigest。旧无计划操作明确缺省。 */
@@ -113,7 +115,7 @@ export type ApplyStep = { key: string; status: 'planned' | 'completed'; evidence
 export type ApplyReceipt = { id: string; journalId: string; effectKey: string; actualTree: string; actualCommit: string | null; deliverySnapshot: InputSnapshot; evidenceRefs: BlobRef[]; completedAtMs: number }
 export type ApplyJournal = { id: string; operationId: string; attemptId: string; generation: number; plan: ApplyPlan; status: 'prepared' | 'applying' | 'completed' | 'settled' | 'recovery_required'; steps: ApplyStep[]; receipt: ApplyReceipt | null; createdAtMs: number }
 export type SyncDispatchEnvelope = { version: 1; type: 'sync.dispatch'; operationId: string; inputId: string; generation: number; dispatchKey: string }
-export type AdmitSyncInput = Pick<SyncOperation, 'ingressKey' | 'rootCauseId' | 'origin' | 'input' | 'requestBlob' | 'retryOf' | 'inheritRetryBudget' | 'model' | 'recordUnverifiedCoverage' | 'automaticSourceAdoption' | 'planBlob' | 'scope' | 'budget' | 'delivery' | 'policyDigest' | 'impactDigest' | 'readSetDigest' | 'deliveryPlan'> & { previousBaselinePair?: BaselinePair | null; baselineSelection?: FrozenBaselineSelection }
+export type AdmitSyncInput = Pick<SyncOperation, 'ingressKey' | 'rootCauseId' | 'origin' | 'input' | 'requestBlob' | 'retryOf' | 'inheritRetryBudget' | 'model' | 'managedQuotaRetry' | 'recordUnverifiedCoverage' | 'automaticSourceAdoption' | 'planBlob' | 'scope' | 'budget' | 'delivery' | 'policyDigest' | 'impactDigest' | 'readSetDigest' | 'deliveryPlan'> & { previousBaselinePair?: BaselinePair | null; baselineSelection?: FrozenBaselineSelection }
 export type ClaimAttemptInput = { operationId: string; source: WorktreeIdentity; scope: SyncScope; leaseMs: number; expectedMessageId?: string }
 export type ClaimedAttempt = { operation: SyncOperation; attempt: SyncAttempt; fence: WriteFence; lease: ScopeLease }
 export type RecoverableSync = { operation: SyncOperation; attempt: SyncAttempt | null; journals: ApplyJournal[] }
@@ -139,7 +141,7 @@ export type SyncResourceCheckpoint = {
 }
 export type RecoverableSyncResource = { operation: SyncOperation; attempt: SyncAttempt; resource: SyncResourceRecord }
 
-export type SyncIngressReceipt = Pick<AdmitSyncInput, 'model' | 'inheritRetryBudget' | 'recordUnverifiedCoverage' | 'automaticSourceAdoption' | 'requestBlob' | 'budget' | 'deliveryPlan' | 'previousBaselinePair' | 'baselineSelection'> & { operationId: string; payloadDigest: string; input?: InputSnapshot; origin?: SyncOperation['origin'] }
+export type SyncIngressReceipt = Pick<AdmitSyncInput, 'model' | 'managedQuotaRetry' | 'inheritRetryBudget' | 'recordUnverifiedCoverage' | 'automaticSourceAdoption' | 'requestBlob' | 'budget' | 'deliveryPlan' | 'previousBaselinePair' | 'baselineSelection'> & { operationId: string; payloadDigest: string; input?: InputSnapshot; origin?: SyncOperation['origin'] }
 
 export type ClaimQueuedAttemptInput = ClaimAttemptInput & { expectedRevision: number; continuation?: true }
 export type SyncObservationInput = { input: InputSnapshot; configRef: BlobRef; selection: FrozenBaselineSelection | null; latestDifferenceDigest: string; failure?: SyncFailure }

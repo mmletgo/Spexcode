@@ -14,6 +14,7 @@ code:
 
 ## expanded spec
 
+操作与接入回执可带 `managedQuotaRetry: true`，表示原正式额度已耗尽且本次模型由 Manager 选为后继。首次新派发消耗该操作自己的第一次调用并精确绑定这个模型。其他操作及旧接入缺省继续原行为。
 Manager 托管的原生工作树可在 DispatchPlan 保存 `managedModel`。其值和最终请求摘要随调用预留原子冻结，operation.model 仍是原准入身份。历史派发缺少该字段时保留原字节。
 
 [[sync-p0-review-challenge]] 授权存在原 operation，保存操作员请求身份、原 local/continuation wrapper、冻结分区计划与 scope、诊断 CAS 引用。诊断只进入正式独审。 v2 授权通过同一诊断 CAS 绑定精确的只读证据路径。v1 缺此数据，继续按原资格验证。
