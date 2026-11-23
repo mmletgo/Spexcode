@@ -183,6 +183,8 @@ AC-ELABORATION-38–40 验证空 changes 的完整既有目标、只返回子叶
 
 候选检查从同一次完整核验的冻结工作树按原路径顺序读取普通UTF-8文件，用于核对源码、测试及契约引用。
 
+业务条目经来源和依赖无法追溯到 REQ 时仍阻断独审。该诊断记录候选中实际条目的节点、规格路径、行号及 ID，便于受管作者定位本次需要修复的业务行。
+
 普通非分区细化与合并后的partition seal都对完整冻结图执行final completeness检查；只有带冻结`validationScope: partition_local`的分区子候选，才把只读context的源码/测试完整性留给之后的全局seal。该技术范围参与inputDigest，不能从模型输出取得，也不能把局部结果当全局ready。
 
 显式空 implementationWritePaths 表示本轮只观察既有实现（code→spec）。生成和独审均不得将缺代码、测试文件或用例延后交给 P2；这些缺口保留为具体 readonly_implementation_gap 并阻止细化通过，不能虚构新测试、编造业务GAP或弱化验收。已有完整实现/测试仍按原结构与独审门禁通过。

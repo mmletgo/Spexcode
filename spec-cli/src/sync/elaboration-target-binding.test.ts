@@ -75,6 +75,40 @@ const runner = (generate: (request: ElaborationSessionRequest) => unknown): { ru
   } }
 }
 
+test('未追溯业务项定位到实际叶节点并阻断独审', async () => {
+  const frozen = input()
+  const selectedLeaf = frozen.targets[1]
+  const fake = runner(request => {
+    const generated = leaf(request)
+    const tables = generated.tables as GeneratedTargetElaboration['changes'][number]['tables']
+    tables.RULE = [{
+      id: 'RULE-LEAF-ORPHAN',
+      scope: '冻结叶的边界',
+      constraint: '业务规则必须追溯其需求',
+      basis: '冻结原意',
+      authority: selectedLeaf.nodeId,
+      source: 'user:raw',
+      'depends-on': [],
+    }]
+    return build(request, [generated])
+  })
+
+  const result = await elaborate(frozen, { runner: fake.run })
+  const round = result.rounds[0]
+  const change = round.candidate!.changes.find(item => item.nodeId === selectedLeaf.nodeId)!
+  const rule = parseContract(change).contract!.items.find(item => item.id === 'RULE-LEAF-ORPHAN')!
+  const error = round.findings.find(item => item.code === 'untraceable_intent' && item.itemId === rule.id)!
+  assert.deepEqual({ nodeId: error.nodeId, path: error.path, line: error.line }, {
+    nodeId: selectedLeaf.nodeId,
+    path: change.path,
+    line: rule.line,
+  })
+  assert.equal(error.severity, 'error')
+  assert.equal(result.structurePassed, false)
+  assert.equal(result.reviewPassed, false)
+  assert.deepEqual(fake.calls.map(call => call.purpose), ['elaboration_generate'])
+})
+
 const ownerScopeInput = (): ElaborationInput => {
   const frozen = input()
   const source = `---\ntitle: 原父接口\ndesc: 保留原说明\ncontract-schema: sync-v1\nrelated:\n  - tests/export.test.mjs\n---\n# 原父标题\n\n## raw source\n\n父接口原意。\n\n## expanded spec\n\n父接口原解释。\n\n### VERIFY\n\n| id | command | cwd | timeout-ms |\n| --- | --- | --- | --- |\n| VERIFY-PARENT-01 | ["node","--version"] | . | 1000 |\n\n后置解释。\n\n### REQ\n\n| id | goal | source | constraints | success | depends-on |\n| --- | --- | --- | --- | --- | --- |\n| REQ-PARENT-01 | 保留父接口 | user:raw | 不改变接口 | 子叶可承接 | - |\n`.replace(/\n/g, '\r\n')
