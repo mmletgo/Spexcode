@@ -6,7 +6,7 @@ import { posix, sep } from 'node:path'
 import { configPath } from '@spexcode/spec-core'
 import { contractReferences, parseContract, parseParts } from '@spexcode/spec-core/contracts'
 import { analyzeCodeBehavior, CodeBehaviorReviewRepairError, compositionConflictPaths, deriveBehaviorAuthorization, partitionBehaviorChangedPaths, uncoveredCompositionConflicts, verifyBehaviorReadBasis } from './code-behavior.js'
-import type { CodeBehaviorApprovalBinding, CodeBehaviorInput, CodeBehaviorContinuation, CodeBehaviorMaterialRequest, CodeBehaviorReviewReference } from './code-behavior.js'
+import type { CodeBehaviorApprovalBinding, CodeBehaviorApprovalInput, CodeBehaviorInput, CodeBehaviorContinuation, CodeBehaviorMaterialRequest, CodeBehaviorReviewReference } from './code-behavior.js'
 import { elaborationSchema, outputErrors } from './elaboration-schema.js'
 import { elaborate, freezeElaborationInput, inspectElaborationGaps, verifyElaborationDraftCache, projectElaborationFlowReadiness, sealPartitionedElaboration, partitionSealRepairContext } from './elaboration.js'
 import type { Contract, ContractFinding, Verification } from '@spexcode/spec-core/contracts'
@@ -40,6 +40,7 @@ export type PartitionCheckpoints = {
   loadBehaviorContinuation?(key: string, planDigest: string, inputDigest: string, analysisSchemaDigest: string): CodeBehaviorContinuation | null
   loadBehaviorReviewFeedback?(key: string, planDigest: string, inputDigest: string): CodeBehaviorReviewReference | null
   loadAcceptedAnalysis?(key: string, plan: SyncPartitionPlan, inputDigest: string, binding: CodeBehaviorApprovalBinding): CodeBehaviorAnalysis | null
+  auditP0Approvals?(plan: SyncPartitionPlan): P0ApprovalAudit | Promise<P0ApprovalAudit>
   authenticateAnalysisOnly?(plan: SyncPartitionPlan, evidence: CodeBehaviorEvidence, owners: readonly AnalysisOnlyPartitionEvidence[]): boolean
   loadAcceptedElaboration?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'> | null
   loadAcceptedInterfaceSeed?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'> | null
@@ -52,6 +53,18 @@ export type PartitionCheckpoints = {
   loadPartitionSealRepair?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): PartitionSealRepair | null | Promise<PartitionSealRepair | null>
   loadGapRepair?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): { prior: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>; repair: ElaborationGapRepair } | null | Promise<{ prior: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>; repair: ElaborationGapRepair } | null>
   save(key: string, value: unknown): BlobRef
+}
+export type P0ApprovalSource = { operationId: string; attemptId: string; checkpointRef: BlobRef; resultRef: BlobRef }
+type P0ApprovalDecision = { source: P0ApprovalSource } & (
+  | { status: 'reused'; analysis: CodeBehaviorAnalysis; authenticatedOrigin: { operationId: string; attemptId: string } }
+  | { status: 'invalidated'; reason: string; evidence: BlobRef[] }
+  | { status: 'blocked'; reason: string }
+)
+export type P0ApprovalCheck = (input: CodeBehaviorApprovalInput) => P0ApprovalDecision
+export type P0ApprovalAudit = ReadonlyMap<string, P0ApprovalCheck>
+export class P0ApprovalEvidenceError extends Error {
+  readonly code = 'p0_approval_evidence_invalid'
+  constructor(message: string, readonly auditRef: BlobRef) { super(message) }
 }
 export type PartitionAnalysisFailure = { partitionId: string; code: string; message: string; error?: unknown }
 export type PartitionAnalysisFailures = { planDigest: string; failures: PartitionAnalysisFailure[] }
@@ -268,24 +281,61 @@ export async function analyzeSyncPartitions(input: CodeBehaviorInput, plan: Sync
   const failures: PartitionAnalysisFailure[] = []
   const scopes = new Map<string, string[]>()
   let verified: ReturnType<typeof verifyBehaviorReadBasis> | undefined
+  const localInputFor = (partition: SyncPartition): CodeBehaviorInput => {
+    const diagnostic = operatorReviewDiagnostics?.get(partition.id)
+    // 只把全局授权且本区可读的父Spec交给新叶门禁。
+    const authorizedParentSpecPaths = input.plan.version === 'sync-coordinator-v2' && input.plan.direction === 'code_to_spec' && input.plan.sourcePaths !== undefined
+      ? input.plan.targets.filter(target => (partition.contextNodeIds.includes(target.nodeId) || partition.targets.some(local => local.nodeId === target.nodeId && local.path === target.path))
+        && within(target.path, partition.readPaths) && within(posix.dirname(target.path), input.plan.writePaths)).map(target => target.path).sort()
+      : undefined
+    const factSourcePaths = input.plan.sourcePaths === undefined
+      ? unique(partition.writePaths.filter(path => !path.startsWith('.spec/')))
+      : unique(partition.sourcePaths.filter(path => !path.startsWith('.spec/')))
+    return { ...input, ...(diagnostic ? { operatorReviewDiagnostic: diagnostic } : {}),
+      postGateReview: input.postGateReview?.filter(item => item.partitionId === partition.id),
+      repairDiagnostics: input.repairDiagnostics?.filter(item => 'partitionId' in item && item.partitionId === partition.id),
+      requestKey: input.requestKey + ':partition:' + partition.id, plan: projectSyncPartition(input.plan, partition),
+      partition: { id: partition.id, changedPaths: partition.changedPaths, factSourcePaths, ...(authorizedParentSpecPaths !== undefined ? { authorizedParentSpecPaths } : {}) },
+    }
+  }
+
+  const audit = input.contextTransport === 'git-json-v6' ? await checkpoints.auditP0Approvals?.(plan) : undefined
+  const restored = new Map<string, CodeBehaviorAnalysis>()
+  if (audit?.size) {
+    const decisions = []
+    for (const partition of plan.partitions) {
+      if (signal?.aborted) throw Object.assign(new Error('分区审批核验已取消'), { code: 'cancelled' })
+      const check = audit.get(partition.id)
+      if (!check) {
+        decisions.push({ partitionId: partition.id, status: 'unapproved' as const })
+        continue
+      }
+      const localInput = localInputFor(partition)
+      const approvalInput = await analyzeCodeBehavior(localInput, null, undefined, undefined, verified ??= verifyBehaviorReadBasis(localInput))
+      const decision = check(approvalInput)
+      const currentInputDigest = approvalInput.inputDigest
+      if (decision.status === 'reused') {
+        const { analysis, ...proof } = decision
+        restored.set(partition.id, analysis)
+        decisions.push({ partitionId: partition.id, currentInputDigest, ...proof })
+      } else decisions.push({ partitionId: partition.id, currentInputDigest, ...decision })
+      await yieldToControl()
+    }
+    const auditRef = checkpoints.save('partition:analysis-approval-audit', { version: 'p0-approval-audit-v1', planDigest: plan.digest, decisions })
+    const blocked = decisions.filter(decision => decision.status === 'blocked')
+    if (blocked.length) throw new P0ApprovalEvidenceError('P0批准证据无法核验，保留原件并停止派发: ' + blocked.map(({ partitionId, reason }) => `${partitionId} ${reason}`).join('；'), auditRef)
+  }
+
   let results: (CodeBehaviorAnalysis | null)[]
   try { results = await mapSyncPartitions(plan.partitions, maxParallel, input.signal, async partition => {
     try {
-      const key = `partition:${partition.id}:analysis`
-      const diagnostic = operatorReviewDiagnostics?.get(partition.id)
-      const saved = checkpoints.load<CodeBehaviorAnalysis>(key)
-      // 只把全局授权、处于本区targets/只读上下文且正文可读的父Spec投影给新叶门禁，不扩充局部writePaths。
-      const authorizedParentSpecPaths = input.plan.version === 'sync-coordinator-v2' && input.plan.direction === 'code_to_spec' && input.plan.sourcePaths !== undefined
-        ? input.plan.targets.filter(target => (partition.contextNodeIds.includes(target.nodeId) || partition.targets.some(local => local.nodeId === target.nodeId && local.path === target.path))
-          && within(target.path, partition.readPaths) && within(posix.dirname(target.path), input.plan.writePaths)).map(target => target.path).sort()
-        : undefined
-      const factSourcePaths = input.plan.sourcePaths === undefined
-        ? unique(partition.writePaths.filter(path => !path.startsWith('.spec/')))
-        : unique(partition.sourcePaths.filter(path => !path.startsWith('.spec/')))
-      const localInput: CodeBehaviorInput = { ...input, ...(diagnostic ? { operatorReviewDiagnostic: diagnostic } : {}), postGateReview: input.postGateReview?.filter(diagnostic => diagnostic.partitionId === partition.id), repairDiagnostics: input.repairDiagnostics?.filter(diagnostic => 'partitionId' in diagnostic && diagnostic.partitionId === partition.id), requestKey: `${input.requestKey}:partition:${partition.id}`, plan: projectSyncPartition(input.plan, partition), partition: { id: partition.id, changedPaths: partition.changedPaths, factSourcePaths, ...(authorizedParentSpecPaths !== undefined ? { authorizedParentSpecPaths } : {}) } }
+      const key = 'partition:' + partition.id + ':analysis'
+      const localInput = localInputFor(partition)
+      const diagnostic = localInput.operatorReviewDiagnostic
+      const saved = audit ? null : checkpoints.load<CodeBehaviorAnalysis>(key)
       const paths = partitionBehaviorChangedPaths(localInput)
       scopes.set(partition.id, paths)
-      const local = await analyzeCodeBehavior(localInput, runner, (inputDigest, binding) => saved?.inputDigest === inputDigest && (!diagnostic || saved.reviewDiagnosticRef?.sha256 === diagnostic.ref.sha256) ? saved : checkpoints.loadAcceptedAnalysis?.(key, plan, inputDigest, binding) ?? null, { loadReviewFeedback: inputDigest => checkpoints.loadBehaviorReviewFeedback?.(key, plan.digest, inputDigest) ?? null, loadMaterial: (purpose, schemaDigest, inputDigest, request, existingDraft) => checkpoints.loadBehaviorDraftMaterial?.(key, plan.digest, purpose, schemaDigest, inputDigest, request, existingDraft) ?? null, load: (inputDigest, analysisSchemaDigest) => checkpoints.loadBehaviorContinuation?.(key, plan.digest, inputDigest, analysisSchemaDigest) ?? null, save: continuation => { checkpoints.save(`${key}:continuation`, continuation) } }, verified ??= verifyBehaviorReadBasis(localInput))
+      const local = restored.get(partition.id) ?? await analyzeCodeBehavior(localInput, runner, audit ? undefined : (inputDigest, binding) => saved?.inputDigest === inputDigest && (!diagnostic || saved.reviewDiagnosticRef?.sha256 === diagnostic.ref.sha256) ? saved : checkpoints.loadAcceptedAnalysis?.(key, plan, inputDigest, binding) ?? null, { loadReviewFeedback: inputDigest => checkpoints.loadBehaviorReviewFeedback?.(key, plan.digest, inputDigest) ?? null, loadMaterial: (purpose, schemaDigest, inputDigest, request, existingDraft) => checkpoints.loadBehaviorDraftMaterial?.(key, plan.digest, purpose, schemaDigest, inputDigest, request, existingDraft) ?? null, load: (inputDigest, analysisSchemaDigest) => checkpoints.loadBehaviorContinuation?.(key, plan.digest, inputDigest, analysisSchemaDigest) ?? null, save: continuation => { checkpoints.save(`${key}:continuation`, continuation) } }, verified ??= verifyBehaviorReadBasis(localInput))
       if (local.changes.some(change => change.paths.some(path => !paths.includes(path)))) reject(`分析超出本区真实变更集合: ${partition.id}`)
       checkpoints.save(key, local)
       return local

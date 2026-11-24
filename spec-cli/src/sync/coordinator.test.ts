@@ -10092,7 +10092,7 @@ for (const mode of ['observation', 'ordinary', 'mixed', 'recovered', 'empty-cont
   t.diagnostic(JSON.stringify({ mode, peaks: [...waves].map(([attempt, wave]) => ({ attempt, peak: wave.peak, started: wave.started })), callsUsed: result.operation.callsUsed }))
 })
 
-for (const mode of ['analysis', 'review-execution', 'review-format', 'review-then-repair', 'input', 'plan', 'schema', 'author-identity', 'model', 'scope', 'lineage'] as const) test(`P0正式retry只重新派发未完成的阶段，保留原模型和Git证明 mode=${mode}`, async t => {
+for (const mode of ['analysis', 'review-execution', 'review-format', 'review-then-repair', 'input', 'plan', 'schema', 'author-identity', 'approved-review', 'model', 'scope', 'lineage'] as const) test(`P0正式retry只重新派发未完成的阶段，保留原模型和Git证明 mode=${mode}`, async t => {
   const tamper = mode === 'analysis' || mode.startsWith('review-') ? null : mode
   const failure = tamper ? 'review-execution' : mode
   const importPath = '.spec/project/import-contract/spec.md', importSpec = original.replaceAll('export-job', 'import-job').replaceAll('EXPORT', 'IMPORT').replaceAll('export-contract', 'import-contract').replaceAll('src/export.js', 'src/import.js').replaceAll('tests/export.test.mjs', 'tests/import.test.mjs')
@@ -10188,8 +10188,16 @@ for (const mode of ['analysis', 'review-execution', 'review-format', 'review-the
     const readAttempt = store.readAttempt.bind(store), listAttempts = store.listAttempts.bind(store)
     const changedPrior = { ...prior, checkpointRefs: prior.checkpointRefs.map(ref => {
       const wrapper = JSON.parse(readEvidence(commonDir, ref).toString()) as { stage: string; resultRef: BlobRef; baselineSelectionRef?: BlobRef }
-      const refToChange = tamper === 'plan' ? wrapper.stage === 'partition-plan' : wrapper.resultRef?.sha256 === pending!.resultRef.sha256
+      const refToChange = tamper === 'plan' ? wrapper.stage === 'partition-plan'
+        : tamper === 'approved-review' ? wrapper.stage === key : wrapper.resultRef?.sha256 === pending!.resultRef.sha256
       if (!refToChange) return ref
+      if (tamper === 'approved-review') {
+        const approval = JSON.parse(readEvidence(commonDir, wrapper.resultRef).toString()) as import('./writeback-types.js').CodeBehaviorAnalysis
+        approval.traces[1].threadId = 'other independent review thread'
+        const resultRef = writeEvidence(commonDir, approval), artifacts = syncCheckpointArtifacts(approval, resultRef)
+        if (wrapper.baselineSelectionRef) artifacts.push({ kind: 'json', ref: wrapper.baselineSelectionRef })
+        return { ...writeEvidence(commonDir, { ...wrapper, resultRef }), artifacts }
+      }
       const original = JSON.parse(readEvidence(commonDir, wrapper.resultRef).toString()) as CodeBehaviorContinuation
       if (tamper === 'input') original.inputDigest = contentHash('other business input')
       if (tamper === 'schema') original.drafts.code_behavior_analyze!.schemaDigest = contentHash('other analysis schema')
@@ -10208,6 +10216,24 @@ for (const mode of ['analysis', 'review-execution', 'review-format', 'review-the
   }
   const outcome = await runSyncOperation(store, active.id, f.options)
   const retried = calls.filter(call => call.operation === active.id)
+  const current = store.readAttempt(outcome.operation.currentAttemptId!), saved = stages(outcome.operation, current)
+  const receipt = saved.find(stage => stage.stage === 'partition:analysis-approval-audit')
+  const decisions = receipt && (JSON.parse(readEvidence(commonDir, receipt.resultRef).toString()) as { decisions: {
+    partitionId: string; status: string; source?: { operationId: string; attemptId: string; checkpointRef: BlobRef; resultRef: BlobRef }; reason?: string
+  }[] }).decisions
+  if (tamper === 'plan' || tamper === 'approved-review') {
+    assert.deepEqual(retried, [], '原批准无法核验时，不得派发任何分区')
+    assert.equal(outcome.failure?.code, 'p0_approval_evidence_invalid')
+    assert.ok(receipt)
+    assert.deepEqual(outcome.failure.evidenceRefs, [receipt.resultRef])
+    assert.equal(current.dispatchPlans.length, 0)
+    const blocked = decisions?.find(item => item.partitionId === approved)
+    assert.equal(blocked?.status, 'blocked')
+    assert.equal(blocked.source?.attemptId, prior.id)
+    assert.match(blocked.reason ?? '', tamper === 'plan' ? /计划.*失配/ : /Native\/Git原件失配/)
+    assert.deepEqual(decisions?.filter(item => item.status === 'unapproved').map(item => item.partitionId), [calls.find(call => call.operation === old.id && call.partition !== approved)!.partition])
+    return
+  }
   if (tamper) {
     const partition = calls.find(call => call.operation === old.id && call.partition !== approved)!.partition
     assert.deepEqual(retried.filter(call => call.partition === partition).map(call => call.purpose), ['code_behavior_analyze', 'code_behavior_review'], `失配来源须走新分析 ${JSON.stringify(outcome.failure)}`)
@@ -10220,7 +10246,12 @@ for (const mode of ['analysis', 'review-execution', 'review-format', 'review-the
   assert.ok(retried.every(call => call.model === 'zcode:default'))
   if (semanticRepair) assert.equal(outcome.operation.phase, 'budget_exhausted')
   else assert.equal(outcome.failure?.message, '完整P0已组装')
-  const current = store.readAttempt(outcome.operation.currentAttemptId!), saved = stages(outcome.operation, current)
+  const reused = decisions?.find(item => item.partitionId === approved)
+  assert.equal(reused?.status, 'reused')
+  assert.deepEqual(reused.source?.resultRef, accepted.resultRef)
+  assert.ok(prior.checkpointRefs.some(ref => ref.sha256 === reused.source?.checkpointRef.sha256))
+  assert.equal(reused.source?.attemptId, prior.id)
+  assert.equal(reused.source?.operationId, old.id)
   assert.deepEqual(saved.find(stage => stage.stage === key)?.resultRef, accepted.resultRef)
   const provenance = saved.find(stage => stage.stage === `${key}:provenance`)!
   assert.deepEqual(JSON.parse(readEvidence(commonDir, provenance.resultRef).toString()), { fromOperationId: old.id, fromAttemptId: prior.id, resultRef: accepted.resultRef })
@@ -12155,6 +12186,10 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
     assert.equal(rejected.operation.phase, 'paused')
     assert.equal(store.readAttempt(rejected.operation.currentAttemptId!).failure?.code, 'behavior_review_coverage_missing')
     assert.equal(rejected.operation.callsUsed, paused.callsUsed + 1)
+    const audit = stageWrappers(store.readAttempt(rejected.operation.currentAttemptId!)).find(wrapper => wrapper.stage === 'partition:analysis-approval-audit')
+    const decisions = JSON.parse(readEvidence(commonDir, audit.resultRef).toString()).decisions
+    assert.deepEqual(decisions.filter((item: { status: string }) => item.status === 'invalidated').map(({ partitionId, reason, evidence }: { partitionId: string; reason: string; evidence: BlobRef[] }) => ({ partitionId, reason, evidence })), [{ partitionId: target.partitionId, reason: 'p0_review_challenge', evidence: [recorded.challenge.diagnosticRef] }])
+    assert.equal(decisions.filter((item: { status: string }) => item.status === 'reused').length, 2)
     assert.equal(readCurrentSyncAnalysis(store, rejected.operation), null)
     protocol.close()
     protocol = openProtocol(join(f.parent, 'sync.sqlite'))
