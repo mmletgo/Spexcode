@@ -463,7 +463,8 @@ recover 只核对并结算已有资源或已开始的交付日志，保持原控
 resources recover 是单次离线资源清理；必须明确原input-id，不启动API/队列，不回放journal，也不改变业务失败或取得resume/adopt权限。
 challenge 在原生分区 P0 已暂停且未派发 P1 时登记具体复审，诊断由新独审根据冻结资料判定。登记后用 resume 续审。
 resume 继续原操作，--retry-of 建立关联新操作；三个入口各自有明确门禁。
-宿主登记 LLM Manager 后，新原生操作由所选功能组选路。显式传 --model llm-manager 也可请求组选路。正式重试用 --retry-of --model llm-manager 重新选路。
+宿主登记 LLM Manager 后，新原生派发（含独审）按原功能组的当前可用顺序选路，已预留或在途派发沿该次冻结路线。
+正式重试可用 --retry-of --model llm-manager 请求同组路线。额度失败后，Manager 按实际失败派发为重试的首个新会话选择组内后继路线。
 未启用管理时，手动 --model 优先于项目 sync.model。普通重复、未指定模型的重试及 resume/recover 复用原选择。操作及独审均使用已冻结的模型。
 --retry-of 显式重试可重试的失败操作，保留原正文意图并关联旧结果；不能同时传 --patch-file。
 --inherit-retry-budget 与 --retry-of、--model 合用，交接已结算、尚未验证交付的代码→Spec 候选，保留原预算族与截止时间。
