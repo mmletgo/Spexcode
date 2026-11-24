@@ -150,6 +150,11 @@ function testCaseTitles(source: string): string[] {
       if (Array.isArray(object) && /^(0|[1-9][0-9]*)$/.test(String(key)) && Object.hasOwn(object, key)) return object[Number(key)]
       return unknownValue
     }
+    if (node.type === 'BinaryExpression' && node.operator === '+') {
+      const left = value(node.left, overrides, at, resolving)
+      const right = value(node.right, overrides, at, resolving)
+      return typeof left === 'string' && typeof right === 'string' ? left + right : unknownValue
+    }
     if (node.type === 'TemplateLiteral') {
       let title = node.quasis[0].value.cooked
       if (title === null) return unknownValue
