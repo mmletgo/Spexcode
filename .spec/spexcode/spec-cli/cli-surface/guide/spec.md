@@ -20,7 +20,7 @@ protected tests, business facts and budgets. Image placeholders require an actua
 image; the page documents explicit enable authorization and service-owned external watching, physical pause/resume, latest-input compensation, and offline diagnostics.
 The workflow teaches explicit `--retry-of`, preserved original body intent and origin,
 read-only retryEligibility and refusal for changed input, unresolved resources or business GAP/conflict.
-An ordinary repeated input does not grant a fresh operation budget.
+An ordinary repeated input does not grant a fresh operation budget. For managed runs the guide documents selection per new native dispatch, including independent review, and the frozen route for each reserved dispatch. It describes quota continuation from the actual failed dispatch, and renewed eligibility after the Manager cooldown and recovery checks in [[sync-model-selection]].
 It also documents daemon-free `sync check` with explicit immutable base/candidate/trusted policy, protected-target CI execution, exit codes, and uncovered scope. Large context uses the verified frozen reader without truncation; the configured total budget remains binding when finite.
 It distinguishes recover (settle existing side effects without new work), resume and retry,
 and preserves control/input/budget while recovery remains uncertain.

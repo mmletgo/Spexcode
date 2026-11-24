@@ -38,4 +38,4 @@ sync run/verify 的 API 和 CLI --model 接受操作级模型选择。选择进�
 
 新手动 run/verify 操作可显式选择模型覆盖项目默认。省略时，同 request 的 prior 或 retryOf 原 operation 选择优先于当前输入冻结的版本化项目 `sync.model`。无 prior/retry 才使用项目值、宿主原生选路或当前工作流默认值。相同 requestId 改选择拒绝；普通重复即使换 requestId 也不能改变选择或取得新预算，换执行器或选择须经正式 retryOf。自动观察、decide 和 revert 的新 operation 采用相同默认判据。显式 CLI 模型原样交给正式 runtime。旧 operation 缺少 model 字段仍固定为 gpt-6.1-sol；配置变化不能替换已准入选择或重置预算。
 
-所有行为分析、P1/P2 及独立审查的真实结构化请求使用该选择，requestDigest、会话隔离及完整冻结读取证明照常绑定。是否可用仍由实际 native/catalog 校验。需要改用另一执行器时由正式 retryOf 重新准入。
+行为分析、P1/P2 及独立审查的真实结构化请求按各自的正式派发身份校验 requestDigest、会话隔离及完整冻结读取证明。托管派发使用当次 Manager 选定的路线。非托管派发沿已准入的操作选择，由实际 native/catalog 核验可用性；显式另选执行器通过正式 retryOf 重新准入。

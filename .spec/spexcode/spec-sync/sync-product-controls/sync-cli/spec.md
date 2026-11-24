@@ -20,7 +20,7 @@ related:
 
 `spex sync run` 可将 `--inherit-retry-budget` 与 `--retry-of`、`--model` 合用，向正式后端提交原候选续审交接。保留原预算族、已用调用与截止时间。普通的暂停和恢复沿原模型。
 
-帮助说明新原生操作由已启用的 [[llm-manager-host]] 功能组选路，使用 `--retry-of --model llm-manager` 可正式请求组内的当前路线。省略模型的重试、恢复和原请求重放仍使用已冻结的选择。
+帮助说明 [[llm-manager-host]] 按操作登记的功能组为每次新原生派发选路，包括独审。已预留和在途派发遵循该次冻结路线。使用 `--retry-of --model llm-manager` 可正式请求同组路线，额度后继取自实际失败派发。
 
 `spex sync source-continuity <operation-id> --input-id <id> --revision <N> --enabled-digest <sha256> --old-common-dev <N> --old-root-dev <N> --old-git-dev <N>` 是 [[sync-source-registration]] 的正式offline入口，拒绝API路由和多余业务选项，缺值/错配非零退出。不调用HTTP或启动服务，成功输出真实proof引用与pause，重复登记不重复派发。文档要求停稳及先结算资源，v20配套备份/启用原件回滚；resume为后续明确控制。
 
