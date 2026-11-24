@@ -14,7 +14,7 @@ related:
 
 [[sync-p0-review-challenge]] 的非权威诊断仅绑定指定 owner 的新独审 Git context。原业务 inputDigest、待审分析及分析/独审 schema 不因诊断变化。真实独审可驳回质疑并 accept，也可依冻结原件给具体 repair。裁决与 findings 相互矛盾时仅续原候选独审。
 
-原生 P0 的已校验分析经协调器认证可在正式重试中作为待审材料承接。分析阶段用本轮同一 schema 与程序门重校原作者 Git 稿，保留原 trace，按同一待审分析生成新的独审请求。新独审与原作者的会话及线程须独立。合法业务 repair 清除已校验资格，对同一稿件继续分析及独审。
+原生 P0 的已校验分析经协调器认证可在正式重试中作为待审材料承接。分析阶段用本轮同一 schema 与程序门重校原作者 Git 稿，保留原 trace，按同一待审分析生成新的独审请求。新独审与原作者的会话及线程须独立。合法业务 repair 清除已校验资格，对同一稿件继续分析及独审。只有经过身份、覆盖、变更 ID 及裁决一致性校验后返回的业务 repair 才通知 [[sync-partition-execution]] 继续其他分区。保留原失败代码和诊断，审查绑定错误没有此调度资格。
 
 P0 的唯一模型计划投影排除仅供全图封口的 contextVerifications 和 [[sync-historical-coverage]] 证明；局部分析和独审仍只接收本轮原 verifications 与 mandatoryTests，不取得历史未执行许可。完整可信计划继续参与 policyDigest，不删改 planBlob 或从实时配置补写旧缺席。
 

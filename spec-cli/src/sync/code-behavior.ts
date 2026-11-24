@@ -43,6 +43,10 @@ export const LEGACY_CODE_BEHAVIOR_GUIDANCE_VERSION = 'code-behavior-guidance-v7'
 export const CODE_BEHAVIOR_FAILURE_STATUS = 'P0 行为校验未通过'
 export const CODE_BEHAVIOR_DRAFT_COMMIT_MISSING = 'behavior_draft_commit_missing'
 export const CODE_BEHAVIOR_REVIEW_COVERAGE_MISSING = 'behavior_review_coverage_missing'
+
+export class CodeBehaviorReviewRepairError extends Error {
+  readonly code = 'behavior_review_failed'
+}
 const CONTEXT_TRANSPORTS = ['git-json-v1', 'git-json-v2', 'git-json-v3', 'git-json-v4', 'git-json-v5', 'git-json-v6'] as const
 export type CodeBehaviorContextTransport = typeof CONTEXT_TRANSPORTS[number]
 export function isCodeBehaviorContextTransport(value: unknown): value is CodeBehaviorContextTransport {
@@ -320,6 +324,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
       } else delete continuation.readyAnalysis
       persist()
     }
+    if (code === 'behavior_review_failed' && !reviewOnly) throw new CodeBehaviorReviewRepairError(failure)
     throw Object.assign(new Error(failure), { code })
   }
   const commonDir = input.snapshot.source.commonDir

@@ -708,6 +708,82 @@ test('分区分析保留全部在途失败及各自完整诊断，不让首错�
   assert.ok(saved.failures.some(failure => failure.code === 'cancellation_pending'))
 })
 
+for (const mode of ['business-repair', 'invalid-review-binding', 'repair-then-cancellation'] as const) {
+  test('P0业务返修只阻塞本分区 ' + mode, { timeout: 15000 }, async t => {
+    const { input, plan, checkpoints } = await fixture(t)
+    const [first, second, third] = plan.partitions
+    const maxParallel = mode === 'business-repair' ? 2 : 1
+    const analysisInput: CodeBehaviorInput = {
+      snapshot: input.snapshot, baseline: null, composed: composeInputSnapshots(input.snapshot, null).composed!,
+      readSetDigest: 'readset', policyDigest: 'policy', requestKey: 'partition-review-repair', timeoutMs: 30000, origin: 'initial',
+      plan: { version: 'sync-coordinator-v2', direction: 'code_to_spec', intentNodeId: 'export-contract',
+        targets: plan.partitions.flatMap(partition => partition.targets), sourcePaths: ['src'], readPaths: ['.spec', 'src', 'tests'],
+        writePaths: ['.spec'], facts: [], verifications: [], mandatoryTests: [],
+        partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel } },
+    }
+    const dispatched: string[] = []
+    let startSecondReview!: () => void, startThirdDispatch!: () => void
+    const secondReview = new Promise<void>(resolve => { startSecondReview = resolve })
+    const thirdDispatch = new Promise<void>(resolve => { startThirdDispatch = resolve })
+    const stop = Object.assign(new Error('原生资源尚未结算'), { code: 'cancellation_pending' })
+    let restarted = false
+    const runner: ElaborationRunner = async request => {
+      const context = readFrozenBehaviorContext<{ partition: { id: string }; changedPaths: string[] }>(request)
+      const { id } = context.partition
+      const sequence = dispatched.push(id + ':' + request.purpose)
+      if (mode === 'business-repair' && !restarted) {
+        if (id === third.id) startThirdDispatch()
+        else if (request.purpose === 'code_behavior_review') {
+          if (id === first.id) await secondReview
+          else {
+            startSecondReview()
+            await thirdDispatch
+          }
+        }
+      }
+      if (mode === 'repair-then-cancellation' && id === second.id) throw stop
+      let output: unknown
+      if (request.purpose === 'code_behavior_analyze') {
+        output = { changes: context.changedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: [], ruleIds: [],
+          originalIntent: '保留任务状态', previousBehavior: '已实现的任务状态', sourceBehavior: '保留任务状态',
+          deliveryBehavior: '首次纳管', evidence: '冻结源码', counterexample: '状态变化需有明确证据',
+        })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+      } else {
+        const reviewed = JSON.parse(request.prompt.split('待审分析:\n')[1]) as { analysisDigest: string; analysis: CodeBehaviorAnalysis }
+        const repair = id === first.id && !restarted
+        output = { inputDigest: request.inputDigest, analysisDigest: reviewed.analysisDigest, verdict: repair ? 'repair' : 'accept',
+          checkedPaths: repair && mode === 'invalid-review-binding' ? [] : context.changedPaths,
+          checkedChangeIds: reviewed.analysis.changes.map(change => change.id),
+          findings: repair ? [{ message: '任务终态的描述有遗漏', evidence: '冻结任务状态转换', counterexample: '异常结束需记录失败' }] : [],
+        }
+      }
+      return { sessionId: 'session-' + sequence, threadId: 'thread-' + sequence, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+    }
+    const failures = () => checkpoints.load<{ failures: { partitionId: string; code: string }[] }>('partition:analysis-failures')!.failures
+    const accepted = (id: string) => checkpoints.load<CodeBehaviorAnalysis>('partition:' + id + ':analysis')
+    await assert.rejects(analyzeSyncPartitions(analysisInput, plan, maxParallel, runner, checkpoints), (error: unknown) => {
+      if (mode === 'repair-then-cancellation') assert.equal(error, stop)
+      else assert.equal((error as { code: string }).code, 'behavior_review_failed')
+      return true
+    })
+    assert.deepEqual(failures().map(item => item.partitionId), mode === 'repair-then-cancellation' ? [first.id, second.id] : [first.id])
+    assert.equal(accepted(first.id), null)
+    if (mode !== 'business-repair') {
+      assert.equal(dispatched.length, mode === 'repair-then-cancellation' ? 3 : 2)
+      assert.equal(accepted(third.id), null)
+      return
+    }
+    const retained = [accepted(second.id), accepted(third.id)]
+    assert.ok(retained.every(local => local?.reviewPassed), '剩余分区须在同一失败尝试内完成独审')
+    assert.equal(dispatched.length, 6)
+    restarted = true
+    const whole = await analyzeSyncPartitions({ ...analysisInput, requestKey: 'partition-review-resume' }, plan, maxParallel, runner, checkpoints)
+    assert.ok(whole.reviewPassed)
+    assert.deepEqual([accepted(second.id), accepted(third.id)], retained)
+    assert.deepEqual(dispatched.slice(6), [first.id + ':code_behavior_analyze', first.id + ':code_behavior_review'])
+  })
+}
+
 test('分区分析以独占文件限定事实来源，共享oracle仍逐区全文读取且不制造同源事实冲突', async t => {
   const { input, plan, checkpoints } = await fixture(t), oracle = 'tests/export.test.mjs'
   for (const partition of plan.partitions) {
