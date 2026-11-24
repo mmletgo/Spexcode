@@ -33,6 +33,9 @@ class FixtureUpstream(BaseHTTPRequestHandler):
         text = str(request.get("fixture", ""))
         path = self.path.partition("?")[0]
         assert path in ("/tenant/v1/messages", "/tenant/v1/messages/count_tokens")
+        if text == "timeout":
+            self.rfile.read(1)
+            return
         status = 429 if text == "limit" else 200
         if text == "redirect":
             self.send_response(302)
@@ -94,9 +97,9 @@ class HostTests(unittest.TestCase):
         self.settings("save_provider", input={"mode": "create", "provider": provider})
         return provider
 
-    def add_api(self, base_url: str) -> dict[str, Any]:
+    def add_api(self, base_url: str, *, timeout: float = 3) -> dict[str, Any]:
         result = self.add_provider(
-            "api", kind="api", api_format="anthropic-messages", base_url=base_url,
+            "api", kind="api", api_format="anthropic-messages", base_url=base_url, timeout_seconds=timeout,
             models=[{"id": "api-model", "name": "fixture-model", "thinking_tiers": [
                 {"id": "api-off", "thinking_effort": "off", "max_thinking_tokens": None},
             ]}],
@@ -205,19 +208,19 @@ class HostTests(unittest.TestCase):
         self.assertEqual([report[name] for name in ("call_count", "input_tokens", "output_tokens", "cache_read_tokens")], [1, 11, 4, 2])
         self.assertIsNotNone(self.settings("status")["leases"][0]["released_at"])
 
-    def add_api_with_fixture(self) -> None:
+    def add_api_with_fixture(self, *, timeout: float = 3) -> None:
         upstream = ThreadingHTTPServer(("127.0.0.1", 0), FixtureUpstream)
         thread = Thread(target=upstream.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(upstream.server_close)
         self.addCleanup(upstream.shutdown)
-        self.add_api(f"http://127.0.0.1:{upstream.server_port}/tenant")
+        self.add_api(f"http://127.0.0.1:{upstream.server_port}/tenant", timeout=timeout)
 
     def expire_api_cooldown(self) -> None:
         with sqlite3.connect(self.database) as database:
             expired = database.execute(
-                "UPDATE llm_circuit_breaker SET cooldown_until = ? WHERE owner_id = ? AND key_id = ?",
-                ("2000-01-01 00:00:00.000000", "fixture-owner", "fixture-key"),
+                "UPDATE llm_circuit_breaker SET cooldown_until = ? WHERE owner_id = ? AND (key_id = ? OR provider_id = ?)",
+                ("2000-01-01 00:00:00.000000", "fixture-owner", "fixture-key", "api"),
             )
             self.assertEqual(expired.rowcount, 1)
 
@@ -337,6 +340,73 @@ sys.exit(19)
         self.expire_api_cooldown()
         self.assertEqual(self.rpc(action="resolve"), route)
         self.assertEqual(self.settings("status")["breakers"], [])
+
+    def test_claude_reports_only_latest_messages_upstream_timeout(self) -> None:
+        self.add_api_with_fixture(timeout=1)
+        self.add_native("grok", "account")
+        self.group("api", "grok")
+        preferred = self.rpc(action="resolve")
+        self.assertEqual(preferred["kind"], "anthropic-messages")
+        cli = self.root / "controlled-claude-timeout"
+        cli.write_text(f"#!{sys.executable}\n" + '''
+import json
+import os
+import sys
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+
+def call(path: str, flag: str) -> int:
+    req = Request(
+        os.environ["ANTHROPIC_BASE_URL"] + path,
+        json.dumps({"model": "fixture-model", "fixture": flag, "messages": []}).encode(),
+        headers={"x-api-key": os.environ["ANTHROPIC_API_KEY"]},
+    )
+    try:
+        with urlopen(req, timeout=4) as result:
+            return result.status
+    except HTTPError as error:
+        return error.code
+
+mode = sys.argv[1]
+messages = "/v1/messages"
+count_tokens = messages + "/count_tokens"
+assert call(count_tokens if mode == "count-tokens" else messages, "timeout") == 502
+if mode == "later-success":
+    assert call(messages, "success") == 200
+elif mode == "last-message":
+    assert call(count_tokens, "success") == 200
+sys.exit(19)
+''', encoding="utf-8")
+        cli.chmod(0o700)
+
+        for mode in ("count-tokens", "later-success", "last-message"):
+            with self.subTest(mode=mode):
+                self.assertTrue(self.reserve(preferred, mode)["ok"])
+                result = self.run_claude(preferred, mode, cli, mode)
+                self.assertEqual(result.returncode, 19, result.stderr)
+                breakers = self.settings("status")["breakers"]
+                self.assertEqual(
+                    self.rpc(action="settle", route=preferred, sessionId=mode, outcome="stopped"),
+                    {"outcome": "stopped"},
+                )
+                self.assertEqual(self.call(action="resolve", nextAfter=preferred)["code"], "llm_manager_quota_required")
+                status = self.settings("status")
+                self.assertTrue(all(lease["released_at"] is not None for lease in status["leases"]))
+                fresh = self.rpc(action="resolve", sameGroupAs=preferred)
+                if mode == "last-message":
+                    self.assertEqual(
+                        [(breaker["scope"], breaker["provider_id"]) for breaker in breakers],
+                        [("config", "api")],
+                    )
+                    self.assertEqual(status["breakers"], breakers)
+                    self.assertEqual(fresh["vendor"], "grok")
+                    self.expire_api_cooldown()
+                    self.assertEqual(self.rpc(action="resolve", sameGroupAs=preferred), preferred)
+                    self.assertEqual(self.settings("status")["breakers"], [])
+                else:
+                    self.assertEqual(breakers, [])
+                    self.assertEqual(status["breakers"], [])
+                    self.assertEqual(fresh, preferred)
 
 
 if __name__ == "__main__":

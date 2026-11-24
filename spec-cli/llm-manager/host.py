@@ -21,7 +21,7 @@ from io import BufferedIOBase
 from pathlib import Path
 from socket import socket
 from sqlite3 import connect
-from threading import Thread
+from threading import Lock, Thread
 from typing import Literal, Self, TypeAlias, cast
 from urllib.parse import urlsplit
 
@@ -1039,6 +1039,8 @@ class ClaudeRelay(ThreadingHTTPServer):
         self.upstream_secret = secret
         self.model = model
         self.timeout = timeout
+        self._timeout_lock = Lock()
+        self._timed_out_ordinal = 0
         self.ticket = secrets.token_urlsafe(32)
         super().__init__(("127.0.0.1", 0), ClaudeRelayHandler)
 
@@ -1085,6 +1087,45 @@ class ClaudeRelay(ThreadingHTTPServer):
             elif claim.upstream_ordinal == ordinal:
                 claim.upstream_status = status
             return claim.upstream_ordinal
+
+    def observe_upstream_timeout(self, ordinal: int) -> None:
+        """
+        Business Logic（为什么需要这个函数）:
+            宿主需要记住本轮真实 Messages 上游的超时，等原生进程完成后交给 Manager。
+
+        Code Logic（这个函数做什么）:
+            用锁记录收到响应头之前超时的最大正式请求序号。
+        """
+
+        with self._timeout_lock:
+            self._timed_out_ordinal = max(self._timed_out_ordinal, ordinal)
+
+    def report_terminal_timeout(self, key: bytes | None) -> None:
+        """
+        Business Logic（为什么需要这个函数）:
+            新派发依赖 Manager 的 Provider 健康记录，同一轮后续成功的请求可取代较早超时。
+
+        Code Logic（这个函数做什么）:
+            结算时核对最新消息序号、活跃租约及当前绑定，把已证上游超时交给 Manager。
+        """
+
+        with self._timeout_lock:
+            ordinal = self._timed_out_ordinal
+        if ordinal == 0:
+            return
+        with transaction(self.config, key) as manager:
+            claim = manager.session.get(RouteClaim, (manager.owner_id, self.session_id))
+            if (claim is None or claim.route_id != self.route_id or claim.outcome is not None
+                    or claim.upstream_ordinal != ordinal or claim.upstream_status is not None):
+                return
+            binding = manager.session.get_one(RouteBinding, (manager.owner_id, self.route_id))
+            lease = manager.session.get_one(Lease, (manager.owner_id, claim.lease_id))
+            if binding.request_group != self.config.group_id or lease.released_at is not None:
+                return
+            execution = execution_manager(manager, self.config, key)
+            choice = frozen_choice(binding)
+            if is_current(execution, binding, choice):
+                execution.report_failure(choice, FailureReport(transport="timeout"))
 
 
 class ClaudeRelayHandler(BaseHTTPRequestHandler):
@@ -1145,8 +1186,13 @@ class ClaudeRelayHandler(BaseHTTPRequestHandler):
         try:
             ordinal = relay.message_status() if path == "/v1/messages" else None
             prefix = target.path.rstrip("/").removesuffix("/v1/messages").removesuffix("/v1")
-            upstream.request("POST", prefix + path + (f"?{query}" if query else ""), body=body, headers=headers)
-            response = upstream.getresponse()
+            try:
+                upstream.request("POST", prefix + path + (f"?{query}" if query else ""), body=body, headers=headers)
+                response = upstream.getresponse()
+            except TimeoutError:
+                if ordinal is not None:
+                    relay.observe_upstream_timeout(ordinal)
+                raise
             if ordinal is not None:
                 relay.message_status(ordinal, response.status)
             if 300 <= response.status < 400:
@@ -1268,6 +1314,7 @@ def launch_claude(
                 worker.join()
                 for signum, handler in previous.items():
                     signal.signal(signum, handler)
+    relay.report_terminal_timeout(key)
     return status if status >= 0 else 128 - status
 
 
