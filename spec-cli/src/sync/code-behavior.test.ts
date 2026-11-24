@@ -3590,3 +3590,53 @@ for (const contextTransport of ['git-json-v1', 'git-json-v2', 'git-json-v3', 'gi
   assert.equal(calls, 0)
   t.diagnostic(JSON.stringify({ transportContractOnly: true, epipeRootCauseClaimed: false, acceptedLookups: 23, distinctFixtureOwners: 1, addedRunnerCalls: calls, stages: seen }))
 })
+
+test('P0 作者证据拒绝后沿原 Git 草稿修复，先验完再派独审', async t => {
+  const f = await fixture(t)
+  writeFileSync(join(f.root, 'src/export.js'), f.source + '\nexport function verifiedBoundary() { return true }\n')
+  const original = await f.input()
+  const oracle = { verificationId: 'VERIFY-EXPORT-01', testPath: 'tests/export.test.mjs', testId: 'export-oracle' }
+  const input: CodeBehaviorInput = { ...original, contextTransport: 'git-json-v6', draftProtocol: 'code-behavior-draft-v1', authorEvidencePreflight: true,
+    plan: { ...original.plan, agentWorkflow: 'native-worktree-v1', mandatoryTests: [oracle] } }
+  assert.deepEqual(await analyzeCodeBehavior(input, null), await analyzeCodeBehavior({ ...input, authorEvidencePreflight: undefined }, null), '新增预检不改变历史批准的业务摘要或 schema')
+  const commonDir = input.snapshot.source.commonDir
+  let checkpoint: CodeBehaviorContinuation | null = null, repaired = false, oldText = ''
+  const calls: string[] = []
+  const run: ElaborationRunner = async request => {
+    calls.push(request.purpose)
+    const context = readCodeBehaviorContext(request, commonDir), task = context.task as { requiredChangedPaths: string[] }
+    const path = /草稿文件=([^\s；]+)/.exec(request.prompt)![1], seed = request.worktree!
+    const workspace = join(f.root, '..', `author-evidence-${calls.length}`)
+    git(f.root, 'worktree', 'add', '--detach', workspace, seed.baseCommit)
+    const pending = context.pendingAnalysis
+    if (!pending && repaired) {
+      assert.equal(readFileSync(join(workspace, path), 'utf8'), oldText)
+      assert.match(request.prompt, /原草稿的证据预检问题/)
+      assert.match(request.prompt, /\/changes\/0\/deliveryBehavior/)
+      assert.match(request.prompt, /\/facts\/0\/source/)
+    }
+    const source = `code:src/export.js#${repaired ? 'verifiedBoundary' : 'missingBoundary'}`
+    const draft = pending
+      ? { inputDigest: request.inputDigest, analysisDigest: pending.analysisDigest, verdict: 'accept', checkedPaths: task.requiredChangedPaths, checkedChangeIds: pending.analysis.changes.map(change => change.id), findings: [] }
+      : { changes: task.requiredChangedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保留原业务', previousBehavior: '原业务', sourceBehavior: '原业务',
+        deliveryBehavior: repaired ? `依赖事实 [[fact:${source}]]` : 'import app.entry 先抛 ImportError，属于第 7 行',
+        evidence: repaired ? `本轮正式必验 [[mandatory:${oracle.verificationId}:${oracle.testPath}#${oracle.testId}]]` : `错误归属 [[mandatory:${oracle.verificationId}:tests/export.test.mjs#focused-only]]`, counterexample: '不得改变权限' })),
+      facts: [{ source, text: '可核对原函数定义' }], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    const text = JSON.stringify(draft)
+    if (!repaired) oldText = text
+    mkdirSync(join(workspace, path, '..'), { recursive: true }); writeFileSync(join(workspace, path), text)
+    git(workspace, 'add', path); git(workspace, 'commit', '-m', 'author evidence git draft')
+    const result = { summary: '提交原生草稿' }
+    return { sessionId: `evidence-author-${calls.length}`, threadId: `evidence-thread-${calls.length}`, turnId: 'turn', output: result, resultDigest: contentHash(JSON.stringify(result)), worktree: nativeWorktreeResult(workspace, seed) }
+  }
+  const checkpoints = { load: () => checkpoint, save: (value: CodeBehaviorContinuation) => { checkpoint = structuredClone(value) } }
+  await assert.rejects(analyzeCodeBehavior(input, run, undefined, checkpoints), { code: 'behavior_author_evidence_invalid' })
+  assert.deepEqual(calls, ['code_behavior_analyze'])
+  const rejected = structuredClone(checkpoint!) as CodeBehaviorContinuation
+  assert.equal(rejected.readyAnalysis, undefined)
+  assert.equal(readStageDraft(commonDir, rejected.drafts.code_behavior_analyze!, rejected.drafts.code_behavior_analyze!), oldText)
+  repaired = true
+  const accepted = await analyzeCodeBehavior({ ...input, requestKey: 'author-evidence-retry' }, run, undefined, checkpoints)
+  assert.equal(accepted.reviewPassed, true)
+  assert.deepEqual(calls, ['code_behavior_analyze', 'code_behavior_analyze', 'code_behavior_review'])
+})

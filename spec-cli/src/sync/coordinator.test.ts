@@ -10297,14 +10297,15 @@ for (const mode of ['analysis', 'review-execution', 'review-format', 'review-the
 })
 
 // A1格式拒绝、A2局部accept但兄弟再失败、A3只续失败兄弟；不能把跨attempt的原analyze trace丢掉。
-test('Native P0三attempt保留已审兄弟，analysis与review沿精确Git/Native provenance承接', async t => {
+for (const mode of ['review-format', 'author-evidence'] as const) test(`Native P0三attempt保留已审兄弟，analysis与review沿精确Git/Native provenance承接 mode=${mode}`, async t => {
   const importPath = '.spec/project/import-contract/spec.md', importSpec = original.replaceAll('export-job', 'import-job').replaceAll('EXPORT', 'IMPORT').replaceAll('export-contract', 'import-contract').replaceAll('src/export.js', 'src/import.js').replaceAll('tests/export.test.mjs', 'tests/import.test.mjs')
   const f = await fixture(t, { maxAttempts: 3, maxCalls: 24, maxRepairs: 2, timeoutMs: 120_000 }, false, original, 'project', original, {
     version: 'sync-coordinator-v2', direction: 'code_to_spec', agentWorkflow: 'native-worktree-v1', sourcePaths: ['src'], writePaths: ['.spec'],
     targets: [{ nodeId: 'export-contract', path: contractPath }, { nodeId: 'import-contract', path: importPath }],
-    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 32768, maxParallel: 2 }, commitTrigger: { before: null, paths: ['src/export.js', 'src/import.js'] },
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 32768, maxParallel: mode === 'author-evidence' ? 1 : 2 }, commitTrigger: { before: null, paths: ['src/export.js', 'src/import.js'] },
   }, undefined, 'code', 'claude:MiniMax-M3.1-Flash', true, { [importPath]: importSpec, 'src/import.js': 'export class ImportService {}\n', 'tests/import.test.mjs': 'import assert from "node:assert/strict"\n' })
   const calls: { attempt: number; domain: string; purpose: string }[] = []
+  let rejectedDomain: string | undefined, rejectedDraft: string | undefined
   f.options.runner = async request => {
     if (!request.purpose.startsWith('code_behavior_')) throw Object.assign(new Error('三轮P0已验证，在P1前停止'), { code: 'unsupported' })
     const attempt = f.store.readAttempt(f.store.readOperation(f.operation.id).currentAttemptId!), seed = request.worktree!
@@ -10316,13 +10317,36 @@ test('Native P0三attempt保留已审兄弟，analysis与review沿精确Git/Nati
     const reviewed = request.purpose === 'code_behavior_review' ? readCodeBehaviorContext(request, f.input.source.commonDir).pendingAnalysis! as { analysisDigest: string; analysis: import('./writeback-types.js').CodeBehaviorAnalysis } : null
     const output = reviewed ? { inputDigest: request.inputDigest, analysisDigest: reviewed.analysisDigest, verdict: 'accept', checkedPaths: brief.requiredChangedPaths, checkedChangeIds: reviewed.analysis.changes.map(change => change.id), findings: [] }
       : { changes: brief.requiredChangedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: [`RULE-${domain}-05`], ruleIds: [`RULE-${domain}-05`], originalIntent: '保留原业务', previousBehavior: '原业务', sourceBehavior: '原业务', deliveryBehavior: '原业务', evidence: path, counterexample: '不得改变权限或发布次数' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
-    const text = reviewed && (attempt.number === 1 || domain === 'IMPORT' && attempt.number === 2) ? '{ ORIGINAL_THREE_ATTEMPT_REVIEW' : JSON.stringify(output)
+    let text = JSON.stringify(output)
+    if (mode === 'author-evidence' && !reviewed) {
+      if (attempt.number === 1 && !rejectedDomain) {
+        rejectedDomain = domain
+        for (const change of output.changes!) change.counterexample = 'import example.route 首个失败点是 route.py:7，抛 ImportError'
+        rejectedDraft = text = JSON.stringify(output)
+      } else if (attempt.number === 2) {
+        assert.equal(domain, rejectedDomain)
+        assert.equal(f.git('show', `${seed.baseCommit}:${path}`), rejectedDraft, '失败分区须沿原 Git 字节续稿')
+        assert.match(request.prompt, /原草稿的证据预检问题/)
+      }
+    }
+    if (mode === 'review-format' && reviewed && (attempt.number === 1 || domain === 'IMPORT' && attempt.number === 2)) text = '{ ORIGINAL_THREE_ATTEMPT_REVIEW'
     mkdirSync(join(workspace, path, '..'), { recursive: true }); writeFileSync(join(workspace, path), text)
     execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '--allow-empty', '-m', 'three attempt real draft'], { stdio: 'pipe' })
     const dispatch = attempt.dispatchPlans.find(dispatch => dispatch.key === request.requestKey)!, receipt = { summary: '三轮真实Git草稿' }
     return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `three-${request.requestKey}`, turnId: 'turn', output: receipt, resultDigest: contentHash(JSON.stringify(receipt)), worktree: nativeWorktreeResult(workspace, seed) }
   }
   await runSyncOperation(f.store, f.operation.id, f.options)
+  if (mode === 'author-evidence') {
+    const [first, second] = f.store.listAttempts(f.operation.id)
+    assert.equal(first.failure?.code, 'behavior_author_evidence_invalid')
+    assert.deepEqual(calls.map(call => [call.attempt, call.domain === rejectedDomain, call.purpose]), [
+      [1, true, 'code_behavior_analyze'], [1, false, 'code_behavior_analyze'], [1, false, 'code_behavior_review'],
+      [2, true, 'code_behavior_analyze'], [2, true, 'code_behavior_review'],
+    ])
+    assert.ok(second.checkpointRefs.some(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()).stage === 'partition:analysis-approval-audit'))
+    assert.equal(f.store.listJournals(f.operation.id).length, 0)
+    return
+  }
   assert.equal(f.store.listAttempts(f.operation.id).length, 3)
   assert.deepEqual(calls.filter(call => call.domain === 'EXPORT').map(call => [call.attempt, call.purpose]), [[1, 'code_behavior_analyze'], [1, 'code_behavior_review'], [2, 'code_behavior_review']])
   assert.deepEqual(calls.filter(call => call.domain === 'IMPORT').map(call => [call.attempt, call.purpose]), [[1, 'code_behavior_analyze'], [1, 'code_behavior_review'], [2, 'code_behavior_review'], [3, 'code_behavior_review']])

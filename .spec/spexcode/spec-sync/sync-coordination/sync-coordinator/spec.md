@@ -91,6 +91,8 @@ P0 只在本次 attempt 尚无阶段检查点和 code_behavior saved/reserved �
 
 新 Native P0 attempt 首次冻结 `behavior-draft-protocol` 时登记 `reviewCoveragePreflight`，供 [[sync-code-behavior]] 的独审现场自检沿原候选与当前 Git 评审稿核必审路径与变化 ID。历史已冻结协议及已有派发保持原提示。
 
+仅新冻结的 Native P0 attempt 登记 `authorEvidencePreflight`。检查拒绝沿既有原稿修复预算，合法其他分区的批准与正式独审继续执行；已冻结尝试和历史请求保持原协议及绑定。[[sync-migrations]] writer74 保护该标记。
+
 支持重复项自检的新 attempt 在同一协议检查点登记 `reviewDuplicatePreflight`。恢复已冻结 attempt 时按原字段生成请求，原先没有该字段的覆盖自检继续保持原字节；新 attempt 只增强评审自检，不改变待审分析和原批准条件。
 
 新 P0 attempt 在首次冻结原 behavior-draft-protocol 时登记 exactChangedPathsPreflight，启用 [[sync-code-behavior]] 的分区分析越界路径自检。已冻结协议或已有 saved/reserved 派发时沿原冻结值，历史缺席保持。该标记只改变新分区分析请求的自检提示，原任务、草稿 schema、业务摘要和独审继续沿原绑定，重新派发的同 owner 可接续已认证原草稿。[[sync-migrations]] writer56 保护提示冻结。

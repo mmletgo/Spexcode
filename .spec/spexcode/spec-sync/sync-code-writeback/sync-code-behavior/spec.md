@@ -4,6 +4,7 @@ status: active
 code:
   - spec-cli/src/sync/code-behavior.ts
 related:
+  - spec-cli/src/sync/code-behavior-author-evidence.ts
   - spec-cli/src/sync/code-behavior.test.ts
 ---
 ## raw source
@@ -11,6 +12,8 @@ related:
 外部代码和两边同改应依据真实共同验证基线自动协调；文本重叠不是业务冲突，模型自身错误不能成为新需求或批准。
 
 ## expanded spec
+
+新原生 v6 P0 attempt 冻结 [[sync-code-behavior-author-evidence]] 资格，保持原业务摘要、草稿 schema 与独审请求身份。程序在校验作者稿结构之后、预约独审之前核对证据，旧稿须用同一冻结计划及源码重验。作者证据失败沿原 Git 稿返修，保留其他分区有效批准。
 
 [[sync-p0-review-challenge]] 的非权威诊断仅绑定指定 owner 的新独审 Git context。原业务 inputDigest、待审分析及分析/独审 schema 不因诊断变化。真实独审可驳回质疑并 accept，也可依冻结原件给具体 repair。裁决与 findings 相互矛盾时仅续原候选独审。
 

@@ -46,6 +46,19 @@ export async function findWholeFileSourcePaths(files: ReadonlyMap<string, string
   return eligible
 }
 
+/** P0 作者事实必须绑定冻结文件中的唯一非类型声明。 */
+export async function invalidFrozenFactAnchors(sources: readonly string[], files: ReadonlyMap<string, string>): Promise<string[]> {
+  const entries = sources.map(source => ({ source, ...parseCodeEntry(source.slice('code:'.length)) }))
+  const extract = frozenFileExtraction(files, entries.map(entry => entry.path), extractors(''))
+  const invalid: string[] = []
+  for (const { source, path, anchor } of entries) {
+    const parsed = await extract(path)
+    const match = 'units' in parsed && anchor !== null ? resolveSelectors(parsed.units, [anchor])[0] : null
+    if (!match || !('ok' in match) || match.ok.typeOnly) invalid.push(source)
+  }
+  return invalid
+}
+
 /** 只解析冻结文本；使用工具自身的语言注册表，不加载候选工作区的可执行依赖。 */
 export async function validateFrozenAnchors(graph: ContractGraph, files: ReadonlyMap<string, string>, registry: Extractor[] = extractors('')): Promise<FrozenAnchorResult> {
   const findings: ContractFinding[] = [], anchors: FrozenAnchorEvidence[] = []
