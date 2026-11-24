@@ -1,3 +1,5 @@
+import { authorEvidenceInstructions, checkAuthorEvidence } from './code-behavior-author-evidence.js'
+import { invalidFrozenFactAnchors } from './frozen-anchors.js'
 import { requiredBehaviorReviewPaths, type P0ReviewDiagnostic } from './behavior-review-challenge.js'
 import { captureStageDraft, DRAFT_RECEIPT_INSTRUCTIONS, DRAFT_RECEIPT_SCHEMA, overlayStageTree, readStageDraft, StageDraftCommitMissingError, stageWorktree, STAGE_READING_INSTRUCTIONS, type StageDraftBinding } from './stage-worktree.js'
 import { posix } from 'node:path'
@@ -44,6 +46,10 @@ export const CODE_BEHAVIOR_FAILURE_STATUS = 'P0 行为校验未通过'
 export const CODE_BEHAVIOR_DRAFT_COMMIT_MISSING = 'behavior_draft_commit_missing'
 export const CODE_BEHAVIOR_REVIEW_COVERAGE_MISSING = 'behavior_review_coverage_missing'
 
+export class CodeBehaviorAuthorEvidenceError extends Error {
+  readonly code = 'behavior_author_evidence_invalid'
+}
+
 export class CodeBehaviorReviewRepairError extends Error {
   readonly code = 'behavior_review_failed'
 }
@@ -59,7 +65,7 @@ export type CodeBehaviorPostGateReview = {
   findings: { finding: ContractFinding; before: ContractItem; after: ContractItem; changedPaths: string[] }[]
   codeDiff: string
 }
-export type CodeBehaviorInput = { operatorReviewDiagnostic?: P0ReviewDiagnostic; contextTransport?: CodeBehaviorContextTransport; exactChangedPathsPreflight?: true; reviewCoveragePreflight?: true; reviewDuplicatePreflight?: true; postGateReview?: readonly CodeBehaviorPostGateReview[]; draftProtocol?: 'code-behavior-draft-v1'; partition?: { id: string; changedPaths: readonly string[]; factSourcePaths: readonly string[]; authorizedParentSpecPaths?: readonly string[] }; model?: string; snapshot: InputSnapshot; baseline: BaselinePair | null; baselineSelection?: FrozenBaselineSelection; composed: ComposedInputRef; readSetDigest: string; policyDigest: string; plan: SyncCoordinatorPlan; requestKey: string; timeoutMs: number | null; signal?: AbortSignal; origin?: 'initial' | 'spec' | 'code' | 'combined' | 'reconcile' | 'decision'; decision?: { request: SyncDecisionInput; previous: CodeBehaviorEvidence; previousComposed?: ComposedInputRef; previousReadPaths?: readonly string[] }; repairDiagnostics?: readonly { code: string; message: string }[] }
+export type CodeBehaviorInput = { operatorReviewDiagnostic?: P0ReviewDiagnostic; contextTransport?: CodeBehaviorContextTransport; exactChangedPathsPreflight?: true; authorEvidencePreflight?: true; reviewCoveragePreflight?: true; reviewDuplicatePreflight?: true; postGateReview?: readonly CodeBehaviorPostGateReview[]; draftProtocol?: 'code-behavior-draft-v1'; partition?: { id: string; changedPaths: readonly string[]; factSourcePaths: readonly string[]; authorizedParentSpecPaths?: readonly string[] }; model?: string; snapshot: InputSnapshot; baseline: BaselinePair | null; baselineSelection?: FrozenBaselineSelection; composed: ComposedInputRef; readSetDigest: string; policyDigest: string; plan: SyncCoordinatorPlan; requestKey: string; timeoutMs: number | null; signal?: AbortSignal; origin?: 'initial' | 'spec' | 'code' | 'combined' | 'reconcile' | 'decision'; decision?: { request: SyncDecisionInput; previous: CodeBehaviorEvidence; previousComposed?: ComposedInputRef; previousReadPaths?: readonly string[] }; repairDiagnostics?: readonly { code: string; message: string }[] }
 type BehaviorPurpose = 'code_behavior_analyze' | 'code_behavior_review'
 type CompletedBehaviorDraft = { trace: ElaborationTrace; draftOid: string; resultCommit: string; requestRef: BlobRef; receipt: unknown }
 /** 未批准临时稿只记录真实Git身份；readyAnalysis仅省去独审协议失败后的重复分析，不批准独审。 */
@@ -331,6 +337,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
       persist()
     }
     if (code === 'behavior_review_failed' && !reviewOnly) throw new CodeBehaviorReviewRepairError(failure)
+    if (code === 'behavior_author_evidence_invalid') throw new CodeBehaviorAuthorEvidenceError(failure)
     throw Object.assign(new Error(failure), { code })
   }
   const commonDir = input.snapshot.source.commonDir
@@ -666,6 +673,22 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     continuation = checkpoints?.load(inputDigest, analysisSchemaDigest) ?? { version: 'code-behavior-draft-v1', inputDigest, drafts: {}, ...(input.operatorReviewDiagnostic ? { reviewDiagnosticRef: input.operatorReviewDiagnostic.ref } : {}) }
     if (continuation.version !== input.draftProtocol || continuation.inputDigest !== inputDigest) throw new Error('P0草稿续修完整输入绑定不匹配')
   }
+  const inspectAuthorEvidence = async (proposal: Proposal) => {
+    const issues = checkAuthorEvidence(proposal, input.plan)
+    const facts = proposal.facts.filter(fact => fact.source.startsWith('code:') && !input.plan.facts.some(item => item.source === fact.source && item.text === fact.text))
+    if (facts.length) {
+      const paths = new Set(facts.map(fact => parseCodeEntry(fact.source.slice('code:'.length)).path))
+      const entries = sourceEntries.filter(entry => paths.has(entry.path) && entry.mode !== '120000' && !isHostPrivatePath(entry.path))
+      const bytes = readObjectBatch(commonDir, entries.map(entry => entry.oid))
+      const files = new Map(entries.flatMap(entry => {
+        const body = bytes.get(entry.oid)!
+        return isUtf8Text(body) ? [[entry.path, body.toString('utf8')] as const] : []
+      }))
+      const invalid = await invalidFrozenFactAnchors([...new Set(facts.map(fact => fact.source))], files)
+      for (const ref of invalid) issues.push({ message: `冻结源码没有唯一可用的事实符号：${ref}`, locations: proposal.facts.flatMap((fact, index) => fact.source === ref ? [`/facts/${index}/source`] : []) })
+    }
+    return issues
+  }
   let reviewWorktree = worktree
   const dispatch = async (purpose: BehaviorPurpose, prompt: string, schema: Record<string, unknown>, pendingAnalysis?: CodeBehaviorContext['pendingAnalysis'], previousInstructions?: string): Promise<unknown> => {
     if (signal?.aborted) throw Object.assign(new Error('行为分析已停止'), { code: 'cancelled' })
@@ -716,6 +739,18 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
       prompt = challengeEvidencePaths
         ? `先读取下方只读 context 的 operatorReviewDiagnostic.text，并逐一独立核实这些冻结证据文件：${JSON.stringify(challengeEvidencePaths)}。将实际核实的路径写入 checkedPaths。${instruction}\n${prompt}`
         : prompt + instruction
+    }
+    if (purpose === 'code_behavior_analyze' && input.authorEvidencePreflight) {
+      prompt += authorEvidenceInstructions(input.plan)
+      if (source !== undefined) {
+        let original: unknown
+        try { original = JSON.parse(source) }
+        catch (error) { if (!(error instanceof SyntaxError)) throw error }
+        if (original !== undefined && !outputErrors(original, schema).length) {
+          const issues = await inspectAuthorEvidence(original as Proposal)
+          if (issues.length) prompt += `\n原草稿的证据预检问题，按位置在原稿集中修正：${JSON.stringify(issues)}`
+        }
+      }
     }
     if (reviewFeedback) prompt += `\n用 git show ${reviewFeedback.commit}:${reviewFeedback.path} 读取本区最近一次真实业务独审的原JSON。沿其具体发现修复原草稿。原审查意见只供返修，不授予批准或新写权。`
     const exactChangedPaths = input.contextTransport === 'git-json-v6' && input.exactChangedPathsPreflight === true && input.partition !== undefined
@@ -854,6 +889,10 @@ SPEX_P0_REVIEW_PATHS`
     )
     : undefined
   const proposal = await dispatch('code_behavior_analyze', analysisPrompt, analysisSchema, undefined, previousInstructions) as Proposal
+  if (input.authorEvidencePreflight) {
+    const issues = await inspectAuthorEvidence(proposal)
+    if (issues.length) reject('作者草稿的冻结证据预检未通过', { issues }, 'behavior_author_evidence_invalid')
+  }
   const forbiddenRawlessResolutions = proposal.resolutions.filter(resolution => rawlessSpecPaths.includes(resolution.path))
   if (forbiddenRawlessResolutions.length) reject('无raw且无用户恢复/生命周期授权的既有Spec必须保留原字节，不得返回resolution；仅用facts/changes覆盖并交P1初始化', { rawlessSpecPaths: forbiddenRawlessResolutions.map(resolution => resolution.path) })
   const rawOnlyBootstrap = input.baseline === null && !input.baselineSelection?.bindings.some(binding => ('bytePair' in binding ? binding.bytePair : binding.intentPair) !== null) && ids.size === 0

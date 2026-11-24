@@ -5,7 +5,7 @@ import { readStageDraft, stageWorktree, STAGE_READING_INSTRUCTIONS } from './sta
 import { posix, sep } from 'node:path'
 import { configPath } from '@spexcode/spec-core'
 import { contractReferences, parseContract, parseParts } from '@spexcode/spec-core/contracts'
-import { analyzeCodeBehavior, CodeBehaviorReviewRepairError, compositionConflictPaths, deriveBehaviorAuthorization, partitionBehaviorChangedPaths, uncoveredCompositionConflicts, verifyBehaviorReadBasis } from './code-behavior.js'
+import { analyzeCodeBehavior, CodeBehaviorReviewRepairError, CodeBehaviorAuthorEvidenceError, compositionConflictPaths, deriveBehaviorAuthorization, partitionBehaviorChangedPaths, uncoveredCompositionConflicts, verifyBehaviorReadBasis } from './code-behavior.js'
 import type { CodeBehaviorApprovalBinding, CodeBehaviorApprovalInput, CodeBehaviorInput, CodeBehaviorContinuation, CodeBehaviorMaterialRequest, CodeBehaviorReviewReference } from './code-behavior.js'
 import { elaborationSchema, outputErrors } from './elaboration-schema.js'
 import { elaborate, freezeElaborationInput, inspectElaborationGaps, verifyElaborationDraftCache, projectElaborationFlowReadiness, sealPartitionedElaboration, partitionSealRepairContext } from './elaboration.js'
@@ -342,7 +342,7 @@ export async function analyzeSyncPartitions(input: CodeBehaviorInput, plan: Sync
     } catch (error) {
       const issue = error as { code?: string; message?: string }
       failures.push({ partitionId: partition.id, code: issue.code ?? 'behavior_analysis_failed', message: issue.message ?? String(error), error })
-      if (error instanceof CodeBehaviorReviewRepairError) return null
+      if (error instanceof CodeBehaviorReviewRepairError || error instanceof CodeBehaviorAuthorEvidenceError) return null
       throw error
     }
   })

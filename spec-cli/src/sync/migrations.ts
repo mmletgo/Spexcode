@@ -226,7 +226,8 @@ CREATE INDEX sync_apply_journals_operation ON sync_apply_journals(operation_id,a
 { version: 70, sql: 'SELECT 1; -- Protect P1 review-only continuation and quota-aware stopped draft selection.' },
 { version: 71, sql: 'SELECT 1; -- Protect frozen LLM Manager routes and quota-authorized retries.' },
 { version: 72, sql: 'SELECT 1; -- Protect the frozen P0 review duplicate preflight prompt.' },
-{ version: 73, sql: 'SELECT 1; -- Protect the Manager route frozen with each new native dispatch.' }]
+{ version: 73, sql: 'SELECT 1; -- Protect the Manager route frozen with each new native dispatch.' },
+{ version: 74, sql: 'SELECT 1; -- Protect the frozen P0 author evidence preflight.' }]
 
 /** 升级前以 SQLite online backup 保存一致性旧库；迁移本身由组件事务执行。 */
 export async function migrateSyncStore(protocol: SessionProtocol, options: { backupPath?: string } = {}): Promise<number> {
