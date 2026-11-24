@@ -5,7 +5,7 @@ import { readStageDraft, stageWorktree, STAGE_READING_INSTRUCTIONS } from './sta
 import { posix, sep } from 'node:path'
 import { configPath } from '@spexcode/spec-core'
 import { contractReferences, parseContract, parseParts } from '@spexcode/spec-core/contracts'
-import { analyzeCodeBehavior, compositionConflictPaths, deriveBehaviorAuthorization, partitionBehaviorChangedPaths, uncoveredCompositionConflicts, verifyBehaviorReadBasis } from './code-behavior.js'
+import { analyzeCodeBehavior, CodeBehaviorReviewRepairError, compositionConflictPaths, deriveBehaviorAuthorization, partitionBehaviorChangedPaths, uncoveredCompositionConflicts, verifyBehaviorReadBasis } from './code-behavior.js'
 import type { CodeBehaviorApprovalBinding, CodeBehaviorInput, CodeBehaviorContinuation, CodeBehaviorMaterialRequest, CodeBehaviorReviewReference } from './code-behavior.js'
 import { elaborationSchema, outputErrors } from './elaboration-schema.js'
 import { elaborate, freezeElaborationInput, inspectElaborationGaps, verifyElaborationDraftCache, projectElaborationFlowReadiness, sealPartitionedElaboration, partitionSealRepairContext } from './elaboration.js'
@@ -268,8 +268,8 @@ export async function analyzeSyncPartitions(input: CodeBehaviorInput, plan: Sync
   const failures: PartitionAnalysisFailure[] = []
   const scopes = new Map<string, string[]>()
   let verified: ReturnType<typeof verifyBehaviorReadBasis> | undefined
-  let analyses: CodeBehaviorAnalysis[]
-  try { analyses = await mapSyncPartitions(plan.partitions, maxParallel, input.signal, async partition => {
+  let results: (CodeBehaviorAnalysis | null)[]
+  try { results = await mapSyncPartitions(plan.partitions, maxParallel, input.signal, async partition => {
     try {
       const key = `partition:${partition.id}:analysis`
       const diagnostic = operatorReviewDiagnostics?.get(partition.id)
@@ -292,12 +292,16 @@ export async function analyzeSyncPartitions(input: CodeBehaviorInput, plan: Sync
     } catch (error) {
       const issue = error as { code?: string; message?: string }
       failures.push({ partitionId: partition.id, code: issue.code ?? 'behavior_analysis_failed', message: issue.message ?? String(error), error })
+      if (error instanceof CodeBehaviorReviewRepairError) return null
       throw error
     }
-  }) } catch (error) {
+  })
+    if (failures.length) throw failures[0].error
+  } catch (error) {
     checkpoints.save('partition:analysis-failures', { planDigest: plan.digest, failures: failures.map(({ error: _error, ...failure }) => failure) } satisfies PartitionAnalysisFailures)
     throw Object.assign(error instanceof Error ? error : new Error(String(error)), { partitionFailures: failures })
   }
+  const analyses = results.filter(result => result !== null)
   if (plan.expectedPaths.some(path => plan.partitions.filter(partition => partition.changedPaths.includes(path)).length !== 1) || analyses.some(analysis => !analysis.reviewPassed)) reject('分区并集未唯一覆盖完整变更集合或缺少独审')
   const conflicts = compositionConflictPaths(input)
   if (conflicts.some(path => [...scopes.values()].filter(paths => paths.includes(path)).length !== 1)) reject('组合冲突没有唯一分区归属')
