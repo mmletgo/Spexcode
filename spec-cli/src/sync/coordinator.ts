@@ -948,7 +948,8 @@ function behaviorTraceBinding(store: SyncStore, operation: SyncOperation, origin
 
 /** 业务repair清除ready后，原分析稿仍沿精确continuation来源认证；不继承祖先的推进状态。 */
 function behaviorAnalysisDraftBinding(store: SyncStore, operation: SyncOperation, origin: SyncAttempt, key: string, draft: ElaborationDraft, planDigest?: string, statusOnly = false): boolean {
-  const suffix = key === 'analysis' ? '' : `:partition:${key.slice('partition:'.length, -':analysis'.length)}`
+  const partitionId = key === 'analysis' ? null : key.slice('partition:'.length, -':analysis'.length)
+  const suffix = partitionId === null ? '' : `:partition:${partitionId}`
   let bindModel = false
   for (;;) {
     const source = partitionStage<CodeBehaviorContinuation>(store, operation, origin, `${key}:continuation`)
@@ -960,6 +961,14 @@ function behaviorAnalysisDraftBinding(store: SyncStore, operation: SyncOperation
     const trace = source.result.readyAnalysis?.trace
     if (dispatch && (trace || !source.result.reviewDiagnosticRef)) {
       return !!trace && dispatch.session?.sessionId === trace.sessionId && dispatch.session.threadId === trace.threadId && dispatch.session.turnId === trace.turnId && behaviorTraceBinding(store, operation, origin, key, trace, undefined, undefined, bindModel)
+    }
+    if (dispatch) {
+      const author = authenticatedDraftResult(store, operation, origin, requestKey, 'code_behavior_analyze', saved)
+      if (author?.result && author.request?.inputDigest === source.result.inputDigest && matchesNativeDispatchModel(operation, dispatch, author.request)) {
+        const ownerDigest = contentHash(JSON.stringify({ version: 'code-behavior-draft-v1', source: canonicalSnapshotSource(operation.input.source), partitionId, purpose: 'code_behavior_analyze' }))
+        readStageDraft(operation.input.source.commonDir, saved, { ownerDigest, sourceInputId: operation.input.id, schemaDigest: saved.schemaDigest, path: `.spex-sync-drafts/${ownerDigest}.json` })
+        return true
+      }
     }
     const previous = previousBehaviorContinuation(store, operation, origin, key)
     if (!previous || previous.continuation.inputDigest !== source.result.inputDigest

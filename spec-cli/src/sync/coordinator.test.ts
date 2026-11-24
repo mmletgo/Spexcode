@@ -12000,7 +12000,7 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
   }
 })
 
-for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派指定已批准分区 mode=${mode}`, { timeout: 120_000 }, async t => {
+for (const mode of ['accept', 'repair', 'repair-interrupted-author'] as const) test(`P0操作员复审只派指定已批准分区 mode=${mode}`, { timeout: 120_000 }, async t => {
   const importPath = '.spec/project/import-contract/spec.md', archivePath = '.spec/project/archive-contract/spec.md'
   const copySpec = (name: 'import' | 'archive') => original.replaceAll('export-job', `${name}-job`).replaceAll('EXPORT', name.toUpperCase()).replaceAll('export-contract', `${name}-contract`).replaceAll('src/export.js', `src/${name}.js`).replaceAll('tests/export.test.mjs', `tests/${name}.test.mjs`)
   const budget = { maxAttempts: 8, maxCalls: 24, maxRepairs: 4, timeoutMs: 120000 }
@@ -12024,6 +12024,8 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
   const findings = [{ message: '权限边界描述遗漏原输入分支', evidence: '冻结 src/export.js 实际分支', counterexample: '已验范围内的输入必须保留原活动限制' }]
   let challengedId: string | undefined, originalDraft: string | undefined, incompleteReview: string | undefined
   let repairDraft: { commit: string; path: string } | undefined
+  let revisedDraft: string | undefined
+  const interruptedRepair = mode === 'repair-interrupted-author'
   const originals = new Map<string, NonNullable<ReturnType<typeof readCodeBehaviorContext>['pendingAnalysis']>>()
   const commonDir = f.input.source.commonDir
   f.options.runner = async request => {
@@ -12044,12 +12046,14 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
         assert.deepEqual(requiredCheckedPaths, [...requiredChangedPaths, ...evidencePaths].sort())
         assert.ok(request.prompt.startsWith('先读取下方只读 context 的 operatorReviewDiagnostic.text'))
         if (attempt.number === 3 && mode === 'accept') assert.equal(f.git('show', `${request.worktree!.baseCommit}:${path}`), incompleteReview)
-        if (active.id === f.operation.id || attempt.number === 1) assert.deepEqual(pendingAnalysis, originals.get(partition.id))
+        if (interruptedRepair ? attempt.number === 2 : active.id === f.operation.id || attempt.number === 1) assert.deepEqual(pendingAnalysis, originals.get(partition.id))
       } else {
         assert.equal(operatorReviewDiagnostic, undefined)
         assert.ok(repairDraft && request.prompt.includes(`${repairDraft.commit}:${repairDraft.path}`))
         assert.deepEqual(JSON.parse(f.git('show', `${repairDraft.commit}:${repairDraft.path}`)).findings, findings)
-        assert.equal(f.git('show', `${request.worktree!.baseCommit}:${path}`), originalDraft)
+        const expectedDraft = interruptedRepair && attempt.number > 3 ? revisedDraft : originalDraft
+        assert.ok(expectedDraft)
+        assert.equal(f.git('show', `${request.worktree!.baseCommit}:${path}`), expectedDraft)
       }
     } else assert.equal(operatorReviewDiagnostic, undefined)
     const domain = requiredChangedPaths.some(path => path.endsWith('/import.js')) ? 'IMPORT' : requiredChangedPaths.some(path => path.endsWith('/archive.js')) ? 'ARCHIVE' : 'EXPORT'
@@ -12066,6 +12070,21 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
       output.findings = findings
     }
     if (mode === 'repair' && active.id !== f.operation.id && !pendingAnalysis) output.changes![0].sourceBehavior = '原活动限制和输入分支均保持'
+    if (interruptedRepair && !initial) {
+      if (attempt.number === 4) {
+        assert.equal(request.purpose, 'code_behavior_analyze')
+        return settledBehaviorNativeFixture(store, operation, request, { error: '正式停止，当前未写入新作者稿' })
+      }
+      if (attempt.number === 3 && !pendingAnalysis) {
+        output.changes![0].sourceBehavior = '实际原活动限制含输入分支'
+        revisedDraft = JSON.stringify(output)
+        assert.notEqual(revisedDraft, originalDraft)
+      }
+      if (pendingAnalysis && [2, 3].includes(attempt.number)) {
+        output.verdict = 'repair'
+        output.findings = findings
+      }
+    }
     if (mode === 'accept' && attempt.number === 2) incompleteReview = JSON.stringify(output)
     const worktree = committedDraftFixture(f, request, output, join(f.parent, `p0-challenge-${calls.length}`))
     if (output.verdict === 'repair') repairDraft = { commit: worktree.headCommit, path }
@@ -12243,6 +12262,40 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
     } finally { restoreSchema() }
     store.requestControl(active.id, 'pause')
     store.requestControl(active.id, 'run')
+  } else if (interruptedRepair) {
+    pauseWholeAt = 5
+    const stageName = `partition:${target.partitionId}:analysis:continuation`
+    let latestAuthor: { resultCommit: string; oid: string } | undefined
+    for (const number of [2, 3, 4]) {
+      pauseFailureAt = number
+      const result = await runSyncOperation(store, active.id, f.options)
+      const prior = store.readAttempt(result.operation.currentAttemptId!)
+      assert.equal(result.operation.phase, 'paused', JSON.stringify({ failure: prior.failure, calls }))
+      assert.equal(prior.failure?.code, number === 4 ? 'failed' : 'behavior_review_failed')
+      assert.equal(readCurrentSyncAnalysis(store, result.operation), null)
+      assert.equal(store.listRecoverableResources().length, 0)
+      const wrappers = stageWrappers(prior), wrapper = wrappers.slice().reverse().find(item => item.stage === stageName)
+      const continuation = JSON.parse(readEvidence(commonDir, wrapper.resultRef).toString())
+      assert.deepEqual(continuation.reviewDiagnosticRef, recorded.challenge.diagnosticRef)
+      assert.equal(continuation.readyAnalysis, undefined)
+      if (number === 3) {
+        latestAuthor = continuation.drafts.code_behavior_analyze
+        assert.ok(latestAuthor)
+        const resource = store.findResource(prior.id, prior.dispatchPlans.find(dispatch => dispatch.purpose === 'code_behavior_analyze')!.key)!
+        const native = JSON.parse(readEvidence(commonDir, resource.checkpointRef).toString())
+        assert.equal(native.nativeState, 'completed')
+        assert.equal(native.result.worktree.headCommit, latestAuthor.resultCommit)
+      }
+      if (number === 4) {
+        assert.deepEqual(continuation.drafts.code_behavior_analyze, latestAuthor)
+        assert.ok(wrappers.some(item => item.stage === `${stageName}-provenance`))
+      }
+      protocol.close()
+      protocol = openProtocol(join(f.parent, 'sync.sqlite'))
+      useColdStore()
+      store.requestControl(active.id, 'run')
+    }
+    pauseFailureAt = 0
   } else {
     pauseWholeAt = 0
     for (const attempt of [2, 3, 4]) {
@@ -12292,6 +12345,14 @@ for (const mode of ['accept', 'repair'] as const) test(`P0操作员复审只派�
     assert.deepEqual(currentLocal.analysis.traces[0], target.analysis.traces[0])
     assert.deepEqual(afterOrigin, [`2:${target.partitionId}:code_behavior_review`, `3:${target.partitionId}:code_behavior_review`])
     assert.equal(resumed.callsUsed, paused.callsUsed + 2)
+  } else if (interruptedRepair) {
+    assert.deepEqual(afterOrigin, [
+      `2:${target.partitionId}:code_behavior_review`,
+      `3:${target.partitionId}:code_behavior_analyze`, `3:${target.partitionId}:code_behavior_review`,
+      `4:${target.partitionId}:code_behavior_analyze`,
+      `5:${target.partitionId}:code_behavior_analyze`, `5:${target.partitionId}:code_behavior_review`,
+    ])
+    assert.equal(resumed.callsUsed, paused.callsUsed + 6)
   } else {
     assert.notEqual(currentLocal.analysis.traces[0].sessionId, target.analysis.traces[0].sessionId)
     assert.deepEqual(afterOrigin, [`2:${target.partitionId}:code_behavior_review`, `3:${target.partitionId}:code_behavior_review`, `4:${target.partitionId}:code_behavior_review`, `5:${target.partitionId}:code_behavior_review`, `1:${target.partitionId}:code_behavior_review`, `2:${target.partitionId}:code_behavior_analyze`, `2:${target.partitionId}:code_behavior_review`])
