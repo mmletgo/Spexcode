@@ -66,6 +66,8 @@ P1分区按owner传递[[sync-elaboration]]的草稿引用与具体错误。可�
 
 正式 retryOf 的局部 P0 批准查询使用当前完整业务摘要、原冻结分区计划、实际 changedPaths 和分析 schema 摘要。通过认证的原结果按原 resultRef 和 traces 进入完整聚合，并沿原操作认证只分析资格及后续验收。
 
+原生 git-json-v6 的局部 P0 续跑在首个分区派发前核对整份冻结计划。用同一分析准备过程重算原批准分区的完整 inputDigest、实际 changedPaths 和分析 schema 摘要。通过认证的批准直接还原原 resultRef 与 traces，分析和独审均零重复派发。仅有正式 owner 复审、已认证的后置业务诊断或已明确不兼容的指导合同时，才按该分区的原失效证据继续。没有批准的区按原草稿续审或返修规则处理。任何已有批准证据缺失、损坏或无法绑定时，中止新派发并保留原件，不能把证据错误当成待生成。
+
 只读返修将完整局部输入摘要传给 [[sync-coordinator]] 以选择 Git 续稿。启用已冻结的文件级来源路径时，优先复验同任务的已批准旧输入；需要新 schema 时，同任务旧 Git 失败稿沿原绑定读取并作为未批准材料续修。
 
 只读装配late V1锚点诊断只进入精确owner的localInput与唯一冻结摘要：沿原已审局部正文和JSON重新生成及独审，不能当作失败业务seed或事实/授权。原已审 Git 草稿与本轮 schema 相同时，可作为该 owner 的续改正文，仍核草稿的 owner、Git 与 schema。其它区不附诊断、不改变targets/context摘要，继续承接原已审ref与traces。当前/历史缓存均不得绕过受影响owner；新局部通过仍重做最终全候选seal与V1。只读候选的有效独审repair使用同一ReadonlySpecRepair容器并标识candidate_review来源，仅相应owner接收原review诊断与候选JSON；以原冻结作者目标和files为演进基准，未交付生成正文不成为新授权，其他owner正文与ref保持。P2的Spec写权限投影只来自真实dispatch的allowedScope与readonlyContractPaths，纯父和其它不可写目标不因同operation另有writable owner而取得P2 writer；投影不改变原权限。

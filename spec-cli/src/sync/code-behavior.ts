@@ -307,7 +307,13 @@ export function selectedAuthoredContractChanges(evidence: ReturnType<typeof read
   return [...changes.values()].sort((a, b) => a.path.localeCompare(b.path))
 }
 
-export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: ElaborationRunner, accepted?: (inputDigest: string, binding: CodeBehaviorApprovalBinding) => CodeBehaviorAnalysis | null, checkpoints?: CodeBehaviorCheckpoints, verified?: BehaviorReadBasis): Promise<CodeBehaviorAnalysis> {
+export type CodeBehaviorApprovalInput = { inputDigest: string; binding: CodeBehaviorApprovalBinding }
+
+export function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: ElaborationRunner, accepted?: (inputDigest: string, binding: CodeBehaviorApprovalBinding) => CodeBehaviorAnalysis | null, checkpoints?: CodeBehaviorCheckpoints, verified?: BehaviorReadBasis): Promise<CodeBehaviorAnalysis>
+// eslint-disable-next-line no-redeclare -- TypeScript 用重载区分同一准备过程的预检与执行结果。
+export function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: null, accepted?: undefined, checkpoints?: undefined, verified?: BehaviorReadBasis): Promise<CodeBehaviorApprovalInput>
+// eslint-disable-next-line no-redeclare -- 上面两条声明共用此实现。
+export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: ElaborationRunner | null, accepted?: (inputDigest: string, binding: CodeBehaviorApprovalBinding) => CodeBehaviorAnalysis | null, checkpoints?: CodeBehaviorCheckpoints, verified?: BehaviorReadBasis): Promise<CodeBehaviorAnalysis | CodeBehaviorApprovalInput> {
   const { signal, ...data } = supplied, input: CodeBehaviorInput = { ...structuredClone(data), signal }
   const statusOnly = input.contextTransport !== undefined && input.contextTransport !== 'git-json-v1'
   let continuation: CodeBehaviorContinuation | undefined
@@ -652,7 +658,9 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   let analysisRequest: { requestRef: BlobRef; receipt: unknown } | undefined
   const inputDigest = contentHash(worktree ? JSON.stringify({ context, worktree, logicalInput: contentHash(JSON.stringify(frozen)) }) : context), traces: ElaborationTrace[] = []
   const analysisSchemaDigest = contentHash(JSON.stringify(analysisSchema))
-  const previous = accepted?.(inputDigest, { analysisSchemaDigest, changedPaths })
+  const binding = { analysisSchemaDigest, changedPaths }
+  if (runner === null) return { inputDigest, binding }
+  const previous = accepted?.(inputDigest, binding)
   if (previous) return previous
   if (draftMode) {
     continuation = checkpoints?.load(inputDigest, analysisSchemaDigest) ?? { version: 'code-behavior-draft-v1', inputDigest, drafts: {}, ...(input.operatorReviewDiagnostic ? { reviewDiagnosticRef: input.operatorReviewDiagnostic.ref } : {}) }

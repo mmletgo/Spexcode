@@ -29,8 +29,8 @@ import { historicalCoverageCheck } from './historical-coverage.js'
 import { findWholeFileSourcePaths, isReadonlyCitationFailure } from './frozen-anchors.js'
 import { decisionAuthorizationErrors, sameContractBusinessMeaning } from './contract-evolution.js'
 import type { FrozenContracts, GenerationContractPolicy } from './frozen-contracts.js'
-import { implementationGenerationDispatch, completeSyncPartitionPlan, analyzeSyncPartitions, elaborateSyncPartitions, generateSyncPartitions, inspectPartitionedElaborationGaps, partitionSealRepairOwners, analysisOnlyPartitionEvidence, IMPLEMENTATION_PLAN_SCHEMA } from './partition-execution.js'
-import type { FileWriterPlan, PartitionCheckpoints, PartitionAnalysisFailure, PartitionAnalysisFailures } from './partition-execution.js'
+import { implementationGenerationDispatch, completeSyncPartitionPlan, analyzeSyncPartitions, elaborateSyncPartitions, generateSyncPartitions, inspectPartitionedElaborationGaps, partitionSealRepairOwners, analysisOnlyPartitionEvidence, P0ApprovalEvidenceError, IMPLEMENTATION_PLAN_SCHEMA } from './partition-execution.js'
+import type { FileWriterPlan, PartitionCheckpoints, PartitionAnalysisFailure, PartitionAnalysisFailures, P0ApprovalCheck } from './partition-execution.js'
 import { planSyncPartitions } from './partitioning.js'
 import type { SyncPartitionPlan } from './partitioning.js'
 import { contractOmissionBound, freezeGenerationInput, generationReviewRequest, generationStageTree, restoreGenerationInput, reviewError, verifyGenerationReviewDraft, runGeneration } from './generation.js'
@@ -1707,7 +1707,7 @@ type ApprovalSourceOptions = {
   frozenLegacy?: boolean; inline?: boolean; analysisSchemaDigest?: string; authorization?: P0ReviewAuthorization
 }
 
-function* approvedBehaviorPartitionSource(store: SyncStore, operation: SyncOperation, ownerOperation: SyncOperation, origin: SyncAttempt, planDigest: string, member: ApprovedBehaviorPartition, selection: FrozenBaselineSelection | undefined, checkpoints: (attempt: SyncAttempt) => SyncCheckpointStageView, lineage: ApprovalSourceLineage, options: ApprovalSourceOptions): Generator<void, string | null> {
+function* approvedBehaviorPartitionSource(store: SyncStore, operation: SyncOperation, ownerOperation: SyncOperation, origin: SyncAttempt, planDigest: string, member: ApprovedBehaviorPartition, selection: FrozenBaselineSelection | undefined, checkpoints: (attempt: SyncAttempt) => SyncCheckpointStageView, lineage: ApprovalSourceLineage, options: ApprovalSourceOptions): Generator<void, string | SyncAttempt> {
   const { expectedReadSetDigest, expectedComposedDigest, frozenLegacy, inline, authorization } = options
   if (authorization?.challenge.version === 'p0-review-challenge-v2' && authorization.challenge.origin.partitionPlanRef.sha256 !== planDigest) {
     return `原P0 owner复审授权未绑定精确分区计划: ${member.partitionId}`
@@ -1753,7 +1753,7 @@ function* approvedBehaviorPartitionSource(store: SyncStore, operation: SyncOpera
     origin = previous
   }
   if (!authenticateApprovedBehaviorPartition(store, ownerOperation, origin, key, member.analysis, member.changedPaths, selection, checkpoints, options?.analysisSchemaDigest, false, authorization)) return `原P0 owner分析或独审的Native/Git原件失配: ${member.partitionId}`
-  return null
+  return origin
 }
 
 /** 同一判据逐owner核原冻结计划、P0与真实独审；旧指导仅供完整冻结候选认证。 */
@@ -1796,10 +1796,10 @@ function* approvedBehaviorPartitionAuthentication(store: SyncStore, operation: S
   for (const owner of owners) {
     const member = whole.partitionEvidence?.find(item => item.partitionId === owner.partitionId)
     if (!member || member.analysisRef.sha256 !== owner.analysisRef.sha256 || owner.wholeAnalysisRef.sha256 !== evidence.ref.sha256 || contentHash(JSON.stringify(member.analysis)) !== member.analysisRef.sha256) return reject(`原P0 owner未绑定精确whole/local摘要: ${owner.partitionId}`)
-    const error = yield* approvedBehaviorPartitionSource(store, operation, source, p0, planDigest, member, selection, checkpoints, lineage, {
+    const proof = yield* approvedBehaviorPartitionSource(store, operation, source, p0, planDigest, member, selection, checkpoints, lineage, {
       expectedReadSetDigest: whole.readSetDigest, expectedComposedDigest: whole.composedDigest, frozenLegacy, inline, authorization: challenges.get(owner.partitionId),
     })
-    if (error) return reject(error)
+    if (typeof proof === 'string') return reject(proof)
     yield
   }
   return true
@@ -3685,6 +3685,71 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         loadBehaviorDraftMaterial: (key, planDigest, purpose, schemaDigest, inputDigest, request, existingDraft) => loadBehaviorDraftMaterial(key, purpose, schemaDigest, inputDigest, request, planDigest, existingDraft),
         loadBehaviorContinuation: (key, planDigest, inputDigest, analysisSchemaDigest) => loadBehaviorContinuation(key, inputDigest, analysisSchemaDigest, planDigest),
         loadBehaviorReviewFeedback: (key, planDigest, inputDigest) => loadBehaviorReviewFeedback(key, inputDigest, planDigest),
+        auditP0Approvals: async plan => {
+          const proofs = new Map<string, P0ApprovalCheck>()
+          const current = store.readAttempt(attempt!.id)
+          const planRef = contentHash(JSON.stringify(plan)), selection = store.readBusinessBaselineSelection(operation.id)
+          const owners = new Set(plan.partitions.map(partition => partition.id))
+          const lineage: ApprovalSourceLineage = { settled: new Set() }
+          for (const owner of retryOperationLineage(store, operation)) {
+            const attempts = store.listAttempts(owner.id).reverse()
+              .filter(prior => prior.id === current.id || ['failed', 'superseded', 'settled'].includes(prior.status))
+            for (const prior of attempts) {
+              assertMaterialFence()
+              await yieldToControl()
+              assertMaterialFence()
+              const index = prior.id === current.id ? readStageCheckpoints(store, operation, current, true) : historyCheckpoints(owner, prior)
+              for (const { ref: checkpointRef, value } of index.json) {
+                const wrapper = value as Stage
+                const key = wrapper.stage
+                if (typeof key !== 'string' || !key.startsWith('partition:') || !key.endsWith(':analysis')) continue
+                const partitionId = key.slice('partition:'.length, -':analysis'.length)
+                if (proofs.has(partitionId)) continue
+                if (!owners.has(partitionId)) fail('p0_approval_evidence_invalid', '原P0审批分区不在当前冻结计划', [wrapper.resultRef])
+                const source = { operationId: owner.id, attemptId: prior.id, checkpointRef, resultRef: wrapper.resultRef }
+                proofs.set(partitionId, ({ inputDigest, binding }) => {
+                  const blocked = (reason: string) => ({ status: 'blocked' as const, source, reason })
+                  const analysis = stage<CodeBehaviorAnalysis>(store, owner, prior, key, 'evidence', index, () => true)
+                  if (!analysis?.reviewPassed || analysis.inputId !== owner.input.id || analysis.policyDigest !== owner.policyDigest
+                    || contentHash(JSON.stringify(analysis)) !== source.resultRef.sha256) return blocked('原审批缺少真实且精确绑定的结果')
+                  const authorization = p0ReviewChallenges.get(partitionId)
+                  if (authorization && analysis.reviewDiagnosticRef?.sha256 !== authorization.challenge.diagnosticRef.sha256)
+                    return { status: 'invalidated', source, reason: 'p0_review_challenge', evidence: [authorization.challenge.diagnosticRef] }
+                  const rendered = postGateReview.find(item => item.partitionId === partitionId && item.analysisRef.sha256 === source.resultRef.sha256)
+                  if (rendered) return { status: 'invalidated', source, reason: 'post_gate_review', evidence: [rendered.resultRef] }
+                  const guidance = analysis.guidanceContractVersion ?? LEGACY_CODE_BEHAVIOR_GUIDANCE_VERSION
+                  if (wrapper.guidanceContractVersion !== guidance) return blocked('原审批的指导版本与结果不一致')
+                  if (guidance === LEGACY_CODE_BEHAVIOR_GUIDANCE_VERSION || guidance === 'code-behavior-guidance-v8')
+                    return { status: 'invalidated', source, reason: 'incompatible_behavior_guidance:' + guidance, evidence: [source.resultRef] }
+                  if (guidance !== CODE_BEHAVIOR_GUIDANCE_VERSION || analysis.inputDigest !== inputDigest
+                    || analysis.readSetDigest !== operation.readSetDigest || analysis.composedDigest !== view.composed.contentDigest
+                    || canonical(prior.composedInput) !== canonical(view.composed)
+                    || (owner.id !== operation.id && !settledApprovalSource(store, owner))) return blocked('冻结审批绑定变化且没有本区正式失效依据')
+                  const checkpoints = (origin: SyncAttempt): SyncCheckpointStageView => origin.id === current.id ? index
+                    : historyCheckpoints(origin.operationId === owner.id ? owner : store.readOperation(origin.operationId), origin)
+                  const member = { partitionId, analysisRef: source.resultRef, analysis, changedPaths: [...binding.changedPaths] }
+                  const proof = withReadonlySnapshotQuery(() => {
+                    try {
+                      return finishApprovalProof(approvedBehaviorPartitionSource(
+                        store, operation, owner, prior, planRef, member, selection, checkpoints, lineage,
+                        { expectedReadSetDigest: operation.readSetDigest, expectedComposedDigest: view.composed.contentDigest, analysisSchemaDigest: binding.analysisSchemaDigest, authorization },
+                      ))
+                    } catch (error) {
+                      return error instanceof Error ? error.message : String(error)
+                    }
+                  })
+                  if (typeof proof === 'string') return blocked(proof)
+                  if (prior.id !== current.id) {
+                    assertMaterialFence()
+                    saveStage(store, fence!, key + ':provenance', { fromOperationId: proof.operationId, fromAttemptId: proof.id, resultRef: source.resultRef })
+                  }
+                  return { status: 'reused', source, analysis, authenticatedOrigin: { operationId: proof.operationId, attemptId: proof.id } }
+                })
+              }
+            }
+          }
+          return proofs
+        },
         loadAcceptedAnalysis: (key, plan, inputDigest, binding) => {
           const challenge = challengeForKey(key)
           const partitionId = key.slice('partition:'.length, -':analysis'.length)
@@ -3700,11 +3765,11 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
               const checkpoints = (origin: SyncAttempt): SyncCheckpointStageView => origin.id === current.id && currentIndex ? currentIndex
                 : historyCheckpoints(origin.operationId === operation.id ? operation : store.readOperation(origin.operationId), origin)
               const member = { partitionId, analysisRef: source.resultRef, analysis: source.result, changedPaths: [...binding.changedPaths] }
-              const error = withReadonlySnapshotQuery(() => finishApprovalProof(approvedBehaviorPartitionSource(store, operation, operation, prior, contentHash(JSON.stringify(plan)), member, selection, checkpoints,
+              const proof = withReadonlySnapshotQuery(() => finishApprovalProof(approvedBehaviorPartitionSource(store, operation, operation, prior, contentHash(JSON.stringify(plan)), member, selection, checkpoints,
                 { settled: new Set() }, {
                   expectedReadSetDigest: operation.readSetDigest, expectedComposedDigest: view.composed.contentDigest, analysisSchemaDigest: binding.analysisSchemaDigest, authorization,
                 })))
-              if (error) fail('sync_p0_challenge_binding', error)
+              if (typeof proof === 'string') fail('sync_p0_challenge_binding', proof)
             } else if (partitionStage<SyncPartitionPlan>(store, operation, prior, 'partition-plan')?.result.digest !== plan.digest || source.result.traces.length !== 2 || !source.result.traces.every(trace => stage<{ version: string }>(store, operation, prior, 'behavior-draft-protocol')?.version === 'code-behavior-draft-v1' ? behaviorTraceBinding(store, operation, prior, key, trace) : prior.dispatchPlans.some(dispatch => dispatch.purpose === trace.purpose && dispatch.session?.sessionId === trace.sessionId && dispatch.session.threadId === trace.threadId && dispatch.session.turnId === trace.turnId))) continue
             if (prior.id === current.id) return source.result
             saveStage(store, fence!, `${key}:provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef })
@@ -4041,6 +4106,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
             [partitionId, readP0ReviewDiagnostic(operationId, operation.input.source.commonDir, challenge)]))
           try { const analysisInput: import('./code-behavior.js').CodeBehaviorInput = { ...(draftProtocol ? { draftProtocol } : {}), ...(behaviorProtocol?.contextTransport ? { contextTransport: behaviorProtocol.contextTransport } : {}), exactChangedPathsPreflight: behaviorProtocol?.exactChangedPathsPreflight, reviewCoveragePreflight: behaviorProtocol?.reviewCoveragePreflight, reviewDuplicatePreflight: behaviorProtocol?.reviewDuplicatePreflight, model, snapshot: operation.input, baseline: operation.previousBaselinePair, ...(operation.baselineSelection ? { baselineSelection: store.readBusinessBaselineSelection(operation.id) } : {}), composed: view.composed, readSetDigest: operation.readSetDigest, policyDigest: operation.policyDigest, plan: operation.baselineSelection ? { ...options.plan, readPaths: view.readPaths } : options.plan, requestKey: `sync:${attempt.id}:analysis`, timeoutMs: callTimeoutMs, signal, origin: operation.origin, ...(decision && previousDecisionAnalysis ? { decision: { request: decision, previous: previousDecisionAnalysis, previousComposed: previousDecisionComposed, previousReadPaths: previousDecisionReadPaths } } : {}), repairDiagnostics, postGateReview }; approved = partitions ? await analyzeSyncPartitions(analysisInput, partitions, options.plan.version === 'sync-coordinator-v2' ? options.plan.partitionPolicy.maxParallel : 1, runner, partitionCheckpoints, operatorReviewDiagnostics) : await analyzeCodeBehavior(analysisInput, runner, undefined, { loadReviewFeedback: inputDigest => loadBehaviorReviewFeedback('analysis', inputDigest), loadMaterial: (purpose, schemaDigest, inputDigest, request, existingDraft) => loadBehaviorDraftMaterial('analysis', purpose, schemaDigest, inputDigest, request, undefined, existingDraft), load: (inputDigest, analysisSchemaDigest) => loadBehaviorContinuation('analysis', inputDigest, analysisSchemaDigest), save: continuation => { saveStage(store, fence!, 'analysis:continuation', continuation, !operation.baselineSelection ? { readSetDigest: operation.readSetDigest } : undefined) } }) }
           catch (error) {
+            if (error instanceof P0ApprovalEvidenceError) fail(error.code, error.message, [error.auditRef])
             const issue = error as { code?: string; message?: string }
             const partitionFailures = (error as { partitionFailures?: PartitionAnalysisFailure[] }).partitionFailures
             const errors = [error, ...partitionFailures?.map(item => item.error) ?? []]
