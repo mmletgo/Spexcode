@@ -387,6 +387,23 @@ test('动态测试标题只采信边界确定的静态用例前缀', () => {
   }
 })
 
+test('稳定测试标题可拼接两个闭合字符串', () => {
+  const graph = buildContractGraph([parse()])
+  const sources = new Map(files)
+  for (const [source, declared] of [
+    ["const cases = [{ id: 'AC-EXPORT-01', path: 'export.test.mjs' }]; for (const entry of cases) test(entry.id + ' wrapper ' + entry.path, () => {});", true],
+    ["const title = 'AC-EXPORT-' + '01 export'; test(title, () => {});", true],
+    ["test('AC-EXPORT-01' + '-OTHER', () => {});", false],
+    ["test('AC-EXPORT-01' + dynamic(), () => {});", false],
+    ["test('AC-EXPORT-01 ' + 3, () => {});", false],
+    ["const ids = ['AC-EXPORT-01']; ids[0] = 'OTHER'; test(ids[0] + ' export', () => {});", false],
+  ] as const) {
+    sources.set('tests/export.test.mjs', source)
+    const diagnostics = validateContractGraph(graph, { files: sources })
+    assert.equal(!diagnostics.some(({ code, itemId }) => code === 'missing-test-case' && itemId === 'AC-EXPORT-01'), declared, source)
+  }
+})
+
 test('Vitest each注册不抹去同一TSX文件中的直接it标题', () => {
   const graph = buildContractGraph([parse()])
   const fake = new Map(files)
