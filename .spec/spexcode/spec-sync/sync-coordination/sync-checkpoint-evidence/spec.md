@@ -39,7 +39,7 @@ P1 自动续审用各自失败分区的检查点取得精确 reviewer、实际�
 
 校验原阶段时，阶段 wrapper 与精确 resultRef 查找均使用该阶段已认证的 readSet 和 selection。该视图只在当前认证中传递；checkpoint 扫描、原失败原件和跨 attempt 复用链始终按真实 operation 记录认证。
 
-partitionEvidence容器中的rounds是原局部结果的副本，不能以聚合的inputDigest/failure替原owner认证。读取先核唯一partitionId与原local绑定、完整rounds按引用顺序精确拼接；全局partitioned_final重算同planDigest及各local输入摘要，早退单local容器保原binding/inputDigest。随后仅沿各原resultRef执行既有完整Native强认证；嵌套refinement.prior/repair-input沿同一机制，错ref、错输入、删改重排round或重复owner均显式失败。
+partitionEvidence容器中的rounds是原局部结果的副本，不能以聚合的inputDigest/failure替原owner认证。读取先核唯一partitionId与原local绑定、完整rounds按引用顺序精确拼接；全局partitioned_final重算同planDigest及各local输入摘要，早退单local容器保原binding/inputDigest。 早退容器携带的续审诊断必须与该局部原件一致；跨正式重试的原拒稿只沿局部 resultRef 认证。随后仅沿各原resultRef执行既有完整Native强认证；嵌套refinement.prior/repair-input沿同一机制，错ref、错输入、删改重排round或重复owner均显式失败。
 
 同一原Native强认证接缝也供精确code_review格式续审的原result/plan/checkpoint引用读取复用，核原canonical record、请求/schema/prompt/模型、失败身份及停止状态；不新增raw role或平铺pin，不给旧缺席补ref，不解析原文取得stage、accept或业务权限。
 

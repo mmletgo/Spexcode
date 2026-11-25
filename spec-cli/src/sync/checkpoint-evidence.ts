@@ -381,9 +381,10 @@ function scanSyncCheckpoints(store: SyncStore, operation: PhaseOperation, attemp
           ? owners.length === 1 && isDeepStrictEqual(saved.partitionBinding, locals[0].partitionBinding) && saved.inputDigest === locals[0].inputDigest
           : saved.phase === 'partitioned_final' && locals.every(local => local.partitionBinding!.planDigest === planDigest) && saved.inputDigest === partitionedElaborationInputDigest(planDigest, locals.map(local => local.inputDigest), analysisOnly)
         if (!inputMatches) fail('聚合诊断必须保留原局部身份或精确重算全局输入，不能替代原owner认证')
+        if (saved.repairDiagnostics && (!saved.partitionBinding || !isDeepStrictEqual(saved.repairDiagnostics, locals[0].repairDiagnostics))) fail('聚合的续审诊断必须是原局部诊断的精确副本')
         for (const member of owners) inspect(member.resultRef, owner, current)
       } else for (const round of Array.isArray(saved.rounds) ? saved.rounds : []) if (round.rejectedOutput) authenticate(owner, saved, round)
-      const diagnostic = Array.isArray(saved.rounds) ? saved.repairDiagnostics : undefined
+      const diagnostic = !owners && Array.isArray(saved.rounds) ? saved.repairDiagnostics : undefined
       if (diagnostic) {
         const original = read<Saved>(diagnostic.resultRef), last = original.rounds.at(-1)
         if (original.inputDigest !== diagnostic.inputDigest || !isDeepStrictEqual(original.failure, diagnostic.failure) || !isDeepStrictEqual(last, diagnostic.round)) fail('历史raw诊断不能改写原失败round')
