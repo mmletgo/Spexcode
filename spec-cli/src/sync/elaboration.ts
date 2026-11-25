@@ -1175,7 +1175,9 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
           const parsedBusinessRows = checked.contracts
             .filter(contract => result.changes.some(change => change.nodeId === contract.nodeId && change.path === contract.path))
             .flatMap(contract => contract.items.filter(item => item.kind !== 'VERIFY'))
-          const reviewRepairInstructions = `${reviewScopeInstructions}${retryReview?.errors.length ? `\n本轮仅修复独审的权限/绑定错误，保留原合法生成和同一候选，不修改文件。以下完整原review及具体拒因为非权威诊断，须核实并重新独立审查，不能自行继承或改签accept：\n${JSON.stringify({ errors: retryReview.errors, reviewOutput: retryReview.round.reviewOutput, review: retryReview.round.review })}` : ''}`
+          const reviewItemIdInstructions = input.worktree && input.reviewItemIdGuidance === 'contract-item-ids-v1'
+            ? '\naffectedIds 只填当前契约图中实际存在的业务条目 ID（如 REQ、RULE、FLOW、STEP、STATE、TR、AC、GAP）。节点 ID、owner 标识和路径只作定位证据，不填入 affectedIds。' : ''
+          const reviewRepairInstructions = `${reviewScopeInstructions}${reviewItemIdInstructions}${retryReview?.errors.length ? `\n本轮仅修复独审的权限/绑定错误，保留原合法生成和同一候选，不修改文件。以下完整原review及具体拒因为非权威诊断，须核实并重新独立审查，不能自行继承或改签accept：\n${JSON.stringify({ errors: retryReview.errors, reviewOutput: retryReview.round.reviewOutput, review: retryReview.round.review })}` : ''}`
           const nativeReviewTask = `\n任务:\n${snapshot}\n候选范围及适用性:\n${JSON.stringify({ paths: round.candidate.changes.map(change => change.path), applicability: round.candidate.applicability, nodeChanges: round.candidate.nodeChanges, ...(input.recordUnverifiedCoverage && !citationRepair ? { unverifiedContractIds: checked.findings.flatMap(issue => issue.code === 'acceptance-not-executed' && issue.itemId ? [issue.itemId] : []) } : {}) })}`
           if (index === 0 && settledReview && (!settledReview.prompt.startsWith(reviewScopeInstructions) || !settledReview.prompt.endsWith(nativeReviewTask))) throw Object.assign(new TypeError('独审失败的原任务、owner范围或候选摘要不匹配'), { code: 'review_retry_binding' })
           const rejectionInstruction = index === 0 && settledReview && rejected ? reviewAttachmentInstruction(reviewAttachment(rejected).path) : ''

@@ -53,6 +53,8 @@ export type ElaborationInput = {
   generationGuidance?: ElaborationGenerationGuidance
   /** 首次P1派发前冻结的根级适用性提示和结构诊断，不参与业务摘要。 */
   applicabilityGuidance?: 'root-summary-v1'
+  /** 首次 P1 派发前冻结，仅影响 Native 独审请求提示。 */
+  reviewItemIdGuidance?: 'contract-item-ids-v1'
   /** 新attempt的封口诊断目录入口，仅影响Native提示。 */
   compactSealDiagnostics?: true
   /** 只读V1引用返修的历史诊断展示版本。 */

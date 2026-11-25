@@ -175,6 +175,7 @@ test('review范围复用owner事实：未知ID不能混入，冻结依赖可引�
   const review = (affectedIds: string[]): ElaborationReview => ({ inputDigest: '', candidateDigest: '', verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ code: '任意业务发现码', kind: 'repair', message: '具体语义问题', affectedIds, evidence: '原意及冻结来源', decision: '修复具体义务' }] })
   assert.equal(elaborationReviewScopeErrors(frozen, review(['REQ-PARENT-01']), graph)[0].code, 'review_scope')
   assert.equal(elaborationReviewScopeErrors(frozen, review(['RULE-EXPORT-01', 'UNKNOWN-ID']), graph)[0].code, 'review_binding')
+  assert.equal(elaborationReviewScopeErrors(frozen, review(['RULE-EXPORT-01', parent.nodeId]), graph)[0].code, 'review_binding')
   assert.deepEqual(elaborationReviewScopeErrors(frozen, review(['RULE-EXPORT-01', 'REQ-PARENT-01']), graph), [], '当前改变影响冻结依赖时仍可给域内修复')
   frozen.analysis!.analysis.authorChanges = [{ nodeId: parent.nodeId, path: parent.path, beforeRaw: '原意', afterRaw: '新原意', changedIds: ['REQ-PARENT-01'] }]
   assert.deepEqual(elaborationReviewScopeErrors(frozen, review(['REQ-PARENT-01']), graph), [])
