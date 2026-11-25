@@ -492,18 +492,24 @@ function settledElaborationReview(store: SyncStore, operation: SyncOperation, pr
   const providerReview = result.status === 'unsupported' && isZCodeProviderRejection(failure)
   if ((!providerReview && result.status !== 'failed') || !result.structurePassed || result.reviewPassed || !round.draft || !round.candidate || round.review !== null || round.reviewOutput !== null) return
   const rejection = round.rejectedOutput, grokExit = !rejection && isGrokNativeExitFailure(failure)
+  const formatWithoutPacket = !rejection && reviewFormatRepairCodes.has(failure.code)
   const stoppedReview = allowStoppedReview && !rejection && !grokExit && failure.code === 'failed'
   const key = `${ownerKey}:${round.index}:elaboration_review`
   const quota = !rejection && failure.code === 'provider_quota_exhausted' ? managedQuotaDispatch(store, operation, prior, key) : undefined
   if (providerReview && rejection) return
-  if (!providerReview && !quota && !stoppedReview && (rejection ? !reviewFormatRepairCodes.has(failure.code) || rejection.purpose !== 'elaboration_review' || !rejection.ref || rejection.ownerRequestKey !== ownerKey || rejection.ownerInputDigest !== result.inputDigest : !grokExit && (failure.code !== 'native_rpc_timeout' || !isZCodeEventsRpcTimeout({ state: 'failed', errorCode: failure.code, error: failure.message })))) return
+  if (!providerReview && !quota && !stoppedReview && (rejection ? !reviewFormatRepairCodes.has(failure.code) || rejection.purpose !== 'elaboration_review' || !rejection.ref || rejection.ownerRequestKey !== ownerKey || rejection.ownerInputDigest !== result.inputDigest : !grokExit && !formatWithoutPacket && (failure.code !== 'native_rpc_timeout' || !isZCodeEventsRpcTimeout({ state: 'failed', errorCode: failure.code, error: failure.message })))) return
   const resource = store.findResource(prior.id, key)
   if (!resource || resource.phase !== 'removed' || prior.dispatchPlans.some(dispatch => store.findResource(prior.id, dispatch.key)?.phase !== 'removed')) fail('review_retry_binding', '独审失败缺少原正式资源及结算证明')
   const proof = authenticateNativeFailure(store, operation, prior, key, failure, readRecord, true)
   const { plan, checkpoint, record, state } = proof, { request } = plan, { session } = checkpoint
-  if (stoppedReview) {
-    if (state.state !== 'cancelled' || !proof.observedFailure || checkpoint.stop?.nativeStopped !== true || !record.archived
-      || request.worktree?.mode !== 'read' || state.rejectedOutput) fail('review_retry_binding', '中断独审缺少原失败观察、无输出终止或只读归档')
+  const nativeClaudeFormat = reviewFormatRepairCodes.has(failure.code) && request.model?.startsWith('claude:') && record.harness === 'claude-headless'
+    && state.state === 'failed' && state.claudeNative?.sessionId === session.threadId && state.claudeNative.userUuid === session.turnId
+  if (formatWithoutPacket && !nativeClaudeFormat) return
+  if (stoppedReview || nativeClaudeFormat) {
+    if (!proof.observedFailure || checkpoint.stop?.nativeStopped !== true || !record.archived || request.worktree?.mode !== 'read'
+      || stoppedReview && (state.state !== 'cancelled' || state.rejectedOutput)
+      || nativeClaudeFormat && (checkpoint.stop.nativeStatus !== 'processGroupGone' || !!state.rejectedOutput !== !!rejection))
+      fail('review_retry_binding', '独审缺少原失败观察、精确退出或只读归档')
     assertStoppedArchiveTree(operation.input.source.commonDir, record.session, request.worktree.baseCommit, request.worktree.tree)
   }
   if (grokExit) {
@@ -523,12 +529,12 @@ function settledElaborationReview(store: SyncStore, operation: SyncOperation, pr
   if (rejection) authenticateRejection(operation, prior, key, failure, rejection, checkpoint)
   const failedWorktree = state.failedWorktree
   if (failedWorktree || checkpoint.failure?.failedWorktree) {
-    if (!rejection || !failedWorktree || request.worktree?.mode !== 'read'
+    if ((!rejection && !nativeClaudeFormat) || !failedWorktree || request.worktree?.mode !== 'read'
       || canonical(failedWorktree) !== canonical(checkpoint.failure?.failedWorktree)
       || failedWorktree.worktreePath !== record.worktreePath) fail('review_retry_binding', '独审拒稿的只读Git见证与原失败记录不匹配')
     verifyStageResult(operation.input.source.commonDir, request.worktree, { worktree: failedWorktree })
   }
-  const transportMatches = stoppedReview || grokExit || (quota ? state.state === 'failed' && !state.rejectedOutput : rejection
+  const transportMatches = stoppedReview || nativeClaudeFormat || grokExit || (quota ? state.state === 'failed' && !state.rejectedOutput : rejection
     ? state.state === 'failed' && (request.model?.startsWith('zcode:') && record.harness === 'zcode' || request.model?.startsWith('claude:') && record.harness === 'claude'
       || request.model?.startsWith('grok:') && record.harness === 'grok-structured' && state.grokNative?.sessionId === session.threadId && state.grokNative?.turnId === session.turnId
       || request.model?.startsWith('cursor:') && record.harness === 'cursor-structured' && state.cursorNative?.sessionId === session.threadId && state.cursorNative?.requestId === session.turnId
@@ -541,7 +547,7 @@ function settledElaborationReview(store: SyncStore, operation: SyncOperation, pr
     || request.purpose !== 'elaboration_review' || request.worktree?.mode !== 'read' || request.frozenContext || !transportMatches || !matchesAttemptNativeModel(operation, prior, request) || request.inputDigest !== elaborationNativeInputDigest(result.inputDigest, request)
     || request.root !== operation.input.source.canonicalRoot || request.base !== request.worktree.baseCommit || record.base !== request.base || record.forkCommit !== request.base
     || !checkpoint.nativeCallRequested || !grokExit && !publishedIdentity || checkpoint.status !== terminalStatus || checkpoint.nativeState !== terminalStatus
-    || !quota && !stoppedReview && checkpoint.stop?.nativeStatus !== 'stopped' || checkpoint.result || checkpoint.creationTermination
+    || !quota && !stoppedReview && !nativeClaudeFormat && checkpoint.stop?.nativeStatus !== 'stopped' || checkpoint.result || checkpoint.creationTermination
     || checkpoint.candidateDigest !== null && checkpoint.candidateDigest !== round.candidateDigest
     || canonical(prior.dispatchPlans.find(dispatch => dispatch.key === key)?.session) !== canonical(session)
     || canonical(checkpoint.failure) !== canonical(expectedFailure)
