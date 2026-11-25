@@ -88,7 +88,7 @@ P0 transport 回归让同一 operation 的三兄弟分别精确已停 EPIPE、�
 
 P1追加A正常Git拒稿→B新物理EPIPE无witness→C原bytes续改并独审，以及旧物理晚观察不盖后来正常Git反向；A完整finding进入C且priorDraft角色清除。parent/新旧诊断的比较另由真实elaborate冻结任务、生产elaborationMaterialContext、原物理observer与新seed回调组合覆盖，原整树比较先fail，精确投影后pass，source/tests/非角色Spec差异配对拒绝；formalNative/stop认证复用前述coordinator真实fixture。此组合不假称现场模型全链验收。
 
-P1 根级适用性回归核实新阶段冻结作者指导，已有 v5 阶段缺该字段时仍按原提示生成及独审。真实 SQLite 关闭重开后，原预留请求、schema、派发登记和检查点逐值重放。
+P1 根级适用性与分批草稿回归核实新阶段同时冻结两者。writer74 已有的 v5 阶段沿原提示恢复，writer75 已有的阶段保留根级适用性指导。真实 SQLite 关闭重开后，三个版本的生成与独审均逐值重放原预留请求、schema、派发登记和检查点。
 
 逐值相同的P1草稿及运行诊断经过真实Git与隔离SQLite的分区协调器，在新返修请求只发一组完整发现及第二角色引用。原检查点保留两组原值，短版定位及不合格owner反例继续走各自门禁。稳定派发回归同时核新attempt的提示冻结字段和历史reserved请求。 Native 父接口独审标记只在新阶段冻结，旧 reserved 请求的提示、schema 与摘要逐值重放。新父接口续审在原稿结构通过并遭完整实现绑定拒绝时验证相同候选、源码和测试 Git 对象。混合业务修复仍续生成。候选、原稿、只读树失配或重复审查身份均拒绝。 受控 Native 入口回归分别保留及省略原已完成独审的 canonical 会话见证。见证有效时仅续审原候选，缺失时返回绑定错误，零新派发且无新 provenance。三次 attempt 的回归依次保存格式拒稿原字节、核对后继只读树上的精确附件并记录绑定拒绝、只续审原候选。候选变更的 Git 对象逐值保持。
 
