@@ -105,7 +105,10 @@ function mergeBatch(input: ElaborationInput, draft: GeneratedTargetElaboration, 
     boundaries.add(boundary.boundary)
     const index = output.applicability.findIndex(previous => previous.boundary === boundary.boundary)
     if (index < 0) output.applicability.push(boundary)
-    else output.applicability[index] = boundary
+    else {
+      output.applicability = output.applicability.filter((previous, position) => previous.boundary !== boundary.boundary || position === index)
+      output.applicability[index] = boundary
+    }
   }
   return withDraftVerificationRows(input, output)
 }

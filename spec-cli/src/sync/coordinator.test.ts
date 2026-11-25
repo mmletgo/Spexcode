@@ -8624,7 +8624,7 @@ test('已有reserved P1在SQLite冷恢复后草稿协议缺席仍不补签或改
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
 })
 
-for (const [guidance, purpose] of [
+for (const [guidance, purpose, legacyApplicability] of [
   ['absent', 'elaboration_generate'],
   ['ac-test-binding-v1', 'elaboration_generate'],
   ['ac-test-flow-binding-v2', 'elaboration_generate'],
@@ -8635,15 +8635,19 @@ for (const [guidance, purpose] of [
   [ELABORATION_GENERATION_GUIDANCE_V4, 'elaboration_review'],
   [ELABORATION_GENERATION_GUIDANCE, 'elaboration_generate'],
   [ELABORATION_GENERATION_GUIDANCE, 'elaboration_review'],
-] as const) test(`P1提示按attempt冻结，冷恢复原reserved请求 guidance=${guidance} purpose=${purpose}`, async t => {
+  [ELABORATION_GENERATION_GUIDANCE, 'elaboration_generate', true],
+  [ELABORATION_GENERATION_GUIDANCE, 'elaboration_review', true],
+] as const) test(`P1提示按attempt冻结，冷恢复原reserved请求 guidance=${guidance} purpose=${purpose} legacyApplicability=${legacyApplicability === true}`, async t => {
   const f = await fixture(t, { maxAttempts: 1, maxCalls: 4, maxRepairs: 0, timeoutMs: 120_000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, 'spec', 'claude:default')
   const claimed = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30_000, expectedMessageId: f.operation.dispatchMessageId })
   const commonDir = f.input.source.commonDir
+  const freezesApplicability = guidance === ELABORATION_GENERATION_GUIDANCE && !legacyApplicability
   const expectedProtocol = { version: 'elaboration-draft-v1',
     ...(guidance === 'absent' ? {} : { generationGuidance: guidance }),
-    ...(guidance === ELABORATION_GENERATION_GUIDANCE ? { compactSealDiagnostics: true, citationRepairDiagnostics: 'actionable-v1', defaultExportCitation: true, sharedDraftDiagnostics: true, parentInterfaceReview: 'scope-v2' } : {}),
+    ...(guidance === ELABORATION_GENERATION_GUIDANCE ? { compactSealDiagnostics: true, citationRepairDiagnostics: 'actionable-v1', defaultExportCitation: true, sharedDraftDiagnostics: true, draftRepairDisposition: true, parentInterfaceReview: 'scope-v2' } : {}),
+    ...(freezesApplicability ? { applicabilityGuidance: 'root-summary-v1' } : {}),
   }
-  if (guidance !== ELABORATION_GENERATION_GUIDANCE) {
+  if (!freezesApplicability) {
     const value = expectedProtocol, resultRef = writeEvidence(commonDir, value)
     const wrapper = writeEvidence(commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: claimed.attempt.id, inputId: f.input.id, policyDigest: f.operation.policyDigest, stage: 'elaboration-draft-protocol', resultRef })
     f.store.checkpoint(claimed.fence, { ...wrapper, artifacts: syncCheckpointArtifacts(value, resultRef) })
@@ -8680,6 +8684,7 @@ for (const [guidance, purpose] of [
   const reviewGuidance = guidance === ELABORATION_GENERATION_GUIDANCE_V3 || guidance === ELABORATION_GENERATION_GUIDANCE_V4 || guidance === ELABORATION_GENERATION_GUIDANCE
   assert.equal(requests[0].prompt.includes('仓库相对测试路径#稳定用例ID'), review ? reviewGuidance : guidance !== 'absent')
   assert.equal(requests[0].prompt.includes('TR.from、TR.event'), !review && (guidance === 'ac-test-flow-binding-v2' || reviewGuidance))
+  assert.equal(requests[0].prompt.includes('根级 applicability 按本轮全部目标汇总'), !review && freezesApplicability)
   f.closeForRestart()
   const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
   const store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) }); f.useStore(store)

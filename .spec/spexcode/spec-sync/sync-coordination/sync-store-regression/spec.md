@@ -148,6 +148,10 @@ writer61→writer62 使用真实 SQLite 验证无 DDL、原表行与迁移记录
 
 writer69→writer70 复用真实 SQLite 升级回归，验证故障注入时原库整体回滚，成功升级保留原业务行和自动采纳索引，旧 writer 拒绝新版库。升级前备份可按 writer69 读回。
 
+writer74 到 writer75 的隔离回归验证新标记失败时事务回滚，成功时旧行与索引保持。writer74 拒绝新版库，一致备份由 writer74 恢复。
+
+writer75 到 writer76 复用同一迁移回归，核对既有根级适用性迁移字节、原件与索引，验证新增草稿协议的 writer 围栏和一致备份回滚。
+
 模拟旧版迁移库时移除目标旧代之后全部 marker，不能留下新增 writer marker 形成不存在的 schema gap；旧 writer 拒绝断言从当前迁移注册推导最高代数。 writer56 与 writer57 的隔离升级回归逐值核对旧数据、DDL 和自动采纳索引，验证事务失败回滚、旧 writer 拒绝及一致备份恢复。
 
 历史恢复结算仅接受与冻结计划逐项相同的 restoredIds；未获固定历史授权的验证元数据不能发布新资源头或解除退休状态。新 pair 的当前退休集合按真实恢复身份推进，原不可变退休审计保持；新版 writer 语义 marker 必须拒绝旧 writer 和未知未来版本写入。

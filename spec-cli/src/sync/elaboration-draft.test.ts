@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
 import { buildContractGraph, CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
+import type { ContractFinding } from '@spexcode/spec-core/contracts'
 import { StructuredSessionError, rejectedFinalOutput } from '../session-structured-policy.js'
 import { nativeWorktreePrompt, nativeWorktreeResult } from '../native-worktree-runtime.js'
 import { draftVerificationOwnershipMatches, elaborate, elaborationMaterialContext, elaborationDigest, freezeElaborationInput, incrementalDraftCommand, sealPartitionedElaboration, verifyElaborationDraftCache, withDraftVerificationRows } from './elaboration.js'
@@ -293,6 +294,41 @@ for (const inherited of [false, true]) test(`Native完整P1的VERIFY冻结登记
   assert.doesNotMatch(f.requests[1].prompt, /须从精确冻结登记新增该VERIFY定义/)
   assert.deepEqual(result.contracts.flatMap(contract => contract.items.flatMap(item => item.kind === 'VERIFY' ? [[contract.path, item.id, item.command, item.cwd, item.timeoutMs]] : [])), [[inherited ? ancestorPath : path, verification.id, verification.command, verification.cwd, verification.timeoutMs]])
   assert.equal(result.runtimeVerification, 'not_run')
+})
+
+test('Native P1根级适用性按任务汇总，原稿续修区分缺失和重复', async t => {
+  const f = await fixture(t)
+  const input = { ...f.input, applicabilityGuidance: 'root-summary-v1' as const }
+  assert.equal(freezeElaborationInput(input).inputDigest, freezeElaborationInput(f.input).inputDigest)
+  const repeated = JSON.stringify({ ...rows, applicability: Array.from({ length: 6 }, () => rows.applicability).flat() })
+  const baseline = await elaborate({ ...f.input, maxRepairs: 0 }, { runner: f.run(request => {
+    assert.doesNotMatch(request.prompt, /根级 applicability 按本轮全部目标汇总/)
+    return repeated
+  }) })
+  assert.ok(baseline.rounds[0].findings.filter(issue => issue.code === 'applicability_missing').every(issue => issue.message.startsWith('边界需唯一适用性判断:')))
+  const initial = await elaborate({ ...input, requestKey: 'root-applicability-repeated', maxRepairs: 0 }, { runner: f.run(() => repeated) })
+  assert.equal(initial.status, 'exhausted')
+  assert.match(f.requests.at(-1)!.prompt, /根级 applicability 按本轮全部目标汇总.*10 种边界各恰好一条/)
+  const originalDraft = initial.rounds[0].draft!
+  assert.equal(readStageDraft(f.commonDir, originalDraft, originalDraft), repeated)
+  const errors = initial.rounds[0].findings.filter(issue => issue.severity === 'error')
+  assert.equal(errors.length, 10)
+  assert.ok(errors.every(issue => issue.code === 'applicability_missing' && issue.message.includes('实际 6 条')))
+
+  const withOmission = JSON.stringify({ ...rows, applicability: [...rows.applicability.slice(1), rows.applicability[1]] })
+  let attempts = 0
+  const result = await elaborate({ ...input, requestKey: 'root-applicability-repaired' }, { draft: originalDraft, runner: f.run((request, worktree, draftPath) => {
+    assert.match(request.prompt, /根级 applicability 按本轮全部目标汇总/)
+    assert.equal(readFileSync(join(worktree, draftPath), 'utf8'), attempts === 0 ? repeated : withOmission)
+    if (++attempts === 1) return withOmission
+    assert.match(request.prompt, /permissions.*实际 0 条/)
+    assert.match(request.prompt, /mutation.*实际 2 条/)
+    return JSON.stringify(rows)
+  }) })
+  assert.equal(result.status, 'complete', JSON.stringify(result.failure))
+  assert.deepEqual(f.requests.slice(-3).map(request => request.purpose), ['elaboration_generate', 'elaboration_generate', 'elaboration_review'])
+  assert.doesNotMatch(f.requests.at(-1)!.prompt, /根级 applicability 按本轮全部目标汇总/)
+  assert.deepEqual(result.rounds.at(-1)!.candidate!.applicability, rows.applicability)
 })
 
 test('Native完整P1在共享VERIFY由重复变为缺失后，只给原Git稿一个合法技术归属', async t => {
@@ -1015,10 +1051,11 @@ test('普通原生叶由同一工作树分批写草稿，非法批次原字节�
   const { command, cwd, timeoutMs, id } = verification
   const added = { id: 'VERIFY-SHARED-NEW', command, cwd, timeoutMs }
   const tools = incrementalDraftCommand()
-  const input = { ...f.input, incrementalDraft: tools, verifications: [{ id, command, cwd, timeoutMs }, added], maxRepairs: 0 }
+  const input = { ...f.input, incrementalDraft: tools, applicabilityGuidance: 'root-summary-v1' as const, verifications: [{ id, command, cwd, timeoutMs }, added], maxRepairs: 0 }
   const result = await elaborate(input, { runner: f.run((request, workspace, draftPath) => {
     const owner = draftPath.match(/([a-f0-9]{64})\.json$/)![1]
     assert.match(request.prompt, /草稿由程序写入/)
+    assert.match(request.prompt, /根级 applicability 按本轮全部目标汇总/)
     const args = [tools.cli, 'internal', 'elaboration-draft', request.worktree!.baseCommit, owner]
     const call = (action: 'inspect' | 'apply' | 'check', payload?: unknown) => {
       const child = spawnSync(tools.node, [...args, action, ...(action === 'inspect' && payload !== undefined ? [JSON.stringify(payload)] : [])], { cwd: workspace, input: action === 'apply' && payload !== undefined ? JSON.stringify(payload) : '', encoding: 'utf8' })
@@ -1058,13 +1095,20 @@ test('普通原生叶由同一工作树分批写草稿，非法批次原字节�
     assert.match(call('check').errors.join('\n'), /\$\.changes\[0\]\.targetIndex/)
     assert.equal(call('apply', { revision: call('inspect').revision, changes: [{ targetIndex: 0 }] }).ok, false)
     assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), corrupt)
-    writeFileSync(join(workspace, draftPath), staged)
+    const imported = JSON.parse(staged) as GeneratedTargetElaboration
+    imported.applicability = [...rows.applicability, rows.applicability[0]]
+    const importedBytes = JSON.stringify(imported)
+    writeFileSync(join(workspace, draftPath), importedBytes)
+    const importedState = call('inspect')
+    assert.ok(importedState.diagnostics.some((finding: ContractFinding) => finding.code === 'applicability_missing' && finding.message.includes('实际 2 条')))
+    assert.equal(call('apply', { revision: importedState.revision, applicability: [rows.applicability[0], rows.applicability[0]] }).ok, false)
+    assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), importedBytes)
 
     // The same program handles MCP writes and the ordinary author CLI.
     const messages = [
       { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25' } },
       { jsonrpc: '2.0', id: 2, method: 'tools/list' },
-      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'apply', arguments: { revision: first.revision, applicability: rows.applicability } } },
+      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'apply', arguments: { revision: importedState.revision, applicability: [rows.applicability[0]] } } },
     ]
     const mcp = spawnSync(tools.node, [...args, 'mcp'], { cwd: workspace, input: messages.map(message => JSON.stringify(message)).join('\n') + '\n', encoding: 'utf8' })
     assert.equal(mcp.status, 0, mcp.stderr)
@@ -1074,6 +1118,7 @@ test('普通原生叶由同一工作树分批写草稿，非法批次原字节�
     assert.equal(applied.result.structuredContent.ok, true, mcp.stdout)
     const final = call('check')
     assert.equal(final.ok, true, JSON.stringify(final))
+    assert.deepEqual((JSON.parse(readFileSync(join(workspace, draftPath), 'utf8')) as GeneratedTargetElaboration).applicability, rows.applicability)
     return readFileSync(join(workspace, draftPath), 'utf8')
   }) })
   assert.equal(result.status, 'complete', JSON.stringify(result.failure))
