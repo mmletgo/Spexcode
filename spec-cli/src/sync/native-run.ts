@@ -2,7 +2,7 @@ import { Ajv } from 'ajv'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { getBlob, putBlob, runtimeRoot } from '@spexcode/spec-core'
-import { resolveManagedRoute } from '../llm-manager-host.js'
+import { LlmManagerHostError, resolveManagedRoute } from '../llm-manager-host.js'
 import { managedModel, managedRoute, type ManagedRoute } from '../llm-manager-route.js'
 import { readRecord, type SessRec } from '../session-record.js'
 import { GROK_NATIVE_EXIT_DEADLINE_FAILURE } from '../grok-structured.js'
@@ -43,7 +43,7 @@ export type NativeRunRecord = Pick<SessRec, 'session' | 'status' | 'harnessSessi
 export type AttemptRunnerOptions = {
   resourceRecoveryOnly?: true
   retireSettledWorktrees?: true
-  resolveManagedRoute?: (anchor: ManagedRoute) => Promise<ManagedRoute | null>
+  resolveManagedRoute?: (anchor: ManagedRoute, reviewQuota?: ElaborationSessionRequest['reviewQuota']) => Promise<ManagedRoute | null>
   runtime?: { run: typeof runStructuredSession; cancel: typeof cancelStructuredSession; readRecord: (id: string) => NativeRunRecord | null; readCreateTermination?: typeof readSessionCreateTermination; recoverCreateTermination?: typeof recoverSessionCreateTermination }
   blobIO?: { put: (bytes: Buffer) => BlobRef; read: (ref: BlobRef) => Buffer }
   pollMs?: number
@@ -437,6 +437,8 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
     const exactModel = dispatch?.managedModel
     if (supplied.model !== operation.model && (exactModel === undefined || supplied.model !== exactModel) && (routeAnchor || managedRoute(supplied.model)))
       throw modelReused()
+    const reviewQuota = supplied.reviewQuota
+    if (reviewQuota && (!routeAnchor || supplied.purpose !== 'elaboration_review' || supplied.worktree?.mode !== 'read' || supplied.frozenContext)) throw modelReused()
     let selectedModel: string | undefined, useQuotaSuccessor = false
     if (!dispatch && !resource && routeAnchor && supplied.worktree && !supplied.frozenContext) {
       if (options.resourceRecoveryOnly || signal?.aborted) throw new StructuredSessionError('cancelled', 'native request cancelled before Manager dispatch')
@@ -447,16 +449,23 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
         let lookup = routeLookups.get(key)
         if (!lookup) {
           store.assertWriteFence(fence)
-          const resolve = options.resolveManagedRoute ?? ((original: ManagedRoute) => resolveManagedRoute(undefined, original))
-          lookup = resolve(routeAnchor)
+          lookup = options.resolveManagedRoute
+            ? options.resolveManagedRoute(routeAnchor, reviewQuota)
+            : resolveManagedRoute(reviewQuota?.route, routeAnchor, reviewQuota?.failedSessionId)
           routeLookups.set(key, lookup)
         }
         // 等待宿主期间其他 runner 可以先提交；竞争后的请求仍按原模型和完整摘要重验。
         let selection: ManagedRoute | null
         try { selection = await lookup }
-        catch (error) { if (findDispatch()) return run(request); throw error }
+        catch (error) {
+          if (findDispatch()) return run(request)
+          if (reviewQuota && error instanceof LlmManagerHostError) throw new SyncApplicationError('sync_llm_manager_review_route_unavailable', `LLM Manager 无法选择原候选独审后继（${error.code}）`)
+          throw error
+        }
         finally { if (routeLookups.get(key) === lookup) routeLookups.delete(key) }
         if (findDispatch()) return run(request)
+        if (signal?.aborted) throw new StructuredSessionError('cancelled', 'native request cancelled before Manager dispatch')
+        if (!selection && reviewQuota) throw new SyncApplicationError('sync_llm_manager_no_review_successor', 'LLM Manager 功能组没有可用于原候选续审的额度后继')
         if (!selection) throw new SyncApplicationError('sync_llm_manager_no_ready_route', 'LLM Manager 功能组没有已就绪路线')
         selectedModel = managedModel(selection)
       }

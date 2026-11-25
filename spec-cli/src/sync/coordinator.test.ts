@@ -8280,11 +8280,15 @@ for (const witness of ['missing', 'canonical', 'attachment'] as const) test(`P1�
   assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
 
-for (const tamper of ['none', 'managed-failover', 'attribution', 'turn', 'stop', 'source', 'unrelated', 'bad-json', 'bad-shape', 'missing', 'program-error', 'bare-errno', 'git-errno', 'cas-missing', 'cas-mismatch', 'cold-provenance', 'cold-reserved'] as const) test(`P1已结算ZCode provider独审失败仅显式恢复同Git候选 tamper=${tamper}`, async t => {
+for (const tamper of ['none', 'managed-failover', 'managed-quota', 'managed-quota-cold', 'managed-quota-empty', 'managed-quota-host-error', 'attribution', 'turn', 'stop', 'source', 'unrelated', 'bad-json', 'bad-shape', 'missing', 'program-error', 'bare-errno', 'git-errno', 'cas-missing', 'cas-mismatch', 'cold-provenance', 'cold-reserved'] as const) test(`P1已结算provider独审失败恢复同Git候选 tamper=${tamper}`, async t => {
   const { managedModel } = await import('../llm-manager-route.js')
-  const managed = tamper === 'managed-failover'
+  const { LlmManagerHostError } = await import('../llm-manager-host.js')
+  const quota = tamper.startsWith('managed-quota')
+  const unavailable = tamper === 'managed-quota-empty' || tamper === 'managed-quota-host-error'
+  const managed = quota || tamper === 'managed-failover'
   const admitted = { vendor: 'claude', model: 'preferred', kind: 'anthropic-messages', routeId: '1'.repeat(64) } as const
-  const actualRoute = { vendor: 'zcode', model: 'bigmodel-api/GLM-5.3-Flash', kind: 'cli', routeId: '2'.repeat(64) } as const
+  const successor = { vendor: 'zcode', model: 'bigmodel-api/GLM-5.3-Flash', kind: 'cli', routeId: '2'.repeat(64) } as const
+  const actualRoute = quota ? admitted : successor
   const parentPath = '.spec/project/spec.md', parentId = 'REQ-PARENT-01'
   const raw = '重复导出请求必须保留首次结果，具体下载由子叶实现。'
   const parent = `---\ntitle: 导出上层接口\nstatus: pending\n---\n## raw source\n\n${raw}\n`
@@ -8292,14 +8296,17 @@ for (const tamper of ['none', 'managed-failover', 'attribution', 'turn', 'stop',
   parentRows.changes[0].nodeId = 'project'
   parentRows.applicability = ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: false, basis: '完整子叶承接实现和验收，本层仅保留共享义务', affectedIds: [parentId] }))
   const leaf = original.slice(0, original.indexOf('## expanded spec')).replace('contract-schema: sync-v1\n', '')
-  const f = await fixture(t, { maxAttempts: 2, maxCalls: 12, maxRepairs: 0, timeoutMs: 120_000 }, false, leaf, 'project', original, {
+  const f = await fixture(t, { maxAttempts: unavailable ? 3 : 2, maxCalls: 12, maxRepairs: quota ? 1 : 0, timeoutMs: 120_000 }, false, leaf, 'project', original, {
     version: 'sync-coordinator-v2', direction: 'spec_to_code', agentWorkflow: 'native-worktree-v1', intentNodeId: 'project', sourcePaths: ['src'],
     targets: [{ nodeId: 'project', path: parentPath, rawSource: raw }, { nodeId: 'export-contract', path: contractPath }],
     partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524_288, maxParallel: 1 },
   }, undefined, 'spec', managed ? managedModel(admitted) : 'zcode:bigmodel-api/GLM-5.3-Flash', false, { [parentPath]: parent })
   const commonDir = f.input.source.commonDir, operationId = f.operation.id
-  const failureCode = 'unsupported', error = tamper === 'unrelated' ? 'ZCode actual ModelRequest identity or toolCount differs' : 'ZCode provider rejected the native turn (retryable=false)'
+  const failureCode = quota ? 'provider_quota_exhausted' : 'unsupported'
+  const error = quota ? 'Claude provider returned HTTP 429 for the original native turn' : tamper === 'unrelated' ? 'ZCode actual ModelRequest identity or toolCount differs' : 'ZCode provider rejected the native turn (retryable=false)'
   const calls: { attempt: number; request: ElaborationSessionRequest }[] = []
+  const quotaLookups: string[] = []
+  let quotaSuccessorAvailable = !unavailable
   const hash = (value: unknown): string => contentHash(JSON.stringify(value))
   const runtime: NonNullable<import('./native-run.js').AttemptRunnerOptions['runtime']> = {
     readRecord, cancel: async () => assert.fail('隔离夹具不调用实际原生会话'),
@@ -8318,7 +8325,7 @@ for (const tamper of ['none', 'managed-failover', 'attribution', 'turn', 'stop',
       const prompt = nativeWorktreePrompt(actual.prompt, seed)
       const output = generate ? { summary: '已提交父接口JSON草稿' } : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
       let zcodeNative: ZCodeStructuredExecution['zcodeNative']
-      if (failing) {
+      if (failing && !quota) {
         const generic = execution.nativeConfiguration === 'cli-config-v1'
         const selection = generic ? zcodeNativeConfigSelection(execution.model, execution.effort) : zcodeNativeSelection(execution.model, execution.effort)
         const { model } = selection, toolDenylist = execution.zcodeToolPolicy?.toolDenylist
@@ -8349,9 +8356,9 @@ for (const tamper of ['none', 'managed-failover', 'attribution', 'turn', 'stop',
       }
       const resultDigest = hash(output)
       configuredSessionApplication().createSession({ sessionId: session, status: failing ? 'error' : 'awaiting' })
-      writeRecord({ session, governed: true, worktreePath: workspace, base: seed.baseCommit, forkCommit: seed.baseCommit, branch, title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(), harness: 'zcode', harnessSessionId: identity.threadId, runtimeStartToken: null, status: failing ? 'error' : 'awaiting', stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: null, launchOwner: null, createRequestId: contentHash(key),
+      writeRecord({ session, governed: true, worktreePath: workspace, base: seed.baseCommit, forkCommit: seed.baseCommit, branch, title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(), harness: actual.model?.startsWith('claude:') ? 'claude' : 'zcode', harnessSessionId: identity.threadId, runtimeStartToken: null, status: failing ? 'error' : 'awaiting', stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: null, launchOwner: null, createRequestId: contentHash(key),
         createPayloadHash: hash({ prompt, parent: null, launcher: null, base: seed.baseCommit, structuredExecution: execution }),
-        structuredExecution: { ...execution, ...identity, turnStartRequested: true, ...(failing ? { state: 'failed', errorCode: failureCode, error, zcodeNative, cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: true, acknowledged: false, nativeStatus: 'stopped' } } : { state: 'completed', output, resultDigest, resultWorktree: worktree }) },
+        structuredExecution: { ...execution, ...identity, turnStartRequested: true, ...(failing ? { state: 'failed', errorCode: failureCode, error, zcodeNative, cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: true, acknowledged: false, nativeStatus: quota ? 'processGroupGone' : 'stopped' } } : { state: 'completed', output, resultDigest, resultWorktree: worktree }) },
       })
       if (failing) throw new StructuredSessionError(failureCode, error, { sessionId: session, ...identity })
       return { sessionId: session, ...identity, output, resultDigest, worktree }
@@ -8361,7 +8368,14 @@ for (const tamper of ['none', 'managed-failover', 'attribution', 'turn', 'stop',
     f.options.runner = undefined
     f.options.nativeExecution = {
       pollMs: 2, runtime,
-      resolveManagedRoute: async anchor => { assert.deepEqual(anchor, admitted); return actualRoute },
+      resolveManagedRoute: async (anchor, reviewQuota) => {
+        assert.deepEqual(anchor, admitted)
+        if (!reviewQuota) return actualRoute
+        assert.deepEqual(reviewQuota.route, actualRoute)
+        quotaLookups.push(reviewQuota.failedSessionId)
+        if (!quotaSuccessorAvailable && tamper === 'managed-quota-host-error') throw new LlmManagerHostError('llm_manager_host_unavailable')
+        return quotaSuccessorAvailable ? successor : null
+      },
     }
   } else f.options.runner = async request => {
     const operation = f.store.readOperation(operationId), attempt = f.store.readAttempt(operation.currentAttemptId!)
@@ -8376,7 +8390,65 @@ for (const tamper of ['none', 'managed-failover', 'attribution', 'turn', 'stop',
   const previousCwd = process.cwd()
   process.chdir(f.root)
   t.after(() => process.chdir(previousCwd))
+  if (tamper === 'managed-quota-cold') {
+    const recordFailure = f.store.recordFailure.bind(f.store)
+    f.store.recordFailure = (fence, issue, continueRepair) => {
+      const recorded = recordFailure(fence, issue, continueRepair)
+      if (issue.code === failureCode) {
+        assert.equal(recorded.phase, 'repairing')
+        throw Object.assign(new Error('在失败已落盘后冷停'), { code: 'SYNC_FENCE_EXPIRED' })
+      }
+      return recorded
+    }
+  }
   const originalRun = await runSyncOperation(f.store, operationId, f.options)
+  if (quota) {
+    if (tamper === 'managed-quota-cold') {
+      assert.equal(f.store.readOperation(operationId).phase, 'repairing')
+      assert.equal(f.store.listAttempts(operationId).length, 1)
+      f.closeForRestart()
+      const protocol = openProtocol(join(f.parent, 'sync.sqlite'))
+      t.after(() => protocol.close())
+      f.store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) })
+      f.useStore(f.store)
+      await runSyncOperation(f.store, operationId, f.options)
+    }
+    const [prior, retry] = f.store.listAttempts(operationId)
+    assert.ok(retry, JSON.stringify({ operation: f.store.readOperation(operationId).phase, failure: originalRun.failure }))
+    const before = resultFor(prior).result, after = resultFor(retry).result
+    assert.equal(before.failure?.code, failureCode)
+    assert.equal(before.structurePassed, true)
+    assert.equal(before.reviewPassed, false)
+    assert.deepEqual(quotaLookups, [before.failure?.sessionId])
+    assert.equal(after.candidateDigest, before.candidateDigest)
+    assert.equal(after.rounds[0].draft?.oid, before.rounds[0].draft?.oid)
+    assert.deepEqual(after.rounds[0].traces[0], before.rounds[0].traces[0])
+    assert.equal(calls.filter(call => call.request.purpose === 'elaboration_generate').length, 1)
+    if (unavailable) {
+      assert.equal(after.failure?.code, tamper === 'managed-quota-host-error' ? 'sync_llm_manager_review_route_unavailable' : 'sync_llm_manager_no_review_successor')
+      assert.equal(after.reviewPassed, false)
+      assert.equal(retry.dispatchPlans.length, 0)
+      quotaSuccessorAvailable = true
+      f.store.requestControl(operationId, 'pause')
+      f.store.requestControl(operationId, 'run')
+      await runSyncOperation(f.store, operationId, f.options)
+      const resumed = f.store.listAttempts(operationId).at(-1)!
+      const approved = resultFor(resumed).result
+      assert.equal(approved.reviewPassed, true)
+      assert.equal(approved.candidateDigest, before.candidateDigest)
+      assert.deepEqual(approved.rounds[0].traces[0], before.rounds[0].traces[0])
+      assert.deepEqual(quotaLookups, [before.failure?.sessionId, before.failure?.sessionId])
+      assert.equal(calls.filter(call => call.request.purpose === 'elaboration_generate').length, 1)
+    } else {
+      const review = retry.dispatchPlans.find(dispatch => dispatch.purpose === 'elaboration_review')!
+      assert.equal(after.reviewPassed, true)
+      assert.equal(review.managedModel, managedModel(successor))
+      assert.notEqual(review.session?.sessionId, before.failure?.sessionId)
+      assert.notEqual(review.session?.sessionId, before.rounds[0].traces[0].sessionId)
+      assert.deepEqual(calls[1].request.worktree, calls[2].request.worktree)
+    }
+    return
+  }
   const [prior] = f.store.listAttempts(operationId)
   assert.equal(f.store.listAttempts(operationId).length, 1)
   assert.equal(originalRun.failure?.kind, 'unsupported', JSON.stringify({ status: originalRun.status, failure: originalRun.failure, prior: prior.failure, calls: calls.map(({ request }) => request.purpose) }))

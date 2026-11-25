@@ -21,7 +21,7 @@ import { elaborate, hasApprovedElaborationReview, elaborationGapRepairFindings, 
 import { outputErrors } from './elaboration-schema.js'
 import type { ElaborationGapReviewCheckpoint, ElaborationGapReviewEvidence, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ElaborationTrace, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ReadonlySpecRepair } from './elaboration-types.js'
 import { claimFileMutex } from './file-mutex.js'
-import { authenticateNativeFailure, authenticateNativeRejectedFinal, checkpointStageSelection, composedBeforeNullExpansionMatches, findReviewHandoffParent, managedQuotaFailureRef, readSyncCheckpoints, readSyncCheckpointStageIndex, retryOperationLineage, settledApprovalSource, syncCheckpointArtifacts, withCheckpointStageBasis } from './checkpoint-evidence.js'
+import { authenticateNativeFailure, authenticateNativeRejectedFinal, checkpointStageSelection, composedBeforeNullExpansionMatches, findReviewHandoffParent, managedQuotaDispatch, managedQuotaFailureRef, readSyncCheckpoints, readSyncCheckpointStageIndex, retryOperationLineage, settledApprovalSource, syncCheckpointArtifacts, withCheckpointStageBasis } from './checkpoint-evidence.js'
 import type { SyncCheckpointStageView } from './checkpoint-evidence.js'
 import type { FileMutex } from './file-mutex.js'
 import { checkGenerationContractIntent, isSyncSpecPath, readFrozenContracts } from './frozen-contracts.js'
@@ -460,9 +460,10 @@ function settledElaborationReview(store: SyncStore, operation: SyncOperation, pr
   const providerReview = result.status === 'unsupported' && isZCodeProviderRejection(failure)
   if ((!providerReview && result.status !== 'failed') || !result.structurePassed || result.reviewPassed || !round.draft || !round.candidate || round.review !== null || round.reviewOutput !== null) return
   const rejection = round.rejectedOutput, grokExit = !rejection && isGrokNativeExitFailure(failure)
-  if (providerReview && rejection) return
-  if (!providerReview && (rejection ? !reviewFormatRepairCodes.has(failure.code) || rejection.purpose !== 'elaboration_review' || !rejection.ref || rejection.ownerRequestKey !== ownerKey || rejection.ownerInputDigest !== result.inputDigest : !grokExit && (failure.code !== 'native_rpc_timeout' || !isZCodeEventsRpcTimeout({ state: 'failed', errorCode: failure.code, error: failure.message })))) return
   const key = `${ownerKey}:${round.index}:elaboration_review`
+  const quota = !rejection && failure.code === 'provider_quota_exhausted' ? managedQuotaDispatch(store, operation, prior, key) : undefined
+  if (providerReview && rejection) return
+  if (!providerReview && !quota && (rejection ? !reviewFormatRepairCodes.has(failure.code) || rejection.purpose !== 'elaboration_review' || !rejection.ref || rejection.ownerRequestKey !== ownerKey || rejection.ownerInputDigest !== result.inputDigest : !grokExit && (failure.code !== 'native_rpc_timeout' || !isZCodeEventsRpcTimeout({ state: 'failed', errorCode: failure.code, error: failure.message })))) return
   const resource = store.findResource(prior.id, key)
   if (!resource || resource.phase !== 'removed' || prior.dispatchPlans.some(dispatch => store.findResource(prior.id, dispatch.key)?.phase !== 'removed')) fail('review_retry_binding', '独审失败缺少原正式资源及结算证明')
   const proof = authenticateNativeFailure(store, operation, prior, key, failure, readRecord, true)
@@ -489,7 +490,7 @@ function settledElaborationReview(store: SyncStore, operation: SyncOperation, pr
       || failedWorktree.worktreePath !== record.worktreePath) fail('review_retry_binding', '独审拒稿的只读Git见证与原失败记录不匹配')
     verifyStageResult(operation.input.source.commonDir, request.worktree, { worktree: failedWorktree })
   }
-  const transportMatches = grokExit || (rejection
+  const transportMatches = grokExit || (quota ? state.state === 'failed' && !state.rejectedOutput : rejection
     ? state.state === 'failed' && (request.model?.startsWith('zcode:') && record.harness === 'zcode' || request.model?.startsWith('claude:') && record.harness === 'claude'
       || request.model?.startsWith('grok:') && record.harness === 'grok-structured' && state.grokNative?.sessionId === session.threadId && state.grokNative?.turnId === session.turnId
       || request.model?.startsWith('cursor:') && record.harness === 'cursor-structured' && state.cursorNative?.sessionId === session.threadId && state.cursorNative?.requestId === session.turnId
@@ -499,7 +500,7 @@ function settledElaborationReview(store: SyncStore, operation: SyncOperation, pr
   if (resource.attemptId !== prior.id || resource.generation !== prior.generation || plan.schemaVersion !== 1 || checkpoint.schemaVersion !== 1
     || request.purpose !== 'elaboration_review' || request.worktree?.mode !== 'read' || request.frozenContext || !transportMatches || request.inputDigest !== elaborationNativeInputDigest(result.inputDigest, request)
     || request.root !== operation.input.source.canonicalRoot || request.base !== request.worktree.baseCommit || record.base !== request.base || record.forkCommit !== request.base
-    || !checkpoint.nativeCallRequested || !grokExit && !publishedIdentity || checkpoint.status !== 'failed' || checkpoint.nativeState !== 'failed' || checkpoint.stop?.nativeStatus !== 'stopped' || checkpoint.result || checkpoint.creationTermination
+    || !checkpoint.nativeCallRequested || !grokExit && !publishedIdentity || checkpoint.status !== 'failed' || checkpoint.nativeState !== 'failed' || (!quota && checkpoint.stop?.nativeStatus !== 'stopped') || checkpoint.result || checkpoint.creationTermination
     || checkpoint.candidateDigest !== null && checkpoint.candidateDigest !== round.candidateDigest
     || canonical(prior.dispatchPlans.find(dispatch => dispatch.key === key)?.session) !== canonical(session)
     || canonical(checkpoint.failure) !== canonical({ code: failure.code, message: failure.message, ...(rejection ? { rejectedOutput: checkpoint.failure?.rejectedOutput } : {}), ...(failedWorktree ? { failedWorktree } : {}) })
@@ -511,7 +512,7 @@ function settledElaborationReview(store: SyncStore, operation: SyncOperation, pr
     || generation.request.root !== request.root || generation.request.base !== round.draft.seed.baseCommit
     || store.findResource(generation.attempt.id, generation.key)?.generation !== generation.attempt.generation
     || round.candidate.inputDigest !== result.inputDigest || round.candidateDigest !== result.candidateDigest || round.candidateDigest !== contentHash(JSON.stringify(round.candidate))) fail('review_retry_binding', '独审失败缺少同owner原Native生成及其精确Git候选绑定')
-  const boundReview = { prompt: request.prompt, schema: request.schema, worktree: request.worktree }
+  const boundReview = { prompt: request.prompt, schema: request.schema, worktree: request.worktree, ...(quota ? { reviewQuota: { route: quota.route, failedSessionId: quota.failedSessionId } } : {}) }
   const diagnostics = result.repairDiagnostics, previousRound = diagnostics?.round, previous = previousRound?.rejectedOutput
   if (!diagnostics || !previousRound || previous?.purpose !== 'elaboration_review' || !previous.ref
     || previousRound.candidateDigest !== round.candidateDigest || canonical(previousRound.traces[0]) !== canonical(round.traces[0])) return boundReview
@@ -2995,12 +2996,22 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
             fail('review_retry_binding', 'ZCode 原独审失败不匹配当前冻结输入或owner')
           if (saved && (!source || saved.inputDigest !== inputDigest || saved.phase === 'partitioned_final' || saved.reviewPassed)) return null
           const failure = source?.result.failure, round = source?.result.rounds.at(-1), requestKey = `sync:${prior.id}:${ownerSuffix}`
+          const carriedQuota = source?.result.repairDiagnostics
+          const quotaRouteUnavailable = failure?.code === 'sync_llm_manager_no_review_successor' || failure?.code === 'sync_llm_manager_review_route_unavailable'
+          if (quotaRouteUnavailable && source?.result.structurePassed && !source.result.reviewPassed
+            && round?.candidateDigest && carriedQuota?.failure.code === 'provider_quota_exhausted' && carriedQuota.round.candidateDigest === round.candidateDigest
+            && !prior.dispatchPlans.some(dispatch => dispatch.key.startsWith(`${requestKey}:`)) && priorElaborationInputMatches(prior, binding)) {
+            carriedGenerations.add(canonical(round.traces.find(trace => trace.purpose === 'elaboration_generate')))
+            continue
+          }
           const formatAfterAbort = prior.status === 'superseded' && prior.failure?.kind === 'unsupported' && prior.failure.code === 'coordinator_failed'
             && failure && reviewFormatRepairCodes.has(failure.code)
+          const managedReviewQuota = failure?.code === 'provider_quota_exhausted' && !!source?.result.structurePassed && !source.result.reviewPassed
           if (!newerGeneration && source && round && failure
             && (!carriedGenerations.size || carriedGenerations.size === 1 && carriedGenerations.has(canonical(round.traces.find(trace => trace.purpose === 'elaboration_generate'))))
-            && (providerReview || (prior.failure?.kind === 'repairable' || prior.status === 'superseded' && !prior.failure || formatAfterAbort)
-              && (failure.code === 'native_rpc_timeout' || reviewFormatRepairCodes.has(failure.code) || isGrokNativeExitFailure(failure)) && priorElaborationInputMatches(prior, binding))) {
+            && (providerReview || priorElaborationInputMatches(prior, binding) && (managedReviewQuota
+              || (prior.failure?.kind === 'repairable' || prior.status === 'superseded' && !prior.failure || formatAfterAbort)
+                && (failure.code === 'native_rpc_timeout' || reviewFormatRepairCodes.has(failure.code) || isGrokNativeExitFailure(failure))))) {
             let settledReview: ElaborationRepairDiagnostics['settledReview']
             try { settledReview = settledElaborationReview(store, operation, prior, requestKey, source.result, round, failure) }
             catch (error) {
@@ -4326,7 +4337,8 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         if (quotaRef) issue.evidenceRefs.push(quotaRef)
         if (stopped) fail('cancelled', issue.message, issue.evidenceRefs)
         const failureSources = elaboration.partitionEvidence?.map(owner => JSON.parse(readEvidence(operation.input.source.commonDir, owner.resultRef).toString('utf8')) as SavedElaboration) ?? [elaboration]
-        requireSettledRpcSources(store, operation, store.readAttempt(attempt.id), failureSources, issue.evidenceRefs)
+        const failedAttempt = store.readAttempt(attempt.id)
+        requireSettledRpcSources(store, operation, failedAttempt, failureSources, issue.evidenceRefs)
         if (elaboration.failure?.code === 'cancellation_pending') fail('cancellation_pending', issue.message, issue.evidenceRefs)
         if (partitions && options.plan.agentWorkflow && kind === 'repairable' && failureSources.some(source => isNativeObservationFailure(source.failure))) issue.serialElaborationRetry = true
         if (elaboration.failure?.code === 'partition_final_seal_failed') {
@@ -4337,7 +4349,10 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           const owners = source ? [...source.owners.keys()] : []
           if (previous?.candidateDigest === elaboration.candidateDigest && canonical(previous.partitionSeal!.findings.filter(finding => finding.severity === 'error')) === canonical(elaboration.partitionSeal!.findings.filter(finding => finding.severity === 'error')) && !currentAttempt.dispatchPlans.some(dispatch => dispatch.purpose.startsWith('elaboration_') && (!owners.length || owners.some(owner => dispatch.key.startsWith(`sync:${attempt!.id}:elaborate:partition:${owner}:`))))) fail('partition_final_seal_stalled', '同一全局候选和error没有对应owner新派发，停止缓存重播', issue.evidenceRefs)
         }
-        store.recordFailure(fence, issue)
+        const continueQuotaReview = kind === 'repairable' && failureSources.some(owner => owner.structurePassed && !owner.reviewPassed
+          && owner.failure?.code === 'provider_quota_exhausted' && failedAttempt.dispatchPlans.some(dispatch => dispatch.purpose === 'elaboration_review'
+            && dispatch.session?.sessionId === owner.failure?.sessionId && managedQuotaDispatch(store, operation, failedAttempt, dispatch.key)))
+        store.recordFailure(fence, issue, continueQuotaReview)
         if (kind !== 'repairable') return current(unsupported ? 'unsupported' : undefined, issue)
         seed = elaborationRepairSeed(elaboration, `sync:${attempt.id}:elaborate`)
         continue

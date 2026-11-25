@@ -1091,7 +1091,8 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
             requestDigest = bindRequest()
           }
         }
-        const session = await runner({ root: input.root, base: worktree?.baseCommit ?? input.base, ...(worktree ? { worktree } : {}), prompt, schema, requestKey: `${input.requestKey}:${index}:${purpose}`, inputDigest: requestDigest, purpose, timeoutMs: callTimeoutMs, signal, model: input.model, effort: input.effort })
+        const reviewQuota = purpose === 'elaboration_review' && index === 0 ? settledReview?.reviewQuota : undefined
+        const session = await runner({ root: input.root, base: worktree?.baseCommit ?? input.base, ...(worktree ? { worktree } : {}), prompt, schema, requestKey: `${input.requestKey}:${index}:${purpose}`, inputDigest: requestDigest, purpose, timeoutMs: callTimeoutMs, signal, model: input.model, effort: input.effort, ...(reviewQuota ? { reviewQuota } : {}) })
         const trace: ElaborationTrace = { purpose, sessionId: session.sessionId, threadId: session.threadId, turnId: session.turnId, resultDigest: session.resultDigest, inputDigest: requestDigest }
         round.traces.push(trace)
         if (purpose === 'elaboration_generate') round.output = session.output
@@ -1217,7 +1218,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
       if (settledReview && failure.code === 'review_retry_binding') throw error
       result.failure = { code: failure.code ?? 'failed', message: failure.message ?? String(error), ...(failure.sessionId ? { sessionId: failure.sessionId } : {}), ...(failure.threadId ? { threadId: failure.threadId } : {}), ...(failure.turnId ? { turnId: failure.turnId } : {}) }
       if (round.draft) round.draft.errors = [...structuredClone(round.findings), { code: result.failure.code, message: result.failure.message }]
-      result.status = failure.code === 'unsupported' ? 'unsupported' : failure.code === 'cancelled' ? 'cancelled' : failure.code === 'budget_exhausted' ? 'exhausted' : 'failed'
+      result.status = failure.code === 'unsupported' || failure.code === 'sync_llm_manager_no_review_successor' || failure.code === 'sync_llm_manager_review_route_unavailable' ? 'unsupported' : failure.code === 'cancelled' ? 'cancelled' : failure.code === 'budget_exhausted' ? 'exhausted' : 'failed'
       return result
     }
     if (round.draft) round.draft.errors = structuredClone(round.findings)

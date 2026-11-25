@@ -61,11 +61,12 @@ export function applyLlmManagerSettings(body: Record<string, unknown>): Promise<
   return managerCall({ action: 'settings', body })
 }
 
-export async function resolveManagedRoute(nextAfter?: ManagedRoute, sameGroupAs?: ManagedRoute): Promise<ManagedRoute | null> {
+export async function resolveManagedRoute(nextAfter?: ManagedRoute, sameGroupAs?: ManagedRoute, failedSessionId?: string): Promise<ManagedRoute | null> {
   const route = await managerCall({
     action: 'resolve',
     ...(nextAfter ? { nextAfter } : {}),
     ...(sameGroupAs ? { sameGroupAs } : {}),
+    ...(failedSessionId ? { failedSessionId } : {}),
   })
   return route === null ? null : readManagedRoute(route)
 }

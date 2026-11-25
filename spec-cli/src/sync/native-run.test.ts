@@ -368,11 +368,13 @@ test('Manager 新派发回到首选路线，同键活跃与已完成请求保留
   } finally { finishFirst?.(); await Promise.allSettled(pending); f.cleanup() }
 })
 
-for (const historical of [false, true]) test(`Manager 仅预留请求冷恢复保持原模型和完整字节，历史=${historical}`, async () => {
+for (const mode of ['current', 'historical', 'review-quota'] as const) test(`Manager 仅预留请求冷恢复保持原模型和完整字节 mode=${mode}`, async () => {
   const f = await fixture(undefined, managedModel(preferredRoute))
   const cold = openProtocol(join(f.root, 'db.sqlite'))
   try {
-    const request = { ...f.request, worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'read' as const } }
+    const historical = mode === 'historical'
+    const request = { ...f.request, worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'read' as const },
+      ...(mode === 'review-quota' ? { purpose: 'elaboration_review', reviewQuota: { route: preferredRoute, failedSessionId: 'settled-first-review' } } : {}) }
     const frozen = historical ? request : pinSyncNativeRequest({ ...request, model: managedModel(localRoute) }, null)
     const dispatch = f.store.reserveDispatch(f.claimed.fence, { key: request.requestKey, purpose: request.purpose, requestDigest: hash(frozen), ...(historical ? {} : { managedModel: frozen.model }) })
     const store = new SyncStore(cold, { readBlob: f.blobIO.read })
@@ -390,6 +392,28 @@ for (const historical of [false, true]) test(`Manager 仅预留请求冷恢复�
     assert.equal(calls[0].sessionCreateKey, dispatch.sessionCreateKey)
     assert.equal(store.readOperation(f.claimed.operation.id).callsUsed, 1)
   } finally { cold.close(); f.cleanup() }
+})
+
+test('Manager 续审选路期间取消不会预留派发', async () => {
+  const f = await fixture(undefined, managedModel(preferredRoute))
+  try {
+    const controller = new AbortController()
+    const run = createAttemptRunner(f.store, f.claimed.fence, { blobIO: f.blobIO,
+      resolveManagedRoute: async (anchor, reviewQuota) => {
+        assert.deepEqual(anchor, preferredRoute)
+        assert.deepEqual(reviewQuota, { route: preferredRoute, failedSessionId: 'settled-first-review' })
+        controller.abort()
+        return localRoute
+      },
+      runtime: { ...f.runtimeBase, run: async () => assert.fail('取消后不可派发新的 reviewer') },
+    })
+    await assert.rejects(run({ ...f.request, purpose: 'elaboration_review', signal: controller.signal,
+      worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'read' },
+      reviewQuota: { route: preferredRoute, failedSessionId: 'settled-first-review' } }), { code: 'cancelled' })
+    assert.equal(f.resource(), null)
+    assert.deepEqual(f.store.readAttempt(f.claimed.attempt.id).dispatchPlans, [])
+    assert.equal(f.store.readOperation(f.claimed.operation.id).callsUsed, 0)
+  } finally { f.cleanup() }
 })
 
 test('Manager 同键原子预留竞态复用先提交路线，选路失败无派发', async () => {

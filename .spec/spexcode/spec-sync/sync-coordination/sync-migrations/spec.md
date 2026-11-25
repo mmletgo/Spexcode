@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+writer77 追加无 DDL 的标记，保护 [[sync-coordinator]] 的 P1 同候选额度续审和 [[sync-native-run]] 续审请求中的实际失败会话绑定。升级停稳并结算原生资源、租约和交付 journal，保存与实际旧版本一致的 SQLite online backup 及配套 Git/CAS。回滚停新 writer，再恢复整套原备份。
+
 writer76 追加无 DDL 的 writer 标记，保护 [[incremental-elaboration-draft]] 的新阶段入口和派发摘要。升级前停稳旧 writer，结算原生资源、租约和交付 journal，保存与实际旧版本一致的 SQLite online backup 及配套 Git/CAS。回滚先停稳新 writer，再恢复整套备份；原请求、草稿及独审证据保持。
 
 writer75 追加无 DDL 的 writer 标记，保护 [[sync-elaboration]] 的新 Native P1 根级适用性提示及诊断。先停稳旧 writer 并结算资源与租约，再保存一致的 writer74 SQLite online backup 和配套 Git/CAS。回滚停稳新 writer 后恢复整套备份。历史派发和批准按原件保持。

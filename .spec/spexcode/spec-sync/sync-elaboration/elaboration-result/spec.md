@@ -13,6 +13,8 @@ code:
 
 ## expanded spec
 
+托管额度续审的原失败路线和会话身份按 [[sync-coordinator]] 认证后，只进入当次新审查请求的冻结身份。结果保留原失败和候选来源，后继选择不成为审查批准或业务字段。
+
 Native 普通叶可随输入携带 attempt 冻结的草稿编辑器入口。编辑器诊断只表示当前未完成草稿状态，批准与结果证据沿原协议冻结。[[incremental-elaboration-draft]]
 
 `propagateAuthoredParentScope` 只在 [[sync-coordinator]] 的正式 P1 协议冻结。`inheritedAuthoredParentScope` 是由 [[sync-partition-execution]] 派生的完整冻结输入证据，绑定仅承接父义务的叶 node/path、父 P1 原件引用和命中义务 ID。局部资格在生成前派生，同一份证明进入局部和封口输入摘要。按原 P0 与父 P1 检查点重建，旧结果和批准不追补字段。

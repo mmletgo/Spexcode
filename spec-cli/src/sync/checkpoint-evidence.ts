@@ -160,7 +160,8 @@ export function authenticateNativeFailure(store: SyncStore, operation: SyncOpera
   return { plan, checkpoint, record, state, observedFailure }
 }
 
-function managedQuotaDispatch(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string): { route: ManagedRoute; ref: BlobRef } | undefined {
+/** 额度后继必须来自实际派发及其已结算的原生身份。 */
+export function managedQuotaDispatch(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, key: string): { route: ManagedRoute; ref: BlobRef; failedSessionId: string } | undefined {
   const dispatch = attempt.dispatchPlans.find(item => item.key === key)
   const resource = store.findResource(attempt.id, key)
   if (!dispatch?.session || resource?.phase !== 'removed' || attempt.operationId !== operation.id || resource.operationId !== operation.id || resource.attemptId !== attempt.id
@@ -182,7 +183,7 @@ function managedQuotaDispatch(store: SyncStore, operation: SyncOperation, attemp
     || plan.expectedSessionId !== dispatch.session.sessionId || plan.expectedSessionId !== sessionIdForCreateKey(dispatch.sessionCreateKey)
     || !matchesNativeDispatchModel(operation, dispatch, plan.request)) return
   const route = managedRoute(plan.request.model)
-  if (route) return { route, ref: resource.checkpointRef }
+  if (route) return { route, ref: resource.checkpointRef, failedSessionId: dispatch.session.sessionId }
 }
 
 /** 额度重试沿协调器实际采用的失败会话取得原 Manager 游标。 */

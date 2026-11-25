@@ -4,6 +4,7 @@ import type { RawOnlyInterfaceSeedEvidence } from './partitioning.js'
 import type { BlobRef, InputSnapshot } from './operation-types.js'
 import type { FrozenContextRef, FrozenEntryJson, FrozenReadProof } from '../frozen-context.js'
 import type { RejectedStructuredOutput, StructuredExecution, ZCodeToolPolicy } from '../session-structured-policy.js'
+import type { ManagedRoute } from '../llm-manager-route.js'
 import type { Contract, ContractCoverage, ContractFinding, ContractGraph, Gap, ParseContractInput, Verification } from '@spexcode/spec-core/contracts'
 
 export const ELABORATION_BOUNDARIES = ['permissions', 'mutation', 'async', 'network', 'concurrency', 'callbacks', 'retries', 'cancellation', 'idempotency', 'external_side_effects'] as const
@@ -166,6 +167,7 @@ export type ElaborationRepairDiagnostics = {
   settledReview?: Pick<ElaborationSessionRequest, 'prompt' | 'schema' | 'worktree'> & {
     kind?: 'parent-implementation-binding'
     previousRejection?: Pick<RejectedStructuredOutput, 'sha256' | 'text'>
+    reviewQuota?: ElaborationSessionRequest['reviewQuota']
   }
 }
 export type ElaborationPriorReference = { requestKey: string; inputDigest: string; candidateDigest: string; renderedCandidateDigest: string; traces: ElaborationTrace[] }
@@ -210,6 +212,7 @@ export type ElaborationSessionRequest = {
   worktree?: { baseCommit: string; tree: string; mode: 'read' | 'edit' }
   zcodeToolPolicy?: ZCodeToolPolicy
   nativeConfiguration?: StructuredExecution['nativeConfiguration']
+  reviewQuota?: { route: ManagedRoute; failedSessionId: string }
   frozenContext?: FrozenContextRef
   /** 派发前由 prepareFrozenPrompt 冻结的纯 JSON 条目；持久计划只保留最终 ref。 */
   frozenEntries?: readonly FrozenEntryJson[]
