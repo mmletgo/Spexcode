@@ -406,8 +406,11 @@ function elaborationReviewOrigin(store: SyncStore, owner: SyncOperation, prior: 
   const key = binding ? `partition:${binding.partitionId}:elaboration` : 'elaboration'
   const provenance = stage<{ fromOperationId: string; fromAttemptId: string; resultRef: BlobRef }>(store, owner, prior, `${key}:repair-diagnostics-provenance`)
   if (!provenance || canonical(provenance.resultRef) !== canonical(diagnostics.resultRef)) return null
-  const origin = retryDraftSources(store, owner, prior.number).find(({ owner, prior }) => owner.id === provenance.fromOperationId && prior.id === provenance.fromAttemptId)
-  if (!origin || origin.owner.id !== owner.id && !settledApprovalSource(store, origin.owner) || canonical(origin.prior.composedInput) !== canonical(prior.composedInput)) return null
+  const selection = checkpointStageSelection(owner)
+  const origin = retryDraftSources(store, owner, prior.number, selection).find(({ owner, prior }) => owner.id === provenance.fromOperationId && prior.id === provenance.fromAttemptId)
+  if (!origin || origin.owner.id !== owner.id && !settledApprovalSource(store, origin.owner)) return null
+  if (canonical(origin.prior.composedInput) !== canonical(prior.composedInput)
+    && (!selection || !composedBeforeNullExpansionMatches(origin.prior.composedInput, prior.composedInput, selection.digest))) return null
   const original = partitionStage<SavedElaboration>(store, origin.owner, origin.prior, key)
   const suffix = binding ? `:partition:${binding.partitionId}` : ''
   if (!original || canonical(original.resultRef) !== canonical(provenance.resultRef)
