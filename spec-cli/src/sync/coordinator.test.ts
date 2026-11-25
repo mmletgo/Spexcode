@@ -7364,6 +7364,10 @@ for (const mode of ['live', 'restart', 'input', 'readset', 'partition', 'review-
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index); assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
 
+function withParentRequirement(source: string, parentId: string): string {
+  return source.replace(/^(\| (?:FLOW|AC)-[A-Z0-9-]+ \| [^|]*\S)( \|)/gm, `$1,${parentId}$2`)
+}
+
 for (const mode of ['format', 'format-restart', 'format-pause', 'format-pause-restart', 'format-pause-readset', 'format-pause-selection', 'seed-pause', 'seed-pause-restart', 'seed-pause-owner-cancelled', 'seed-pause-readset', 'seed-pause-selection', 'format-cold-restart', 'seed-cold-restart', 'format-legacy-cold-restart', 'format-input', 'format-readset', 'format-partition', 'format-selection', 'format-unsettled', 'parent-structure', 'parent-review', 'parent-restart', 'parent-capacity-clear', 'parent-lease-clear', 'accepted-leaf', 'accepted-leaf-restart', 'accepted-leaf-readset', 'accepted-leaf-input', 'accepted-leaf-unreviewed', 'leaves', 'leaves-restart', 'input', 'ancestor', 'readset', 'selection', 'foreign', 'policy', 'unsettled', 'aggregate'] as const) test(`v2局部分区续修 ${mode} 绑定原候选诊断而不串区`, async t => {
   const parentPath = '.spec/project/spec.md', parentId = 'REQ-PARENT-01', otherPath = '.spec/project/beta/import-contract/spec.md'
   const candidateSeed = mode.startsWith('seed-'), pauseControl = mode.includes('-pause'), resumeNumber = pauseControl ? 3 : 2
@@ -7374,15 +7378,14 @@ for (const mode of ['format', 'format-restart', 'format-pause', 'format-pause-re
   const parentSource = `---\ntitle: 上层接口\nstatus: active\ncontract-schema: sync-v1\n---\n## raw source\n\n${raw}\n\n## expanded spec\n\n本层保留原意，两个模块分别承接。\n\n### REQ\n\n| id | goal | source | constraints | success | depends-on |\n| --- | --- | --- | --- | --- | --- |\n| ${parentId} | 保留两个模块行为 | user:raw | 不改变原政策 | 现有模块及验收完成 | - |\n`
   const other = original.replaceAll('export-job', 'import-job').replaceAll('EXPORT', 'IMPORT').replaceAll('export-contract', 'import-contract').replaceAll('src/export.js', 'src/beta/import.js').replaceAll('tests/export.test.mjs', 'tests/import.test.mjs').replaceAll('decision:IMPORT-POLICY', 'decision:EXPORT-POLICY')
   const rawOnly = (source: string) => source.slice(0, source.indexOf('## expanded spec')).replace('contract-schema: sync-v1\n', '')
-  const withParent = (source: string) => source.replace(/^(\| (?:FLOW|AC)-[A-Z0-9-]+ \| [^|]*\S)( \|)/gm, `$1,${parentId}$2`)
   const environment = { version: 'trusted-test-v1' as const, image: 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392', platform: 'linux/arm64' as const, memoryBytes: 128 * 1024 * 1024, cpus: 1, pidsLimit: 64, scratchBytes: 16 * 1024 * 1024, logBytes: 128 * 1024 }
   const verifications = [original, other].map(source => { const definition = parseContract({ nodeId: 'fixture', path: contractPath, source }).contract!.items.find(item => item.kind === 'VERIFY')!; assert.equal(definition.kind, 'VERIFY'); return { definition: { id: definition.id, command: definition.command, cwd: definition.cwd, timeoutMs: definition.timeoutMs }, environment } })
   const mandatoryTests = [original, other].map(source => { const acceptance = parseContract({ nodeId: 'fixture', path: contractPath, source }).contract!.items.find(item => item.kind === 'AC')!; assert.equal(acceptance.kind, 'AC'); const [testPath, testId] = acceptance.test.split('#'); return { verificationId: acceptance.command, testPath, testId } })
-  const f = await fixture(t, { maxAttempts: threeAttempts ? 3 : 2, maxCalls: 32, maxRepairs: threeAttempts ? 2 : 1, timeoutMs: 180000 }, false, nativeCold ? withParent(original) : rawOnly(original), 'project', original, {
+  const f = await fixture(t, { maxAttempts: threeAttempts ? 3 : 2, maxCalls: 32, maxRepairs: threeAttempts ? 2 : 1, timeoutMs: 180000 }, false, nativeCold ? withParentRequirement(original, parentId) : rawOnly(original), 'project', original, {
     version: 'sync-coordinator-v2', direction: 'spec_to_code', intentNodeId: 'project', ...(nativeCold ? { agentWorkflow: 'native-worktree-v1' } : {}),
     targets: [{ nodeId: 'project', path: parentPath, rawSource: raw }, { nodeId: 'export-contract', path: contractPath }, { nodeId: 'import-contract', path: otherPath }],
     partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 2 }, sourcePaths: ['src'], verifications, mandatoryTests,
-  }, undefined, 'spec', nativeCold ? 'claude:default' : undefined, nativeCold ? { paths: [parentPath, contractPath, otherPath, 'src/export.js'], contractIds: [], flowIds: [] } : legacyCold || ['selection', 'format-selection', 'format-pause-selection', 'seed-pause-selection'].includes(mode), { [parentPath]: parentBefore, [otherPath]: nativeCold ? withParent(other) : rawOnly(other), 'src/beta/import.js': readFileSync(new URL('src/export.js', fixturePath), 'utf8'), 'tests/import.test.mjs': readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', 'IMPORT').replaceAll('src/export.js', 'src/beta/import.js') })
+  }, undefined, 'spec', nativeCold ? 'claude:default' : undefined, nativeCold ? { paths: [parentPath, contractPath, otherPath, 'src/export.js'], contractIds: [], flowIds: [] } : legacyCold || ['selection', 'format-selection', 'format-pause-selection', 'seed-pause-selection'].includes(mode), { [parentPath]: parentBefore, [otherPath]: nativeCold ? withParentRequirement(other, parentId) : rawOnly(other), 'src/beta/import.js': readFileSync(new URL('src/export.js', fixturePath), 'utf8'), 'tests/import.test.mjs': readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', 'IMPORT').replaceAll('src/export.js', 'src/beta/import.js') })
   const admitted = f.operation
   let store = f.store
   const formatFailure = mode.startsWith('format'), formatDenied = ['format-input', 'format-readset', 'format-partition', 'format-selection', 'format-unsettled', 'format-pause-readset', 'format-pause-selection'].includes(mode)
@@ -7757,7 +7760,7 @@ for (const mode of ['live', 'restart', 'precise', 'readset', 'missing-readset', 
   const parentPath = '.spec/project/spec.md', parentId = 'REQ-PARENT-01'
   const raw = '保留当前导出契约，由现有导出服务完成请求及结果下载。'
   const parentBefore = `---\ntitle: 导出上层接口\nstatus: pending\n---\n## raw source\n\n${raw}\n`
-  const leafBefore = original.slice(0, original.indexOf('## expanded spec')).replace('contract-schema: sync-v1\n', '')
+  const leafBefore = precise ? withParentRequirement(original, parentId) : original.slice(0, original.indexOf('## expanded spec')).replace('contract-schema: sync-v1\n', '')
   const parentSource = `---\ntitle: 导出上层接口\nstatus: active\ncontract-schema: sync-v1\n---\n## raw source\n\n${raw}\n\n## expanded spec\n\n父层声明原意，由现有服务承接。\n\n### REQ\n\n| id | goal | source | constraints | success | depends-on |\n| --- | --- | --- | --- | --- | --- |\n| ${parentId} | 保留现有导出行为 | user:raw | 不改变原政策 | 既有导出流程及验收完成 | - |\n`
   const f = await fixture(t, { maxAttempts: 2, maxCalls: 16, maxRepairs: 1, timeoutMs: 120000 }, false, leafBefore, 'project', original, {
     version: 'sync-coordinator-v2', direction: 'spec_to_code', intentNodeId: 'project',
@@ -7795,8 +7798,11 @@ for (const mode of ['live', 'restart', 'precise', 'readset', 'missing-readset', 
           : frozen.context.find(source => source.path === parentPath)?.source
         assert.ok(settledParentSource?.includes(parentId), '叶必须读取已独审父接口全文')
         const child = rows(original)
-        for (const row of child.changes[0].tables.FLOW) { assert.ok(Array.isArray(row.req)); row.req = [...row.req, parentId] }
-        for (const row of child.changes[0].tables.AC) { assert.ok(Array.isArray(row.covers)); row.covers = [...row.covers, parentId] }
+        if (precise) child.changes = []
+        else {
+          for (const row of child.changes[0].tables.FLOW) { assert.ok(Array.isArray(row.req)); row.req = [...row.req, parentId] }
+          for (const row of child.changes[0].tables.AC) { assert.ok(Array.isArray(row.covers)); row.covers = [...row.covers, parentId] }
+        }
         if (attempt.number === 1) child.applicability.pop()
         return child
       }
