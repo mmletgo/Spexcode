@@ -31,6 +31,8 @@ related:
 
 ## expanded spec
 
+普通完整叶的新原生作者可沿 [[incremental-elaboration-draft]] 逐批写入有效草稿，编排继续核真实 Git 结果、完整结构、独审和全树封口。
+
 [[sync-partition-execution]] 从已审纯父和冻结叶引用派生的父作者影响证明进入有命中 owner 的完整细化 inputDigest，以及对应严格全图封口的 inputDigest。Native 任务仅列本叶及命中的父义务 ID，指向原已审父接口，按当前证据核对原稿的冻结范围诊断。生成、独审、行差量与缓存复用共用本叶的同一影响判据。仅承接父义务时，局部和严格封口都保留冻结依赖未命中的既有需求、规则及全部既有 AC 语义和测试绑定；独审返修须命中本叶可改义务。原 raw、只读范围和逐项验收授权照常校验。无影响证明时，历史任务和业务摘要保持原字节。
 
 同一冻结候选的 GAP 复核经 [[sync-coordinator]] 认证后，只可触发原 owner 的候选误报续稿。资格由独立 review 的 affectedIds 精确命中本轮新提议、code/derived 来源的 missing_fact GAP，不能从说明文字推测。新 gapRepair 仅引用原复核及 accepted owner；临时读取原结果诊断、原已审并集和 Git 草稿，不改旧批准。只可移除命中的临时 GAP 及指向已移除 GAP 的 typed 引用，原 metadata、raw、说明、其他业务列、稳定 ID、AC/VERIFY 和适用性逐值保持；真实未知可原样保留。新独审须与原生成、原独审、GAP 复核和当前生成独立，完整结构、演进和严格全图封口照常执行。诊断不能自行清除 GAP、取得人工裁决或改变实现权限。
@@ -87,6 +89,8 @@ P1草稿与旧Native材料在本轮业务schema计算完成后才通过进程内
 新P1草稿attempt在首次派发前冻结 `sharedDraftDiagnostics`。仅当原非空 `runtimeFindings` 与 `priorDraft.errors` 逐字段、同序序列化相同时，提示发送一份诊断内容，并以 `runtimeFindingsRef: "priorDraft.errors"` 指明所在诊断对象中的内容也供运行发现使用。不同定位、字段或顺序时同时发送两组。V1引用返修继续使用既有提示诊断筛选。业务输入、草稿字节、原运行发现、失败类别和程序验收使用原件。历史字段缺席时继续按原提示重建，已冻结请求及其引用不补写。[[sync-migrations]] writer55 保护新投影。
 
 新 Native P1 阶段冻结根级适用性指导。生成请求要求在一个草稿的根级 applicability 汇总本轮全部目标，分区时汇总本分区。每种边界恰好登记一条，逐项给出冻结事实支持的适用性和依据，适用项关联真实业务 ID。结构检查仍阻断缺项与重复，并报告该边界的实收条数。原草稿和历史诊断按原件交给后续作者，结构通过后进入独立审查。历史请求按旧字段与原提示恢复。
+
+启用 [[incremental-elaboration-draft]] 的普通叶同时保留阶段冻结的根级适用性指导。作者提交一条边界判断可替换旧草稿中该边界的重复项，随后由同一完整结构门复验。
 
 显式draft-v1的只读V1引用返修沿既有未定义kind分支，把精确引用定位、原candidate/accepted/generation引用及真实baselineSpecPath同时交给生成与独审；重复诊断的归并保留实际路径、引用角色及全部受影响业务行，不把mode=reelaborate误当重新细化授权。baseline只从当前acceptedRef核验的真实owner完整正文复制为只读诊断文件，独审候选overlay不能覆盖它；文件不成为raw、事实、新义务或写权限。Agent依据该正文自行恢复坏草稿中被改写的prose及已接受RULE等业务字段，仅修finding定位的引用，选择冻结源码真实可索引声明或实际存在的related文件，不猜局部变量或调用符号，不顺手改basis、政策、流程/验收和稳定ID。原草稿字节、错误及trace不改写，schema、单一draft写范围、源码/tests对象与absence、契约演进及锚点门保持；candidate_review、partition_seal和旧无草稿请求不取得此V1任务。提示或seed改变不能为旧同attempt reserved请求重签，冷切换须在原请求结算后通过新attempt冻结。
 

@@ -1,6 +1,6 @@
 import { StructuredSessionError, assertRejectedOutput } from '../session-structured-policy.js'
 import { nativeWorktreePrompt } from '../native-worktree-runtime.js'
-import { captureStageDraft, DRAFT_RECEIPT_INSTRUCTIONS, DRAFT_RECEIPT_SCHEMA, overlayStageTree, readStageDraft, stageWorktree, STAGE_READING_INSTRUCTIONS, type StageDraftMaterialRequest } from './stage-worktree.js'
+import { captureStageDraft, DRAFT_RECEIPT_INSTRUCTIONS, DRAFT_RECEIPT_SCHEMA, overlayStageTree, readStageDraft, stageDraftEditorPath, stageWorktree, STAGE_READING_INSTRUCTIONS, type StageDraftMaterialRequest } from './stage-worktree.js'
 import type { StageDraftBinding } from './stage-worktree.js'
 import { contentHash, readEvidence, readObject, readTree, writeObject, writeTree } from './snapshot.js'
 import { isHostPrivatePath } from './candidate.js'
@@ -15,6 +15,7 @@ import type { FrozenContracts } from './frozen-contracts.js'
 import { historicalCoverageFinding } from './frozen-contracts.js'
 import type { HistoricalCoverageCheck } from './historical-coverage.js'
 import { posix } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { buildContractGraph, contractReferences, CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts, projectContractCoverage, validateContractGraph } from '@spexcode/spec-core/contracts'
 import type { Contract, ContractCoverage, ContractFinding, ContractGraph, ContractItem, Gap, Verification } from '@spexcode/spec-core/contracts'
 import { CONTRACT_FLOW_INSTRUCTIONS, CONTRACT_INSTRUCTIONS, CONTRACT_SOURCE_INSTRUCTIONS, CONTRACT_VERIFICATION_INSTRUCTIONS, INTERFACE_SEED_CONTRACT_INSTRUCTIONS, ELABORATION_REVIEW_SCHEMA, elaborationSchema, LEGACY_ELABORATION_DIAGNOSTIC_SCHEMA, LEGACY_ELABORATION_V2_DIAGNOSTIC_SCHEMA, VERIFICATION_REGISTRATION_SCHEMA, outputErrors } from './elaboration-schema.js'
@@ -81,7 +82,9 @@ export function elaborationMaterialContext(commonDir: string, previous: Pick<Ela
   if (!previousSchema || previousSchema.mode !== '100644') return invalid()
   if (contentHash(readObject(commonDir, previousSchema.oid)) !== current.binding.schemaDigest) return null
   const paths = [...task!.relatedSpecs?.map(spec => spec.path) ?? [], ...task!.repair?.baselines?.map(spec => spec.baselineSpecPath) ?? [], ...task!.repair?.specs?.map(spec => spec.diagnosticPath) ?? []]
-  const overlayPath = (path: string): boolean => specPath(path) || /^\.spex-sync-diagnostics\/[a-f0-9]{64}\/\.spec\/.+\/spec\.md$/.test(path) && posix.normalize(path) === path && !path.includes('\\')
+  const editorPath = stageDraftEditorPath(current.binding)
+  if (oldEntries.some(entry => entry.path === editorPath)) paths.push(editorPath)
+  const overlayPath = (path: string): boolean => path === editorPath || specPath(path) || /^\.spex-sync-diagnostics\/[a-f0-9]{64}\/\.spec\/.+\/spec\.md$/.test(path) && posix.normalize(path) === path && !path.includes('\\')
   const previousReadonlyOverlay = paths.map(path => { const entry = oldEntries.find(entry => entry.path === path); if (!overlayPath(path) || !entry || !['100644', '100755'].includes(entry.mode)) invalid(); return { path, mode: entry!.mode, oid: entry!.oid } })
   const currentReadonlyOverlay = current.readonlyOverlay ?? []
   if (currentReadonlyOverlay.some(entry => !overlayPath(entry.path) || !['100644', '100755'].includes(entry.mode) || !newEntries.some(actual => actual.path === entry.path && actual.mode === entry.mode && actual.oid === entry.oid))) invalid()
@@ -345,6 +348,66 @@ function checkInput(input: ElaborationInput): void {
   if (input.timeoutMs !== null && (!Number.isInteger(input.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS) || (input.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS) <= 0)) throw new TypeError('每次调用超时必须为正整数或null')
   if (!Number.isInteger(input.maxCalls ?? 2 * ((input.maxRepairs ?? 2) + 1)) || (input.maxCalls ?? 1) <= 0) throw new TypeError('调用预算必须为正整数')
   if (input.totalTimeoutMs !== undefined && input.totalTimeoutMs !== null && (!Number.isInteger(input.totalTimeoutMs) || input.totalTimeoutMs <= 0)) throw new TypeError('总时间预算必须为正整数或null')
+}
+
+function incrementalDraftPlan(input: ElaborationInput, inputDigest: string, binding: StageDraftBinding): string {
+  const { signal: _signal, files: _files, model: _model, effort: _effort, incrementalDraft: _incrementalDraft,
+    maxRepairs: _maxRepairs, maxCalls: _maxCalls, totalTimeoutMs: _totalTimeoutMs, timeoutMs: _timeoutMs, ...frozen } = input
+  return JSON.stringify({ version: 'incremental-elaboration-draft-v1', inputDigest, binding, input: frozen })
+}
+
+/** 冻结首次作者实际可调用的CLI入口，续跑不从当前进程路径重写历史提示。 */
+export function incrementalDraftCommand(): NonNullable<ElaborationInput['incrementalDraft']> {
+  return { node: process.execPath, cli: fileURLToPath(new URL('../../dist/cli.js', import.meta.url)) }
+}
+
+/** 普通完整叶的草稿先经唯一行渲染器和正式结构门，结果不授予批准。 */
+export function inspectElaborationDraftEdit(input: ElaborationInput, output: unknown, inputDigest: string, partial = false): { errors: string[]; blocking: ContractFinding[] } {
+  const schema = elaborationSchema(input)
+  if (partial) delete (schema.properties as Record<string, Record<string, unknown>>).applicability.minItems
+  const errors = outputErrors(output, schema)
+  if (errors.length) return { errors, blocking: [] }
+  const generated = bindElaborationTargets(input, output as GeneratedTargetElaboration)
+  errors.push(...elaborationPatchErrors(input, generated), ...elaborationScopeErrors(input, generated))
+  if (errors.length) return { errors, blocking: [] }
+  const candidate = renderElaboration(input, generated, inputDigest)
+  const checked = checkCandidate(input, candidate, inputDigest)
+  return { errors, blocking: repairDiagnostics(checked.findings, projectContractCoverage(checked.graph)).blocking }
+}
+
+/** 本区程序写入同一冻结VERIFY的单一定义；跨区继续使用原封口技术归属投影。 */
+export function withDraftVerificationRows(input: ElaborationInput, output: GeneratedTargetElaboration): GeneratedTargetElaboration {
+  const updated = structuredClone(output)
+  const original = new Set([...input.targets, ...input.context ?? []].flatMap(target => target.source
+    ? parseContract({ ...target, source: target.source }).contract?.items.filter(item => item.kind === 'VERIFY').map(item => item.id) ?? []
+    : []))
+  for (const target of updated.changes) target.tables.VERIFY = []
+  const writable = updated.changes.filter(target => targetHasCurrentChanges(input, input.targets[target.targetIndex]))
+    .sort((a, b) => a.targetIndex - b.targetIndex)
+  for (const { id, command, cwd, timeoutMs } of input.verifications ?? []) {
+    if (original.has(id) || input.retiredIds?.includes(id) || input.mode === 'preserve_business') continue
+    const owner = writable.find(target => target.tables.AC.some(row => row.command === id)) ?? writable[0]
+    owner?.tables.VERIFY.push({ id, command, cwd, 'timeout-ms': timeoutMs })
+  }
+  return updated
+}
+
+/** 归属比较容许旧草稿逐值回显本节点已有的冻结行。 */
+export function draftVerificationOwnershipMatches(input: ElaborationInput, output: GeneratedTargetElaboration): boolean {
+  const expected = withDraftVerificationRows(input, output)
+  return output.changes.every(({ targetIndex, tables }, index) => {
+    const target = input.targets[targetIndex]
+    const previous = target.source ? parseContract({ ...target, source: target.source }).contract?.items : undefined
+    const inherited = new Set<string>()
+    const written = tables.VERIFY.filter(row => {
+      const item = previous?.find(candidate => candidate.kind === 'VERIFY' && candidate.id === row.id)
+      if (item?.kind !== 'VERIFY' || inherited.has(item.id) || item.cwd !== row.cwd || item.timeoutMs !== row['timeout-ms']
+          || JSON.stringify(item.command) !== JSON.stringify(row.command)) return true
+      inherited.add(item.id)
+      return false
+    })
+    return JSON.stringify(written) === JSON.stringify(expected.changes[index].tables.VERIFY)
+  })
 }
 
 export function freezeElaborationInput(input: ElaborationInput): { input: ElaborationInput; inputDigest: string; frozen: Record<string, unknown> & { targets: readonly ElaborationTarget[] } } {
@@ -894,11 +957,16 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
     : input.worktree ? { ...(sealRepairBrief || anchorRepairBrief || gapRepairBrief ? { repair: sealRepairBrief ?? anchorRepairBrief ?? gapRepairBrief } : {}), intent: input.intent, targets: input.targets.map((target, targetIndex) => ({ targetIndex, nodeId: target.nodeId, path: target.path, rawSource: target.rawSource })), relatedSpecs: input.context?.map(context => ({ nodeId: context.nodeId, path: context.path })), facts: input.facts, authorizedChanges: input.authorizedChanges, verifications: input.verifications, implementationWritePaths: input.implementationWritePaths, readonlyTestPaths: input.readonlyTestPaths, ...(input.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), retiredIds: input.retiredIds, nodeChanges: input.nodeChanges, mode: input.mode, analysis: input.analysis, partitionBinding: input.partitionBinding, inheritedParentObligations: input.inheritedAuthoredParentScope?.map(({ nodeId, path, affectedIds }) => ({ nodeId, path, affectedIds })), decisionAuthorities: input.decisionAuthorities, refinement: input.refinement } : { ...modelInput, targets: frozenInput.frozen.targets.map((target, targetIndex) => ({ targetIndex, ...target })) })
   const generationSchema = elaborationSchema(input, { purpose: input.phase === 'interface_seed' ? 'interface_seed' : 'generation' })
   const draftBinding = elaborationDraftBinding(input, generationSchema)
+  const editor = input.incrementalDraft && draftMode && input.phase !== 'interface_seed' && !input.readonlySpecRepair && !input.gapRepair
+    && !input.nodeChanges?.length && !input.authorizedChanges?.some(change => change.id.startsWith('VERIFY-'))
+    ? { path: stageDraftEditorPath(draftBinding), source: incrementalDraftPlan(input, inputDigest, draftBinding) }
+    : undefined
   const sourceDraft = options.loadDraft?.(draftBinding.schemaDigest) ?? options.draft
   let draft = sourceDraft ? structuredClone(sourceDraft) : undefined
   let draftSource = draftMode && draft ? readStageDraft(input.historyInput!.source.commonDir, draft, draftBinding) : undefined
-  const generationSeed = draftMode ? stageWorktree(input.historyInput!.source.commonDir, input.historyInput!.headCommit, overlayStageTree(input.historyInput!.source.commonDir, input.worktree!.tree, [...input.context ?? [], ...anchorBaselines.map(baseline => ({ path: baseline.baselineSpecPath, source: baseline.source })), ...sealRepair?.specs.map(spec => ({ path: spec.diagnosticPath, source: spec.source })) ?? [], ...gapRepair?.specs.map(spec => ({ path: spec.diagnosticPath, source: spec.source })) ?? [], { path: draftBinding.path.replace(/\.json$/, '.schema.json'), source: JSON.stringify(generationSchema) }]), 'edit') : undefined
+  const generationSeed = draftMode ? stageWorktree(input.historyInput!.source.commonDir, input.historyInput!.headCommit, overlayStageTree(input.historyInput!.source.commonDir, input.worktree!.tree, [...input.context ?? [], ...anchorBaselines.map(baseline => ({ path: baseline.baselineSpecPath, source: baseline.source })), ...sealRepair?.specs.map(spec => ({ path: spec.diagnosticPath, source: spec.source })) ?? [], ...gapRepair?.specs.map(spec => ({ path: spec.diagnosticPath, source: spec.source })) ?? [], { path: draftBinding.path.replace(/\.json$/, '.schema.json'), source: JSON.stringify(generationSchema) }, ...(editor ? [editor] : [])]), 'edit') : undefined
   const overlayPaths = new Set([...input.context?.map(context => context.path) ?? [], ...anchorBaselines.map(baseline => baseline.baselineSpecPath), ...sealRepair?.specs.map(spec => spec.diagnosticPath) ?? [], ...gapRepair?.specs.map(spec => spec.diagnosticPath) ?? []])
+  if (editor) overlayPaths.add(editor.path)
   const readonlyOverlay = generationSeed ? readTree(input.historyInput!.source.commonDir, generationSeed.tree).filter(entry => overlayPaths.has(entry.path)).map(({ path, mode, oid }) => ({ path, mode, oid })) : undefined
   const selectedMaterial = draftSource === undefined || !runtimeDiagnostics?.round.candidate && !seed?.candidate ? await options.loadDraftMaterial?.(draftBinding.schemaDigest, generationSeed ? { binding: draftBinding, worktree: generationSeed, inputDigest, readonlyOverlay, ...(draft ? { existingDraft: draft } : {}), ...(nativeFlowGuidance ? { allowStoppedGitDraft: true } : {}) } : undefined) : undefined
   const observedMaterial = selectedMaterial?.sourceKind === 'physical_draft' || selectedMaterial?.sourceKind === 'stopped_git_draft' ? selectedMaterial : undefined
@@ -993,6 +1061,11 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
       const diagnosticChanges = sealRepair && purpose === 'elaboration_review' ? partitionSealRepairChanges(sealRepair, round.candidate!.changes) : []
       let worktree = writingDraft ? stageWorktree(input.historyInput!.source.commonDir, input.historyInput!.headCommit, overlayStageTree(input.historyInput!.source.commonDir, generationSeed!.tree, draftSource === undefined ? [] : [{ path: draftBinding.path, source: draftSource }]), 'edit') : input.worktree && input.historyInput ? stageWorktree(input.historyInput.source.commonDir, input.historyInput.headCommit, overlayStageTree(input.historyInput.source.commonDir, input.worktree.tree, [...input.context ?? [], ...anchorBaselines.map(baseline => ({ path: baseline.baselineSpecPath, source: baseline.source })), ...sealRepair?.specs.map(spec => ({ path: spec.diagnosticPath, source: diagnosticChanges.find(change => change.nodeId === spec.nodeId && change.path === spec.path)?.source ?? spec.source })) ?? [], ...gapRepair?.specs.map(spec => ({ path: spec.diagnosticPath, source: spec.source })) ?? [], ...(writingDraft ? [{ path: draftBinding.path.replace(/\.json$/, '.schema.json'), source: JSON.stringify(schema) }, ...(draftSource !== undefined ? [{ path: draftBinding.path, source: draftSource }] : [])] : []), ...(purpose === 'elaboration_review' ? [...round.candidate!.changes, ...(round.candidate!.nodeChanges ?? []).filter(change => change.action === 'retire' || change.from.path !== change.to.path).map(change => ({ path: change.from.path, source: null }))] : [])]), writingDraft ? 'edit' : 'read') : input.worktree
       if (writingDraft) {
+        if (editor) {
+          const { node, cli } = input.incrementalDraft!
+          const command = [node, cli, 'internal', 'elaboration-draft', worktree!.baseCommit, draftBinding.ownerDigest].map(value => "'" + value.replaceAll("'", "'\\''") + "'").join(' ')
+          prompt = prompt.replace('\n任务:\n', `\n草稿由程序写入。运行 ${command} inspect 获取草稿路径、摘要、可写目标、可引用ID与工具的参数schema。使用同一命令的 apply 从stdin提交小批JSON，每批传入上次返回的revision；inspect可附一个JSON参数预分配新ID。用 check 核完整性。只让工具写草稿，已有内容从草稿文件读取。共享VERIFY由引擎按登记写入，AC只引用ID。在同一会话中分批保存和修正，check通过后再正常提交。\n任务:\n`)
+        }
         prompt += `\n草稿业务schema只读文件=${draftBinding.path.replace(/\.json$/, '.schema.json')}；先读取精确schema并在原草稿上自检，禁止修改schema。${DRAFT_RECEIPT_INSTRUCTIONS}`
         schema = DRAFT_RECEIPT_SCHEMA
       }
@@ -1029,7 +1102,16 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
           round.draft = draft
           draftSource = readStageDraft(input.historyInput!.source.commonDir, draft, draftBinding)
           if (outputErrors(session.output, DRAFT_RECEIPT_SCHEMA).length) throw new Error('Native草稿summary回执不符合schema')
-          try { return JSON.parse(draftSource) as unknown }
+          try {
+            const output: unknown = JSON.parse(draftSource)
+            if (editor && !outputErrors(output, generationSchema).length) {
+              const proposed = output as GeneratedTargetElaboration
+              if (!draftVerificationOwnershipMatches(input, proposed)) {
+                round.findings.push(finding(input, 'draft_editor_verification', '完整草稿的共享VERIFY须逐值匹配程序冻结登记与本区唯一归属'))
+              }
+            }
+            return output
+          }
           catch (error) {
             if (!(error instanceof SyntaxError)) throw error
             round.findings.push(finding(input, 'output_json', error.message))

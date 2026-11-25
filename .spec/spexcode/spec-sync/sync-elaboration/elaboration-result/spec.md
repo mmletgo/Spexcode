@@ -13,6 +13,8 @@ code:
 
 ## expanded spec
 
+Native 普通叶可随输入携带 attempt 冻结的草稿编辑器入口。编辑器诊断只表示当前未完成草稿状态，批准与结果证据沿原协议冻结。[[incremental-elaboration-draft]]
+
 `propagateAuthoredParentScope` 只在 [[sync-coordinator]] 的正式 P1 协议冻结。`inheritedAuthoredParentScope` 是由 [[sync-partition-execution]] 派生的完整冻结输入证据，绑定仅承接父义务的叶 node/path、父 P1 原件引用和命中义务 ID。局部资格在生成前派生，同一份证明进入局部和封口输入摘要。按原 P0 与父 P1 检查点重建，旧结果和批准不追补字段。
 
 ElaborationGapReviewEvidence 是当次调用的内存诊断。持久 GAP 复核只保存原 aggregate/local/result refs、完整输入与候选摘要、GAP IDs、请求及独立 trace/seed 绑定，不重复保存 review、findings 或说明正文。原结果 ref 指向已有正式 Native/注入结果；新 owner 的 gapRepair 只保存 reviewRef、acceptedRef 和 baseInputDigest，并进入当前输入摘要。协议续审只追加previousReviewRef，冷恢复按严格较早来源重建原请求和全部旧审查身份，诊断正文现读。原作者或已采纳 GAP 不取得该资格，旧字段缺席不追补。

@@ -17,7 +17,7 @@ code:
 
 review verdict 的原生说明明确 accept 仅可搭配空 findings；implementation-review 等待修发现也使用 repair，再由现有分类门禁转交对应阶段，不把矛盾回执自动改成通过。code字段说明完整业务契约下的实现/测试发现使用精确`code:"implementation-review"`及repair分类/结论，不能添加后缀或自定实现code；普通业务repair保留具体业务code并在P1修复。此说明不改变string/minLength约束、schema接受范围或既有精确分类门禁。
 
-模型临时输出 `elaboration-target-rows-v3`：冻结目标的输入内 targetIndex、标题和说明、真实代码/相关绑定、业务解释（null 表示沿用）、显式 removeIds、各类型新增或替换的完整业务行，以及每个适用性边界的依据和影响 ID。模型不返回 nodeId/path；wire 为每个冻结目标附原数组下标 targetIndex，程序从同一冻结目标及显式 nodeChanges 唯一绑定节点、可写路径、原意和源摘要。全部类型数组均存在，空数组表示无该表；行对象的列直接派生自解析器 `CONTRACT_COLUMNS`，不复制另一份列定义。严格 schema 约束稳定 ID、单一来源、引用数组、布尔值、VERIFY argv 和正整数超时；`STEP.next` 的 END 单值不能混入 ID 列表。有状态流程引用 STATE 结果，不能把同步动作当成无状态能力。
+模型临时输出 `elaboration-target-rows-v3`：冻结目标的输入内 targetIndex、标题和说明、真实代码/相关绑定、业务解释（null 表示沿用）、显式 removeIds、各类型新增或替换的完整业务行，以及每个适用性边界的依据和影响 ID。模型不返回 nodeId/path；wire 为每个冻结目标附原数组下标 targetIndex，程序从同一冻结目标及显式 nodeChanges 唯一绑定节点、可写路径、原意和源摘要。全部类型数组均存在，空数组表示无该表；行对象的列直接派生自解析器 `CONTRACT_COLUMNS`，不复制另一份列定义。严格 schema 约束稳定 ID、单一来源、引用数组、布尔值、VERIFY argv 和正整数超时；对象字段必须是 schema 明确声明的自有字段，`__proto__` 等继承名称也按额外字段拒绝。`STEP.next` 的 END 单值不能混入 ID 列表。有状态流程引用 STATE 结果，不能把同步动作当成无状态能力。
 
 生成与独审指令明确区分临时 JSON 行和最终 Markdown：模型提供所有 schema 必填列，引用集合使用 JSON 数组，布尔使用 boolean，schema 允许 null 的列使用 null 表达空值；不适用的 `TR.to` 明确为 null，不能省略或填空字符串、字符串 `-`。表头、Markdown 空值 `-` 与逗号分隔引用由程序渲染，不能将最终文件语法作为模型 JSON 的值约定。严格 schema 接受范围及完整候选、全图和独审门槛不变。 AC-ELABORATION-21 先以当前 v3 wire 校验合法基线，再核字段负例确实在业务行内被拒绝；不适用 TR 的 null 经绑定、渲染及契约解析后仍为 null，不能以旧协议版本错误冒充字段校验覆盖。
 
@@ -55,7 +55,7 @@ P1 的 prose 和持久契约只写业务约定；V3 尚未运行、通过或失�
 
 每轮 tables 差量相对于本轮权威冻结 Markdown：未列行由程序保留，removeIds 只删除该节点明确列出的旧行并继续受原授权约束；完整候选及全图而非差量交给独立审查和所有旧新门禁。新节点与 raw-only 输入以空行基线首次构建同一协议，不增加另一条全量生成路径。已持久失败 seed 的旧 v1/v2 路径回显输出只按原 schema、候选摘要和追踪读取诊断，不用当前目标绑定重新改写历史候选，也不成为新生成输出或权威合成基线。
 
-派发 schema 把 targetIndex 限为原冻结数组的整数范围；索引不排序或压缩，move 绑定目的身份，retire 下标留洞并由输出 schema 拒绝，具体结构发现进入既有有限修复循环，不能因绑定异常提前跳过剩余修复预算。生成 prompt 使用同一冻结目标绑定分别列出全部合法可更新目标及原数组下标、首次必须构建的子集，并要求形成一个完整、可解析的紧凑 JSON 对象；新草稿协议写入指定Git文件、final仅返回小summary，历史只读协议仍通过final传回完整JSON；首次必建0不代表禁止更新已有目标，既有完整契约仅在本轮确无相关业务差量和已核实必要修复时可省略。changes 的 `minItems` 固定为零，`maxItems` 仍限制为合法目标数，以便合法但不完整的输出经过绑定和渲染后形成具体诊断候选。程序逐项核对所有目标；新目标、raw-only 或无已解析 sync-v1 契约的目标缺失时，报告 `target_not_elaborated` 并阻止独审及交付。最低数量不取代该硬门禁；重复/未知身份、额外 path 字段、索引越界和退役索引仍按结构规则拒绝，完整候选、全图与独审门禁保持。已结算 seed 仍仅为诊断，不作生成基线。
+派发 schema 把 targetIndex 限为原冻结数组的整数范围；索引不排序或压缩，move 绑定目的身份，retire 下标留洞并由输出 schema 拒绝，具体结构发现进入既有有限修复循环，不能因绑定异常提前跳过剩余修复预算。生成 prompt 使用同一冻结目标绑定分别列出全部合法可更新目标及原数组下标、首次必须构建的子集，并要求形成一个完整、可解析的候选对象。普通原生完整叶使用 [[incremental-elaboration-draft]] 分批形成候选；其余原生写入阶段仍使用指定 Git 文件。原生作者 final 仅返回小 summary，历史只读协议通过 final 传回完整 JSON。首次必建0不代表禁止更新已有目标，既有完整契约仅在本轮确无相关业务差量和已核实必要修复时可省略。changes 的 `minItems` 固定为零，`maxItems` 仍限制为合法目标数，以便合法但不完整的输出经过绑定和渲染后形成具体诊断候选。程序逐项核对所有目标；新目标、raw-only 或无已解析 sync-v1 契约的目标缺失时，报告 `target_not_elaborated` 并阻止独审及交付。最低数量不取代该硬门禁；重复/未知身份、额外 path 字段、索引越界和退役索引仍按结构规则拒绝，完整候选、全图与独审门禁保持。已结算 seed 仍仅为诊断，不作生成基线。
 
 
 implementationWritePaths 显式为空时，生成与独审说明本轮源码及全部测试只读。AC.test 只能绑定冻结上下文中真实文件和用例，不把新测试或实现修复留给 P2；技术缺证不改写业务原意。

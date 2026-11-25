@@ -143,9 +143,9 @@ export function outputErrors(value: unknown, schema: Record<string, unknown>, pa
     const record = value as Record<string, unknown>
     const properties = schema.properties as Record<string, Record<string, unknown>> | undefined
     if (!properties) return []
-    const errors = (schema.required as string[]).filter(key => !(key in record)).map(key => `${path}.${key}: 缺少字段`)
+    const errors = (schema.required as string[]).filter(key => !Object.hasOwn(record, key)).map(key => `${path}.${key}: 缺少字段`)
     for (const key of Object.keys(record)) {
-      if (!(key in properties)) errors.push(`${path}.${key}: 未允许字段`)
+      if (!Object.hasOwn(properties, key)) errors.push(`${path}.${key}: 未允许字段`)
       else errors.push(...outputErrors(record[key], properties[key], `${path}.${key}`))
     }
     return errors

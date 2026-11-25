@@ -1532,7 +1532,18 @@ if (cmd === 'serve') {
   }
 } else if (cmd === 'internal') {
   const sub = process.argv[3]
-  if (sub === 'peer-accept' || sub === 'peer-drop') {
+  if (sub === 'elaboration-draft') {
+    const [, , , , seed, owner, action] = process.argv
+    if (!seed || !owner || !action || !['inspect', 'apply', 'check', 'mcp'].includes(action)) throw new Error('usage: spex internal elaboration-draft <seed> <owner> inspect [json] | apply < batch.json | check | mcp')
+    const { executeDraftEdit, serveDraftEditor } = await import('./sync/elaboration-draft-edit.js')
+    if (action === 'mcp') await serveDraftEditor(process.cwd(), seed, owner)
+    else if (action === 'inspect' || action === 'apply' || action === 'check') {
+      const text = action === 'apply' ? readFileSync(0, 'utf8') : action === 'inspect' ? process.argv[7] ?? '' : ''
+      const result = executeDraftEdit(process.cwd(), seed, owner, action, text.trim() ? JSON.parse(text) as unknown : {})
+      console.log(JSON.stringify(result))
+      await flushExit(result.ok ? 0 : 1)
+    }
+  } else if (sub === 'peer-accept' || sub === 'peer-drop') {
     const encoded = process.argv[4]
     if (!encoded) { console.error(`usage: spex internal ${sub} <base64url-json>`); process.exit(2) }
     let body: Record<string, unknown>

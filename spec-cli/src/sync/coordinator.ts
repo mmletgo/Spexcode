@@ -17,7 +17,7 @@ import { adoptedDeliveryPaths, baselineResourceKey, baselineSelectionDigest, ext
 import { readHistoryRequest, readReceiptHistoryRestorations } from './history-input.js'
 import { p0ReviewDiagnosticMatches, p0ReviewDiagnosticRef, readP0ReviewDiagnostic, type P0ReviewChallengeRequest } from './behavior-review-challenge.js'
 import { composeAuthoredInput } from './author-input.js'
-import { elaborate, hasApprovedElaborationReview, elaborationGapRepairFindings, elaborationMaterialContext, freezeElaborationInput, gapBlockedFinding, isParentInterfaceImplementationReviewRejection, verifyElaborationDraftCache } from './elaboration.js'
+import { elaborate, hasApprovedElaborationReview, elaborationGapRepairFindings, elaborationMaterialContext, freezeElaborationInput, gapBlockedFinding, incrementalDraftCommand, isParentInterfaceImplementationReviewRejection, verifyElaborationDraftCache } from './elaboration.js'
 import { outputErrors } from './elaboration-schema.js'
 import type { ElaborationGapReviewCheckpoint, ElaborationGapReviewEvidence, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ElaborationTrace, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ReadonlySpecRepair } from './elaboration-types.js'
 import { claimFileMutex } from './file-mutex.js'
@@ -4290,19 +4290,19 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
       if (!elaboration) {
         store.renewLease(fence, leaseMs); await yieldToControl(); store.renewLease(fence, leaseMs)
         if (operation.phase === 'analyzing') store.startElaboration(fence)
-        let protocol = stage<{ version: 'elaboration-draft-v1' } & Pick<ElaborationInput, 'generationGuidance' | 'applicabilityGuidance' | 'compactSealDiagnostics' | 'citationRepairDiagnostics' | 'defaultExportCitation' | 'sharedDraftDiagnostics' | 'draftRepairDisposition' | 'parentInterfaceReview' | 'propagateAuthoredParentScope'>>(store, operation, attempt, 'elaboration-draft-protocol')
+        let protocol = stage<{ version: 'elaboration-draft-v1' } & Pick<ElaborationInput, 'incrementalDraft' | 'generationGuidance' | 'applicabilityGuidance' | 'compactSealDiagnostics' | 'citationRepairDiagnostics' | 'defaultExportCitation' | 'sharedDraftDiagnostics' | 'draftRepairDisposition' | 'parentInterfaceReview' | 'propagateAuthoredParentScope'>>(store, operation, attempt, 'elaboration-draft-protocol')
         if (!protocol && options.plan.agentWorkflow && !attempt.dispatchPlans.some(dispatch => dispatch.purpose.startsWith('elaboration_'))) {
           const approved = reviewContinuation?.elaboration
           const propagateAuthoredParentScope = approved
             ? stage<Pick<ElaborationInput, 'propagateAuthoredParentScope'>>(store, store.readOperation(approved.operationId), store.readAttempt(approved.attemptId), 'elaboration-draft-protocol')?.propagateAuthoredParentScope
             : options.plan.version === 'sync-coordinator-v2' && options.plan.direction === 'spec_to_code' ? true : undefined
-          protocol = { version: 'elaboration-draft-v1', generationGuidance: ELABORATION_GENERATION_GUIDANCE, applicabilityGuidance: 'root-summary-v1', compactSealDiagnostics: true, citationRepairDiagnostics: 'actionable-v1', defaultExportCitation: true, sharedDraftDiagnostics: true, draftRepairDisposition: true, parentInterfaceReview: 'scope-v2', ...(propagateAuthoredParentScope ? { propagateAuthoredParentScope } : {}) }
+          protocol = { version: 'elaboration-draft-v1', incrementalDraft: incrementalDraftCommand(), generationGuidance: ELABORATION_GENERATION_GUIDANCE, applicabilityGuidance: 'root-summary-v1', compactSealDiagnostics: true, citationRepairDiagnostics: 'actionable-v1', defaultExportCitation: true, sharedDraftDiagnostics: true, draftRepairDisposition: true, parentInterfaceReview: 'scope-v2', ...(propagateAuthoredParentScope ? { propagateAuthoredParentScope } : {}) }
           saveStage(store, fence, 'elaboration-draft-protocol', protocol)
         }
         if (protocol && Object.hasOwn(protocol, 'generationGuidance') && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V1 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V2 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V3 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V4 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE) fail('elaboration_generation_guidance_unsupported', '持久P1生成提示版本不受支持；仅字段缺席允许原提示')
         if (protocol?.applicabilityGuidance !== undefined && protocol.applicabilityGuidance !== 'root-summary-v1') fail('elaboration_applicability_guidance_unsupported', '持久P1根级适用性提示版本不受支持')
         const draftProtocol = protocol?.version
-        const elaborationInput = { ...makeElaborationInput(draftProtocol), generationGuidance: protocol?.generationGuidance, applicabilityGuidance: protocol?.applicabilityGuidance, compactSealDiagnostics: protocol?.compactSealDiagnostics, citationRepairDiagnostics: protocol?.citationRepairDiagnostics, defaultExportCitation: protocol?.defaultExportCitation, sharedDraftDiagnostics: protocol?.sharedDraftDiagnostics, draftRepairDisposition: protocol?.draftRepairDisposition, parentInterfaceReview: protocol?.parentInterfaceReview, propagateAuthoredParentScope: protocol?.propagateAuthoredParentScope }
+        const elaborationInput = { ...makeElaborationInput(draftProtocol), incrementalDraft: protocol?.incrementalDraft, generationGuidance: protocol?.generationGuidance, applicabilityGuidance: protocol?.applicabilityGuidance, compactSealDiagnostics: protocol?.compactSealDiagnostics, citationRepairDiagnostics: protocol?.citationRepairDiagnostics, defaultExportCitation: protocol?.defaultExportCitation, sharedDraftDiagnostics: protocol?.sharedDraftDiagnostics, draftRepairDisposition: protocol?.draftRepairDisposition, parentInterfaceReview: protocol?.parentInterfaceReview, propagateAuthoredParentScope: protocol?.propagateAuthoredParentScope }
         const loadDraft = draftProtocol ? (schemaDigest: string): ElaborationDraft | null => {
           const draft = loadElaborationDraft('elaboration', undefined, schemaDigest)
           return draft && cacheDraft ? { ...draft, errors: [...draft.errors, ...cacheDraft.errors] } : draft

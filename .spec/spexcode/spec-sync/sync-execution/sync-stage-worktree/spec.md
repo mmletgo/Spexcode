@@ -13,6 +13,8 @@ Spec变更只把任务相关规格与原始需求差量告知代理，代理在�
 
 ## expanded spec
 
+允许分批写入的阶段将编辑器配置与精确 schema 一同保存在只读 seed。实际结果仍只允许唯一 owner 草稿变化，编辑器配置不进入独审树和交付。[[incremental-elaboration-draft]]
+
 已结算且clean的Native工作树可以由[[sync-native-run]]正式close；branch/archive与原不可变Git对象保持。captureStageDraft、readStageDraft和importStageChanges不依赖结果物理目录，业务JSON/schema后置拒绝仍保原bytes及未批准身份。尚未capture的已提交失败/取消稿，由调用者在原真实性/停止认证后沿[[archive]]临时还原同一checkout，再执行本模块原严格观察及capture，结束后回收。无新增提交保持空材料，不改旧witness或批准；未提交physical稿为dirty来源，未知停止及dirty仍不自动关闭。
 
 StageDraftMaterialRequest仅在进程内传当前binding/真实seed/inputDigest、可定位的existingDraft与程序可信readonly overlay的精确path/mode/OID投影，供P1按真实Native attempt/round选择严格较新物理材料及跨父/诊断比较。它不进入旧请求或NativePlan，不改变本模块对原停止工作树、index、schema/context及其他文件的完整冷验，也不能赋予旧稿新的Git或批准角色。

@@ -1,14 +1,15 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire, syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import test from 'node:test'
 import { buildContractGraph, CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
+import type { ContractFinding } from '@spexcode/spec-core/contracts'
 import { StructuredSessionError, rejectedFinalOutput } from '../session-structured-policy.js'
 import { nativeWorktreePrompt, nativeWorktreeResult } from '../native-worktree-runtime.js'
-import { elaborate, elaborationMaterialContext, elaborationDigest, freezeElaborationInput, sealPartitionedElaboration, verifyElaborationDraftCache } from './elaboration.js'
+import { draftVerificationOwnershipMatches, elaborate, elaborationMaterialContext, elaborationDigest, freezeElaborationInput, incrementalDraftCommand, sealPartitionedElaboration, verifyElaborationDraftCache, withDraftVerificationRows } from './elaboration.js'
 import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE } from './elaboration-types.js'
 import type { ElaborationInput, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence, writeObject, writeTree } from './snapshot.js'
@@ -1041,6 +1042,109 @@ function draftRows(source: string): GeneratedTargetElaboration {
     })))])) as GeneratedTargetElaboration['changes'][number]['tables'],
   }] }
 }
+
+test('普通原生叶由同一工作树分批写草稿，非法批次原字节保留后继续正式独审', async t => {
+  const f = await fixture(t)
+  const before = f.input.targets[0].source!
+  const verification = parseContract({ nodeId: 'export-contract', path, source: before }).contract!.items.find(item => item.kind === 'VERIFY')!
+  assert.equal(verification.kind, 'VERIFY')
+  const { command, cwd, timeoutMs, id } = verification
+  const added = { id: 'VERIFY-SHARED-NEW', command, cwd, timeoutMs }
+  const tools = incrementalDraftCommand()
+  const input = { ...f.input, incrementalDraft: tools, applicabilityGuidance: 'root-summary-v1' as const, verifications: [{ id, command, cwd, timeoutMs }, added], maxRepairs: 0 }
+  const result = await elaborate(input, { runner: f.run((request, workspace, draftPath) => {
+    const owner = draftPath.match(/([a-f0-9]{64})\.json$/)![1]
+    assert.match(request.prompt, /草稿由程序写入/)
+    assert.match(request.prompt, /根级 applicability 按本轮全部目标汇总/)
+    const args = [tools.cli, 'internal', 'elaboration-draft', request.worktree!.baseCommit, owner]
+    const call = (action: 'inspect' | 'apply' | 'check', payload?: unknown) => {
+      const child = spawnSync(tools.node, [...args, action, ...(action === 'inspect' && payload !== undefined ? [JSON.stringify(payload)] : [])], { cwd: workspace, input: action === 'apply' && payload !== undefined ? JSON.stringify(payload) : '', encoding: 'utf8' })
+      assert.ifError(child.error)
+      assert.ok(child.stdout, child.stderr)
+      const result = JSON.parse(child.stdout)
+      assert.equal(child.status, result.ok ? 0 : 1, child.stdout)
+      return result
+    }
+    const inspected = call('inspect', { ids: [{ targetIndex: 0, kind: 'REQ', key: 'NEW-CASE' }] })
+    assert.equal(inspected.revision, null)
+    assert.match(inspected.ids[0].id, /^REQ-NEW-CASE-[A-F0-9]{16}$/)
+    assert.equal(inspected.ids[0].id, call('inspect', { ids: [{ targetIndex: 0, kind: 'REQ', key: 'NEW-CASE' }] }).ids[0].id)
+    const first = call('apply', { revision: null, changes: [{ targetIndex: 0 }] })
+    assert.equal(first.ok, true, JSON.stringify(first))
+    const staged = readFileSync(join(workspace, draftPath), 'utf8')
+    assert.deepEqual((JSON.parse(staged) as GeneratedTargetElaboration).changes[0].tables.VERIFY.map(row => row.id), [added.id])
+    const bad = [
+      { revision: null, changes: [{ targetIndex: 0, title: '迟到写入' }] },
+      { revision: first.revision, changes: [{ targetIndex: 99, title: '其它owner' }] },
+      JSON.parse(`{"revision":"${first.revision}","changes":[{"targetIndex":0,"__proto__":{"title":"不属于输入schema"}}]}`) as unknown,
+      { revision: first.revision, changes: [{ targetIndex: 0, put: [{ kind: 'VERIFY', row: { id: added.id } }] }] },
+      { revision: first.revision, changes: [{ targetIndex: 0, put: [{ kind: 'STEP', row: { ...draftRows(before).changes[0].tables.STEP[0], rules: ['REQ-EXPORT-01'] } }] }] },
+    ]
+    for (const batch of bad) {
+      const rejected = call('apply', batch)
+      assert.equal(rejected.ok, false, JSON.stringify(rejected))
+      assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), staged)
+    }
+    const badRow = call('apply', { revision: first.revision, changes: [{ targetIndex: 0, put: [{ kind: 'REQ', row: { id: 'REQ-TEST-01' } }] }] })
+    assert.match(badRow.errors.join('\n'), /\$\.changes\[0\]\.put\[0\]\.row\.goal/)
+    assert.equal(call('check').ok, false)
+    const outOfBounds = JSON.parse(staged) as GeneratedTargetElaboration
+    outOfBounds.changes[0].targetIndex = 99
+    const corrupt = JSON.stringify(outOfBounds)
+    writeFileSync(join(workspace, draftPath), corrupt)
+    assert.match(call('check').errors.join('\n'), /\$\.changes\[0\]\.targetIndex/)
+    assert.equal(call('apply', { revision: call('inspect').revision, changes: [{ targetIndex: 0 }] }).ok, false)
+    assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), corrupt)
+    const imported = JSON.parse(staged) as GeneratedTargetElaboration
+    imported.applicability = [...rows.applicability, rows.applicability[0]]
+    const importedBytes = JSON.stringify(imported)
+    writeFileSync(join(workspace, draftPath), importedBytes)
+    const importedState = call('inspect')
+    assert.ok(importedState.diagnostics.some((finding: ContractFinding) => finding.code === 'applicability_missing' && finding.message.includes('实际 2 条')))
+    assert.equal(call('apply', { revision: importedState.revision, applicability: [rows.applicability[0], rows.applicability[0]] }).ok, false)
+    assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), importedBytes)
+
+    // The same program handles MCP writes and the ordinary author CLI.
+    const messages = [
+      { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25' } },
+      { jsonrpc: '2.0', id: 2, method: 'tools/list' },
+      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'apply', arguments: { revision: importedState.revision, applicability: [rows.applicability[0]] } } },
+    ]
+    const mcp = spawnSync(tools.node, [...args, 'mcp'], { cwd: workspace, input: messages.map(message => JSON.stringify(message)).join('\n') + '\n', encoding: 'utf8' })
+    assert.equal(mcp.status, 0, mcp.stderr)
+    const [initialized, listed, applied] = mcp.stdout.trim().split('\n').map(line => JSON.parse(line))
+    assert.equal(initialized.result.protocolVersion, '2025-06-18')
+    assert.deepEqual(listed.result.tools.map((tool: { name: string }) => tool.name), ['inspect', 'apply', 'check'])
+    assert.equal(applied.result.structuredContent.ok, true, mcp.stdout)
+    const final = call('check')
+    assert.equal(final.ok, true, JSON.stringify(final))
+    assert.deepEqual((JSON.parse(readFileSync(join(workspace, draftPath), 'utf8')) as GeneratedTargetElaboration).applicability, rows.applicability)
+    return readFileSync(join(workspace, draftPath), 'utf8')
+  }) })
+  assert.equal(result.status, 'complete', JSON.stringify(result.failure))
+  assert.deepEqual(f.requests.map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
+  assert.notEqual(result.rounds[0].traces[0].sessionId, result.rounds[0].traces[1].sessionId)
+  const accepted = parseContract(result.changes[0]).contract!
+  assert.equal(accepted.items.filter(item => item.id === added.id).length, 1)
+  assert.equal(readFileSync(join(f.root, path), 'utf8'), before)
+  assert.ok(!readTree(f.commonDir, f.requests[1].worktree!.tree).some(entry => entry.path.endsWith('.editor.json')))
+})
+
+test('分批作者的多个目标引用同一冻结VERIFY只编译一个定义，正式入口拒绝额外声明', async t => {
+  const f = await fixture(t)
+  const before = f.input.targets[0].source!
+  const shared = { id: 'VERIFY-PROJECT-01', command: ['node', '--test', 'tests/export.test.mjs'], cwd: '.', timeoutMs: 10000 }
+  const input = { ...f.input, targets: [...f.input.targets, { nodeId: 'second', path: '.spec/second/spec.md', source: null, sourceDigest: null, rawSource: '第二个节点' }], verifications: [shared] }
+  const original = draftRows(before)
+  const first = structuredClone(original.changes[0]), second = { ...structuredClone(first), targetIndex: 1 }
+  first.tables.AC[0].command = shared.id
+  second.tables.AC[0].command = shared.id
+  const output = withDraftVerificationRows(input, { ...original, changes: [second, first] })
+  assert.deepEqual(output.changes.map(node => node.tables.VERIFY.map(row => row.id)), [[], [shared.id]])
+  assert.equal(draftVerificationOwnershipMatches(input, output), true)
+  output.changes[0].tables.VERIFY.push(output.changes[1].tables.VERIFY[0])
+  assert.equal(draftVerificationOwnershipMatches(input, output), false)
+})
 
 async function reviewedDetailFixture(t: test.TestContext, scope: 'whole' | 'partition' = 'whole') {
   const f = await fixture(t)
