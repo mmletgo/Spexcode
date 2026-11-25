@@ -250,24 +250,26 @@ function scanSyncCheckpoints(store: SyncStore, operation: PhaseOperation, attemp
       const ref = wrapper?.resultRef
       if (wrapper?.version === 'sync-stage-v1' && wrapper.stage === key && wrapper.operationId === owner.id && wrapper.attemptId === source.id
         && wrapper.inputId === owner.input.id && wrapper.policyDigest === owner.policyDigest && isSyncBlobRef(ref)
-        && (!basis || (wrapper.readSetDigest === basis.readSetDigest || key.endsWith(':provenance') && wrapper.readSetDigest === undefined && !owner.baselineSelection)
+        && (!basis || (wrapper.readSetDigest === basis.readSetDigest || (key.endsWith(':provenance') || key.endsWith(':repair-diagnostics-provenance')) && wrapper.readSetDigest === undefined && !owner.baselineSelection)
           && (!basis.baselineSelectionRef || wrapper.baselineSelectionRef?.sha256 === basis.baselineSelectionRef.sha256 && root.artifacts.some(artifact => artifact.kind === 'json' && artifact.ref.sha256 === basis.baselineSelectionRef!.sha256)))
         && (digest === undefined || ref.sha256 === digest) && root.artifacts.some(artifact => artifact.kind === 'json' && artifact.ref.sha256 === ref.sha256)) return wrapper as Wrapper
     }
     return null
   }
-  let lineage: SyncOperation[] | undefined
+  const lineages = new Map<string, SyncOperation[]>()
   const handoffParents = new Map<string, SyncOperation>()
-  const inheritedDiagnosticOwner = (saved: Saved, original: Saved, diagnostic: NonNullable<Saved['repairDiagnostics']>, origin: SyncAttempt): SyncOperation => {
-    if (!saved.structurePassed || !saved.reviewPassed || saved.failure || saved.rounds.at(-1)?.review?.verdict !== 'accept'
-      || !saved.partitionBinding || !isDeepStrictEqual(saved.partitionBinding, original.partitionBinding) || saved.inputDigest !== original.inputDigest) fail('跨重试raw诊断必须来自同一已审局部原件')
-    const key = `partition:${saved.partitionBinding.partitionId}:elaboration`, digest = hash(saved)
-    if (diagnostic.requestKey !== `sync:${origin.id}:elaborate:partition:${saved.partitionBinding.partitionId}`) fail('跨重试raw诊断不匹配原失败owner')
-    let basis: StageBasis = { readSetDigest: operation.readSetDigest }, scope = operation.scope
-    let expectedSelection = attempt.baselineSelectionDigest, expectedComposition = attempt.composedInput
-    let expandedAt: string | undefined, rebasedOwnerId: string | undefined, expansionOwnerId = operation.id
-    lineage ??= [...retryOperationLineage(store, operation)]
-    let owner = operation, source = attempt, position = 0
+  const inheritedDiagnosticOwner = (carrier: SyncOperation, carrierAttempt: SyncAttempt, saved: Saved, original: Saved, diagnostic: NonNullable<Saved['repairDiagnostics']>, origin: SyncAttempt): SyncOperation => {
+    if (!saved.structurePassed || !isDeepStrictEqual(saved.partitionBinding, original.partitionBinding)
+      || saved.inputDigest !== original.inputDigest) fail('跨重试raw诊断必须来自同一局部业务输入')
+    const partitionId = saved.partitionBinding?.partitionId
+    const key = partitionId ? `partition:${partitionId}:elaboration` : 'elaboration', digest = hash(saved)
+    if (diagnostic.requestKey !== `sync:${origin.id}:elaborate${partitionId ? `:partition:${partitionId}` : ''}`) fail('跨重试raw诊断不匹配原失败owner')
+    let basis: StageBasis = { readSetDigest: carrier.readSetDigest }, scope = carrier.scope
+    let expectedSelection = carrierAttempt.baselineSelectionDigest, expectedComposition = carrierAttempt.composedInput
+    let expandedAt: string | undefined, rebasedOwnerId: string | undefined, expansionOwnerId = carrier.id
+    let lineage = lineages.get(carrier.id)
+    if (!lineage) { lineage = [...retryOperationLineage(store, carrier)]; lineages.set(carrier.id, lineage) }
+    let owner = carrier, source = carrierAttempt, position = 0
     for (;;) {
       if (!stageResult(owner, source, key, digest, basis)) {
         if (rebasedOwnerId === owner.id || owner.id !== expansionOwnerId) fail('跨重试raw诊断缺少原批准resultRef')
@@ -286,7 +288,7 @@ function scanSyncCheckpoints(store: SyncStore, operation: PhaseOperation, attemp
         if (!earlierAttempt && (source.baselineSelectionDigest !== owner.baselineSelection.digest
           || !seal || seal.composedTree !== expectedComposition.tree || seal.composedContentDigest !== expectedComposition.contentDigest
           || !whole || !whole.structurePassed || !whole.reviewPassed || whole.failure || whole.phase !== 'partitioned_final'
-          || !whole.partitionEvidence?.some(member => member.partitionId === saved.partitionBinding!.partitionId && member.resultRef.sha256 === digest))) fail('跨重试raw诊断缺少同阶段批准及正式扩域证明')
+          || !whole.partitionEvidence?.some(member => member.partitionId === partitionId && member.resultRef.sha256 === digest))) fail('跨重试raw诊断缺少同阶段批准及正式扩域证明')
         verifyBaselineSelection(owner.input, before)
         if (!extendsWithUninitializedResources(before, owner.baselineSelection)) fail('跨重试raw诊断扩域改变原冻结选择')
         scope = originalScope
@@ -298,11 +300,15 @@ function scanSyncCheckpoints(store: SyncStore, operation: PhaseOperation, attemp
         if (origin.number >= source.number || !stageResult(owner, origin, key, diagnostic.resultRef.sha256, basis)) fail('跨重试raw诊断缺少原失败resultRef')
         return owner
       }
-      const wrapper = stageResult(owner, source, `${key}:provenance`, undefined, basis)
+      const continuation = stageResult(owner, source, `${key}:repair-diagnostics-provenance`, undefined, basis)
+      if (!continuation && (!partitionId || !saved.reviewPassed || saved.failure || saved.rounds.at(-1)?.review?.verdict !== 'accept'))
+        fail('跨重试raw诊断缺少有效的已审复用或续审来源')
+      const wrapper = continuation ?? stageResult(owner, source, `${key}:provenance`, undefined, basis)
       if (!wrapper) fail('跨重试raw诊断缺少已审复用来源')
       const proof = read<{ fromOperationId?: string; fromAttemptId: string; resultRef: BlobRef }>(wrapper.resultRef)
       const nextPosition = lineage.findIndex(prior => prior.id === (proof.fromOperationId ?? owner.id))
-      if (nextPosition < position || proof.resultRef?.sha256 !== digest) fail('跨重试raw诊断复用来源不匹配原批准resultRef')
+      if (nextPosition < position || proof.resultRef?.sha256 !== (continuation ? diagnostic.resultRef.sha256 : digest))
+        fail('跨重试raw诊断复用来源不匹配原resultRef')
       const previous = store.readAttempt(proof.fromAttemptId), previousOwner = lineage[nextPosition]
       const composed = previous.composedInput
       const unchangedComposition = source.id === expandedAt
@@ -311,6 +317,17 @@ function scanSyncCheckpoints(store: SyncStore, operation: PhaseOperation, attemp
       if (previous.operationId !== previousOwner.id || nextPosition === position && previous.number >= source.number || !['failed', 'superseded', 'settled'].includes(previous.status)
         || (previousOwner.id !== rebasedOwnerId && (previousOwner.readSetDigest !== basis.readSetDigest || !isDeepStrictEqual(previousOwner.scope, scope)))
         || previous.baselineSelectionDigest !== expectedSelection || !unchangedComposition) fail('跨重试raw诊断的原attempt或冻结范围失配')
+      if (continuation) {
+        const produced = saved.rounds[0]
+        if (previous.id !== origin.id || previousOwner.id === owner.id || !settledApprovalSource(store, previousOwner)
+          || !stageResult(previousOwner, previous, key, diagnostic.resultRef.sha256, basis)
+          || !original.structurePassed || original.reviewPassed || original.status !== 'failed'
+          || !diagnostic.round.candidate || diagnostic.round.candidateDigest !== produced?.candidateDigest
+          || !isDeepStrictEqual(diagnostic.round.candidate, produced.candidate)
+          || diagnostic.round.rejectedOutput && diagnostic.round.rejectedOutput.purpose !== 'elaboration_review')
+          fail('跨重试raw诊断缺少原合格候选和已结算续审来源')
+        return previousOwner
+      }
       if (owner.id === expansionOwnerId && owner.inheritRetryBudget && owner.retryOf === previousOwner.id) {
         const parent = handoffParents.get(owner.id) ?? findReviewHandoffParent(store, owner)
         if (parent?.id !== previousOwner.id || previousOwner.baselineSelection?.digest !== expectedSelection) fail('跨重试raw诊断的正式换模型交接失配')
@@ -333,8 +350,8 @@ function scanSyncCheckpoints(store: SyncStore, operation: PhaseOperation, attemp
     authenticateNativeRejectedFinal(store, owner, origin, key, saved.failure!, original, readNativeRecord)
     raw.set(packet.ref.sha256, packet)
   }
-  const inspect = (ref: BlobRef, owner = operation): void => {
-    const proofKey = `${owner.id}:${ref.sha256}`
+  const inspect = (ref: BlobRef, owner = operation, current = attempt): void => {
+    const proofKey = `${current.id}:${ref.sha256}`
     if (proofs.has(proofKey)) return
     proofs.add(proofKey)
     const walk = (value: unknown): void => {
@@ -364,18 +381,19 @@ function scanSyncCheckpoints(store: SyncStore, operation: PhaseOperation, attemp
           ? owners.length === 1 && isDeepStrictEqual(saved.partitionBinding, locals[0].partitionBinding) && saved.inputDigest === locals[0].inputDigest
           : saved.phase === 'partitioned_final' && locals.every(local => local.partitionBinding!.planDigest === planDigest) && saved.inputDigest === partitionedElaborationInputDigest(planDigest, locals.map(local => local.inputDigest), analysisOnly)
         if (!inputMatches) fail('聚合诊断必须保留原局部身份或精确重算全局输入，不能替代原owner认证')
-        for (const member of owners) inspect(member.resultRef, owner)
+        for (const member of owners) inspect(member.resultRef, owner, current)
       } else for (const round of Array.isArray(saved.rounds) ? saved.rounds : []) if (round.rejectedOutput) authenticate(owner, saved, round)
       const diagnostic = Array.isArray(saved.rounds) ? saved.repairDiagnostics : undefined
       if (diagnostic) {
         const original = read<Saved>(diagnostic.resultRef), last = original.rounds.at(-1)
         if (original.inputDigest !== diagnostic.inputDigest || !isDeepStrictEqual(original.failure, diagnostic.failure) || !isDeepStrictEqual(last, diagnostic.round)) fail('历史raw诊断不能改写原失败round')
-        let diagnosticOwner = owner
+        let diagnosticOwner = owner, diagnosticAttempt = current
         if (owner.retryOf && (diagnostic.round.rejectedOutput?.ref || original.repairDiagnostics)) {
-          const origin = store.readAttempt(diagnostic.requestKey.split(':')[1])
-          if (origin.operationId !== owner.id) diagnosticOwner = inheritedDiagnosticOwner(saved, original, diagnostic, origin)
+          diagnosticAttempt = store.readAttempt(diagnostic.requestKey.split(':')[1])
+          if (diagnosticAttempt.operationId !== owner.id)
+            diagnosticOwner = inheritedDiagnosticOwner(owner, current, saved, original, diagnostic, diagnosticAttempt)
         }
-        inspect(diagnostic.resultRef, diagnosticOwner)
+        inspect(diagnostic.resultRef, diagnosticOwner, diagnosticAttempt)
       }
       for (const child of Object.values(value)) walk(child)
     }

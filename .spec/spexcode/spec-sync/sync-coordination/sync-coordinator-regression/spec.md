@@ -33,6 +33,8 @@ v2 复审回归经 CLI/HTTP 保存精确冻结证据路径，拒绝缺失和无�
 
 P0 传输冻结回归核新 attempt 保存 `reviewCoveragePreflight` 与 `reviewDuplicatePreflight`。已冻结覆盖自检且已有预留派发的旧 v6 继续保持重复项自检字段缺席和原请求绑定，其他历史协议沿原件恢复。
 
+正式重试的 P1 双分区回归使用真实 Git、隔离 SQLite 与受控的原生会话。兄弟作者失败终止旧操作后，新 operation 续用 P0 与结构已通过的本区 Git 产物，只为合格稿派发新独审。验证独立身份、只读树、原拒稿字节、原记录和证据摘要，冷读必须按原失败来源认证拒稿。
+
 同operation格式续审回归以真实只读Git工作树产生原失败收尾的 `failedWorktree`，验证首次及连续两次格式拒稿后只重审同一候选、原生成trace/Git稿不重派，拒稿附件逐字保存。正式checkpoint与canonical见证路径不一致的反例在派发前拒绝。
 
 真实 Git 和隔离 SQLite 中，P1 候选结构通过、原独审因无效 affectedIds 被拒后，在写入结果与汇总 attempt 失败之间正式暂停。恢复后只为原候选新派独立审查，原生成 trace、候选摘要及正文一致。原审查缺失、追踪摘要失配或正式 Native 资源的原生完成记录不符时，拒绝恢复且零新增派发。
