@@ -1090,12 +1090,17 @@ export class SyncStore {
       this.saveOperation(tx, operation); return operation
     })
   }
-  recordFailure(fence: WriteFence, failure: SyncFailure): SyncOperation {
+  recordFailure(fence: WriteFence, failure: SyncFailure, continueRepair = false): SyncOperation {
     for (const ref of failure.evidenceRefs) this.blob(ref)
     return this.write(tx => {
       const { operation, attempt } = this.checkFence(tx, fence, true)
       if (attempt.status === 'applying') { operation.phase = 'recovery_required'; attempt.failure = clone(failure) }
-      else { attempt.failure = clone(failure); attempt.status = 'failed'; operation.phase = failure.kind === 'missing_input' ? 'needs_input' : failure.kind === 'conflict' ? 'conflicted' : failure.kind === 'budget' ? 'budget_exhausted' : 'failed'; this.release(tx, attempt.leaseToken) }
+      else {
+        attempt.failure = clone(failure)
+        attempt.status = 'failed'
+        operation.phase = failure.kind === 'repairable' && continueRepair ? 'repairing' : failure.kind === 'missing_input' ? 'needs_input' : failure.kind === 'conflict' ? 'conflicted' : failure.kind === 'budget' ? 'budget_exhausted' : 'failed'
+        this.release(tx, attempt.leaseToken)
+      }
       this.saveAttempt(tx, attempt); this.saveOperation(tx, operation); return operation
     })
   }

@@ -32,6 +32,8 @@ related:
 
 工作台在已启用完整管理的宿主显示 LLM Manager 的当前可用路线和同源设置入口。默认执行器、API 地址、模型和凭据通过同一管理界面保存。设置变更作用于后续新派发，既有操作和冻结结果维持各自已保存的身份。
 
+P1 独审因已结算的 Manager 额度失败时，在原 operation 的下一次尝试从失败会话所在组取得其后继。继续审查通过结构门的同一份 Git 候选。每个分区沿自己的独审记录取后继，原作者、输入和预算保留。组内无可用后继时保留候选及原因。
+
 sync run/verify 的 API 和 CLI --model 接受操作级模型选择。选择进入不可变 admission/payload/ingress 身份，同 requestId 改模型拒绝；普通重复业务请求不能靠新 requestId 换模型取得新预算或归并到另一模型，换模型必须经正式 retryOf。显式 retry 未指定模型时继承原操作，显式另选模型仍复用原 source/input/policy/readset/request/origin 并保持既有已批准 P1 义务。
 
 历史缺省及显式 gpt-6.1-sol 统一为字段省略，其持久语义固定为该模型。旧操作不回写字段，不改旧 payload、receipt、fence；重启、恢复及同请求重放保持原选择。非默认模型的新操作使用带精确模型的 sync-tools-v2 固定运行描述，旧二进制只识别 v1 时明确拒绝执行；同时以既有 sync component v13 无DDL writer marker 在入口整体拒绝旧二进制，避免其绕过原运行描述派生 sol 重试；运行描述仅为能力/回滚门，选择权威仍为 operation。默认旧操作继续读原 v1。

@@ -2,6 +2,7 @@
 
 - 本目录复用 session 原生工作树执行与 spec-core/contracts；不自行维护第二份契约图或会话执行器。旧受限结构化策略只按原绑定恢复历史任务。
 - 新普通 Native 叶的分批草稿 CLI/MCP 共用既有校验和渲染。只读配置留在原 seed，正式候选仍核 Git 对象与完整结构。writer76 升级沿 [[sync-migrations]] 的一致备份和原检查点恢复。
+- P1 Manager 独审额度失败按各分区的正式会话结算，在同 operation 下一尝试只续同一候选，精确后继随新派发冻结。writer77 按 [[sync-migrations]] 升降级。
 - Manager 托管 Native 新会话由原功能组重新选路，冻结于派发。旧键、在途及恢复沿原 Native 路线。writer73 升级先停稳、结算并保留一致 v72 SQLite 及配套 Git/CAS 备份，契约见 [[sync-model-selection]]、[[sync-migrations]]。
 - Dashboard 保存 Spec 立即进入 spec→code；外部文件保存/index变化只观察，Git 提交冻结 HEAD 后才派发。已采纳的真实同步发布先消费为基线，避免回声或污染下次提交方向。
 - 已启用的主分支自动采纳新授权的完整已验证交付；与显式采纳共用发布锁、原收据和普通 Git 快进。每个直接后继采纳后先观察该 HEAD 再继续；历史无标记或来源有改动时保留私有结果。writer46 只追加自动采纳索引与版本围栏，回滚恢复一致 v45 备份及原证据。

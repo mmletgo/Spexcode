@@ -172,7 +172,7 @@ class RouteLookup(BaseModel):
         新会话按原功能组当前排序选路，额度失败后的后继选择可沿用原游标。
 
     Code Logic（这个类做什么）:
-        校验选路请求中可独立提供的同组锚点和额度后继路由。
+        校验同组锚点、额度后继路由，以及可用于精确绑定的原失败会话。
     """
 
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -180,6 +180,7 @@ class RouteLookup(BaseModel):
     action: Literal["resolve"]
     nextAfter: ManagedRoute | None = None
     sameGroupAs: ManagedRoute | None = None
+    failedSessionId: str | None = Field(default=None, min_length=1, max_length=256, pattern=r"^[^\r\n\x00]+$")
 
 
 class RouteRequest(BaseModel):
@@ -635,19 +636,24 @@ def resolve(manager: LlmManager, config: HostConfig, request: RouteLookup) -> Ma
 
     Code Logic（这个函数做什么）:
         按冻结绑定验证锚点的 owner 和组，再由 Manager 从组首选路。
-        带额度游标的请求读取已结算的后继，后继失效时继续沿游标向下。
+        额度游标读取已结算后继；指定失败会话时只读取该会话。后继失效时继续沿游标向下。
     """
 
     if request.sameGroupAs is not None:
         require_binding(manager, config.group_id, request.sameGroupAs)
     after = request.nextAfter
     if after is None:
+        if request.failedSessionId is not None:
+            raise HostError("llm_manager_quota_required")
         choice = ready_choice(manager, manager.resolve(config.group_id))
     else:
         old = require_binding(manager, config.group_id, after)
-        claim = manager.session.scalars(select(RouteClaim).where(
+        claims = select(RouteClaim).where(
             RouteClaim.owner_id == manager.owner_id, RouteClaim.route_id == old.route_id, RouteClaim.outcome == "quota",
-        ).order_by(RouteClaim.settled_at.desc(), RouteClaim.session_id.desc()).limit(1)).first()
+        )
+        if request.failedSessionId is not None:
+            claims = claims.where(RouteClaim.session_id == request.failedSessionId)
+        claim = manager.session.scalars(claims.order_by(RouteClaim.settled_at.desc(), RouteClaim.session_id.desc()).limit(1)).first()
         if claim is None:
             raise HostError("llm_manager_quota_required")
         if claim.successor_id is None:

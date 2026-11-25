@@ -13,6 +13,8 @@ related:
 
 ## expanded spec
 
+P1 自动续审用各自失败分区的检查点取得精确 reviewer、实际路线及会话身份。额度失败和精确停止逐值核对 canonical Native 原件，随后核对同一结构候选。总体失败中用于显式重试的游标继续保留。
+
 托管线路切换的正式额度重试以协调器记录的唯一实际失败资源为游标。核对同 operation、attempt、generation、输入、请求摘要、持久派发路线、候选和原生精确停止；缺证或歧义不派发。未记录派发级路线的历史 attempt 仍用原准入路线。
 
 含analysisOnlyPartitions的全局P1读取另核共同whole P0、同计划、每区精确原P0 ref/正文及两种分区证据的完整互斥并集，并用同一聚合算法重算新inputDigest。仅分析P0 ref保活为JSON证据，不作为P1 round或raw；原局部强认证继续仅沿partitionEvidence进行。
