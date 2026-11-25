@@ -5076,9 +5076,11 @@ for (const target of ['code_behavior_analyze', 'elaboration_generate'] as const)
   assert.equal(f.calls.some(call => call.purpose === 'code_generate'), false)
 })
 
-for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read-witness', 'format-read-witness-twice', 'format-wrong-witness', 'format-formal-retry', 'format-terminal-retry', 'format-terminal-managed-quota', 'format-terminal-stopped-review', 'format-terminal-stopped-review-unobserved', 'format-sibling-stopped-draft', 'format-wrong-packet', 'format-wrong-candidate', 'legacy-review', 'v3-review', 'paused', 'paused-review', 'newer-generation', 'wrong-stop', 'wrong-candidate', 'wrong-task', 'partition-settled-interrupted-review'] as const) test(`P1已结算${mode.startsWith('format-terminal-stopped-review') ? '失败后正式停止的独审' : mode === 'format-terminal-managed-quota' ? '托管额度失败独审' : mode.startsWith('format') ? '格式失败独审' : mode === 'partition-settled-interrupted-review' ? '中断前独审绑定拒绝' : 'session/events独审超时'}只重审同一Git候选 ${mode}`, async t => {
+for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read-witness', 'format-read-witness-twice', 'format-wrong-witness', 'format-formal-retry', 'format-terminal-retry', 'format-terminal-managed-quota', 'format-terminal-managed-quota-unavailable', 'format-terminal-stopped-review', 'format-terminal-stopped-review-unobserved', 'format-sibling-stopped-draft', 'format-wrong-packet', 'format-wrong-candidate', 'legacy-review', 'v3-review', 'paused', 'paused-review', 'newer-generation', 'wrong-stop', 'wrong-candidate', 'wrong-task', 'partition-settled-interrupted-review'] as const) test(`P1已结算${mode.startsWith('format-terminal-stopped-review') ? '失败后正式停止的独审' : mode.startsWith('format-terminal-managed-quota') ? '托管额度失败独审' : mode.startsWith('format') ? '格式失败独审' : mode === 'partition-settled-interrupted-review' ? '中断前独审绑定拒绝' : 'session/events独审超时'}只重审同一Git候选 ${mode}`, async t => {
   const stoppedReview = mode.startsWith('format-terminal-stopped-review'), omitFailedObservation = mode === 'format-terminal-stopped-review-unobserved'
-  const terminalQuota = mode === 'format-terminal-managed-quota'
+  const terminalQuota = mode.startsWith('format-terminal-managed-quota')
+  const unavailableQuotaSuccessor = mode === 'format-terminal-managed-quota-unavailable'
+  let quotaSuccessorAvailable = !unavailableQuotaSuccessor
   const formatFailure = mode.startsWith('format') && !stoppedReview && !terminalQuota
   const { managedModel } = await import('../llm-manager-route.js')
   const quotaAnchor = { vendor: 'claude', model: 'preferred', kind: 'anthropic-messages', routeId: '1'.repeat(64) } as const
@@ -5304,7 +5306,7 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
         if (!reviewQuota) return quotaAnchor
         assert.deepEqual(reviewQuota.route, quotaAnchor)
         quotaLookups.push(reviewQuota.failedSessionId)
-        return quotaSuccessor
+        return quotaSuccessorAvailable ? quotaSuccessor : null
       },
     }
   } else f.options.runner = async request => {
@@ -5392,7 +5394,7 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
     const previousBytes = Buffer.from(JSON.stringify(old))
     const originalRefs = old.checkpointRefs.map(ref => [ref, readEvidence(commonDir, ref)] as const)
     f.closeForRestart()
-    const protocol = openProtocol(join(f.parent, 'sync.sqlite'))
+    let protocol = openProtocol(join(f.parent, 'sync.sqlite'))
     t.after(() => protocol.close())
     store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) })
     if (omitFailedObservation) {
@@ -5400,10 +5402,12 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
       assert.ok(checkpoints.length < oldReviewResource.checkpoints.length)
       protocol.withTransaction(tx => tx.exec('UPDATE sync_resources SET record_json=? WHERE id=?', JSON.stringify({ ...oldReviewResource, checkpoints }), oldReviewResource.id))
     }
-    const retryKey = 'terminal-p1-format-retry'
-    const admission = await prepareSyncAdmission(f.input, f.plan, { ingressKey: retryKey, rootCauseId: retryKey, retryOf: parent.id, model: terminalQuota ? managedModel(quotaAnchor) : 'zcode:fixture/retry', origin: parent.origin, budget: parent.budget, managedRoot: f.managedRoot, baselineSelection: store.readBusinessBaselineSelection(parent.id), executionScope: parent.scope, impactDigest: parent.impactDigest })
-    active = store.admitAndEnqueue(admission)
-    active = store.ackDispatch(f.input.source.repositoryId, active.dispatchMessageId)
+    const admitRetry = async (previous: SyncOperation, requestId: string): Promise<SyncOperation> => {
+      const admission = await prepareSyncAdmission(f.input, f.plan, { ingressKey: requestId, rootCauseId: requestId, retryOf: previous.id, model: terminalQuota ? managedModel(quotaAnchor) : 'zcode:fixture/retry', origin: previous.origin, budget: previous.budget, managedRoot: f.managedRoot, baselineSelection: store.readBusinessBaselineSelection(previous.id), executionScope: previous.scope, impactDigest: previous.impactDigest })
+      const admitted = store.admitAndEnqueue(admission)
+      return store.ackDispatch(f.input.source.repositoryId, admitted.dispatchMessageId)
+    }
+    active = await admitRetry(parent, 'terminal-p1-format-retry')
     assert.equal(active.retryOf, parent.id)
     assert.equal(active.input.id, parent.input.id)
     assert.equal(active.planBlob?.sha256, parent.planBlob?.sha256)
@@ -5412,23 +5416,54 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
     assert.deepEqual(active.scope, parent.scope)
     assert.deepEqual(store.readBusinessBaselineSelection(active.id), store.readBusinessBaselineSelection(parent.id))
     store.expandContractScope = () => { throw new StructuredSessionError('unsupported', 'fixture在P1批准后、范围变化前停止') }
-    const beforeRetry = calls.length
+    let beforeRetry = calls.length
     result = await runSyncOperation(store, active.id, f.options)
+    let unavailableAttempt: SyncAttempt | undefined
+    if (unavailableQuotaSuccessor) {
+      const unavailableOperation = result.operation
+      unavailableAttempt = store.readAttempt(unavailableOperation.currentAttemptId!)
+      const partitionId = rejected.partitionBinding!.partitionId
+      const carried = readLocals(unavailableAttempt).find(local => local.partitionBinding?.partitionId === partitionId)!
+      assert.equal(unavailableOperation.phase, 'failed')
+      assert.equal(unavailableAttempt.failure?.code, 'sync_llm_manager_no_review_successor')
+      assert.deepEqual(store.readRetryEligibility(unavailableOperation.id), { eligible: true })
+      assert.equal(carried.failure?.code, 'sync_llm_manager_no_review_successor')
+      assert.equal(carried.candidateDigest, rejected.candidateDigest)
+      assert.deepEqual(carried.repairDiagnostics?.failure, rejected.failure)
+      assert.deepEqual(carried.repairDiagnostics?.round, authorRound)
+      assert.ok(!unavailableAttempt.dispatchPlans.some(dispatch => dispatch.key.includes(`:partition:${partitionId}:`)))
+      assert.deepEqual(calls.slice(beforeRetry).map(call => [ownerPath(call), call.purpose]), [
+        [siblingPath, 'elaboration_generate'], [siblingPath, 'elaboration_review'],
+      ])
+      assert.deepEqual(quotaLookups, [sessionId])
+      protocol.close()
+      protocol = openProtocol(join(f.parent, 'sync.sqlite'))
+      store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) })
+      active = await admitRetry(unavailableOperation, 'terminal-p1-quota-successor-restored')
+      assert.equal(active.retryOf, unavailableOperation.id)
+      assert.equal(active.input.id, parent.input.id)
+      store.expandContractScope = () => { throw new StructuredSessionError('unsupported', 'fixture在P1批准后、范围变化前停止') }
+      beforeRetry = calls.length
+      quotaSuccessorAvailable = true
+      result = await runSyncOperation(store, active.id, f.options)
+    }
     const next = store.readAttempt(result.operation.currentAttemptId!), retryCalls = calls.slice(beforeRetry)
     const dispatches = retryCalls.map(call => ({ purpose: call.purpose, owner: ownerPath(call) }))
-    t.diagnostic(JSON.stringify({ terminalParent: parent.phase, terminalFailure: old.failure?.code, reviewFailure: rejected.failure?.code, stoppedReview: oldReviewCheckpoint.stop?.state, quotaLookups, retryDispatches: dispatches }))
+    t.diagnostic(JSON.stringify({ terminalParent: parent.phase, terminalFailure: old.failure?.code, reviewFailure: rejected.failure?.code, stoppedReview: oldReviewCheckpoint.stop?.state, unavailableRetry: unavailableAttempt?.failure?.code, quotaLookups, retryDispatches: dispatches }))
     assert.ok(retryCalls.every(call => call.purpose.startsWith('elaboration_')), 'P0 原批准继续有效')
     if (omitFailedObservation) {
       assert.equal(result.failure?.code, 'review_retry_binding')
       assert.deepEqual(dispatches.filter(call => call.owner === contractPath), [], '没有观察到原失败就不能把一次普通停止当成原只读独审失败')
       return
     }
-    assert.deepEqual(dispatches.filter(call => call.owner === siblingPath).map(call => call.purpose), ['elaboration_generate', 'elaboration_review'], '无合格稿的兄弟分区仍从作者开始')
+    assert.deepEqual(dispatches.filter(call => call.owner === siblingPath).map(call => call.purpose),
+      unavailableQuotaSuccessor ? [] : ['elaboration_generate', 'elaboration_review'],
+      '首个重试补齐无稿兄弟分区，后续应保留它的批准')
     assert.deepEqual(dispatches.filter(call => call.owner === contractPath).map(call => call.purpose), ['elaboration_review'], '终态正式重试只为同一已校验候选重新派发独审')
     const review = retryCalls.find(call => ownerPath(call) === contractPath)!
     const packet = authorRound.rejectedOutput, tree = readTree(commonDir, review.worktree!.tree)
     if (terminalQuota) {
-      assert.deepEqual(quotaLookups, [sessionId])
+      assert.deepEqual(quotaLookups, unavailableQuotaSuccessor ? [sessionId, sessionId] : [sessionId])
       const dispatch = next.dispatchPlans.find(dispatch => dispatch.key === review.requestKey)
       assert.equal(dispatch?.managedModel, managedModel(quotaSuccessor))
       const resource = store.findResource(next.id, review.requestKey)!
@@ -5458,7 +5493,12 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
     assert.deepEqual(reviewed.repairDiagnostics?.round.draft, authorRound.draft)
     assert.notEqual(reviewedRound.traces[1].sessionId, rejected.failure?.sessionId)
     assert.notEqual(reviewedRound.traces[1].sessionId, authorRound.traces[0].sessionId)
-    assert.deepEqual(Buffer.from(JSON.stringify(store.readAttempt(old.id))), previousBytes)
+    const originalAttempt = store.readAttempt(old.id)
+    if (unavailableAttempt) {
+      assert.deepEqual(store.readAttempt(unavailableAttempt.id), unavailableAttempt)
+      assert.equal(originalAttempt.status, 'superseded', '后继准入沿现有规则结算重叠的祖先')
+    } else assert.equal(originalAttempt.status, old.status)
+    assert.deepEqual(Buffer.from(JSON.stringify({ ...originalAttempt, status: old.status })), previousBytes)
     assert.deepEqual(store.findResource(old.id, oldReviewDispatch.key), oldReviewResource)
     assert.equal(JSON.stringify(readRecord(sessionId)), oldReviewRecord)
     for (const [ref, bytes] of originalRefs) assert.deepEqual(readEvidence(commonDir, ref), bytes)
