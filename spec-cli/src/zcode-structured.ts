@@ -853,7 +853,8 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
         while (!terminal && Date.now() < deadline && !exited) { await poll(deadline); if (!terminal) await sleep(100) }
       }
       if (sessionCreated && (!sent || terminal)) {
-        const deadline = Date.now() + 3000
+        const idleWindowMs = 3000
+        const deadline = Date.now() + idleWindowMs
         const observations: ReturnType<typeof zcodeIdleObservation>[] = []
         do {
           const snapshot = await request('session/read', { sessionId: plan.sessionId }) as IdleSnapshot
@@ -863,7 +864,16 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
           if (!idle) await sleep(50)
         } while (!idle && Date.now() < deadline)
         if (!idle) throw new StructuredSessionError('cancellation_pending', 'ZCode exact terminal has no matching idle runtime')
-        await sampleOwnedProcesses(plan, deadline)
+        try { await sampleOwnedProcesses(plan, deadline) }
+        catch (error) {
+          if (!worktree || terminal?.type !== 'turn.completed' || terminal.payload.resultType !== 'success'
+            || !(error instanceof StructuredSessionError) || error.code !== 'cancellation_pending'
+            || abortRequested || protocolError || resultError || !launchStillOwned()) throw error
+          const retryDeadline = Date.now() + idleWindowMs
+          await sleep(50)
+          if (abortRequested || protocolError || exited || !launchStillOwned()) throw error
+          await sampleOwnedProcesses(plan, retryDeadline)
+        }
         const response = await request('session/close', { sessionId: plan.sessionId, expectedPersistence: 'immediate' }) as { closed?: boolean }
         closeAcknowledged = response.closed === true
       }

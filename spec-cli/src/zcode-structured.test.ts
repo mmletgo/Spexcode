@@ -628,7 +628,7 @@ test('cold ZCode cancellation settles an unpublished worktree launch only after 
   assert.equal(existsSync(join(root, 'exit.json')), false)
 })
 
-for (const censusPhase of ['pre-exit', 'post-exit', 'late-protocol-error', 'startup-transient', 'mixed-message-protocol'] as const) test(`same-stack ZCode completion reuses its fresh stop proof while cold unsettled replay reobserves processes: ${censusPhase}`, { timeout: 30_000 }, async t => {
+for (const censusPhase of ['pre-exit', 'post-exit', 'late-protocol-error', 'startup-transient', 'post-idle-transient', 'post-idle-timeout', 'post-idle-persistent', 'mixed-message-protocol'] as const) test(`same-stack ZCode completion reuses its fresh stop proof while cold unsettled replay reobserves processes: ${censusPhase}`, { timeout: 30_000 }, async t => {
   const directory = mkdtempSync(join(tmpdir(), 'zcode-worktree-census-repro-'))
   t.after(() => rmSync(directory, { recursive: true, force: true }))
   const bin = join(directory, 'bin'), workspace = join(directory, 'workspace'), realm = join(directory, 'realm'), id = 'fixture'
@@ -638,17 +638,19 @@ for (const censusPhase of ['pre-exit', 'post-exit', 'late-protocol-error', 'star
   const originalSpawn = childProcess.spawn.bind(childProcess)
   let preExitCensusCalls = 0, postExitCensusCalls = 0, preExitInjectedCensusCalls = 0, postExitInjectedCensusCalls = 0, coldReplayRequested = false
   let publishedBeforeStartupCensus = false, startupInjectedCensusCalls = 0
+  let postIdleInjectedCensusCalls = 0
+  const postIdle = censusPhase.startsWith('post-idle-')
   const cli = join(bin, 'zcode')
   const rpcFixture = `#!/usr/bin/env node
 const readline=require('node:readline'),cp=require('node:child_process');
 if(process.argv.includes('--version')){process.stdout.write('99.4.1\\n');process.exit(0)}
-const rl=readline.createInterface({input:process.stdin});let create,send;
+const rl=readline.createInterface({input:process.stdin});let create,send,closeCount=0;
 const turnId='fixture-turn',response='{"ok":true}',model=()=>create.model;
 const reply=(id,result)=>process.stdout.write(JSON.stringify({id,result})+'\\n');
 rl.on('line',line=>{const request=JSON.parse(line),params=request.params||{};
 if(request.method==='session/create'){create=params;reply(request.id,{session:{sessionId:create.sessionId,model:create.model}})}
 else if(request.method==='session/read')reply(request.id,{session:{sessionId:create.sessionId,status:'idle',model:model()},settings:{model:{current:model()}},runtime:{pendingRequestIds:[]},projection:{currentTurnId:send?turnId:undefined,pendingPermissions:[],activeToolCalls:[]}})
-else if(request.method==='session/send'){if(process.platform==='darwin'&&${JSON.stringify(censusPhase)}==='pre-exit'){const probe=cp.spawnSync('/usr/bin/git',['config','core.filemode','core.autocrlf'],{stdio:'ignore'});if(probe.error)throw probe.error;}send=params;reply(request.id,{accepted:true,sessionId:create.sessionId})}
+else if(request.method==='session/send'){if(send)throw new Error('fixture accepts one send');if(process.platform==='darwin'&&${JSON.stringify(censusPhase)}==='pre-exit'){const probe=cp.spawnSync('/usr/bin/git',['config','core.filemode','core.autocrlf'],{stdio:'ignore'});if(probe.error)throw probe.error;}send=params;reply(request.id,{accepted:true,sessionId:create.sessionId})}
 else if(request.method==='session/events'){const events=[
 {type:'turn.started',payload:{inputId:send.inputId,queryId:send.queryId,messageId:'fixture-user'}},
 {type:'session.updated',payload:{providerId:model().providerId,modelId:model().modelId,toolCount:0}},
@@ -678,7 +680,7 @@ else if(request.method==='session/messages')reply(request.id,{hasMore:false,mess
 {info:{id:'fixture-user',sessionID:create.sessionId,role:'user',modelSelection:model(),anchor:{turnId},semantics:{kind:'user_prompt'}},parts:[{type:'text',text:send.content}]},
 {info:{id:'fixture-final',sessionID:create.sessionId,role:'assistant',providerId:model().providerId,modelId:model().modelId,anchor:{turnId},semantics:{kind:'assistant_response'}},parts:[{type:'text',text:response}]}
 ]})
-else if(request.method==='session/close'){reply(request.id,{closed:true});if (${JSON.stringify(censusPhase)}==='late-protocol-error')process.stdout.write('malformed-native-rpc\\n')}
+else if(request.method==='session/close'){if(++closeCount!==1)throw new Error('fixture accepts one close');reply(request.id,{closed:true});if (${JSON.stringify(censusPhase)}==='late-protocol-error')process.stdout.write('malformed-native-rpc\\n')}
 else throw new Error('unexpected fixture RPC')
 });
 `
@@ -711,6 +713,12 @@ else throw new Error('unexpected fixture RPC')
   }
   const interceptedSpawn = (command: string, args: readonly string[], options: SpawnOptions) => {
     if (command === '/bin/ps') {
+      if (postIdle && postIdleInjectedCensusCalls < (censusPhase === 'post-idle-persistent' ? 2 : 1)
+        && existsSync(join(root, 'idle.json'))) {
+        postIdleInjectedCensusCalls++
+        const probe = censusPhase === 'post-idle-timeout' ? 'setTimeout(() => {}, 10_000)' : 'process.exitCode=23'
+        return originalSpawn(process.execPath, ['-e', probe], options)
+      }
       if (publishedBeforeStartupCensus && startupInjectedCensusCalls === 0 && !existsSync(join(root, 'send.json'))) {
         startupInjectedCensusCalls++
         return originalSpawn(process.execPath, ['-e', 'process.exitCode=23'], options)
@@ -723,7 +731,7 @@ else throw new Error('unexpected fixture RPC')
         }
       } else {
         preExitCensusCalls++
-        if (censusPhase !== 'post-exit' && !coldReplayRequested && preExitInjectedCensusCalls === 0 && existsSync(stopObservationsPath)) {
+        if (!postIdle && censusPhase !== 'post-exit' && !coldReplayRequested && preExitInjectedCensusCalls === 0 && existsSync(stopObservationsPath)) {
           const observations = readFileSync(stopObservationsPath, 'utf8').trim().split('\n').map(line => JSON.parse(line) as { nativeStopped: boolean })
           if (observations.length === 1 && observations[0].nativeStopped) {
             preExitInjectedCensusCalls++
@@ -753,6 +761,20 @@ else throw new Error('unexpected fixture RPC')
     }
     if ('error' in outcome) {
       assert.equal(outcome.error.code, 'cancellation_pending')
+      if (postIdle) {
+        assert.equal(existsSync(completedPath), false)
+        assert.equal(existsSync(join(root, 'terminal.json')), true)
+        if (censusPhase !== 'post-idle-timeout') {
+          const exit = JSON.parse(readFileSync(exitPath, 'utf8')) as { code: number | null; stopped: boolean; idle: boolean; closed: boolean }
+          assert.deepEqual({ code: exit.code, stopped: exit.stopped, idle: exit.idle, closed: exit.closed }, { code: 0, stopped: true, idle: true, closed: false })
+        }
+        if (censusPhase === 'post-idle-persistent') {
+          assert.equal(postIdleInjectedCensusCalls, 2)
+          return
+        }
+        assert.equal(postIdleInjectedCensusCalls, 1)
+        assert.fail(`a transient post-idle observation must retry the same close before publication; got ${outcome.error.message}`)
+      }
       if (censusPhase !== 'post-exit') {
         assert.equal(existsSync(stopObservationsPath), true)
         const stopObservations = readFileSync(stopObservationsPath, 'utf8').trim().split('\n').map(line => JSON.parse(line) as { nativeStopped: boolean })
@@ -788,6 +810,7 @@ else throw new Error('unexpected fixture RPC')
       assert.fail(`fresh same-stack stop proof should settle the warm result; got ${outcome.error.message}`)
     }
     if (censusPhase === 'late-protocol-error') assert.fail('终态后的原生协议错误不能复用本轮停止观察')
+    if (censusPhase === 'post-idle-persistent') assert.fail('连续的进程观测失败不得发布结果')
     const exit = JSON.parse(readFileSync(exitPath, 'utf8')) as { code: number | null; signal: string | null; stopped: boolean; acknowledged: boolean; idle: boolean; closed: boolean }
     assert.deepEqual({ code: exit.code, signal: exit.signal, stopped: exit.stopped, acknowledged: exit.acknowledged, idle: exit.idle, closed: exit.closed }, { code: 0, signal: null, stopped: true, acknowledged: false, idle: true, closed: true })
     assert.equal(postExitCensusCalls, 0, 'same-stack settlement must reuse its fresh process-stop observations')
@@ -795,6 +818,7 @@ else throw new Error('unexpected fixture RPC')
     assert.equal(outcome.result.turnId, 'fixture-turn')
     assert.equal(outcome.result.text, '{"ok":true}')
     if (censusPhase === 'startup-transient') assert.equal(startupInjectedCensusCalls, 1)
+    if (postIdle) assert.equal(postIdleInjectedCensusCalls, 1)
     const expectedUsage = censusPhase === 'pre-exit'
       ? { source: 'zcode-turn-usage', totalInputTokens: 1100, outputTokens: 134, cacheReadInputTokens: 800, cacheWriteInputTokens: 0 }
       : undefined

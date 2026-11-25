@@ -69,6 +69,8 @@ NativePlan v1/v2 与缺席 `nativeConfiguration` 的历史请求保持原策略�
 
 先捕获原始消息，再精确 session/close:true 与 EOF，确认自有 detached 进程组及全部已观察 app/MCP 子进程死亡，才写 completed。MCP startToken 缺失时使用宿主 ps 的精确 PID/start 身份补证，不伪造 reader ledger。completed 冷重放核原请求、原始见证、schema、proof 与 durable output，零新 SDK/API；未知 in-progress 不追加 prompt，保留 cancellation_pending。
 
+worktree 的精确成功终态已保存原始消息，且原会话已观察到 idle 时，若 close 前的进程观测返回 cancellation_pending，在无取消或协议错误并重新核实同一存活 leader 与 receipt 后，允许一次单独限时 3 秒的观测复验。只在复验完成后向原会话发 close。连续观察失败保留原结算门及失败，单次 send、正式 close ACK、停止观察、输出与 schema 认证保持。原 idle、RPC、取消及 close 后停止的截止规则不变。
+
 原生 TurnComplete 将 projection.status 置 idle，但保留 currentTurnId 作为历史指针；此指针只允许缺省或精确等于已核终态 turn，另一 turn 仍拒绝。真正活动来自 runtime.activeTurnId/kind，终态事件可先于 finally 清除它；必须等真实活动消失，pending request/permission 为空且工具状态全部为 completed/failed/denied，未知、pending/running 均拒绝。idle 诊断逐次保留白名单真实 status、active/current turn、pending 身份数组和工具状态，不保存传输头、工具输入或权限正文。正式 close ACK 和整组/reader 死亡仍是独立必需结算证据，不改写旧失败的 idle=false。
 
 取消沿原协调入口撤销发布权。活运行向同 session 发 stop，核 ACK 后仍要求精确 turn 终态与 idle；关闭后仍核全部进程。冷取消只允许原固定 plan、PID/start/receipt 的专属 runtime，精确 TERM 后核进程组与 MCP 全亡；未知身份不操作，不以 ACK、leader 退出或迟到 output 释放容量或发布结果。
