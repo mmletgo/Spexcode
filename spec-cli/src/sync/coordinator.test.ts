@@ -5225,7 +5225,7 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
         else assert.equal(actual.purpose, 'elaboration_review')
         const worktree = draft ? committedDraftFixture(f, actual, draft, workspace) : undefined
         const output = draft ? { summary: '已正常提交草稿' } : interruptedReview && attempt.number === 1
-          ? { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ code: 'review_binding', kind: 'repair', message: '修复目标须引用现存契约条款', affectedIds: ['REQ-UNKNOWN-INTERRUPTED'], evidence: `${contractPath}:42`, decision: '修复验收前的引用' }] }
+          ? { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{ code: 'review_binding', kind: 'repair', message: '修复目标须引用现存契约条款', affectedIds: ['REQ-EXPORT-01', 'export-contract'], evidence: `${contractPath}:42`, decision: '修复验收前的引用' }] }
           : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
         const resultDigest = contentHash(JSON.stringify(output)), message = formatFailure ? 'fixture拒绝原格式' : 'ZCode native RPC timeout (session/events)'
         if ((!timingOut || readWitness) && !worktree) f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
@@ -5290,6 +5290,7 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
     assert.equal(originalResult.structurePassed, true)
     assert.equal(originalResult.reviewPassed, false)
     assert.deepEqual(originalRound.findings.filter(issue => issue.severity === 'error').map(issue => issue.code), ['review_binding'])
+    assert.deepEqual(originalRound.review!.findings[0].affectedIds, ['REQ-EXPORT-01', 'export-contract'])
     assert.notEqual(originalRound.traces[0].sessionId, originalRound.traces[1].sessionId)
     assert.deepEqual(calls.filter(call => call.purpose.startsWith('elaboration_')).map(call => call.purpose), ['elaboration_generate', 'elaboration_review', 'elaboration_review'])
     const reviewed = savedLocal(retry), reviewedRound = reviewed.rounds.at(-1)!
@@ -5298,6 +5299,7 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
     assert.deepEqual(reviewedRound.traces[0], originalRound.traces[0])
     assert.equal(reviewedRound.draft?.oid, originalRound.draft?.oid)
     assert.notEqual(reviewedRound.traces[1].sessionId, originalRound.traces[1].sessionId)
+    assert.match(calls.filter(call => call.purpose === 'elaboration_review')[1].prompt, /节点 ID、owner 标识和路径只作定位证据/)
     return
   }
   assert.equal(old.status, 'superseded')
@@ -5363,7 +5365,12 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
     }
   } else assert.deepEqual(elaborationCalls[1].worktree, elaborationCalls[2].worktree)
   assert.deepEqual(elaborationCalls[1].schema, elaborationCalls[2].schema)
-  if (mode === 'v3-review') assert.equal(elaborationCalls[1].prompt, elaborationCalls[2].prompt, '已有V3超时续审提示逐字保持')
+  if (mode === 'v3-review') {
+    const itemIdGuidance = /\naffectedIds 只填当前契约图中实际存在的业务条目 ID[^\n]*/
+    assert.doesNotMatch(elaborationCalls[1].prompt, itemIdGuidance)
+    assert.match(elaborationCalls[2].prompt, itemIdGuidance)
+    assert.equal(elaborationCalls[2].prompt.replace(itemIdGuidance, ''), elaborationCalls[1].prompt, '新续审只增加条目 ID 说明')
+  }
   if (mode === 'legacy-review') assert.doesNotMatch(elaborationCalls[1].prompt, /沿冻结VERIFY命令和包装器的实际调用逐项核对/)
   assert.match(elaborationCalls[2].prompt, /沿冻结VERIFY命令和包装器的实际调用逐项核对/)
   assert.match(elaborationCalls[2].prompt, /本轮审查修复范围.*冻结已接受内容/)
@@ -8711,19 +8718,23 @@ for (const [guidance, purpose, historicalProtocol] of [
   [ELABORATION_GENERATION_GUIDANCE, 'elaboration_review', 'writer74'],
   [ELABORATION_GENERATION_GUIDANCE, 'elaboration_generate', 'writer75'],
   [ELABORATION_GENERATION_GUIDANCE, 'elaboration_review', 'writer75'],
+  [ELABORATION_GENERATION_GUIDANCE, 'elaboration_generate', 'writer77'],
+  [ELABORATION_GENERATION_GUIDANCE, 'elaboration_review', 'writer77'],
 ] as const) test(`P1提示按attempt冻结，冷恢复原reserved请求 guidance=${guidance} purpose=${purpose} historicalProtocol=${historicalProtocol ?? 'default'}`, async t => {
   const f = await fixture(t, { maxAttempts: 1, maxCalls: 4, maxRepairs: 0, timeoutMs: 120_000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, 'spec', 'claude:default')
   const claimed = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30_000, expectedMessageId: f.operation.dispatchMessageId })
   const commonDir = f.input.source.commonDir
-  const freezesIncrementalDraft = guidance === ELABORATION_GENERATION_GUIDANCE && !historicalProtocol
+  const freezesNewProtocol = guidance === ELABORATION_GENERATION_GUIDANCE && !historicalProtocol
+  const freezesIncrementalDraft = freezesNewProtocol || historicalProtocol === 'writer77'
   const hasRootApplicability = freezesIncrementalDraft || historicalProtocol === 'writer75'
   const expectedProtocol = { version: 'elaboration-draft-v1',
     ...(guidance === 'absent' ? {} : { generationGuidance: guidance }),
     ...(guidance === ELABORATION_GENERATION_GUIDANCE ? { compactSealDiagnostics: true, citationRepairDiagnostics: 'actionable-v1', defaultExportCitation: true, sharedDraftDiagnostics: true, draftRepairDisposition: true, parentInterfaceReview: 'scope-v2' } : {}),
     ...(hasRootApplicability ? { applicabilityGuidance: 'root-summary-v1' } : {}),
     ...(freezesIncrementalDraft ? { incrementalDraft: incrementalDraftCommand() } : {}),
+    ...(freezesNewProtocol ? { reviewItemIdGuidance: 'contract-item-ids-v1' } : {}),
   }
-  if (!freezesIncrementalDraft) {
+  if (!freezesNewProtocol) {
     const value = expectedProtocol, resultRef = writeEvidence(commonDir, value)
     const wrapper = writeEvidence(commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: claimed.attempt.id, inputId: f.input.id, policyDigest: f.operation.policyDigest, stage: 'elaboration-draft-protocol', resultRef })
     f.store.checkpoint(claimed.fence, { ...wrapper, artifacts: syncCheckpointArtifacts(value, resultRef) })
@@ -8762,6 +8773,7 @@ for (const [guidance, purpose, historicalProtocol] of [
   assert.equal(requests[0].prompt.includes('TR.from、TR.event'), !review && (guidance === 'ac-test-flow-binding-v2' || reviewGuidance))
   assert.equal(requests[0].prompt.includes('根级 applicability 按本轮全部目标汇总'), !review && hasRootApplicability)
   assert.equal(requests[0].prompt.includes('草稿由程序写入'), !review && freezesIncrementalDraft)
+  assert.equal(requests[0].prompt.includes('节点 ID、owner 标识和路径只作定位证据'), review && freezesNewProtocol)
   f.closeForRestart()
   const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
   const store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) }); f.useStore(store)
