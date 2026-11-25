@@ -6749,27 +6749,42 @@ test('v2最终预算只列真实实现派发，纯父接口不产生虚构生成
   assert.equal(f.store.listJournals(f.operation.id).length, 0)
 })
 
-for (const mode of ['historical-aggregate', 'historical-v2-aggregate', 'historical-v3-aggregate', 'historical-v5-aggregate', 'historical-v5-local', 'current-aggregate', 'current-local', 'same-guidance', 'same-guidance-local'] as const) test(`v2指导缓存 ${mode} 正式pause恢复不把旧accept无ID gap直接复用`, async t => {
+const guidanceCacheCases: readonly {
+  name: string
+  originalTransport: 'git-json-v5' | 'git-json-v6'
+  saved: 'history' | 'aggregate' | 'local' | 'unmarked-aggregate' | 'before-aggregate'
+  corruptLocalMarker?: string | null
+}[] = [
+  { name: 'git-json-v5-v7-aggregate', originalTransport: 'git-json-v5', saved: 'aggregate' },
+  { name: 'git-json-v5-v7-local', originalTransport: 'git-json-v5', saved: 'local' },
+  { name: 'git-json-v5-v7-unmarked-aggregate', originalTransport: 'git-json-v5', saved: 'unmarked-aggregate' },
+  ...[1, 2, 3, 5].map(version => ({ name: `mismatched-v${version}-local-marker`, originalTransport: 'git-json-v5' as const, saved: 'local' as const, corruptLocalMarker: `code-behavior-guidance-v${version}` })),
+  { name: 'missing-local-marker', originalTransport: 'git-json-v5', saved: 'local', corruptLocalMarker: null },
+  { name: 'same-guidance-aggregate', originalTransport: 'git-json-v6', saved: 'history' },
+  { name: 'same-guidance-local', originalTransport: 'git-json-v6', saved: 'before-aggregate' },
+]
+
+for (const scenario of guidanceCacheCases) test(`v2指导缓存 ${scenario.name} 正式pause恢复核验原批准`, async t => {
   const rawOnly = original.slice(0, original.indexOf('## expanded spec')).replace('contract-schema: sync-v1\n', '')
   const f = await fixture(t, { maxAttempts: 3, maxCalls: 20, maxRepairs: 2, timeoutMs: 120000 }, false, rawOnly, 'project', original, { version: 'sync-coordinator-v2', direction: 'code_to_spec', agentWorkflow: 'native-worktree-v1', partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, sourcePaths: ['src'], commitTrigger: { before: null, paths: ['src/export.js'] } }, undefined, 'code', 'claude:default')
-  const same = mode.startsWith('same-guidance'), checkpoint = f.store.checkpoint.bind(f.store)
+  const commonDir = f.input.source.commonDir
+  const same = scenario.originalTransport === 'git-json-v6', localOnly = scenario.saved === 'before-aggregate'
+  const corrupt = scenario.corruptLocalMarker !== undefined
   if (!same) {
     const claimed = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30000, expectedMessageId: f.operation.dispatchMessageId })
-    const protocol = { version: 'code-behavior-draft-v1', contextTransport: 'git-json-v5' }, resultRef = writeEvidence(f.input.source.commonDir, protocol)
-    f.store.checkpoint(claimed.fence, { ...writeEvidence(f.input.source.commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: claimed.attempt.id, inputId: f.input.id, policyDigest: f.operation.policyDigest, stage: 'behavior-draft-protocol', resultRef }), artifacts: syncCheckpointArtifacts(protocol, resultRef) })
+    const protocol = { version: 'code-behavior-draft-v1', contextTransport: scenario.originalTransport }, resultRef = writeEvidence(commonDir, protocol)
+    f.store.checkpoint(claimed.fence, { ...writeEvidence(commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: claimed.attempt.id, inputId: f.input.id, policyDigest: f.operation.policyDigest, stage: 'behavior-draft-protocol', resultRef }), artifacts: syncCheckpointArtifacts(protocol, resultRef) })
   }
-  f.store.checkpoint = (fence, ref) => {
-    const value = JSON.parse(readEvidence(f.input.source.commonDir, ref).toString())
-    if (f.store.readAttempt(fence.attemptId).number === 1 && value.version === 'sync-stage-v1' && (value.stage === 'analysis' || value.stage?.endsWith(':analysis'))) {
-      if (mode.startsWith('historical-')) value.guidanceContractVersion = mode.includes('v5') ? 'code-behavior-guidance-v5' : mode === 'historical-v3-aggregate' ? 'code-behavior-guidance-v3' : mode === 'historical-v2-aggregate' ? 'code-behavior-guidance-v2' : 'code-behavior-guidance-v1'
-      else if (mode === 'same-guidance' || mode === 'same-guidance-local' && value.stage !== 'analysis') {
-        assert.equal(value.guidanceContractVersion, CODE_BEHAVIOR_GUIDANCE_VERSION, '同指导必须由真实v6请求生成，不能给旧fixture补签全局版本')
-        assert.equal(JSON.parse(readEvidence(f.input.source.commonDir, value.resultRef).toString()).guidanceContractVersion, CODE_BEHAVIOR_GUIDANCE_VERSION)
+  const beforeAggregate = '局部审批已保存，全局分析尚未登记'
+  if (localOnly) {
+    const checkpoint = f.store.checkpoint.bind(f.store)
+    f.store.checkpoint = (fence, ref) => {
+      const value = JSON.parse(readEvidence(commonDir, ref).toString())
+      if (f.store.readAttempt(fence.attemptId).number === 1 && value.version === 'sync-stage-v1' && value.stage === 'analysis') {
+        throw Object.assign(new Error(beforeAggregate), { code: 'unsupported' })
       }
-      else delete value.guidanceContractVersion
-      ref = writeEvidence(f.input.source.commonDir, value)
+      return checkpoint(fence, ref)
     }
-    return checkpoint(fence, ref)
   }
   f.options.runner = async request => {
     f.calls.push(request)
@@ -6779,7 +6794,7 @@ for (const mode of ['historical-aggregate', 'historical-v2-aggregate', 'historic
     const currentGuidance = same || attempt.number > 1
     const descriptor = JSON.parse(request.prompt.split('\n任务:\n')[1].split('\n草稿文件=')[0])
     assert.equal(descriptor.contextTransport, currentGuidance ? 'git-json-v6' : 'git-json-v5')
-    const context = readCodeBehaviorContext(request, f.input.source.commonDir), paths = context.task.requiredChangedPaths as string[], pending = context.pendingAnalysis
+    const context = readCodeBehaviorContext(request, commonDir), paths = context.task.requiredChangedPaths as string[], pending = context.pendingAnalysis
     if (pending) assert.equal(pending.analysis.guidanceContractVersion, currentGuidance ? CODE_BEHAVIOR_GUIDANCE_VERSION : undefined)
     const output = pending
       ? { inputDigest: request.inputDigest, analysisDigest: pending.analysisDigest, verdict: 'accept', checkedPaths: paths, checkedChangeIds: pending.analysis.changes.map(change => change.id), findings: [] }
@@ -6789,32 +6804,81 @@ for (const mode of ['historical-aggregate', 'historical-v2-aggregate', 'historic
     return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `guidance-cache-${request.requestKey}`, turnId: 'turn', output: receipt, resultDigest: contentHash(JSON.stringify(receipt)), worktree }
   }
   const first = await runSyncOperation(f.store, f.operation.id, f.options)
-  assert.equal(first.status, 'needs_input', JSON.stringify(f.store.listAttempts(f.operation.id).map(attempt => attempt.failure))); assert.equal(first.failure!.code, 'unbound_behavior_finding')
-  assert.deepEqual(readCurrentSyncAnalysis(f.store, first.operation)!.ref, first.failure!.evidenceRefs[0], '旧指导已审原件仍可显示并作为明确choice来源，不能当自动cache')
+  if (localOnly) {
+    assert.equal(first.status, 'unsupported')
+    assert.equal(first.failure?.message, beforeAggregate)
+  } else {
+    assert.equal(first.status, 'needs_input', JSON.stringify(first.failure))
+    assert.equal(first.failure!.code, 'unbound_behavior_finding')
+    assert.deepEqual(readCurrentSyncAnalysis(f.store, first.operation)!.ref, first.failure!.evidenceRefs[0], '旧指导已审原件仍可作为明确裁决来源')
+  }
   const old = f.store.readAttempt(first.operation.currentAttemptId!), oldRefs = structuredClone(old.checkpointRefs), oldFailure = structuredClone(old.failure)
-  const stages = old.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
+  const analysisStages = old.checkpointRefs.map(ref => JSON.parse(readEvidence(commonDir, ref).toString()))
+    .filter(stage => stage.version === 'sync-stage-v1' && (stage.stage === 'analysis' || /^partition:.+:analysis$/.test(stage.stage)))
+  const oldWhole = analysisStages.find(stage => stage.stage === 'analysis')
+  const oldLocals = analysisStages.filter(stage => stage.stage !== 'analysis')
+  assert.equal(Boolean(oldWhole), !localOnly)
+  assert.ok(oldLocals.length > 1)
+  for (const wrapper of analysisStages) {
+    assert.equal(wrapper.guidanceContractVersion, same ? CODE_BEHAVIOR_GUIDANCE_VERSION : 'code-behavior-guidance-v7')
+    const approval = JSON.parse(readEvidence(commonDir, wrapper.resultRef).toString())
+    assert.equal(approval.guidanceContractVersion, same ? CODE_BEHAVIOR_GUIDANCE_VERSION : undefined)
+    assert.equal(approval.reviewPassed, true)
+  }
   const calls = f.calls.length
   f.store.requestControl(f.operation.id, 'pause'); f.store.requestControl(f.operation.id, 'run')
-  assert.throws(() => f.store.checkpoint({ operationId: f.operation.id, attemptId: old.id, generation: old.generation, leaseToken: old.leaseToken, sourceFingerprint: f.input.source.physicalFingerprint }, writeEvidence(f.input.source.commonDir, { stale: true })), /SYNC_FENCE_EXPIRED/)
-  if (mode === 'historical-v5-aggregate' || mode === 'historical-v5-local' || mode === 'current-aggregate' || mode === 'current-local' || mode === 'same-guidance-local') {
+  assert.throws(() => f.store.checkpoint({ operationId: f.operation.id, attemptId: old.id, generation: old.generation, leaseToken: old.leaseToken, sourceFingerprint: f.input.source.physicalFingerprint }, writeEvidence(commonDir, { stale: true })), /SYNC_FENCE_EXPIRED/)
+  const carried = scenario.saved === 'local' ? oldLocals[0] : scenario.saved === 'aggregate' || scenario.saved === 'unmarked-aggregate' ? oldWhole : undefined
+  if (carried) {
     const claimed = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30000 })
     f.store.bindComposedInput(claimed.fence, old.composedInput!)
-    const source = stages.find(stage => stage.version === 'sync-stage-v1' && (mode.includes('aggregate') ? stage.stage === 'analysis' : stage.stage?.startsWith('partition:') && stage.stage.endsWith(':analysis')))
-    assert.ok(source)
-    f.store.checkpoint(claimed.fence, source.resultRef)
-    f.store.checkpoint(claimed.fence, writeEvidence(f.input.source.commonDir, { ...source, attemptId: claimed.attempt.id }))
+    const wrapper = { ...carried, attemptId: claimed.attempt.id }
+    if (scenario.saved === 'unmarked-aggregate' || scenario.corruptLocalMarker === null) delete wrapper.guidanceContractVersion
+    else if (corrupt) wrapper.guidanceContractVersion = scenario.corruptLocalMarker
+    f.store.checkpoint(claimed.fence, carried.resultRef)
+    f.store.checkpoint(claimed.fence, writeEvidence(commonDir, wrapper))
   }
   const result = await runSyncOperation(f.store, f.operation.id, f.options)
-  const latestStages = f.store.readAttempt(result.operation.currentAttemptId!).checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
+  const resumed = f.store.readAttempt(result.operation.currentAttemptId!)
+  const latestStages = resumed.checkpointRefs.map(ref => JSON.parse(readEvidence(commonDir, ref).toString()))
   const latestAnalysis = new Map(latestStages.filter(stage => stage.stage === 'analysis' || stage.stage?.endsWith(':analysis')).map(stage => [stage.stage, stage]))
-  assert.ok(latestAnalysis.size > 0 && [...latestAnalysis.values()].every(stage => stage.guidanceContractVersion === CODE_BEHAVIOR_GUIDANCE_VERSION), '仅最新的新指导已审或同指导已校验复制登记marker；旧wrapper保持原件')
-  if (mode === 'same-guidance-local') assert.ok(!latestStages.some(stage => stage.stage === 'analysis-provenance'), '旧aggregate拒绝后由同指导local重组，不能直接复制旧aggregate')
+  const audit = latestStages.find(stage => stage.stage === 'partition:analysis-approval-audit')
+  const decisions = audit ? (JSON.parse(readEvidence(commonDir, audit.resultRef).toString()) as {
+    decisions: { status: string; reason?: string; source?: { resultRef: BlobRef } }[]
+  }).decisions : undefined
   const nextAnalysisCalls = f.calls.slice(calls).filter(call => call.purpose.startsWith('code_behavior_')).map(call => call.purpose)
-  if (same) { assert.deepEqual(nextAnalysisCalls, []); assert.equal(result.status, 'needs_input'); assert.equal(result.failure!.code, 'unbound_behavior_finding') }
-  else {
-    assert.deepEqual(nextAnalysisCalls, f.calls.slice(0, calls).filter(call => call.purpose.startsWith('code_behavior_')).map(call => call.purpose), '旧指导aggregate/current local的全部分区必须实际重新生成并独审')
+  if (corrupt) {
+    assert.equal(result.status, 'unsupported', JSON.stringify(result.failure))
+    assert.equal(result.failure!.code, 'p0_approval_evidence_invalid')
+    assert.deepEqual(result.failure!.evidenceRefs, [audit.resultRef])
+    assert.equal(resumed.dispatchPlans.length, 0)
+    assert.equal(f.calls.length, calls)
+    const rejected = decisions!.filter(decision => decision.status === 'blocked')
+    assert.equal(rejected.length, 1)
+    assert.equal(rejected[0].reason, '原审批的指导版本与结果不一致')
+    assert.deepEqual(rejected[0].source?.resultRef, carried.resultRef)
+    assert.equal(latestAnalysis.has('analysis'), false)
+  } else if (same) {
+    assert.deepEqual(nextAnalysisCalls, [])
+    assert.equal(result.status, 'needs_input', JSON.stringify(result.failure))
+    assert.equal(result.failure!.code, 'unbound_behavior_finding')
+    if (localOnly) {
+      assert.ok(!latestStages.some(stage => stage.stage === 'analysis-provenance'), '全局未保存时从正式局部分区原件重组')
+      assert.equal(decisions?.filter(decision => decision.status === 'reused').length, oldLocals.length)
+    } else assert.deepEqual(latestAnalysis.get('analysis').resultRef, oldWhole.resultRef)
+  } else {
+    assert.deepEqual(nextAnalysisCalls, f.calls.slice(0, calls).filter(call => call.purpose.startsWith('code_behavior_')).map(call => call.purpose), '旧指导的全部分区必须实际重新生成并独审')
     assert.ok(nextAnalysisCalls.includes('code_behavior_analyze') && nextAnalysisCalls.includes('code_behavior_review'))
-    assert.ok(f.calls.slice(calls).some(call => call.purpose === 'elaboration_generate'), JSON.stringify(result.failure))
+    assert.equal(f.calls.at(-1)?.purpose, 'elaboration_generate', JSON.stringify(result.failure))
+    assert.equal(decisions?.filter(decision => decision.status === 'invalidated' && decision.reason === 'incompatible_behavior_guidance:code-behavior-guidance-v7').length, oldLocals.length)
+    assert.notDeepEqual(latestAnalysis.get('analysis').resultRef, oldWhole.resultRef)
+  }
+  if (!corrupt) {
+    assert.ok(latestAnalysis.size > 0)
+    for (const wrapper of latestAnalysis.values()) {
+      assert.equal(wrapper.guidanceContractVersion, CODE_BEHAVIOR_GUIDANCE_VERSION)
+      assert.equal(JSON.parse(readEvidence(commonDir, wrapper.resultRef).toString()).guidanceContractVersion, CODE_BEHAVIOR_GUIDANCE_VERSION)
+    }
   }
   assert.deepEqual(f.store.readAttempt(old.id).checkpointRefs, oldRefs); assert.deepEqual(f.store.readAttempt(old.id).failure, oldFailure)
   assert.deepEqual(result.operation.input, first.operation.input); assert.deepEqual(result.operation.budget, first.operation.budget); assert.equal(result.operation.deadlineAtMs, first.operation.deadlineAtMs)
