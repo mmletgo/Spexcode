@@ -48,6 +48,8 @@ export type ElaborationInput = {
   draftProtocol?: 'elaboration-draft-v1'
   /** 原attempt阶段冻结的生成提示版本，仅影响Native generation的请求摘要。 */
   generationGuidance?: ElaborationGenerationGuidance
+  /** 首次P1派发前冻结的根级适用性提示和结构诊断，不参与业务摘要。 */
+  applicabilityGuidance?: 'root-summary-v1'
   /** 新attempt的封口诊断目录入口，仅影响Native提示。 */
   compactSealDiagnostics?: true
   /** 只读V1引用返修的历史诊断展示版本。 */

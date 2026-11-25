@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+writer75 追加无 DDL 的 writer 标记，保护 [[sync-elaboration]] 的新 Native P1 根级适用性提示及诊断。先停稳旧 writer 并结算资源与租约，再保存一致的 writer74 SQLite online backup 和配套 Git/CAS。回滚停稳新 writer 后恢复整套备份。历史派发和批准按原件保持。
+
 writer74 追加无 DDL 的 writer 标记，保护新 Native P0 attempt 的作者证据预检冻结。停稳旧 writer、结算原生资源与租约，再保存一致的 v73 SQLite online backup 和配套证据/Git 引用；回滚恢复整套备份，保持历史请求和原批准。
 
 writer73 也保护正式额度后继的接入身份和首次派发资格。无后继标记的旧接入摘要与既有迁移字节不变。

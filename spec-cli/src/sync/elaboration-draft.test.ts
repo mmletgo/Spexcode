@@ -295,6 +295,41 @@ for (const inherited of [false, true]) test(`Native完整P1的VERIFY冻结登记
   assert.equal(result.runtimeVerification, 'not_run')
 })
 
+test('Native P1根级适用性按任务汇总，原稿续修区分缺失和重复', async t => {
+  const f = await fixture(t)
+  const input = { ...f.input, applicabilityGuidance: 'root-summary-v1' as const }
+  assert.equal(freezeElaborationInput(input).inputDigest, freezeElaborationInput(f.input).inputDigest)
+  const repeated = JSON.stringify({ ...rows, applicability: Array.from({ length: 6 }, () => rows.applicability).flat() })
+  const baseline = await elaborate({ ...f.input, maxRepairs: 0 }, { runner: f.run(request => {
+    assert.doesNotMatch(request.prompt, /根级 applicability 按本轮全部目标汇总/)
+    return repeated
+  }) })
+  assert.ok(baseline.rounds[0].findings.filter(issue => issue.code === 'applicability_missing').every(issue => issue.message.startsWith('边界需唯一适用性判断:')))
+  const initial = await elaborate({ ...input, requestKey: 'root-applicability-repeated', maxRepairs: 0 }, { runner: f.run(() => repeated) })
+  assert.equal(initial.status, 'exhausted')
+  assert.match(f.requests.at(-1)!.prompt, /根级 applicability 按本轮全部目标汇总.*10 种边界各恰好一条/)
+  const originalDraft = initial.rounds[0].draft!
+  assert.equal(readStageDraft(f.commonDir, originalDraft, originalDraft), repeated)
+  const errors = initial.rounds[0].findings.filter(issue => issue.severity === 'error')
+  assert.equal(errors.length, 10)
+  assert.ok(errors.every(issue => issue.code === 'applicability_missing' && issue.message.includes('实际 6 条')))
+
+  const withOmission = JSON.stringify({ ...rows, applicability: [...rows.applicability.slice(1), rows.applicability[1]] })
+  let attempts = 0
+  const result = await elaborate({ ...input, requestKey: 'root-applicability-repaired' }, { draft: originalDraft, runner: f.run((request, worktree, draftPath) => {
+    assert.match(request.prompt, /根级 applicability 按本轮全部目标汇总/)
+    assert.equal(readFileSync(join(worktree, draftPath), 'utf8'), attempts === 0 ? repeated : withOmission)
+    if (++attempts === 1) return withOmission
+    assert.match(request.prompt, /permissions.*实际 0 条/)
+    assert.match(request.prompt, /mutation.*实际 2 条/)
+    return JSON.stringify(rows)
+  }) })
+  assert.equal(result.status, 'complete', JSON.stringify(result.failure))
+  assert.deepEqual(f.requests.slice(-3).map(request => request.purpose), ['elaboration_generate', 'elaboration_generate', 'elaboration_review'])
+  assert.doesNotMatch(f.requests.at(-1)!.prompt, /根级 applicability 按本轮全部目标汇总/)
+  assert.deepEqual(result.rounds.at(-1)!.candidate!.applicability, rows.applicability)
+})
+
 test('Native完整P1在共享VERIFY由重复变为缺失后，只给原Git稿一个合法技术归属', async t => {
   const f = await fixture(t), [target] = f.input.targets
   const peerPath = '.spec/export/peer-contract/spec.md'
