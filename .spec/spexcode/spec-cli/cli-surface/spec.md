@@ -32,6 +32,8 @@ needs a repository nor enters the noun-first command map.
 
 ## expanded spec
 
+The private `internal elaboration-draft` entry provides `inspect`, `apply`, `check`, and `mcp` inside the frozen P1 author stage. It shares the same editor across the CLI and stdio MCP. [[incremental-elaboration-draft]]
+
 同步帮助列出 `--inherit-retry-budget` 与正式 `--retry-of`、`--model` 的组合用法。交接门禁见 [[sync-cli]]。
 
 **The grammar.** `spex <noun> <verb> [object] [flags]` — the verb is always the token immediately

@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+writer75 追加无 DDL 的 writer 标记，保护 [[incremental-elaboration-draft]] 的新阶段入口和派发摘要。升级前停稳旧 writer，结算原生资源、租约和交付 journal，保存一致的 v74 SQLite online backup 及配套 Git/CAS。回滚先停稳新 writer，再恢复整套备份；原请求、草稿及独审证据保持。
+
 writer74 追加无 DDL 的 writer 标记，保护新 Native P0 attempt 的作者证据预检冻结。停稳旧 writer、结算原生资源与租约，再保存一致的 v73 SQLite online backup 和配套证据/Git 引用；回滚恢复整套备份，保持历史请求和原批准。
 
 writer73 也保护正式额度后继的接入身份和首次派发资格。无后继标记的旧接入摘要与既有迁移字节不变。

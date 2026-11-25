@@ -46,6 +46,8 @@ export type ElaborationInput = {
   worktree?: { baseCommit: string; tree: string; mode: 'read' | 'edit' }
   /** 新派发显式冻结；缺席继续使用原请求协议，不重写历史reserved请求。 */
   draftProtocol?: 'elaboration-draft-v1'
+  /** 由新 attempt 冻结；已有派发的草稿协议继续沿原字节恢复。 */
+  incrementalDraft?: { node: string; cli: string }
   /** 原attempt阶段冻结的生成提示版本，仅影响Native generation的请求摘要。 */
   generationGuidance?: ElaborationGenerationGuidance
   /** 新attempt的封口诊断目录入口，仅影响Native提示。 */

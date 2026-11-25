@@ -31,6 +31,8 @@ related:
 
 ## expanded spec
 
+普通完整叶的新原生作者可沿 [[incremental-elaboration-draft]] 逐批写入有效草稿，编排继续核真实 Git 结果、完整结构、独审和全树封口。
+
 [[sync-partition-execution]] 从已审纯父和冻结叶引用派生的父作者影响证明进入有命中 owner 的完整细化 inputDigest，以及对应严格全图封口的 inputDigest。Native 任务仅列本叶及命中的父义务 ID，指向原已审父接口，按当前证据核对原稿的冻结范围诊断。生成、独审、行差量与缓存复用共用本叶的同一影响判据。仅承接父义务时，局部和严格封口都保留冻结依赖未命中的既有需求、规则及全部既有 AC 语义和测试绑定；独审返修须命中本叶可改义务。原 raw、只读范围和逐项验收授权照常校验。无影响证明时，历史任务和业务摘要保持原字节。
 
 同一冻结候选的 GAP 复核经 [[sync-coordinator]] 认证后，只可触发原 owner 的候选误报续稿。资格由独立 review 的 affectedIds 精确命中本轮新提议、code/derived 来源的 missing_fact GAP，不能从说明文字推测。新 gapRepair 仅引用原复核及 accepted owner；临时读取原结果诊断、原已审并集和 Git 草稿，不改旧批准。只可移除命中的临时 GAP 及指向已移除 GAP 的 typed 引用，原 metadata、raw、说明、其他业务列、稳定 ID、AC/VERIFY 和适用性逐值保持；真实未知可原样保留。新独审须与原生成、原独审、GAP 复核和当前生成独立，完整结构、演进和严格全图封口照常执行。诊断不能自行清除 GAP、取得人工裁决或改变实现权限。
