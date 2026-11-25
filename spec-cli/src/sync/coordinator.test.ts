@@ -18,7 +18,7 @@ import { outputErrors } from './elaboration-schema.js'
 import type { ContractCell, GeneratedElaboration, GeneratedTables } from './elaboration-markdown.js'
 import { sameContractBusinessMeaning } from './contract-evolution.js'
 import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE, ELABORATION_GENERATION_GUIDANCE_V3, ELABORATION_GENERATION_GUIDANCE_V4 } from './elaboration-types.js'
-import { elaborate, freezeElaborationInput, hasApprovedElaborationReview } from './elaboration.js'
+import { elaborate, freezeElaborationInput, hasApprovedElaborationReview, incrementalDraftCommand } from './elaboration.js'
 import { checkGenerationContractIntent, readFrozenContracts } from './frozen-contracts.js'
 import type { ElaborationDraft, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ReadonlySpecRepair } from './elaboration-types.js'
 import { buildSyncApplicationPlan } from './planning.js'
@@ -8624,7 +8624,7 @@ test('已有reserved P1在SQLite冷恢复后草稿协议缺席仍不补签或改
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
 })
 
-for (const [guidance, purpose, legacyApplicability] of [
+for (const [guidance, purpose, historicalProtocol] of [
   ['absent', 'elaboration_generate'],
   ['ac-test-binding-v1', 'elaboration_generate'],
   ['ac-test-flow-binding-v2', 'elaboration_generate'],
@@ -8635,19 +8635,23 @@ for (const [guidance, purpose, legacyApplicability] of [
   [ELABORATION_GENERATION_GUIDANCE_V4, 'elaboration_review'],
   [ELABORATION_GENERATION_GUIDANCE, 'elaboration_generate'],
   [ELABORATION_GENERATION_GUIDANCE, 'elaboration_review'],
-  [ELABORATION_GENERATION_GUIDANCE, 'elaboration_generate', true],
-  [ELABORATION_GENERATION_GUIDANCE, 'elaboration_review', true],
-] as const) test(`P1提示按attempt冻结，冷恢复原reserved请求 guidance=${guidance} purpose=${purpose} legacyApplicability=${legacyApplicability === true}`, async t => {
+  [ELABORATION_GENERATION_GUIDANCE, 'elaboration_generate', 'writer74'],
+  [ELABORATION_GENERATION_GUIDANCE, 'elaboration_review', 'writer74'],
+  [ELABORATION_GENERATION_GUIDANCE, 'elaboration_generate', 'writer75'],
+  [ELABORATION_GENERATION_GUIDANCE, 'elaboration_review', 'writer75'],
+] as const) test(`P1提示按attempt冻结，冷恢复原reserved请求 guidance=${guidance} purpose=${purpose} historicalProtocol=${historicalProtocol ?? 'default'}`, async t => {
   const f = await fixture(t, { maxAttempts: 1, maxCalls: 4, maxRepairs: 0, timeoutMs: 120_000 }, false, original, 'project', original, { agentWorkflow: 'native-worktree-v1' }, undefined, 'spec', 'claude:default')
   const claimed = f.store.claimAttempt({ operationId: f.operation.id, source: f.input.source, scope: f.operation.scope, leaseMs: 30_000, expectedMessageId: f.operation.dispatchMessageId })
   const commonDir = f.input.source.commonDir
-  const freezesApplicability = guidance === ELABORATION_GENERATION_GUIDANCE && !legacyApplicability
+  const freezesIncrementalDraft = guidance === ELABORATION_GENERATION_GUIDANCE && !historicalProtocol
+  const hasRootApplicability = freezesIncrementalDraft || historicalProtocol === 'writer75'
   const expectedProtocol = { version: 'elaboration-draft-v1',
     ...(guidance === 'absent' ? {} : { generationGuidance: guidance }),
     ...(guidance === ELABORATION_GENERATION_GUIDANCE ? { compactSealDiagnostics: true, citationRepairDiagnostics: 'actionable-v1', defaultExportCitation: true, sharedDraftDiagnostics: true, draftRepairDisposition: true, parentInterfaceReview: 'scope-v2' } : {}),
-    ...(freezesApplicability ? { applicabilityGuidance: 'root-summary-v1' } : {}),
+    ...(hasRootApplicability ? { applicabilityGuidance: 'root-summary-v1' } : {}),
+    ...(freezesIncrementalDraft ? { incrementalDraft: incrementalDraftCommand() } : {}),
   }
-  if (!freezesApplicability) {
+  if (!freezesIncrementalDraft) {
     const value = expectedProtocol, resultRef = writeEvidence(commonDir, value)
     const wrapper = writeEvidence(commonDir, { version: 'sync-stage-v1', operationId: f.operation.id, attemptId: claimed.attempt.id, inputId: f.input.id, policyDigest: f.operation.policyDigest, stage: 'elaboration-draft-protocol', resultRef })
     f.store.checkpoint(claimed.fence, { ...wrapper, artifacts: syncCheckpointArtifacts(value, resultRef) })
@@ -8684,7 +8688,8 @@ for (const [guidance, purpose, legacyApplicability] of [
   const reviewGuidance = guidance === ELABORATION_GENERATION_GUIDANCE_V3 || guidance === ELABORATION_GENERATION_GUIDANCE_V4 || guidance === ELABORATION_GENERATION_GUIDANCE
   assert.equal(requests[0].prompt.includes('仓库相对测试路径#稳定用例ID'), review ? reviewGuidance : guidance !== 'absent')
   assert.equal(requests[0].prompt.includes('TR.from、TR.event'), !review && (guidance === 'ac-test-flow-binding-v2' || reviewGuidance))
-  assert.equal(requests[0].prompt.includes('根级 applicability 按本轮全部目标汇总'), !review && freezesApplicability)
+  assert.equal(requests[0].prompt.includes('根级 applicability 按本轮全部目标汇总'), !review && hasRootApplicability)
+  assert.equal(requests[0].prompt.includes('草稿由程序写入'), !review && freezesIncrementalDraft)
   f.closeForRestart()
   const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
   const store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) }); f.useStore(store)
