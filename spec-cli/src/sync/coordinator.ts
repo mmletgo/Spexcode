@@ -3032,6 +3032,21 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         const parentReviewScope = parentAttempt && stage<Pick<ElaborationInput, 'parentInterfaceReview'>>(store, operation, parentAttempt, 'elaboration-draft-protocol')?.parentInterfaceReview === 'scope-v2'
         let newerGeneration = hasOwnerGeneration(parentReviewScope ? parentAttempt : attempt!)
         const carriedGenerations = new Set<string | undefined>()
+        const carriedQuotaRefs = new Set<string>()
+        const rememberUnavailableQuota = (prior: SyncAttempt, result: SavedElaboration, owner = operation, checkpoints?: SyncCheckpointStageView): boolean => {
+          const code = result.failure?.code, round = result.rounds.at(-1), diagnostics = result.repairDiagnostics
+          if (code !== 'sync_llm_manager_no_review_successor' && code !== 'sync_llm_manager_review_route_unavailable') return false
+          const author = round?.traces.find(trace => trace.purpose === 'elaboration_generate')
+          if (result.status !== 'unsupported' || !result.structurePassed || result.reviewPassed || !round?.draft || !round.candidate || !author
+            || diagnostics?.failure.code !== 'provider_quota_exhausted' || diagnostics.round.candidateDigest !== round.candidateDigest
+            || canonical(diagnostics.round.candidate) !== canonical(round.candidate)
+            || canonical(diagnostics.round.traces.find(trace => trace.purpose === 'elaboration_generate')) !== canonical(author)
+            || prior.dispatchPlans.some(dispatch => dispatch.key.startsWith(`sync:${prior.id}:${ownerSuffix}:`))
+            || !priorElaborationInputMatches(prior, binding, owner, checkpoints)) fail('review_retry_binding', 'Manager 后继不可用记录未保留精确的无派发候选')
+          carriedGenerations.add(canonical(author))
+          carriedQuotaRefs.add(diagnostics.resultRef.sha256)
+          return true
+        }
         for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number).reverse()) {
           if (!['failed', 'superseded', 'settled'].includes(prior.status)) return null
           const saved = stage<SavedElaboration>(store, operation, prior, key)
@@ -3043,14 +3058,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
             fail('review_retry_binding', 'ZCode 原独审失败不匹配当前冻结输入或owner')
           if (saved && (!source || saved.inputDigest !== inputDigest || saved.phase === 'partitioned_final' || saved.reviewPassed)) return null
           const failure = source?.result.failure, round = source?.result.rounds.at(-1), requestKey = `sync:${prior.id}:${ownerSuffix}`
-          const carriedQuota = source?.result.repairDiagnostics
-          const quotaRouteUnavailable = failure?.code === 'sync_llm_manager_no_review_successor' || failure?.code === 'sync_llm_manager_review_route_unavailable'
-          if (quotaRouteUnavailable && source?.result.structurePassed && !source.result.reviewPassed
-            && round?.candidateDigest && carriedQuota?.failure.code === 'provider_quota_exhausted' && carriedQuota.round.candidateDigest === round.candidateDigest
-            && !prior.dispatchPlans.some(dispatch => dispatch.key.startsWith(`${requestKey}:`)) && priorElaborationInputMatches(prior, binding)) {
-            carriedGenerations.add(canonical(round.traces.find(trace => trace.purpose === 'elaboration_generate')))
-            continue
-          }
+          if (source && rememberUnavailableQuota(prior, source.result)) continue
           const formatAfterAbort = prior.status === 'superseded' && prior.failure?.kind === 'unsupported' && prior.failure.code === 'coordinator_failed'
             && failure && reviewFormatRepairCodes.has(failure.code)
           const managedReviewQuota = failure?.code === 'provider_quota_exhausted' && !!source?.result.structurePassed && !source.result.reviewPassed
@@ -3154,28 +3162,35 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           saveStage(store, fence!, `${key}:repair-diagnostics-provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef })
           return { requestKey, inputDigest, resultRef: source.resultRef, failure, round }
         }
-        if (!operation.retryOf || newerGeneration || carriedGenerations.size) return null
+        if (!operation.retryOf || newerGeneration || carriedGenerations.size && !carriedQuotaRefs.size) return null
+        const missingFormalReview = (): null => {
+          if (carriedQuotaRefs.size) fail('review_retry_binding', 'Manager 后继不可用时保存的候选缺少原已结算额度失败')
+          return null
+        }
         formalElaborationReviewSources ??= retryDraftSources(store, operation, attempt!.number).filter(({ owner }) => owner.id !== operation.id)
         for (const { owner, prior } of formalElaborationReviewSources) {
-          if (!settledApprovalSource(store, owner)) return null
+          if (!settledApprovalSource(store, owner)) return missingFormalReview()
           const checkpoints = historyCheckpoints(owner, prior)
           const source = partitionStage<SavedElaboration>(store, owner, prior, key, undefined, checkpoints)
           if (!source) {
-            if (hasOwnerGeneration(prior) || prior.dispatchPlans.some(dispatch => dispatch.key.startsWith(`sync:${prior.id}:${ownerSuffix}:`))) return null
+            if (hasOwnerGeneration(prior) || prior.dispatchPlans.some(dispatch => dispatch.key.startsWith(`sync:${prior.id}:${ownerSuffix}:`))) return missingFormalReview()
             continue
           }
           const { result } = source, round = result.rounds.at(-1), failure = result.failure
-          if (!round?.draft || !round.candidate || !result.structurePassed || result.reviewPassed || result.status !== 'failed' || !failure
-            || !(reviewFormatRepairCodes.has(failure.code) || failure.code === 'provider_quota_exhausted' || failure.code === 'failed')) return null
           if (result.inputDigest !== inputDigest || canonical(result.partitionBinding) !== canonical(binding)
-            || !priorElaborationInputMatches(prior, binding, owner, checkpoints)) return null
+            || !priorElaborationInputMatches(prior, binding, owner, checkpoints)) return missingFormalReview()
+          if (rememberUnavailableQuota(prior, result, owner, checkpoints)) continue
+          if (!round?.draft || !round.candidate || !result.structurePassed || result.reviewPassed || result.status !== 'failed' || !failure
+            || !(reviewFormatRepairCodes.has(failure.code) || failure.code === 'provider_quota_exhausted' || failure.code === 'failed')) return missingFormalReview()
+          if (carriedQuotaRefs.size && (failure.code !== 'provider_quota_exhausted' || carriedQuotaRefs.size !== 1 || !carriedQuotaRefs.has(source.resultRef.sha256)
+            || carriedGenerations.size !== 1 || !carriedGenerations.has(canonical(round.traces.find(trace => trace.purpose === 'elaboration_generate'))))) return missingFormalReview()
           const requestKey = `sync:${prior.id}:${ownerSuffix}`
           const settledReview = settledElaborationReview(store, owner, prior, requestKey, result, round, failure, true)
           if (!settledReview) fail('review_retry_binding', '正式重试的P1原稿缺少精确已结算独审原件')
           saveStage(store, fence!, `${key}:repair-diagnostics-provenance`, { fromOperationId: owner.id, fromAttemptId: prior.id, resultRef: source.resultRef })
           return { requestKey, inputDigest, resultRef: source.resultRef, failure, round, settledReview }
         }
-        return null
+        return missingFormalReview()
       }
       type SealRepairSource = { attempt: SyncAttempt; result: SavedElaboration; resultRef: BlobRef; locals: Map<string, { result: SavedElaboration; resultRef: BlobRef }>; owners: Map<string, ContractFinding[]> }
       const findSealRepairSource = async (): Promise<SealRepairSource | null> => {
