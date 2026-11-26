@@ -37,7 +37,7 @@ import type { SyncPartitionPlan } from './partitioning.js'
 import { contractOmissionBound, freezeGenerationInput, generationReviewRequest, generationStageTree, restoreGenerationInput, reviewError, verifyGenerationReviewDraft, runGeneration } from './generation.js'
 import type { GenerationReadCache } from './generation.js'
 import type { GenerationFinding, GenerationInput, GenerationResult, StoppedCandidateReviewDraft } from './generation-types.js'
-import { captureStageDraft, readStageDraft, readStoppedPhysicalDraft, StageDraftCommitMissingError, stageWorktree, StoppedPhysicalDraftStatusError, verifyStageResult, type StageDraftMaterialRequest } from './stage-worktree.js'
+import { captureStageDraft, readStageDraft, readStoppedPhysicalDraft, StageDraftCommitMissingError, stageWorktree, StoppedPhysicalDraftSidecarsError, StoppedPhysicalDraftStatusError, verifyStageResult, type StageDraftMaterialRequest } from './stage-worktree.js'
 import { createAttemptRunner, hasSettledGrokP0ExitFailure, hasSettledNativeRpcFailure, hasSettledNativeTurnTransportFailure, matchesNativeDispatchModel, pinSyncNativeRequest } from './native-run.js'
 import type { NativeRunCheckpoint, NativeRunPlan } from './native-run.js'
 import type { AdmitSyncInput, ApplyReceipt, BlobRef, CandidateRef, ComposedInputRef, FrozenBaselineSelection, InputSnapshot, P0ReviewChallenge, P1ReviewChallenge, SyncAttempt, SyncFailure, SyncOperation, SyncScope, SyncResourceRecord, VerificationResultBlob, WriteFence } from './operation-types.js'
@@ -3060,7 +3060,24 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
                     else if (!zcode) assertClaudeStoppedDraftSource(prompt, state, proof.record.worktreePath)
                     assertMaterialFence()
                     store.assertWriteFence(fence!)
-                    const physical = readStoppedPhysicalDraft(commonDir, proof.record.worktreePath, worktree, request.binding, { allowCommitted: allowCommitted && !providerDraft, allowUntrackedWithoutDraft: providerDraft })
+                    let physical: ReturnType<typeof readStoppedPhysicalDraft>
+                    try {
+                      physical = readStoppedPhysicalDraft(commonDir, proof.record.worktreePath, worktree, request.binding, {
+                        allowCommitted: allowCommitted && !providerDraft,
+                        allowUntrackedWithoutDraft: providerDraft,
+                        observeRejectedSidecars: providerDraft && owner.id === operation.id,
+                      })
+                    } catch (error) {
+                      if (!(error instanceof StoppedPhysicalDraftSidecarsError)) throw error
+                      const { source, ...observation } = error.evidence
+                      const draftRef = writeEvidence(commonDir, { version: 'stopped-physical-draft-v1', path: request.binding.path, source })
+                      saveStage(store, fence!, `${key}:stopped-physical-material-rejection`, {
+                        code: 'untracked_draft_sidecars', fromOperationId: owner.id, fromAttemptId: prior.id,
+                        nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef, draftRef, ...observation,
+                      })
+                      skipSource = true
+                      return null
+                    }
                     if (physical && (!(grokDraft || completedEventsRpc) || physical.committedOid)) {
                       if (providerDraft && (physical.observedHeadCommit !== worktree.baseCommit || physical.observedTree !== worktree.tree)) fail('draft_material_binding', 'ZCode 原生成物理草稿必须位于原 seed')
                       if (zcode && failed !== true) fail('stale_result', 'ZCode物理细化草稿没有原精确失败终态')

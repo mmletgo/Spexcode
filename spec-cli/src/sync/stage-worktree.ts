@@ -72,8 +72,14 @@ export type StageDraftMaterialRequest = { binding: StageDraftBinding; worktree: 
 const stoppedDraftBoundaryMessage = '已停物理草稿的owner/seed、只读文件或index发生越界变化'
 export class StoppedPhysicalDraftStatusError extends Error {}
 
+export class StoppedPhysicalDraftSidecarsError extends StoppedPhysicalDraftStatusError {
+  constructor(readonly evidence: { source: string; observedHeadCommit: string; observedTree: string; indexSha256: string; statusSha256: string }) {
+    super(stoppedDraftBoundaryMessage)
+  }
+}
+
 /** 调用者先认证原Native与正式停止。已提交材料须显式准入，观察不签发Native结果。 */
-export function readStoppedPhysicalDraft(commonDir: string, worktreePath: string, seed: StageWorktree, binding: StageDraftBinding, options?: { allowCommitted: boolean; allowUntrackedWithoutDraft?: boolean }): { source: string; observedHeadCommit: string; observedTree: string; indexSha256: string; committedOid?: string } | null {
+export function readStoppedPhysicalDraft(commonDir: string, worktreePath: string, seed: StageWorktree, binding: StageDraftBinding, options?: { allowCommitted: boolean; allowUntrackedWithoutDraft?: boolean; observeRejectedSidecars?: boolean }): { source: string; observedHeadCommit: string; observedTree: string; indexSha256: string; committedOid?: string } | null {
   const invalid = (): never => { throw new Error(stoppedDraftBoundaryMessage) }
   const git = (...args: string[]): Buffer => sourceGit(worktreePath, ['--no-optional-locks', ...args])
   if (seed.mode !== 'edit' || !/^[a-f0-9]{64}$/.test(binding.ownerDigest) || binding.path !== `.spex-sync-drafts/${binding.ownerDigest}.json`
@@ -89,11 +95,13 @@ export function readStoppedPhysicalDraft(commonDir: string, worktreePath: string
   const status = inspectCommit ? undefined : git(...statusArgs)
   if (status?.length === 0) return null
   const rows = status?.toString('utf8').split('\0').filter(Boolean) ?? []
-  const untrackedWithoutDraft = options?.allowUntrackedWithoutDraft && rows.length > 0
-    && rows.every(row => row.startsWith('?? ') && row.slice(3) !== binding.path) && !entries.some(entry => entry.path === binding.path)
+  const onlyUntracked = rows.length > 0 && rows.every(row => row.startsWith('?? ')) && !entries.some(entry => entry.path === binding.path)
+  const untrackedDraft = onlyUntracked && rows.includes(`?? ${binding.path}`)
+  const untrackedWithoutDraft = options?.allowUntrackedWithoutDraft && onlyUntracked && !untrackedDraft
+  const rejectedSidecars = options?.observeRejectedSidecars && untrackedDraft && rows.length > 1
   const noMaterial = rows.length > 0 && (rows.every(row => row.startsWith('!! ')) || untrackedWithoutDraft)
   if (rows.some(row => /^!! \.spex-sync-drafts(?:\/|$)/iu.test(row))) invalid()
-  if (noMaterial) {
+  if (noMaterial || rejectedSidecars) {
     if (observedHeadCommit !== seed.baseCommit || observedTree !== seed.tree) invalid()
   } else if (rows.some(row => !row.startsWith('!! ') && (!/^(?:\?\?|[ AM]{2}) /.test(row) || row.slice(3) !== binding.path))) throw new StoppedPhysicalDraftStatusError(stoppedDraftBoundaryMessage)
   const indexPath = resolve(worktreePath, git('rev-parse', '--git-path', 'index').toString().trim()), indexSha256 = contentHash(readFileSync(indexPath))
@@ -124,7 +132,7 @@ export function readStoppedPhysicalDraft(commonDir: string, worktreePath: string
     if (indexDraft!.oid === observedDraft!.oid && physical(binding.path).equals(readObject(commonDir, observedDraft!.oid))) committedOid = observedDraft!.oid
     else if (ignored!.length || git('ls-files', '-v', '-z', '--', binding.path).toString('utf8') !== `H ${binding.path}\0`) invalid()
   }
-  const compareFullIndex = noMaterial || committedOid !== undefined
+  const compareFullIndex = noMaterial || rejectedSidecars || committedOid !== undefined
   const protectedEntries = compareFullIndex ? entries : entries.filter(entry => entry.path !== binding.path)
   const protectedIndex = new Map(index.filter(entry => compareFullIndex || entry.path !== binding.path).map(entry => [entry.path, entry]))
   if (protectedIndex.size !== protectedEntries.length || protectedEntries.some(entry => { const item = protectedIndex.get(entry.path); return !item || item.mode !== entry.mode || item.oid !== entry.oid }) || indexDraft && indexDraft.mode !== '100644') invalid()
@@ -154,6 +162,7 @@ export function readStoppedPhysicalDraft(commonDir: string, worktreePath: string
   }
   const bytes = physical(binding.path)
   if (!isUtf8Text(bytes) || committedOid && !readObject(commonDir, committedOid).equals(bytes) || !unchanged() || !physical(binding.path).equals(bytes)) invalid()
+  if (rejectedSidecars) throw new StoppedPhysicalDraftSidecarsError({ source: bytes.toString('utf8'), observedHeadCommit, observedTree, indexSha256, statusSha256: contentHash(status!) })
   if (committedOid && (!canonicalFilterMatches() || protectedEntries.some(entry => {
     const bytes = physical(entry.path), projected = rebuilt?.get(entry.path)
     return projected ? !bytes.equals(projected) : contentHash(bytes) !== entry.digest
