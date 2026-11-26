@@ -22,6 +22,7 @@ try {
   const managerWrites = []
   const group = { id: 'spec-sync', label: 'Sync fixture', fallback_group_id: null, fallback_when: 'never' }
   let providers = []
+  let scheduleTimezone = null
   let config = {
     dashboard: { title: 'Fixture' },
     sync: { version: 'sync-settings-v1', model: 'claude:default', budget: { maxCalls: 3 }, facts: [{ source: 'fixture', text: 'preserve' }] },
@@ -45,7 +46,8 @@ try {
     }
     if (url.pathname.endsWith('/api/sync/model-settings')) {
       return route.fulfill({ json: {
-        nativeVendors: [{ id: 'claude', installed: true }, { id: 'grok', installed: false }, { id: 'zcode', installed: true }, { id: 'cursor', installed: true }],
+        nativeVendors: [{ id: 'claude', installed: true }, { id: 'grok', installed: false }, { id: 'zcode', installed: true },
+          { id: 'cursor', installed: true }, { id: 'codex', installed: true }],
         llmManager,
       } })
     }
@@ -63,6 +65,12 @@ try {
       const body = request.postDataJSON()
       switch (body.op) {
         case 'catalog': return route.fulfill({ json: { catalog: [group], providerCapabilities: {} } })
+        case 'get_schedule_timezone': return route.fulfill({ json: { timezone: scheduleTimezone } })
+        case 'set_schedule_timezone': {
+          managerWrites.push(body)
+          scheduleTimezone = body.timezone
+          return route.fulfill({ json: { timezone: scheduleTimezone } })
+        }
         case 'list_groups': return route.fulfill({ json: { groups: [{ ...group, members: [] }] } })
         case 'list_providers': return route.fulfill({ json: { providers } })
         case 'status': return route.fulfill({ json: { breakers: [], leases: [] } })
@@ -72,7 +80,7 @@ try {
         } })
         case 'save_provider': {
           managerWrites.push(body)
-          const provider = { ...body.input.provider, id: 'fixture-provider', version: 1, keys: [] }
+          const provider = { ...body.input.provider, timezone: scheduleTimezone ?? 'UTC', id: 'fixture-provider', version: 1, keys: [] }
           providers = [provider]
           return route.fulfill({ json: provider })
         }
@@ -93,7 +101,7 @@ try {
   const managerLink = panel.getByRole('link', { name: 'Open LLM Manager settings' })
   await route.waitFor()
   assert.equal(await route.inputValue(), 'claude')
-  assert.deepEqual(await route.locator('option').evaluateAll((options) => options.map((entry) => entry.value)), ['', 'claude', 'grok', 'zcode', 'cursor'])
+  assert.deepEqual(await route.locator('option').evaluateAll((options) => options.map((entry) => entry.value)), ['', 'claude', 'grok', 'zcode', 'cursor', 'codex'])
   assert.equal(await managerLink.count(), 0)
   if (process.env.SPEX_SYNC_MODEL_SCREENSHOT) await panel.screenshot({ path: process.env.SPEX_SYNC_MODEL_SCREENSHOT })
 
@@ -182,18 +190,29 @@ try {
     await page.getByRole('heading', { name: 'Provider 配置库' }).waitFor()
     await page.getByRole('heading', { name: 'Sync fixture' }).waitFor()
     await page.getByText('暂无 Provider 配置').waitFor()
+    const timezone = page.getByRole('combobox', { name: '全局时区' })
+    const saveTimezone = page.getByRole('button', { name: '保存时区' })
+    await timezone.selectOption('Asia/Singapore')
+    await saveTimezone.click()
+    await page.getByText('已保存调度时区').waitFor()
+    assert.deepEqual(managerWrites[0], { op: 'set_schedule_timezone', timezone: 'Asia/Singapore' })
+    await page.reload()
+    await timezone.locator('option[value="Asia/Singapore"]:checked').waitFor({ state: 'attached' })
+    assert.equal(await timezone.inputValue(), 'Asia/Singapore')
     if (process.env.SPEX_SYNC_MANAGER_SCREENSHOT) {
       await page.screenshot({ path: process.env.SPEX_SYNC_MANAGER_SCREENSHOT, fullPage: true })
     }
     await page.getByRole('button', { name: '新增配置' }).click()
     const form = page.getByRole('dialog', { name: '新增配置' })
+    assert.equal(await form.getByRole('textbox', { name: '时区', exact: true }).count(), 0)
     await form.getByRole('textbox', { name: '名称', exact: true }).fill('Provider fixture')
     await form.getByRole('textbox', { name: 'Base URL' }).fill('https://fixture.invalid/v1')
     await form.getByRole('button', { name: '保存配置' }).click()
     await page.getByText('Provider 已保存').waitFor()
-    assert.equal(managerWrites.length, 1)
-    assert.equal(managerWrites[0].input.mode, 'create')
-    assert.equal(managerWrites[0].input.provider.name, 'Provider fixture')
+    assert.equal(managerWrites.length, 2)
+    assert.equal(managerWrites[1].input.mode, 'create')
+    assert.equal(managerWrites[1].input.provider.name, 'Provider fixture')
+    assert.equal(Object.hasOwn(managerWrites[1].input.provider, 'timezone'), false)
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true)
   }
   assert.deepEqual(pageErrors, [])

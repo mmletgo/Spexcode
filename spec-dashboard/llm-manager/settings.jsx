@@ -24,6 +24,10 @@ async function postSettings(op, fields) {
 }
 
 const client = {
+  scheduleTimezone: {
+    async read() { return (await postSettings('get_schedule_timezone')).timezone },
+    async save(timezone) { return (await postSettings('set_schedule_timezone', { timezone })).timezone },
+  },
   async listProviders() { return (await postSettings('list_providers')).providers },
   saveProvider(input) { return postSettings('save_provider', { input }) },
   async deleteProvider(providerId) { await postSettings('delete_provider', { provider_id: providerId }) },
