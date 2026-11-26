@@ -276,10 +276,10 @@ async function observeAcp(stdout: Readable, plan: NativePlan, prompt: string, se
   onTerminal(output: NativeOutput): void
   onProviderQuota?(request: NativeRequest, evidence: 'http_429' | 'usage_limit'): void
   isInterrupted(): boolean
-}): Promise<{ output: NativeOutput; toolActivity: boolean }> {
+}): Promise<{ output: NativeOutput; textOnlyWithoutTools: boolean }> {
   const lines = createInterface({ input: stdout, crlfDelay: Infinity }), chunks: string[] = []
   let awaiting: number | string = 1, sessionId: string | undefined, request: NativeRequest | undefined, terminal: NativeOutput | undefined, model: string | undefined
-  let toolActivity = false
+  let textOnlyWithoutTools = true
   try {
     for await (const line of lines) {
       if (!line.trim()) continue
@@ -291,7 +291,7 @@ async function observeAcp(stdout: Readable, plan: NativePlan, prompt: string, se
         const params = object(packet.params)
         if (typeof packet.id === 'string' || typeof packet.id === 'number') {
           if (packet.method === 'session/request_permission') {
-            if (request && params?.sessionId === sessionId) toolActivity = true
+            if (request && params?.sessionId === sessionId) textOnlyWithoutTools = false
             const outcome = hooks.isInterrupted() || terminal || !request ? { outcome: { outcome: 'cancelled' } } : permissionResult(params, plan, sessionId)
             send({ id: packet.id, result: outcome })
           } else send({ id: packet.id, error: { code: -32601, message: 'Client method unavailable' } })
@@ -308,7 +308,7 @@ async function observeAcp(stdout: Readable, plan: NativePlan, prompt: string, se
             throw pending('Cursor ACP emitted session updates after its original prompt terminal')
           }
           if (update?.sessionUpdate === 'tool_call' || update?.sessionUpdate === 'tool_call_update') {
-            toolActivity = true
+            textOnlyWithoutTools = false
             chunks.length = 0
           }
           else if (update?.sessionUpdate === 'agent_message_chunk') {
@@ -316,7 +316,7 @@ async function observeAcp(stdout: Readable, plan: NativePlan, prompt: string, se
             if (content?.type === 'text') {
               if (typeof content.text !== 'string') throw pending('Cursor ACP assistant text chunk is malformed')
               chunks.push(content.text)
-            }
+            } else textOnlyWithoutTools = false
           } else if (update?.sessionUpdate === 'config_option_update') model = reportedModel(update) ?? model
           else if (update?.sessionUpdate === 'current_mode_update' && plan.mode === 'read' && update.currentModeId !== 'ask') {
             throw pending('Cursor ACP read session changed to an unverified mode')
@@ -374,7 +374,7 @@ async function observeAcp(stdout: Readable, plan: NativePlan, prompt: string, se
     }
   } finally { lines.close() }
   if (!terminal) throw request ? pending('Cursor ACP stream closed without its original prompt terminal') : failed('Cursor ACP closed before prompt dispatch')
-  return { output: terminal, toolActivity }
+  return { output: terminal, textOnlyWithoutTools }
 }
 
 /** 启动 Cursor ACP 原生会话。已存在的派发只允许读取原结果或精确停止。 */
@@ -552,8 +552,9 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
     if (failure) throw failure
     if (!output || !boundRequest) throw pending('Cursor ACP result was not fully observed')
     if (!success) throw failed('Cursor ACP prompt did not complete successfully')
+    writeEvidence(root, 'result.json', output)
     let quotaDigest: string | undefined
-    if (managedRoute(execution.model) && observation?.toolActivity === false && usageLimitNotice(output.text)) {
+    if (managedRoute(execution.model) && observation?.textOnlyWithoutTools && usageLimitNotice(output.text)) {
       try {
         const actual = nativeWorktreeResult(worktreePath, execution.worktree)
         if (actual.headCommit === execution.worktree.baseCommit && actual.tree === execution.worktree.tree) {
@@ -566,7 +567,6 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
         if (!(error instanceof StructuredSessionError) || error.code !== 'native_worktree_result_invalid') throw error
       }
     }
-    writeEvidence(root, 'result.json', output)
     writeEvidence(root, 'settlement.json', { launchDigest: digest(binding), outputDigest: digest(output), stopDigest: stopObservation(root, binding), exit, ...(normalClose ? { closeDigest: digest(normalClose) } : {}), ...(quotaDigest ? { quotaDigest } : {}) } satisfies NativeSettlement)
     if (quotaDigest) throw quotaFailure(boundRequest)
     return verifyFinal(boundRequest, output, prompt, execution)

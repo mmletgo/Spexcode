@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
-import { delimiter, join } from 'node:path'
+import { delimiter, dirname, join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { processStartToken } from '@spexcode/spec-core'
 import { assertCursorRejectedFinalSource, cursorStructuredTurn, stopCursorStructuredTurn, type CursorStructuredExecution } from './cursor-structured.js'
@@ -19,7 +19,7 @@ const limitNotice = '\n\nUpgrade your plan to continue\n'
 const managedCursor = managedModel({ routeId: 'a'.repeat(64), vendor: 'cursor', model: 'default', kind: 'cli' })
 const sha256 = (text: string): string => createHash('sha256').update(text).digest('hex')
 const readJson = <T>(path: string): T => JSON.parse(readFileSync(path, 'utf8')) as T
-type Scenario = 'edit' | 'edit-sticky' | 'external-exit' | 'read' | 'bad-json' | 'bad-schema' | 'duplicate-terminal' | 'wrong-id' | 'auth' | 'rpc-error' | 'usage-notice' | 'usage-notice-with-tool' | 'usage-notice-dirty' | 'usage-notice-json' | 'usage-notice-late-permission' | 'cancel' | 'cancel-blocked' | 'read-wrong-mode' | 'read-mode-refused' | 'periodic'
+type Scenario = 'edit' | 'edit-sticky' | 'external-exit' | 'read' | 'bad-json' | 'bad-schema' | 'duplicate-terminal' | 'wrong-id' | 'auth' | 'rpc-error' | 'usage-notice' | 'usage-notice-with-tool' | 'usage-notice-dirty' | 'usage-notice-json' | 'usage-notice-late-permission' | 'usage-notice-nontext' | 'cancel' | 'cancel-blocked' | 'read-wrong-mode' | 'read-mode-refused' | 'periodic'
 
 function fixture(t: TestContext, scenario: Scenario, model = 'cursor:default', afterTerminal: ReadonlyArray<Record<string, unknown>> = []) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'spex-cursor-fixture-')))
@@ -128,6 +128,7 @@ createInterface({ input: process.stdin, crlfDelay: Infinity }).on('line', line =
     if (scenario.startsWith('usage-notice')) {
       if (scenario === 'usage-notice-with-tool') update('tool_call', { rawInput: 'fixture tool' })
       if (scenario === 'usage-notice-dirty') writeFileSync(join(cwd, 'draft.json'), '{}')
+      if (scenario === 'usage-notice-nontext') update('agent_message_chunk', { content: { type: 'image', data: 'YQ==', mimeType: 'image/png' } })
       const notice = scenario === 'usage-notice-json' ? JSON.stringify({ marker: ${JSON.stringify(limitNotice)} }) : ${JSON.stringify(limitNotice)}
       text(notice.slice(0, 8))
       text(notice.slice(8))
@@ -553,8 +554,8 @@ test('Cursor settles a bare managed ACP usage notice as provider quota and retai
   await assert.rejects(f.run(f.state(), replayCallbacks), { code: 'structured_output_format_invalid' })
 })
 
-test('Cursor keeps unmanaged notices and notices from worktree or tool activity as rejected output', async t => {
-  for (const [scenario, model] of [['usage-notice', 'cursor:default'], ['usage-notice-with-tool', managedCursor], ['usage-notice-dirty', managedCursor]] as const) {
+test('Cursor keeps unmanaged notices, edited worktrees and mixed ACP activity as rejected output', async t => {
+  for (const [scenario, model] of [['usage-notice', 'cursor:default'], ['usage-notice-with-tool', managedCursor], ['usage-notice-dirty', managedCursor], ['usage-notice-nontext', managedCursor]] as const) {
     await t.test(scenario, async t => {
       const f = fixture(t, scenario, model)
       await assert.rejects(f.run(), (error: unknown) => {
@@ -566,6 +567,14 @@ test('Cursor keeps unmanaged notices and notices from worktree or tool activity 
       assert.equal(existsSync(join(f.sessionRoot, 'provider-quota.json')), false)
     })
   }
+})
+
+test('Cursor preserves the native reply when the Git check for a usage notice fails', async t => {
+  const f = fixture(t, 'usage-notice', managedCursor)
+  writeFileSync(join(dirname(f.cli), 'git'), '#!/bin/sh\nif [ "$1" = "--no-optional-locks" ]; then exit 19; fi\nexec /usr/bin/git "$@"\n', { mode: 0o700 })
+  await assert.rejects(f.run(), { status: 19 })
+  assert.equal(readJson<{ text: string }>(join(f.sessionRoot, 'result.json')).text, limitNotice)
+  assert.equal(existsSync(join(f.sessionRoot, 'provider-quota.json')), false)
 })
 
 test('Cursor accepts valid business JSON containing a usage notice as normal structured output', async t => {
