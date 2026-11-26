@@ -55,6 +55,12 @@ export type P0ReviewChallenge = {
   analysisRef: BlobRef; diagnosticRef: BlobRef; scopeDigest: string
   origin: { operationId: string; attemptId: string; approvalCheckpointRef: BlobRef; continuationRef: BlobRef; partitionPlanRef: BlobRef; analysisDigest: string }
 }
+export type P1ReviewChallenge = {
+  version: 'p1-review-challenge-v1'
+  requestId: string; expectedRevision: number; inputId: string; partitionId: string
+  candidateDigest: string; resultRef: BlobRef; diagnosticRef: BlobRef; scopeDigest: string
+  origin: { operationId: string; attemptId: string; reviewCheckpointRef: BlobRef; partitionPlanRef: BlobRef }
+}
 export type SyncOperation = {
   id: string; ingressKey: string; payloadDigest: string; rootCauseId: string
   origin: 'initial' | 'spec' | 'code' | 'combined' | 'reconcile' | 'decision'
@@ -69,6 +75,7 @@ export type SyncOperation = {
   /** 用户显式重开已结束操作；冻结业务输入不变。 */
   retryOf?: string
   p0ReviewChallenges?: P0ReviewChallenge[]
+  p1ReviewChallenges?: P1ReviewChallenge[]
   /** 模型交接只为原候选续审，保留原预算族和截止时间。 */
   inheritRetryBudget?: true
   /** 固定操作模型；缺省表示历史 gpt-6.1-sol，不随全局配置变化。 */

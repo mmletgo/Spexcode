@@ -8,9 +8,10 @@ import { test } from 'node:test'
 import { applyComponentMigrations, openProtocol, type ProtocolTransaction, type SqlParam } from '@spexcode/session-protocol'
 import { gc, getBlob, putBlob } from '@spexcode/spec-core'
 import { managedModel } from '../llm-manager-route.js'
+import { p1ReviewDiagnosticEvidence, p1ReviewDiagnosticRef, readP1ReviewChallengeRequest, readP1ReviewDiagnostic } from './elaboration-review-challenge.js'
 import { migrateSyncStore, syncSemanticDigest, SYNC_COMPONENT, SYNC_MIGRATIONS } from './migrations.js'
-import type { AdmitSyncInput, ApplyFilePlan, ApplyPlan, ApplyReceipt, BlobRef, CandidateRef, ClaimedAttempt, InputSnapshot, SyncScope, VerificationRef, VerificationResultBlob, WorktreeIdentity } from './operation-types.js'
-import { captureInputSnapshot, readEvidence } from './snapshot.js'
+import type { AdmitSyncInput, ApplyFilePlan, ApplyPlan, ApplyReceipt, BlobRef, CandidateRef, ClaimedAttempt, InputSnapshot, P1ReviewChallenge, SyncOperation, SyncScope, VerificationRef, VerificationResultBlob, WorktreeIdentity } from './operation-types.js'
+import { captureInputSnapshot, contentHash, readEvidence, writeEvidence } from './snapshot.js'
 import { prepareControlledDecision, prepareControlledRequest } from './request-input.js'
 import { SyncStore, SYNC_COORDINATOR_ADDRESS, syncCoordinatorAddress } from './store.js'
 
@@ -79,6 +80,165 @@ async function fixture() {
   const receipt = (journalId: string, plan: ApplyPlan): ApplyReceipt => ({ id: `receipt-${journalId}`, journalId, effectKey: plan.effectKey, actualTree: 'f'.repeat(40), actualCommit: '3'.repeat(40), deliverySnapshot: { ...input(store.readJournal(journalId).plan.target, `delivered-${journalId}`), immutableTree: 'f'.repeat(40), manifestBlob: store.readAttempt(store.readJournal(journalId).attemptId).candidate!.manifestBlob }, evidenceRefs: [put({ bytesChecked: true })], completedAtMs: time })
   return { root, path, protocol, store, options, put, input, admit, claim, ready, receipt, controlled, blobs, tick: (ms: number) => { time += ms }, cleanup: () => { protocol.close(); rmSync(root, { recursive: true, force: true }) } }
 }
+
+function freezeP1ChallengeSource(f: Awaited<ReturnType<typeof fixture>>, { operation, attempt, fence }: ClaimedAttempt) {
+  const partitionId = 'order-leaf', planDigest = 'partition-digest'
+  const candidate = { inputDigest: 'p1-input', changes: [], applicability: [] }
+  const candidateDigest = contentHash(JSON.stringify(candidate))
+  const resultRef = f.put({
+    structurePassed: true, reviewPassed: false, candidateDigest, partitionBinding: { partitionId, planDigest },
+    rounds: [{ candidate, candidateDigest, traces: [{ purpose: 'elaboration_review', sessionId: 'review-session' }], review: { verdict: 'repair' } }],
+  })
+  const partitionPlanRef = f.put({ version: 'sync-partitions-v1', partitions: [{ id: partitionId }], digest: planDigest })
+  const save = (stage: string, ref: BlobRef): BlobRef => {
+    const wrapper = f.put({ version: 'sync-stage-v1', operationId: operation.id, attemptId: attempt.id, inputId: operation.input.id, policyDigest: operation.policyDigest, readSetDigest: operation.readSetDigest, stage, resultRef: ref })
+    f.store.checkpoint(fence, { ...wrapper, artifacts: [{ kind: 'json', ref }] })
+    return wrapper
+  }
+  const planCheckpointRef = save('partition-plan', partitionPlanRef)
+  const reviewCheckpointRef = save(`partition:${partitionId}:elaboration`, resultRef)
+  const prepare = (target: SyncOperation) => {
+    const request = readP1ReviewChallengeRequest({ operationId: target.id, requestId: 'challenge-1', expectedRevision: target.revision, inputId: target.input.id, partitionId, candidateDigest, resultRef, diagnostic: '请核对代码列与测试列。', evidencePaths: ['tests/order.test.ts', 'src/order.ts', 'src/order.ts'] })
+    const diagnosticRef = f.put(p1ReviewDiagnosticEvidence(request))
+    const challenge: P1ReviewChallenge = { version: 'p1-review-challenge-v1', requestId: request.requestId, expectedRevision: request.expectedRevision, inputId: request.inputId, partitionId, candidateDigest, resultRef, diagnosticRef,
+      scopeDigest: contentHash(JSON.stringify({ contractIds: target.scope.contractIds, flowIds: target.scope.flowIds, paths: target.scope.paths })),
+      origin: { operationId: operation.id, attemptId: attempt.id, reviewCheckpointRef, partitionPlanRef },
+    }
+    return { request, challenge }
+  }
+  return { prepare, planCheckpointRef }
+}
+
+test('P1定向复审诊断只接受精确DTO与规范路径，并从原CAS字节冷读', async () => {
+  const f = await fixture()
+  try {
+    const claimed = f.claim(), original = freezeP1ChallengeSource(f, claimed)
+    const { request, challenge } = original.prepare(f.store.requestControl(claimed.operation.id, 'pause'))
+    assert.deepEqual(request.evidencePaths, ['src/order.ts', 'tests/order.test.ts'])
+    assert.deepEqual(p1ReviewDiagnosticRef(request), challenge.diagnosticRef)
+    assert.deepEqual(writeEvidence(f.root, p1ReviewDiagnosticEvidence(request)), challenge.diagnosticRef)
+    assert.deepEqual(readP1ReviewDiagnostic(f.root, challenge), { ref: challenge.diagnosticRef, text: request.diagnostic, evidencePaths: request.evidencePaths })
+    for (const evidencePaths of [[], ['.Git/config'], ['.env.production'], ['.spex-sync-drafts/order.json'], ['src/../order.ts'], ['/src/order.ts'], ['src\\order.ts']]) {
+      assert.throws(() => readP1ReviewChallengeRequest({ ...request, evidencePaths }), { code: 'sync_p1_challenge_invalid' })
+    }
+    for (const invalid of [{ origin: challenge.origin }, { candidateDigest: 'not-sha' }, { resultRef: { ...request.resultRef, extra: 'unknown' } }, { expectedRevision: 0 }, { diagnostic: '\uD800' }]) {
+      assert.throws(() => readP1ReviewChallengeRequest({ ...request, ...invalid }), { code: 'sync_p1_challenge_invalid' })
+    }
+    const noncanonicalRef = writeEvidence(f.root, p1ReviewDiagnosticEvidence({ ...request, evidencePaths: [...request.evidencePaths].reverse() }))
+    assert.throws(() => readP1ReviewDiagnostic(f.root, { ...challenge, diagnosticRef: noncanonicalRef }), { code: 'sync_p1_challenge_binding' })
+    assert.throws(() => readP1ReviewDiagnostic(f.root, { ...challenge, candidateDigest: 'a'.repeat(64) }), { code: 'sync_p1_challenge_binding' })
+  } finally { f.cleanup() }
+})
+
+test('P1定向复审正式暂停后登记，原件与预算保持并支持冷幂等', async () => {
+  const f = await fixture()
+  try {
+    const original = f.claim(), frozen = freezeP1ChallengeSource(f, original), id = original.operation.id
+    assert.throws(() => f.store.authorizeP1ReviewChallenge(id, frozen.prepare(f.store.readOperation(id)).challenge), { code: 'SYNC_P1_CHALLENGE_UNSETTLED' })
+    const paused = f.store.requestControl(id, 'pause'), attempt = f.store.readAttempt(original.attempt.id), budget = f.store.readBudgetUsage(id)
+    const { challenge, request } = frozen.prepare(paused)
+    const stale = frozen.prepare({ ...paused, revision: paused.revision - 1 }).challenge
+    assert.throws(() => f.store.authorizeP1ReviewChallenge(id, stale), { code: 'SYNC_P1_CHALLENGE_STALE' })
+    for (const origin of [{ ...challenge.origin, operationId: 'foreign' }, { ...challenge.origin, reviewCheckpointRef: frozen.planCheckpointRef }, { ...challenge.origin, partitionPlanRef: challenge.resultRef }]) {
+      assert.throws(() => f.store.authorizeP1ReviewChallenge(id, { ...challenge, origin }), { code: 'SYNC_P1_CHALLENGE_BINDING' })
+    }
+    const substituted = { ...request, resultRef: challenge.origin.partitionPlanRef }
+    const changed = { ...challenge, resultRef: substituted.resultRef, diagnosticRef: f.put(p1ReviewDiagnosticEvidence(substituted)) }
+    assert.throws(() => f.store.authorizeP1ReviewChallenge(id, changed), { code: 'SYNC_P1_CHALLENGE_BINDING' })
+    assert.deepEqual(f.store.readOperation(id), paused)
+    const recorded = f.store.authorizeP1ReviewChallenge(id, challenge)
+    assert.deepEqual(recorded, { challenge, operation: { ...paused, revision: paused.revision + 1, p1ReviewChallenges: [challenge] } })
+    assert.deepEqual(f.store.readAttempt(original.attempt.id), attempt)
+    assert.deepEqual(f.store.readBudgetUsage(id), budget)
+    const reopened = openProtocol(f.path)
+    try {
+      const cold = new SyncStore(reopened, f.options)
+      assert.deepEqual(cold.authorizeP1ReviewChallenge(id, challenge), recorded)
+      const otherDiagnostic = f.put(p1ReviewDiagnosticEvidence({ ...request, diagnostic: '另一份诊断' }))
+      assert.throws(() => cold.authorizeP1ReviewChallenge(id, { ...challenge, diagnosticRef: otherDiagnostic }), { code: 'SYNC_IDEMPOTENCY_CONFLICT' })
+      assert.throws(() => cold.authorizeP1ReviewChallenge(id, { ...challenge, origin: { ...challenge.origin, reviewCheckpointRef: frozen.planCheckpointRef } }), { code: 'SYNC_IDEMPOTENCY_CONFLICT' })
+      assert.ok(cold.pinnedBlobRefs().some(ref => ref.sha256 === challenge.diagnosticRef.sha256))
+    } finally { reopened.close() }
+  } finally { f.cleanup() }
+})
+
+test('P1定向复审必须等待原生资源正式移除', async () => {
+  const f = await fixture()
+  try {
+    const original = f.claim(), frozen = freezeP1ChallengeSource(f, original), id = original.operation.id
+    const planBlob = f.put({ run: 'original-review' })
+    const resource = f.store.planResource(original.fence, { key: 'original-review', kind: 'native_session', payloadDigest: 'review', inputId: original.operation.input.id, candidateDigest: null, planBlob, checkpointRef: planBlob })
+    const { challenge } = frozen.prepare(f.store.requestControl(id, 'pause'))
+    assert.throws(() => f.store.authorizeP1ReviewChallenge(id, challenge), { code: 'SYNC_P1_CHALLENGE_UNSETTLED' })
+    const binding = { operationId: id, attemptId: original.attempt.id, inputId: original.operation.input.id, candidateDigest: null }
+    const terminal = f.store.recordResourceCheckpoint(resource.id, { ...binding, phase: 'terminal', expectedCheckpointRef: planBlob, checkpointRef: f.put({ stopped: true }) })
+    assert.throws(() => f.store.authorizeP1ReviewChallenge(id, challenge), { code: 'SYNC_P1_CHALLENGE_UNSETTLED' })
+    f.store.recordResourceCheckpoint(resource.id, { ...binding, phase: 'removed', expectedCheckpointRef: terminal.checkpointRef, checkpointRef: f.put({ removed: true }) })
+    assert.deepEqual(f.store.authorizeP1ReviewChallenge(id, challenge).challenge, challenge)
+  } finally { f.cleanup() }
+})
+
+test('P1定向复审只承认同一冻结输入的正式祖先检查点', async () => {
+  const f = await fixture()
+  try {
+    const admission = f.admit(), original = f.claim(admission), frozen = freezeP1ChallengeSource(f, original)
+    f.store.recordFailure(original.fence, { code: 'p1_review_repair', message: '原审查要求修复', kind: 'repairable', evidenceRefs: [] })
+    const retry = f.claim({ ...admission, ingressKey: 'p1-retry', rootCauseId: 'p1-retry', retryOf: original.operation.id })
+    const paused = f.store.requestControl(retry.operation.id, 'pause')
+    const unrelated = f.claim(f.admit(source('unrelated')))
+    const unrelatedPaused = f.store.requestControl(unrelated.operation.id, 'pause')
+    assert.throws(() => f.store.authorizeP1ReviewChallenge(unrelatedPaused.id, frozen.prepare(unrelatedPaused).challenge), { code: 'SYNC_P1_CHALLENGE_BINDING' })
+    const { challenge } = frozen.prepare(paused)
+    assert.deepEqual(f.store.authorizeP1ReviewChallenge(paused.id, challenge).challenge, challenge)
+    assert.equal(f.store.readOperation(original.operation.id).p1ReviewChallenges, undefined)
+  } finally { f.cleanup() }
+})
+
+test('P1定向复审拒绝仅登记过受管验证资源的操作', async () => {
+  const f = await fixture()
+  try {
+    const original = f.claim(), frozen = freezeP1ChallengeSource(f, original), id = original.operation.id
+    const { input, scope: coveredScope } = original.operation
+    const manifestBlob = f.put({ version: 1, entries: [] })
+    f.store.bindComposedInput(original.fence, { sourceInputId: input.id, previousBaselinePairId: null, tree: input.immutableTree, manifestBlob, contentDigest: input.contentDigest })
+    f.store.startGeneration(original.fence, { readyScope: coveredScope, blockedScope: { paths: [], contractIds: [], flowIds: [] }, blockedReason: null })
+    const candidate = { baseTree: input.immutableTree, sourceInputId: input.id, tree: input.immutableTree, digest: 'verification-candidate', manifestBlob, actualDiffBlob: f.put([]), coveredScope }
+    f.store.freezeCandidate(original.fence, candidate)
+    const planBlob = f.put({ run: 'managed-verification' })
+    const resource = f.store.planResource(original.fence, { key: 'managed-verification', kind: 'verification', payloadDigest: 'verification', inputId: input.id, candidateDigest: candidate.digest, planBlob, checkpointRef: planBlob })
+    const binding = { operationId: id, attemptId: original.attempt.id, inputId: input.id, candidateDigest: candidate.digest }
+    const terminal = f.store.recordResourceCheckpoint(resource.id, { ...binding, phase: 'terminal', expectedCheckpointRef: planBlob, checkpointRef: f.put({ stopped: true }) })
+    f.store.recordResourceCheckpoint(resource.id, { ...binding, phase: 'removed', expectedCheckpointRef: terminal.checkpointRef, checkpointRef: f.put({ removed: true }) })
+    const paused = f.store.requestControl(id, 'pause')
+    assert.equal(paused.delivery, null)
+    assert.equal(f.store.readAttempt(original.attempt.id).verification, null)
+    assert.throws(() => f.store.authorizeP1ReviewChallenge(id, frozen.prepare(paused).challenge), { code: 'SYNC_P1_CHALLENGE_PHASE' })
+  } finally { f.cleanup() }
+})
+
+for (const delivered of [false, true]) test(`P1定向复审拒绝已验证或已交付的操作 delivered=${delivered}`, async () => {
+  const f = await fixture()
+  try {
+    let frozen!: ReturnType<typeof freezeP1ChallengeSource>
+    const ready = f.ready(f.admit(), scope(), { paths: [], contractIds: [], flowIds: [] }, null, claim => { frozen = freezeP1ChallengeSource(f, claim) })
+    const id = ready.operation.id
+    assert.equal(f.store.hasVerificationOrJournal(id), true)
+    if (delivered) {
+      const journal = f.store.beginApply(ready.fence, ready.plan, ready.target)
+      for (const step of journal.steps) f.store.recordApplyStep(ready.fence, journal.id, { ...step, status: 'completed' })
+      const pausing = f.store.requestControl(id, 'pause')
+      assert.throws(() => f.store.authorizeP1ReviewChallenge(id, frozen.prepare(pausing).challenge), { code: 'SYNC_P1_CHALLENGE_UNSETTLED' })
+      const receipt = f.receipt(journal.id, ready.plan)
+      f.store.recordReceipt(journal.id, receipt)
+      f.store.settleApply(journal.id, receipt.id)
+      assert.equal(f.store.readJournal(journal.id).status, 'settled')
+    } else f.store.requestControl(id, 'pause')
+    const paused = f.store.readOperation(id)
+    assert.equal(paused.phase, 'paused')
+    assert.throws(() => f.store.authorizeP1ReviewChallenge(id, frozen.prepare(paused).challenge), { code: 'SYNC_P1_CHALLENGE_PHASE' })
+    assert.deepEqual(f.store.readOperation(id), paused)
+  } finally { f.cleanup() }
+})
 
 test('自动采纳政策冻结到操作、payload、语义和alias，重试保持原选择', async () => {
   const f = await fixture()
@@ -3300,7 +3460,7 @@ for (const prior of [34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44] as const) test(
   } finally { backup?.close(); f.cleanup() }
 })
 
-for (const prior of [46, 47, 48, 49, 51, 52, 54, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 71, 72, 74, 75, 76, 77] as const) test(`从writer${prior}升级保留自动采纳索引及原件，旧writer拒绝且备份可回滚`, async () => {
+for (const prior of [46, 47, 48, 49, 51, 52, 54, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 71, 72, 74, 75, 76, 77, 79] as const) test(`从writer${prior}升级保留自动采纳索引及原件，旧writer拒绝且备份可回滚`, async () => {
   assert.equal(SYNC_MIGRATIONS[prior]?.version, prior + 1, '新持久语义必须有独立 writer 围栏')
   const f = await fixture()
   let backup: ReturnType<typeof openProtocol> | undefined

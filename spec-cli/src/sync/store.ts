@@ -8,9 +8,12 @@ import { controlledDecisionIdentity, readControlledDecision, readControlledReque
 import { readHistoryRequest } from './history-input.js'
 import { assertPublicationParentCurrent, verifyPublicationBase } from './publication-base.js'
 import { baselineSelectionDigest, selectedRetiredIds } from './composition.js'
+import { authenticateP1ReviewDiagnostic } from './elaboration-review-challenge.js'
 import { proveUnadoptedDelivery } from './source-adoption.js'
 import type { SyncCoordinatorPlan } from './coordinator-types.js'
-import type { P0ReviewChallenge, PublicationBase, PublicationHeads } from './operation-types.js'
+import type { ElaborationResult } from './elaboration-types.js'
+import type { P0ReviewChallenge, P1ReviewChallenge, PublicationBase, PublicationHeads, SyncCheckpointRef } from './operation-types.js'
+import type { SyncPartitionPlan } from './partitioning.js'
 import { SYNC_COMPONENT, SYNC_MIGRATIONS, syncCoordinatorAddress, syncSemanticDigest } from './migrations.js'
 import type { BaselineResource, BaselineBinding, FrozenBaselineSelection, BaselineSelectionResult, PhysicalScope, PhysicalControl, ClaimQueuedAttemptInput, SyncObserverHealth, SyncObservationInput, SyncObservation, ObserveAndAdmitResult, AdmitSyncInput, ApplyFilePlan, ApplyJournal, ApplyPlan, ApplyReceipt, ApplyStep, BaselinePair, BlobRef, CandidateRef, ClaimedAttempt, ClaimAttemptInput, ComposedInputRef, RecoverableSyncResource, SyncResourceCheckpoint, SyncResourcePlan, SyncResourceRecord, DispatchPlan, InputSnapshot, NativeSessionRef, RecoverableSync, ScopeLease, SyncAttempt, SyncControl, SyncDispatchEnvelope, SyncFailure, SyncOperation, SyncIngressReceipt, SyncScope, VerificationRef, VerificationResultBlob, WorktreeIdentity, WriteFence } from './operation-types.js'
 
@@ -1025,6 +1028,12 @@ export class SyncStore {
       attempt.status = 'settled'; journal.status = 'settled'; this.saveJournal(tx, journal); this.saveAttempt(tx, attempt); this.release(tx, attempt.leaseToken); this.saveOperation(tx, operation); return operation
     })
   }
+  private reviewChallengeExecutionSettled(tx: ProtocolTransaction, operationId: string): boolean {
+    return !tx.query("SELECT id FROM sync_attempts WHERE operation_id=? AND status NOT IN ('failed','superseded','settled') LIMIT 1", operationId).length
+      && !tx.query('SELECT operation_id FROM sync_leases WHERE operation_id=? AND token IS NOT NULL AND expires_at_ms>? LIMIT 1', operationId, this.now()).length
+      && !tx.query("SELECT id FROM sync_resources WHERE operation_id=? AND phase!='removed' LIMIT 1", operationId).length
+      && !tx.query("SELECT id FROM sync_apply_journals WHERE operation_id=? AND status!='settled' LIMIT 1", operationId).length
+  }
   /** 在暂停围栏内追加后端已冷验的定向复审授权。 */
   authorizeP0ReviewChallenge(operationId: string, challenge: P0ReviewChallenge): { operation: SyncOperation; challenge: P0ReviewChallenge } {
     this.blob(challenge.diagnosticRef)
@@ -1037,10 +1046,7 @@ export class SyncStore {
       }
       if (operation.revision !== challenge.expectedRevision || operation.input.id !== challenge.inputId || digest(operation.scope) !== challenge.scopeDigest) fail('SYNC_P0_CHALLENGE_STALE', '复审的 operation revision、输入或范围已变化')
       if (operation.control !== 'pause' || operation.phase !== 'paused' || !operation.currentAttemptId
-        || tx.query("SELECT id FROM sync_attempts WHERE operation_id=? AND status NOT IN ('failed','superseded','settled') LIMIT 1", operationId).length
-        || tx.query('SELECT operation_id FROM sync_leases WHERE operation_id=? AND token IS NOT NULL AND expires_at_ms>? LIMIT 1', operationId, this.now()).length
-        || tx.query("SELECT id FROM sync_resources WHERE operation_id=? AND phase!='removed' LIMIT 1", operationId).length
-        || tx.query("SELECT id FROM sync_apply_journals WHERE operation_id=? AND status!='settled' LIMIT 1", operationId).length) fail('SYNC_P0_CHALLENGE_UNSETTLED', '申请前须正式暂停并结算原执行栅栏、资源、租约及应用日志')
+        || !this.reviewChallengeExecutionSettled(tx, operationId)) fail('SYNC_P0_CHALLENGE_UNSETTLED', '申请前须正式暂停并结算原执行栅栏、资源、租约及应用日志')
       for (let source: SyncOperation | undefined = operation; source; source = source.retryOf ? this.operation(tx, source.retryOf) : undefined) {
         if (this.p1OrLater(tx, source)) {
           fail('SYNC_P0_CHALLENGE_PHASE', '定向复审只接受从未派发 P1 或产生候选的原生 P0 操作及正式重试链')
@@ -1050,6 +1056,60 @@ export class SyncStore {
       if (origin.operationId !== challenge.origin.operationId || !origin.checkpointRefs.some(ref => ref.sha256 === challenge.origin.approvalCheckpointRef.sha256
         && ref.artifacts?.some(artifact => artifact.ref.sha256 === challenge.analysisRef.sha256))) fail('SYNC_P0_CHALLENGE_BINDING', '获准的局部分析已经失去原检查点')
       operation.p0ReviewChallenges = [...operation.p0ReviewChallenges ?? [], clone(challenge)]
+      this.saveOperation(tx, operation)
+      return { operation, challenge }
+    })
+  }
+  /** 冻结原局部候选和计划，在暂停围栏内追加须由新独审处理的诊断。 */
+  authorizeP1ReviewChallenge(operationId: string, challenge: P1ReviewChallenge): { operation: SyncOperation; challenge: P1ReviewChallenge } {
+    const replay = (operation: SyncOperation) => {
+      const prior = operation.p1ReviewChallenges?.find(item => item.requestId === challenge.requestId)
+      if (!prior) return null
+      if (digest(prior) !== digest(challenge)) fail('SYNC_IDEMPOTENCY_CONFLICT', challenge.requestId)
+      return { operation, challenge: prior }
+    }
+    const before = this.readOperation(operationId), repeated = replay(before)
+    authenticateP1ReviewDiagnostic(this.blob(challenge.diagnosticRef), operationId, challenge)
+    if (repeated) return repeated
+    const sample = this.readAttempt(challenge.origin.attemptId)
+    const hasArtifact = (checkpoint: SyncCheckpointRef, ref: BlobRef): boolean => checkpoint.artifacts?.some(artifact => artifact.kind === 'json' && artifact.ref.sha256 === ref.sha256) === true
+    const stageMatches = (checkpoint: SyncCheckpointRef, name: string, resultRef: BlobRef): boolean => {
+      if (!hasArtifact(checkpoint, resultRef)) return false
+      const value = JSON.parse(this.blob(checkpoint).toString('utf8')) as { version: string; operationId: string; attemptId: string; inputId: string; policyDigest: string; readSetDigest: string; stage: string; resultRef: BlobRef }
+      return value?.version === 'sync-stage-v1' && value.stage === name && value.operationId === challenge.origin.operationId
+        && value.attemptId === sample.id && value.inputId === challenge.inputId && value.resultRef?.sha256 === resultRef.sha256
+        && value.policyDigest === before.policyDigest && value.readSetDigest === before.readSetDigest
+    }
+    const review = sample.checkpointRefs.find(ref => ref.sha256 === challenge.origin.reviewCheckpointRef.sha256)
+    const plan = sample.checkpointRefs.find(ref => stageMatches(ref, 'partition-plan', challenge.origin.partitionPlanRef))
+    if (!review || !plan || !stageMatches(review, `partition:${challenge.partitionId}:elaboration`, challenge.resultRef)) fail('SYNC_P1_CHALLENGE_BINDING', '找不到绑定原局部结果与分区计划的冻结检查点')
+    const result = JSON.parse(this.blob(challenge.resultRef).toString('utf8')) as ElaborationResult
+    const partitionPlan = JSON.parse(this.blob(challenge.origin.partitionPlanRef).toString('utf8')) as SyncPartitionPlan
+    const round = result.rounds?.at(-1)
+    if (partitionPlan.version !== 'sync-partitions-v1' || !partitionPlan.partitions?.some(partition => partition.id === challenge.partitionId)
+      || result.partitionBinding?.partitionId !== challenge.partitionId || result.partitionBinding.planDigest !== partitionPlan.digest
+      || result.structurePassed !== true || result.reviewPassed !== false || result.candidateDigest !== challenge.candidateDigest
+      || round?.candidateDigest !== challenge.candidateDigest || !round.candidate || createHash('sha256').update(JSON.stringify(round.candidate)).digest('hex') !== challenge.candidateDigest
+      || !round.traces?.some(trace => trace.purpose === 'elaboration_review')) fail('SYNC_P1_CHALLENGE_BINDING', '原结果缺少绑定分区及计划的结构合格候选或真实独审记录')
+    return this.write(tx => {
+      const operation = this.operation(tx, operationId)
+      const repeated = replay(operation)
+      if (repeated) return repeated
+      if (operation.revision !== challenge.expectedRevision || operation.input.id !== challenge.inputId || digest(operation.scope) !== challenge.scopeDigest) fail('SYNC_P1_CHALLENGE_STALE', '复审的 operation revision、输入或范围已变化')
+      if (operation.control !== 'pause' || operation.phase !== 'paused' || !operation.currentAttemptId) fail('SYNC_P1_CHALLENGE_UNSETTLED', '申请前须正式暂停原操作')
+      let origin: SyncOperation | undefined
+      for (let source: SyncOperation | undefined = operation; source; source = source.retryOf ? this.operation(tx, source.retryOf) : undefined) {
+        if (source.delivery || !contains(emptyScope(), source.deliveredScope) || this.verificationOrJournalExists(tx, source.id)) fail('SYNC_P1_CHALLENGE_PHASE', '定向 P1 复审只接受尚未进入验证或交付的正式操作链')
+        if (!this.reviewChallengeExecutionSettled(tx, source.id)) fail('SYNC_P1_CHALLENGE_UNSETTLED', '申请前须结算原执行栅栏、资源、租约及应用日志')
+        if (source.id === challenge.origin.operationId) origin = source
+      }
+      const attempt = this.attempt(tx, sample.id)
+      if (!origin || origin.input.id !== challenge.inputId || identityKey(origin.input.source) !== identityKey(operation.input.source)
+        || origin.policyDigest !== operation.policyDigest || origin.readSetDigest !== operation.readSetDigest
+        || origin.planBlob?.sha256 !== operation.planBlob?.sha256 || origin.baselineSelection?.digest !== operation.baselineSelection?.digest || digest(origin.scope) !== challenge.scopeDigest
+        || attempt.operationId !== origin.id || !attempt.checkpointRefs.some(ref => ref.sha256 === review.sha256 && hasArtifact(ref, challenge.resultRef))
+        || !attempt.checkpointRefs.some(ref => ref.sha256 === plan.sha256 && hasArtifact(ref, challenge.origin.partitionPlanRef))) fail('SYNC_P1_CHALLENGE_BINDING', '原检查点或来源不属于当前的冻结输入和正式操作链')
+      operation.p1ReviewChallenges = [...operation.p1ReviewChallenges ?? [], clone(challenge)]
       this.saveOperation(tx, operation)
       return { operation, challenge }
     })

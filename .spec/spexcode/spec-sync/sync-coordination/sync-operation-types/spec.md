@@ -19,6 +19,8 @@ Manager 托管的原生工作树可在 DispatchPlan 保存 `managedModel`。其�
 
 [[sync-p0-review-challenge]] 授权存在原 operation，保存操作员请求身份、原 local/continuation wrapper、冻结分区计划与 scope、诊断 CAS 引用。诊断只进入正式独审。 v2 授权通过同一诊断 CAS 绑定精确的只读证据路径。v1 缺此数据，继续按原资格验证。
 
+[[sync-p1-review-challenge]] 授权在 operation 的可选数组中追加不可变的 `p1-review-challenge-v1`，绑定请求身份、预期 revision、冻结 inputId、partitionId、候选摘要、局部结果、诊断、scope，以及原 operation、attempt、独审局部结果 wrapper 和分区计划引用。诊断正文与精确证据路径只保存在授权指向的 CAS。
+
 模型交接在正式 `retryOf` 的 operation 和 ingress receipt 保存 `inheritRetryBudget: true`。新 operation 固定自己的模型和派发身份，沿 dispatchAnchor 的原预算根累计使用并保持原 deadlineAtMs。原 operation 与其派发、候选和证据保留。
 
 本节点治理共享 TypeScript 数据协议，完整范围遵循 [[sync-coordination]]。工作树身份包含仓库、commonDir、canonicalRoot、gitDir、分支及删除重建可区分的物理指纹。冻结输入保存 HEAD、不可变 tree、index tree/digest、文件 manifest blob 与内容摘要；采集时间仅为元数据，稳定 ID 不包含采集时间。

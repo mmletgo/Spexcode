@@ -26,8 +26,9 @@ import { restoreGenerationInput } from './generation.js'
 import { CODE_BEHAVIOR_DRAFT_COMMIT_MISSING, CODE_BEHAVIOR_GUIDANCE_VERSION, type CodeBehaviorContinuation } from './code-behavior.js'
 import { SyncApplication } from './application.js'
 import { p0ReviewDiagnosticEvidence } from './behavior-review-challenge.js'
+import { p1ReviewDiagnosticEvidence } from './elaboration-review-challenge.js'
 import * as continuationCoordinator from './coordinator.js'
-import { acceptedCandidateReviewSource, isSyncInputCurrent, prepareSyncAdmission, readCurrentSyncAnalysis, readonlySpecRepairStalled, recoverSyncOperationResources, runSyncOperation, syncPlanDigest } from './coordinator.js'
+import { acceptedCandidateReviewSource, isSyncInputCurrent, prepareP1ReviewChallenge, prepareSyncAdmission, readCurrentSyncAnalysis, readonlySpecRepairStalled, recoverSyncOperationResources, runSyncOperation, syncPlanDigest } from './coordinator.js'
 import type { SyncCoordinatorOptions, SyncCoordinatorPlan } from './coordinator-types.js'
 import type { BlobRef, SyncAttempt, SyncOperation } from './operation-types.js'
 import { migrateSyncStore, SYNC_COMPONENT, SYNC_MIGRATIONS, syncCoordinatorAddress } from './migrations.js'
@@ -1779,6 +1780,130 @@ async function fixture(t: test.TestContext, budget: import('./operation-types.js
   t.after(() => { if (!closed) protocol.close(); unlock(parent); rmSync(parent, { recursive: true, force: true }) })
   return { root, parent, managedRoot, artifactRoot, input, index, bytes, protocol, store, operation, plan, options, calls, git, priorCommitCount, realTools, closeForRestart: () => { protocol.close(); closed = true }, useStore: (next: SyncStore) => { store = next }, useOperation: (next: typeof operation) => { operation = next }, transform: (fn: typeof transform) => { transform = fn } }
 }
+
+test('P1定向复审经历无效独审及两次正式恢复，始终沿原Git候选只派独审', async t => {
+  const f = await fixture(t, { maxAttempts: 4, maxCalls: 12, maxRepairs: 3, timeoutMs: 120_000 }, false, original, 'project', original, {
+    version: 'sync-coordinator-v2', direction: 'spec_to_code', agentWorkflow: 'native-worktree-v1', sourcePaths: ['src/export.js'],
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 },
+  }, undefined, 'spec', 'zcode:default', true)
+  const cwd = process.cwd()
+  process.chdir(f.root)
+  t.after(() => process.chdir(cwd))
+  const id = f.operation.id, commonDir = f.input.source.commonDir
+  const calls: ElaborationSessionRequest[] = []
+  const repair = [{ code: 'verify-test-reference', kind: 'repair', affectedIds: ['REQ-EXPORT-01'], message: '复查验收的测试引用', evidence: 'tests/export.test.mjs 与候选契约', decision: '核对原绑定' }]
+  const failPhase = f.store.recordFailure.bind(f.store)
+  f.store.recordFailure = (fence, issue, continueRepair) => {
+    const result = failPhase(fence, issue, continueRepair)
+    if (issue.code === 'repair_budget_exhausted' || issue.code === 'p1_challenge_review_invalid') f.store.requestControl(id, 'pause')
+    return result
+  }
+  f.store.startGeneration = () => { throw new StructuredSessionError('unsupported', '夹具在完成P1后结束') }
+  f.options.runner = undefined
+  f.options.nativeExecution = { pollMs: 2, runtime: { readRecord, cancel: async () => assert.fail('不控制真实代理'), run: async request => {
+    calls.push(request)
+    const attempt = f.store.readAttempt(f.store.readOperation(id).currentAttemptId!)
+    const seed = request.worktree!, key = request.sessionCreateKey!, session = sessionIdForCreateKey(key)
+    const identity = { threadId: `operator-review-${session}`, turnId: 'turn' }
+    const workspace = join(f.parent, `operator-challenge-${calls.length}`)
+    let resultWorktree: NonNullable<ElaborationSessionResult['worktree']>, output: unknown
+    if (request.purpose === 'code_behavior_analyze') {
+      const { requiredChangedPaths } = nativeTask(request, commonDir) as { requiredChangedPaths: string[] }
+      const changes = requiredChangedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'],
+        originalIntent: '冻结导出义务', previousBehavior: '导出行为不变', sourceBehavior: '只改备注', deliveryBehavior: '导出行为不变', evidence: 'src/export.js#ExportService', counterexample: '重复请求仍保留首次结果' }))
+      resultWorktree = committedDraftFixture(f, request, { changes, facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }, workspace)
+      output = { summary: '已提交分析' }
+    } else if (request.purpose === 'code_behavior_review') {
+      const context = readCodeBehaviorContext(request, commonDir)
+      const reviewed = context.pendingAnalysis as { analysisDigest: string; analysis: { changes: { id: string }[] } }
+      resultWorktree = committedDraftFixture(f, request, { inputDigest: request.inputDigest, analysisDigest: reviewed.analysisDigest, verdict: 'accept',
+        checkedPaths: (context.task as { requiredChangedPaths: string[] }).requiredChangedPaths,
+        checkedChangeIds: reviewed.analysis.changes.map(change => change.id), findings: [] }, workspace)
+      output = { summary: '已提交分析审查' }
+    } else if (request.purpose === 'elaboration_generate') {
+      assert.equal(attempt.number, 1, '复审期间不能重新生成')
+      resultWorktree = committedDraftFixture(f, request, {
+        version: 'elaboration-target-rows-v3', changes: [],
+        applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: true, basis: '冻结契约已有该边界', affectedIds: ['REQ-EXPORT-01'] })),
+      }, workspace)
+      output = { summary: '已提交原稿' }
+    } else {
+      assert.equal(request.purpose, 'elaboration_review')
+      if (attempt.number > 1) assert.match(request.prompt, /操作员复审诊断 SHA-256/)
+      f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
+      resultWorktree = nativeWorktreeResult(workspace, seed)
+      const checkedBoundaries = [...ELABORATION_BOUNDARIES]
+      if (attempt.number === 2) checkedBoundaries[0] = checkedBoundaries[1]
+      output = { verdict: attempt.number < 3 ? 'repair' : 'accept', checkedBoundaries, findings: attempt.number < 3 ? repair : [] }
+    }
+    const branch = `codex/fixture-p1-operator-${session}`
+    f.git('-C', workspace, 'switch', '-c', branch)
+    const resultDigest = contentHash(JSON.stringify(output)), execution = structuredExecutionPolicy(request)
+    const prompt = nativeWorktreePrompt(request.prompt, seed)
+    configuredSessionApplication().createSession({ sessionId: session, status: 'awaiting' })
+    writeRecord({ session, governed: true, worktreePath: workspace, base: seed.baseCommit, forkCommit: seed.baseCommit, branch, title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(), harness: 'zcode', harnessSessionId: identity.threadId, runtimeStartToken: null, status: 'awaiting', stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: null, launchOwner: null,
+      createRequestId: contentHash(key), createPayloadHash: contentHash(JSON.stringify({ prompt, parent: null, launcher: null, base: seed.baseCommit, structuredExecution: execution })),
+      structuredExecution: { ...execution, ...identity, state: 'completed', output, resultDigest, resultWorktree },
+    })
+    return { sessionId: session, ...identity, output, resultDigest, worktree: resultWorktree }
+  } } }
+  const local = (attempt: SyncAttempt) => {
+    const entry = readSyncCheckpointStageIndex(f.store, f.store.readOperation(id), attempt).json
+      .map(item => item.value as { stage: string; resultRef: BlobRef })
+      .find(item => item.stage.startsWith('partition:') && item.stage.endsWith(':elaboration'))!
+    assert.ok(entry)
+    const bytes = readEvidence(commonDir, entry.resultRef)
+    return { ref: entry.resultRef, bytes, result: JSON.parse(bytes.toString('utf8')) as ElaborationResult }
+  }
+  const originalRun = await runSyncOperation(f.store, id, f.options)
+  assert.equal(originalRun.operation.phase, 'paused', JSON.stringify({ failure: originalRun.failure, calls: calls.map(call => call.purpose) }))
+  const [first] = f.store.listAttempts(id)
+  const originalLocal = local(first), originalRound = originalLocal.result.rounds[0]
+  assert.equal(originalLocal.result.structurePassed, true)
+  assert.equal(originalRound.review?.verdict, 'repair')
+  const paused = f.store.readOperation(id)
+  const request = { operationId: id, inputId: paused.input.id, requestId: 'p1-operator-fixture', expectedRevision: paused.revision,
+    partitionId: originalLocal.result.partitionBinding!.partitionId, candidateDigest: originalLocal.result.candidateDigest!,
+    resultRef: originalLocal.ref, diagnostic: '追溯冻结测试及原有验收字段', evidencePaths: ['tests/export.test.mjs'] }
+  const rejectedDispatch = first.dispatchPlans.find(call => call.purpose === 'elaboration_review')!
+  const readResource = f.store.findResource.bind(f.store), resource = readResource(first.id, rejectedDispatch.key)!
+  const native = JSON.parse(readEvidence(commonDir, resource.checkpointRef).toString('utf8')) as NativeRunCheckpoint
+  const nativeRecord = readRecord(rejectedDispatch.session!.sessionId)!
+  const witness = native.result!.worktree!
+  try {
+    for (const wrong of [undefined, { ...witness, headCommit: originalRound.draft!.resultCommit, tree: originalRound.draft!.resultTree }]) {
+      writeRecord({ ...nativeRecord, structuredExecution: { ...nativeRecord.structuredExecution!, resultWorktree: wrong } })
+      const modified = writeEvidence(commonDir, { ...native, result: { ...native.result, worktree: wrong } })
+      f.store.findResource = (attemptId, key) => attemptId === first.id && key === rejectedDispatch.key
+        ? { ...resource, checkpointRef: modified } : readResource(attemptId, key)
+      await assert.rejects(prepareP1ReviewChallenge(f.store, paused, f.plan, request), /只读|合法作者/)
+    }
+  } finally {
+    f.store.findResource = readResource
+    writeRecord(nativeRecord)
+  }
+  const challenge = await prepareP1ReviewChallenge(f.store, paused, f.plan, request)
+  assert.deepEqual(writeEvidence(commonDir, p1ReviewDiagnosticEvidence(request)), challenge.diagnosticRef)
+  f.store.authorizeP1ReviewChallenge(id, challenge)
+  f.store.requestControl(id, 'run')
+  const invalid = await runSyncOperation(f.store, id, f.options)
+  assert.equal(invalid.operation.phase, 'paused', JSON.stringify(invalid.failure))
+  const second = local(f.store.listAttempts(id)[1]).result
+  assert.equal(second.failure?.code, 'p1_challenge_review_invalid')
+  assert.equal(second.reviewPassed, false)
+  assert.equal(second.rounds[0].draft?.oid, originalRound.draft?.oid)
+  f.store.requestControl(id, 'run')
+  await runSyncOperation(f.store, id, f.options)
+  const third = local(f.store.listAttempts(id)[2]).result
+  assert.equal(third.reviewPassed, true)
+  for (const next of [second, third]) {
+    assert.equal(next.candidateDigest, originalLocal.result.candidateDigest)
+    assert.deepEqual(next.rounds[0].traces[0], originalRound.traces[0])
+  }
+  assert.deepEqual(calls.filter(call => call.purpose.startsWith('elaboration_')).map(call => call.purpose), ['elaboration_generate', 'elaboration_review', 'elaboration_review', 'elaboration_review'])
+  assert.deepEqual(local(first).bytes, originalLocal.bytes)
+  assert.equal(f.store.listJournals(id).length, 0)
+})
 
 async function rejectedReviewFixture(f: Awaited<ReturnType<typeof fixture>>, request: ElaborationSessionRequest, text: string | undefined, message = 'invalid_json', failedWorktree?: ElaborationSessionResult['worktree']): Promise<ElaborationSessionResult> {
   const operation = f.store.readOperation(f.operation.id), attempt = f.store.readAttempt(operation.currentAttemptId!)

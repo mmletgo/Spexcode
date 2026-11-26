@@ -168,8 +168,10 @@ app.post('/api/sync/run', async c => {
 })
 app.post('/api/sync/operations/:id/challenge', async c => {
   const { targetTree, operationId, ...body } = await syncRequestBody(c.req), id = c.req.param('id')
-  if (operationId !== undefined && operationId !== id) throw new SyncApplicationError('sync_p0_challenge_invalid', '复审 operation 身份不一致', 400)
-  return c.json(await (await syncApplication(c.req.query('targetTree'), targetTree)).challengeP0({ ...body, operationId: id }))
+  const elaboration = Object.hasOwn(body, 'resultRef') || Object.hasOwn(body, 'candidateDigest')
+  if (operationId !== undefined && operationId !== id) throw new SyncApplicationError(elaboration ? 'sync_p1_challenge_invalid' : 'sync_p0_challenge_invalid', '复审 operation 身份不一致', 400)
+  const application = await syncApplication(c.req.query('targetTree'), targetTree), request = { ...body, operationId: id }
+  return c.json(await (elaboration ? application.challengeP1(request) : application.challengeP0(request)))
 })
 app.post('/api/sync/operations/:id/decide', async c => {
   const body = await syncRequestBody(c.req)
