@@ -5231,13 +5231,14 @@ for (const target of ['code_behavior_analyze', 'elaboration_generate'] as const)
   assert.equal(f.calls.some(call => call.purpose === 'code_generate'), false)
 })
 
-for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read-witness', 'format-read-witness-twice', 'format-wrong-witness', 'format-formal-retry', 'format-terminal-retry', 'format-terminal-claude-missing-final', 'format-terminal-parent-aggregate-raw', 'format-terminal-managed-quota', 'format-terminal-managed-quota-unavailable', 'format-terminal-stopped-review', 'format-terminal-stopped-review-unobserved', 'format-terminal-stopped-review-cancelling', 'format-terminal-stopped-review-cancelling-unobserved', 'format-terminal-stopped-review-cancelling-resume', 'format-sibling-stopped-draft', 'format-sibling-cancellation-pending', 'format-sibling-cancellation-pending-wrong-packet', 'format-sibling-cancellation-pending-newer-generation', 'format-sibling-cancellation-pending-unsettled', 'format-wrong-packet', 'format-wrong-candidate', 'legacy-review', 'v3-review', 'paused', 'paused-review', 'newer-generation', 'wrong-stop', 'wrong-candidate', 'wrong-task', 'partition-settled-interrupted-review'] as const) test(`P1已结算${mode.startsWith('format-terminal-stopped-review') ? '失败后正式停止的独审' : mode.startsWith('format-terminal-managed-quota') ? '托管额度失败独审' : mode.startsWith('format') ? '格式失败独审' : mode === 'partition-settled-interrupted-review' ? '中断前独审绑定拒绝' : 'session/events独审超时'}只重审同一Git候选 ${mode}`, async t => {
+for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read-witness', 'format-read-witness-twice', 'format-wrong-witness', 'format-formal-retry', 'format-terminal-retry', 'format-terminal-claude-missing-final', 'format-terminal-parent-aggregate-raw', 'format-terminal-managed-quota', 'format-terminal-managed-quota-unavailable', 'format-terminal-stopped-review', 'format-terminal-stopped-review-unobserved', 'format-terminal-stopped-review-cancelling', 'format-terminal-stopped-review-cancelling-unobserved', 'format-terminal-stopped-review-cancelling-resume', 'format-terminal-stopped-review-prelaunch-resume', 'format-sibling-stopped-draft', 'format-sibling-cancellation-pending', 'format-sibling-cancellation-pending-wrong-packet', 'format-sibling-cancellation-pending-newer-generation', 'format-sibling-cancellation-pending-unsettled', 'format-wrong-packet', 'format-wrong-candidate', 'legacy-review', 'v3-review', 'paused', 'paused-review', 'newer-generation', 'wrong-stop', 'wrong-candidate', 'wrong-task', 'partition-settled-interrupted-review'] as const) test(`P1已结算${mode.startsWith('format-terminal-stopped-review') ? '失败后正式停止的独审' : mode.startsWith('format-terminal-managed-quota') ? '托管额度失败独审' : mode.startsWith('format') ? '格式失败独审' : mode === 'partition-settled-interrupted-review' ? '中断前独审绑定拒绝' : 'session/events独审超时'}只重审同一Git候选 ${mode}`, async t => {
+  const prelaunchReview = mode === 'format-terminal-stopped-review-prelaunch-resume'
   const stoppedReview = mode.startsWith('format-terminal-stopped-review'), omitFailedObservation = mode === 'format-terminal-stopped-review-unobserved'
   const pendingReview = mode.startsWith('format-terminal-stopped-review-cancelling')
-  const resumeInterruptedReview = mode === 'format-terminal-stopped-review-cancelling-resume'
+  const resumeInterruptedReview = mode === 'format-terminal-stopped-review-cancelling-resume' || prelaunchReview
   const omitCancellationObservation = mode === 'format-terminal-stopped-review-cancelling-unobserved'
   const claudeMissingFinal = mode === 'format-terminal-claude-missing-final'
-  const claudeReviewFixture = stoppedReview || claudeMissingFinal
+  const claudeReviewFixture = stoppedReview && !prelaunchReview || claudeMissingFinal
   const parentAggregateRaw = mode === 'format-terminal-parent-aggregate-raw'
   const terminalQuota = mode.startsWith('format-terminal-managed-quota')
   const unavailableQuotaSuccessor = mode === 'format-terminal-managed-quota-unavailable'
@@ -5253,7 +5254,7 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
   const wrongPacket = mode === 'format-wrong-packet' || mode === 'format-sibling-cancellation-pending-wrong-packet'
   const wrongCandidate = mode === 'wrong-candidate' || mode === 'format-wrong-candidate'
   const failureCode = terminalQuota ? 'provider_quota_exhausted' : pendingReview ? 'cancellation_pending' : stoppedReview ? 'failed' : formatFailure ? 'structured_output_format_invalid' : 'native_rpc_timeout'
-  const formalRetry = mode === 'format-formal-retry', terminalRetry = mode === 'format-terminal-retry' || parentAggregateRaw || claudeReviewFixture || terminalQuota, codeToSpec = formatTwice || formalRetry || terminalRetry
+  const formalRetry = mode === 'format-formal-retry', terminalRetry = mode === 'format-terminal-retry' || parentAggregateRaw || claudeReviewFixture || terminalQuota || prelaunchReview, codeToSpec = formatTwice || formalRetry || terminalRetry
   const interruptedReview = mode === 'partition-settled-interrupted-review'
   const siblingCancellationPending = mode.startsWith('format-sibling-cancellation-pending')
   const siblingWithNewerAuthor = mode === 'format-sibling-cancellation-pending-newer-generation'
@@ -5279,13 +5280,20 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
     'tests/import.test.mjs': readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', 'IMPORT').replaceAll('../src/export.js', '../src/beta/import.js'),
   } : {}
   const f = await fixture(t, { maxAttempts: ['newer-generation', 'paused-review', 'wrong-task', 'format-formal-retry', 'format-wrong-packet'].includes(mode) || siblingWithNewerAuthor || formatTwice ? 3 : 2, maxCalls: 30, maxRepairs: ['wrong-task', 'format-wrong-packet'].includes(mode) || formatTwice ? 2 : 1, timeoutMs: 120_000 }, false, original, 'project', original, { ...plan, ...retryPartition, agentWorkflow: 'native-worktree-v1', ...(formalRetry || terminalRetry ? { executionScope: { paths: terminalRetry ? [contractPath, siblingPath] : [contractPath], contractIds: [], flowIds: [] } } : {}) }, undefined, codeToSpec ? 'code' : 'spec', terminalQuota ? managedModel(quotaAnchor) : claudeReviewFixture ? 'claude:default' : 'zcode:default', partitioned, siblingFiles)
-  if (claudeReviewFixture || terminalQuota) {
+  if (claudeReviewFixture || terminalQuota || prelaunchReview) {
     const priorCwd = process.cwd()
     process.chdir(f.root)
     t.after(() => process.chdir(priorCwd))
   }
   const calls: ElaborationSessionRequest[] = []
   let store = f.store, active = f.operation
+  let prelaunchSessionId: string | undefined, prelaunchObservationServed = false
+  const runtimeReadRecord = (sessionId: string): NativeRunRecord | null => {
+    const record = readRecord(sessionId)
+    if (prelaunchSessionId !== sessionId || prelaunchObservationServed || !record?.structuredExecution || record.structuredExecution.state !== 'cancelled') return record
+    prelaunchObservationServed = true
+    return { ...record, structuredExecution: { ...record.structuredExecution, state: 'failed', cancellation: undefined } }
+  }
   const ownerPath = (request: ElaborationSessionRequest): string | undefined => request.purpose.startsWith('elaboration_')
     ? (nativeTask(request, f.input.source.commonDir).targets as { path: string }[])[0].path : undefined
   const siblingRejection = '兄弟分区原生作者拒绝，正式操作终止'
@@ -5394,11 +5402,20 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
       return checkpoint(fence, { ...writeEvidence(commonDir, { ...wrapper, resultRef }), artifacts: syncCheckpointArtifacts(value, resultRef) })
     }
   }
+  if (prelaunchReview) {
+    const recordFailure = f.store.recordFailure.bind(f.store)
+    f.store.recordFailure = (fence, issue, continueRepair) => {
+      if (f.store.readAttempt(fence.attemptId).number === 1 && issue.code !== 'cancellation_pending') {
+        return recordFailure(fence, { ...issue, code: 'cancellation_pending', kind: 'unsupported', message: '兄弟分区的原生停止仍待确认' }, continueRepair)
+      }
+      return recordFailure(fence, issue, continueRepair)
+    }
+  }
   const expandContractScope = f.store.expandContractScope.bind(f.store)
   if (formalRetry) f.store.expandContractScope = () => { throw new StructuredSessionError('unsupported', 'fixture在P1批准后、范围变化前停止') }
   f.store.startGeneration = () => { throw new StructuredSessionError('unsupported', 'fixture在P1正式独审通过后停止') }
   const runtime: NonNullable<import('./native-run.js').AttemptRunnerOptions['runtime']> = {
-      readRecord,
+      readRecord: runtimeReadRecord,
       cancel: async () => { throw new Error('fixture禁止真实Native控制') },
       run: async actual => {
         if (terminalQuota) calls.push(actual)
@@ -5406,9 +5423,9 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
         const seed = actual.worktree!, execution = structuredExecutionPolicy(actual), key = actual.sessionCreateKey!, sessionId = sessionIdForCreateKey(key)
         const identity = { threadId: `p1-timeout-${sessionId}`, turnId: 'turn' }, workspace = join(f.parent, `p1-timeout-${calls.length}`)
         const sibling = terminalRetry && ownerPath(actual) === siblingPath
-        const authorRejected = sibling && (active.id === f.operation.id || parentAggregateRaw) && actual.purpose === 'elaboration_generate'
+        const authorRejected = !prelaunchReview && sibling && (active.id === f.operation.id || parentAggregateRaw) && actual.purpose === 'elaboration_generate'
           && (!resumeInterruptedReview || attempt.number === 1)
-        const timingOut = !interruptedReview && (!terminalRetry || (active.id === f.operation.id || parentAggregateRaw) && !sibling) && actual.purpose === 'elaboration_review' && attempt.number <= (formatTwice ? 2 : 1)
+        const timingOut = !interruptedReview && (!terminalRetry || (active.id === f.operation.id || parentAggregateRaw) && (!sibling || prelaunchReview)) && actual.purpose === 'elaboration_review' && attempt.number <= (formatTwice ? 2 : 1)
         let draft: unknown
         if (actual.purpose === 'code_behavior_analyze' || actual.purpose === 'code_behavior_review') {
           const task = nativeTask(actual, f.input.source.commonDir) as { requiredChangedPaths: string[] }
@@ -5429,10 +5446,11 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
           : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
         const resultDigest = contentHash(JSON.stringify(output))
         const missingFinal = claudeMissingFinal && timingOut
-        const message = authorRejected ? siblingRejection : missingFinal ? 'Claude worktree success is missing required structured_output' : terminalQuota ? 'Claude provider returned HTTP 429 for the original native turn' : stoppedReview ? 'Claude emitted more than one native init identity' : formatFailure ? 'fixture拒绝原格式' : 'ZCode native RPC timeout (session/events)'
+        const message = authorRejected ? prelaunchReview ? '兄弟分区的原生停止仍待确认' : siblingRejection : missingFinal ? 'Claude worktree success is missing required structured_output' : terminalQuota ? 'Claude provider returned HTTP 429 for the original native turn' : prelaunchReview ? 'ZCode CLI version could not be recorded for this runtime' : stoppedReview ? 'Claude emitted more than one native init identity' : formatFailure ? 'fixture拒绝原格式' : 'ZCode native RPC timeout (session/events)'
         const pendingStop = pendingReview && timingOut
         const failed = timingOut || authorRejected, errorCode = authorRejected ? 'unsupported' : failureCode
-        const awaitingRecovery = stoppedReview && timingOut, branch = claudeReviewFixture || terminalQuota ? `codex/fixture-terminal-review-${sessionId}` : null
+        const awaitingRecovery = stoppedReview && timingOut && !prelaunchReview, prelaunchFailure = prelaunchReview && timingOut
+        const branch = claudeReviewFixture || terminalQuota || prelaunchReview ? `codex/fixture-terminal-review-${sessionId}` : null
         if (worktree && branch) f.git('-C', workspace, 'switch', '-c', branch)
         else if (!worktree && branch) f.git('worktree', 'add', '-b', branch, workspace, seed.baseCommit)
         else if ((!failed || readWitness) && !worktree) f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
@@ -5481,12 +5499,19 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
         const failedWorktree = timingOut && (readWitness || missingFinal) ? nativeWorktreeResult(workspace, seed) : undefined
         const rejectedText = parentAggregateRaw && operation.id !== f.operation.id ? 'invalid JSON from the new review\u0000' : 'invalid JSON from review ' + attempt.number + '\u0000'
         const rejectedOutput = formatFailure && timingOut && !missingFinal ? rejectedFinalOutput(rejectedText, prompt, execution, identity) : undefined
+        const savedErrorCode = errorCode === 'failed' || errorCode === 'cancellation_pending' ? undefined : errorCode as NonNullable<NativeRunRecord['structuredExecution']>['errorCode']
+        const structuredExecution: NonNullable<NativeRunRecord['structuredExecution']> = prelaunchFailure
+          ? { ...execution, state: 'cancelled' as const, error: message, cancellation: { reason: 'cancelled' as const, requestedAt: Date.now(), nativeStopped: true, acknowledged: false, nativeStatus: 'notStarted' as const } }
+          : { ...execution, ...identity, turnStartRequested: true, ...(failed ? { state: pendingStop ? 'cancelling' as const : 'failed' as const, ...(savedErrorCode ? { errorCode: savedErrorCode } : {}), error: message, ...(rejectedOutput ? { rejectedOutput } : {}), ...(failedWorktree ? { failedWorktree } : {}), ...(awaitingRecovery ? { claudeNative, ...(pendingStop ? { cancellation: { reason: 'cancelled' as const, requestedAt: Date.now(), nativeStopped: false, acknowledged: false, error: message } } : {}) } : claudeStop ? { claudeNative, cancellation: { reason: 'cancelled' as const, requestedAt: Date.now(), ...claudeStop } } : { zcodeNative: { version: 1, root: workspace, sessionId: identity.threadId, inputId: 'fixture-input', turnId: identity.turnId, pid: process.pid, receiptFile: join(workspace, 'fixture-process.json') }, cancellation: { reason: 'cancelled' as const, requestedAt: Date.now(), nativeStopped: true, acknowledged: true, nativeStatus: terminalQuota && timingOut ? 'processGroupGone' as const : 'stopped' as const } }) } : { state: 'completed' as const, output, resultDigest, resultWorktree }) }
         configuredSessionApplication().createSession({ sessionId, status: failed ? 'error' : 'awaiting' })
-        writeRecord({ session: sessionId, governed: true, worktreePath: workspace, base: seed.baseCommit, forkCommit: seed.baseCommit, branch, title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(), harness: actual.model?.startsWith('claude:') ? 'claude-headless' : 'zcode', harnessSessionId: identity.threadId, runtimeStartToken: null, status: failed ? 'error' : 'awaiting', stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: null, launchOwner: null,
-          createRequestId: contentHash(key), createPayloadHash: contentHash(JSON.stringify({ prompt, parent: null, launcher: null, base: seed.baseCommit, structuredExecution: execution })),
-          structuredExecution: { ...execution, ...identity, turnStartRequested: true, ...(failed ? { state: pendingStop ? 'cancelling' : 'failed', ...(errorCode === 'failed' || errorCode === 'cancellation_pending' ? {} : { errorCode }), error: message, ...(rejectedOutput ? { rejectedOutput } : {}), ...(failedWorktree ? { failedWorktree } : {}), ...(awaitingRecovery ? { claudeNative, ...(pendingStop ? { cancellation: { reason: 'cancelled' as const, requestedAt: Date.now(), nativeStopped: false, acknowledged: false, error: message } } : {}) } : claudeStop ? { claudeNative, cancellation: { reason: 'cancelled', requestedAt: Date.now(), ...claudeStop } } : { zcodeNative: { version: 1, root: workspace, sessionId: identity.threadId, inputId: 'fixture-input', turnId: identity.turnId, pid: process.pid, receiptFile: join(workspace, 'fixture-process.json') }, cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: true, acknowledged: true, nativeStatus: terminalQuota && timingOut ? 'processGroupGone' : 'stopped' } }) } : { state: 'completed', output, resultDigest, resultWorktree }) },
+        writeRecord({ session: sessionId, governed: true, worktreePath: workspace, base: seed.baseCommit, forkCommit: seed.baseCommit, branch, title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(), harness: actual.model?.startsWith('claude:') ? 'claude-headless' : 'zcode', harnessSessionId: prelaunchFailure ? null : identity.threadId, runtimeStartToken: null, status: failed ? 'error' : 'awaiting', stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: null, launchOwner: null,
+          createRequestId: contentHash(key), createPayloadHash: contentHash(JSON.stringify({ prompt, parent: null, launcher: null, base: seed.baseCommit, structuredExecution: execution })), structuredExecution,
         })
-        if (failed) throw new StructuredSessionError(errorCode, message, { sessionId, ...identity, ...(rejectedOutput ? { rejectedOutput } : {}), ...(failedWorktree ? { failedWorktree } : {}) })
+        if (prelaunchFailure) {
+          prelaunchSessionId = sessionId
+          prelaunchObservationServed = false
+        }
+        if (failed) throw new StructuredSessionError(errorCode, message, { sessionId, ...(prelaunchFailure ? {} : identity), ...(rejectedOutput ? { rejectedOutput } : {}), ...(failedWorktree ? { failedWorktree } : {}) })
         return { sessionId, ...identity, output, resultDigest, worktree: resultWorktree }
       },
   }
@@ -5515,23 +5540,26 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
     const parent = result.operation, [old] = store.listAttempts(parent.id), commonDir = f.input.source.commonDir
     const observed = JSON.stringify({ failure: result.failure, firstFailure: old.failure, calls: calls.map(call => [call.purpose, ownerPath(call)]) })
     assert.equal(parent.phase, 'failed', observed)
-    assert.equal(old.status, 'failed')
-    assert.equal(old.failure?.code, pendingReview ? 'cancellation_pending' : 'unsupported', observed)
-    if (!pendingReview) assert.equal(old.failure?.message, siblingRejection)
+    assert.equal(old.status, 'failed', observed)
+    assert.equal(old.failure?.code, prelaunchReview || pendingReview ? 'cancellation_pending' : 'unsupported', observed)
+    if (!pendingReview && !prelaunchReview) assert.equal(old.failure?.message, siblingRejection)
     const readLocals = (attempt: SyncAttempt): ElaborationResult[] => attempt.checkpointRefs
       .map(ref => JSON.parse(readEvidence(commonDir, ref).toString('utf8')) as { stage: string; resultRef: BlobRef })
       .filter(entry => entry.stage.startsWith('partition:') && entry.stage.endsWith(':elaboration'))
       .map(entry => JSON.parse(readEvidence(commonDir, entry.resultRef).toString('utf8')) as ElaborationResult)
-    const priorLocals = readLocals(old), rejected = priorLocals.find(local => local.failure?.code === failureCode)!
+    const priorLocals = readLocals(old), rejected = (prelaunchReview
+      ? priorLocals.find(local => local.changes.some(change => change.path === contractPath))
+      : priorLocals.find(local => local.failure?.code === failureCode))!
     assert.equal(priorLocals.length, 2)
     assert.ok(rejected)
-    assert.equal(priorLocals.find(local => local !== rejected)?.candidateDigest, null)
+    if (prelaunchReview) assert.ok(priorLocals.find(local => local !== rejected)?.candidateDigest)
+    else assert.equal(priorLocals.find(local => local !== rejected)?.candidateDigest, null)
     const authorRound = rejected.rounds.at(-1)!
     assert.equal(rejected.structurePassed, true)
     assert.equal(rejected.reviewPassed, false)
     assert.equal(rejected.failure?.code, failureCode)
     assert.ok(authorRound.draft?.resultCommit)
-    if (claudeReviewFixture || terminalQuota) assert.equal(authorRound.rejectedOutput, undefined)
+    if (claudeReviewFixture || terminalQuota || prelaunchReview) assert.equal(authorRound.rejectedOutput, undefined)
     else assert.ok(authorRound.rejectedOutput)
     assert.ok(authorRound.candidateDigest)
     const oldReviewer = calls.find(call => ownerPath(call) === contractPath && call.purpose === 'elaboration_review')!
@@ -5540,17 +5568,41 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
     const checkpointOf = (ref: BlobRef) => JSON.parse(readEvidence(commonDir, ref).toString('utf8')) as NativeRunCheckpoint
     const originalObservation = checkpointOf(originalResource.checkpointRef)
     assert.notEqual(sessionId, authorRound.traces[0].sessionId)
+    if (prelaunchReview) {
+      assert.equal(rejected.failure?.code, 'failed')
+      assert.equal(rejected.failure?.sessionId, sessionId)
+      assert.equal(rejected.failure?.threadId, undefined)
+      assert.equal(rejected.failure?.turnId, undefined)
+      assert.equal(authorRound.review, null)
+      assert.equal(authorRound.reviewOutput, null)
+    }
     if (stoppedReview) {
-      assert.equal(originalResource.phase, 'created')
-      assert.equal(originalObservation.nativeState, pendingReview ? 'cancelling' : 'failed')
-      assert.equal(originalObservation.nativeStarted, true)
-      assert.deepEqual(originalObservation.session, oldReviewDispatch.session)
-      assert.equal(originalObservation.failure, undefined)
-      assert.equal(readRecord(sessionId)?.structuredExecution?.state, pendingReview ? 'cancelling' : 'failed')
-      assert.equal(readRecord(sessionId)?.structuredExecution?.cancellation?.nativeStopped, pendingReview ? false : undefined)
-      assert.equal(store.readRetryEligibility(parent.id).reason?.code, 'SYNC_RETRY_RESOURCE_PENDING')
-      const recovered = await recoverSyncOperationResources(store, parent.id, { root: f.root, inputId: f.input.id, artifactRoot: f.artifactRoot })
-      assert.equal(recovered.status, 'resources_recovered', JSON.stringify(recovered.failure))
+      if (prelaunchReview) {
+        assert.equal(originalResource.phase, 'removed')
+        assert.equal(originalObservation.phase, 'removed')
+        assert.equal(originalObservation.status, 'cancelled')
+        assert.equal(originalObservation.nativeState, 'cancelled')
+        assert.equal(originalObservation.nativeCallRequested, true)
+        assert.equal(originalObservation.nativeStarted, false)
+        assert.deepEqual(originalObservation.session, { sessionId, threadId: null, turnId: null })
+        assert.deepEqual(originalObservation.stop, { sessionId, state: 'cancelled', nativeStopped: true, acknowledged: false, nativeStatus: 'notStarted' })
+        assert.equal(originalObservation.failure, undefined)
+        assert.ok(originalResource.checkpoints.some(item => {
+          const observed = checkpointOf(item.checkpointRef)
+          return observed.phase === 'created' && observed.nativeState === 'failed' && observed.nativeCallRequested && !observed.nativeStarted && !observed.stop && !observed.failure
+        }))
+      } else {
+        assert.equal(originalResource.phase, 'created')
+        assert.equal(originalObservation.nativeState, pendingReview ? 'cancelling' : 'failed')
+        assert.equal(originalObservation.nativeStarted, true)
+        assert.deepEqual(originalObservation.session, oldReviewDispatch.session)
+        assert.equal(originalObservation.failure, undefined)
+        assert.equal(readRecord(sessionId)?.structuredExecution?.state, pendingReview ? 'cancelling' : 'failed')
+        assert.equal(readRecord(sessionId)?.structuredExecution?.cancellation?.nativeStopped, pendingReview ? false : undefined)
+        assert.equal(store.readRetryEligibility(parent.id).reason?.code, 'SYNC_RETRY_RESOURCE_PENDING')
+        const recovered = await recoverSyncOperationResources(store, parent.id, { root: f.root, inputId: f.input.id, artifactRoot: f.artifactRoot })
+        assert.equal(recovered.status, 'resources_recovered', JSON.stringify(recovered.failure))
+      }
       const record = readRecord(sessionId)!, checkpoint = checkpointOf(store.findResource(old.id, oldReviewDispatch.key)!.checkpointRef)
       assert.equal(record.archived, true)
       assert.equal(record.stopped, true)
@@ -5563,7 +5615,7 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
       assert.equal(checkpoint.phase, 'removed')
       assert.equal(checkpoint.status, 'cancelled')
       assert.equal(checkpoint.nativeState, 'cancelled')
-      assert.equal(checkpoint.stop?.nativeStatus, 'processGroupGone')
+      assert.equal(checkpoint.stop?.nativeStatus, prelaunchReview ? 'notStarted' : 'processGroupGone')
       assert.equal(checkpoint.result, undefined)
       assert.equal(checkpoint.failure, undefined)
       assert.deepEqual(checkpoint.session, originalObservation.session)
@@ -5726,9 +5778,15 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
       assert.deepEqual(store.listJournals(active.id), [])
       return
     }
-    assert.deepEqual(dispatches.filter(call => call.owner === siblingPath).map(call => call.purpose),
-      unavailableQuotaSuccessor ? [] : ['elaboration_generate', 'elaboration_review'],
-      '首个重试补齐无稿兄弟分区，后续应保留它的批准')
+    const siblingDispatches = dispatches.filter(call => call.owner === siblingPath).map(call => call.purpose)
+    if (prelaunchReview) {
+      assert.deepEqual(siblingDispatches, ['elaboration_review'], '另一个结构已通过的分区也只续审')
+      const previousSiblingReview = calls.slice(0, beforeRetry).find(call => ownerPath(call) === siblingPath && call.purpose === 'elaboration_review')!
+      assert.deepEqual(retryCalls.find(call => ownerPath(call) === siblingPath)?.worktree, previousSiblingReview.worktree)
+    } else {
+      assert.deepEqual(siblingDispatches, unavailableQuotaSuccessor ? [] : ['elaboration_generate', 'elaboration_review'],
+        '首个重试补齐无稿兄弟分区，后续应保留它的批准')
+    }
     assert.deepEqual(dispatches.filter(call => call.owner === contractPath).map(call => call.purpose), ['elaboration_review'], '终态正式重试只为同一已校验候选重新派发独审')
     const review = retryCalls.find(call => ownerPath(call) === contractPath)!
     const packet = authorRound.rejectedOutput, tree = readTree(commonDir, review.worktree!.tree)

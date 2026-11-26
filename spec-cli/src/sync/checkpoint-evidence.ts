@@ -4,7 +4,7 @@ import { nativeWorktreePrompt } from '../native-worktree-runtime.js'
 import { assertGrokRejectedFinalSource, isGrokNativeExitFailure } from '../grok-structured.js'
 import { assertCursorRejectedFinalSource } from '../cursor-structured.js'
 import { assertCodexRejectedFinalSource } from '../codex-native-worktree-structured.js'
-import { sessionIdForCreateKey } from '../sessions.js'
+import { readSessionCreateTermination, sessionIdForCreateKey } from '../sessions.js'
 import { readRecord } from '../session-record.js'
 import { managedRoute, type ManagedRoute } from '../llm-manager-route.js'
 import { contentHash, readEvidence } from './snapshot.js'
@@ -135,13 +135,19 @@ export function syncCheckpointArtifacts(value: unknown, resultRef: BlobRef): Non
 }
 
 /** 共用原请求、原failed观察和canonical身份；不补字段或改写历史终态。 */
-export function authenticateNativeFailure(store: SyncStore, operation: SyncOperation, origin: SyncAttempt, key: string, failure: NonNullable<ElaborationResult['failure']>, readNativeRecord: typeof readRecord = readRecord, allowStoppedSource = false): { plan: NativeRunPlan; checkpoint: NativeRunCheckpoint; record: NonNullable<ReturnType<typeof readRecord>>; state: StructuredExecution; observedFailure: boolean } {
+function authenticateNativeDispatch(store: SyncStore, operation: SyncOperation, origin: SyncAttempt, key: string) {
   const read = <T>(ref: BlobRef): T => readCheckpointJson<T>(store, operation, ref)
   const resource = store.findResource(origin.id, key), dispatch = origin.dispatchPlans.find(item => item.key === key)
   if (!resource || !dispatch || origin.operationId !== operation.id || resource.operationId !== operation.id || resource.plan.kind !== 'native_session' || resource.plan.inputId !== operation.input.id) fail('失败缺少原正式Native资源与派发')
   const plan = read<NativeRunPlan>(resource.plan.planBlob), checkpoint = read<NativeRunCheckpoint>(resource.checkpointRef)
   if (dispatch.managedModel !== undefined && !matchesNativeDispatchModel(operation, dispatch, plan.request)) fail('失败的Native路线与派发绑定不匹配')
-  if (plan.operationId !== operation.id || plan.attemptId !== origin.id || plan.inputId !== operation.input.id || plan.request.requestKey !== key || plan.request.purpose !== dispatch.purpose || plan.requestDigest !== resource.plan.payloadDigest || plan.requestDigest !== dispatch.requestDigest || hash(plan.request) !== plan.requestDigest || plan.sessionCreateKey !== dispatch.sessionCreateKey || plan.expectedSessionId !== sessionIdForCreateKey(dispatch.sessionCreateKey) || failure.sessionId !== plan.expectedSessionId) fail('失败的原请求、身份或输入摘要不匹配')
+  if (plan.operationId !== operation.id || plan.attemptId !== origin.id || plan.inputId !== operation.input.id || plan.request.requestKey !== key || plan.request.purpose !== dispatch.purpose || plan.requestDigest !== resource.plan.payloadDigest || plan.requestDigest !== dispatch.requestDigest || hash(plan.request) !== plan.requestDigest || plan.sessionCreateKey !== dispatch.sessionCreateKey || plan.expectedSessionId !== sessionIdForCreateKey(dispatch.sessionCreateKey)) fail('失败的原请求、身份或输入摘要不匹配')
+  return { read, plan, checkpoint, resource, dispatch }
+}
+
+export function authenticateNativeFailure(store: SyncStore, operation: SyncOperation, origin: SyncAttempt, key: string, failure: NonNullable<ElaborationResult['failure']>, readNativeRecord: typeof readRecord = readRecord, allowStoppedSource = false): { plan: NativeRunPlan; checkpoint: NativeRunCheckpoint; record: NonNullable<ReturnType<typeof readRecord>>; state: StructuredExecution; observedFailure: boolean } {
+  const { read, plan, checkpoint, resource, dispatch } = authenticateNativeDispatch(store, operation, origin, key)
+  if (failure.sessionId !== plan.expectedSessionId) fail('失败的原请求、身份或输入摘要不匹配')
   const { request } = plan
   const unpublishedGrok = allowStoppedSource && request.model?.startsWith('grok:') && isGrokNativeExitFailure(failure)
     && (request.worktree?.mode === 'edit' && (request.purpose === 'code_behavior_analyze' || request.purpose === 'elaboration_generate')
@@ -168,6 +174,56 @@ export function authenticateNativeFailure(store: SyncStore, operation: SyncOpera
   if (allowStoppedSource && dispatch.session && (dispatch.session.sessionId !== checkpoint.session.sessionId || dispatch.session.threadId !== null && dispatch.session.threadId !== checkpoint.session.threadId || dispatch.session.turnId !== null && dispatch.session.turnId !== checkpoint.session.turnId)) fail('停止来源缺少原派发的精确 Native 身份')
   if (allowStoppedSource && (state.state !== 'cancelled' && !(state.state === 'failed' && observedFailure) || resource.phase !== 'removed' || state.cancellation?.nativeStopped !== true)) fail('停止来源须有原正式取消或已认证失败及资源停止证明')
   return { plan, checkpoint, record, state, observedFailure }
+}
+
+/** 未启动的只读独审可以沿原请求续审；原失败不是验证结论。 */
+export function authenticateUnstartedElaborationReview(store: SyncStore, operation: SyncOperation, origin: SyncAttempt, key: string, failure: NonNullable<ElaborationResult['failure']>, candidateDigest: string): { request: NativeRunPlan['request']; archivedSessionId?: string } | undefined {
+  const persisted = store.findResource(origin.id, key)
+  if (!persisted) return
+  const saved = readCheckpointJson<NativeRunCheckpoint>(store, operation, persisted.checkpointRef)
+  if (saved.nativeStarted || !saved.nativeCallRequested) return
+  const { read, plan, checkpoint, resource, dispatch } = authenticateNativeDispatch(store, operation, origin, key)
+  const { request, expectedSessionId } = plan
+  const session = { sessionId: expectedSessionId, threadId: null, turnId: null }
+  const stop = { sessionId: expectedSessionId, state: 'cancelled', nativeStopped: true, acknowledged: false, nativeStatus: 'notStarted' }
+  const bound = (item: NativeRunCheckpoint): boolean => item.schemaVersion === 1 && item.operationId === plan.operationId && item.attemptId === plan.attemptId
+    && item.inputId === plan.inputId && item.candidateDigest === plan.candidateDigest && item.expectedSessionId === expectedSessionId
+    && item.requestDigest === plan.requestDigest && isDeepStrictEqual(item.session, session) && item.nativeCallRequested && !item.nativeStarted
+    && !item.result && !item.failure
+  if (failure.code !== 'failed' || failure.threadId !== undefined || failure.turnId !== undefined || request.purpose !== 'elaboration_review'
+    || request.worktree?.mode !== 'read' || plan.schemaVersion !== 1 || plan.candidateDigest !== resource.plan.candidateDigest
+    || plan.candidateDigest !== null && plan.candidateDigest !== candidateDigest
+    || resource.attemptId !== origin.id || resource.generation !== origin.generation || resource.plan.key !== key || resource.phase !== 'removed'
+    || checkpoint.phase !== 'removed' || checkpoint.status !== 'cancelled' || !bound(checkpoint)
+    || dispatch.session && !isDeepStrictEqual(dispatch.session, session) || !isDeepStrictEqual(checkpoint.stop, stop))
+    fail('未启动独审缺少原只读派发及精确结算证明')
+  const execution = structuredExecutionPolicy(request), base = request.worktree.baseCommit
+  const requestDigest = contentHash(plan.sessionCreateKey)
+  const payloadHash = hash({ prompt: nativeWorktreePrompt(request.prompt, request.worktree), parent: null, launcher: null, base, structuredExecution: execution })
+  if (checkpoint.creationTermination) {
+    const receipt = readSessionCreateTermination(plan.sessionCreateKey)
+    if (failure.sessionId !== undefined || checkpoint.nativeState !== 'unpublished' || !receipt
+      || receipt.sessionId !== expectedSessionId || receipt.requestDigest !== requestDigest || receipt.payloadHash !== payloadHash
+      || receipt.code !== 'session_create_cancelled' || !isDeepStrictEqual(receipt, checkpoint.creationTermination)
+      || readRecord(expectedSessionId)) fail('独审创建取消缺少原请求的未启动证明')
+    return { request }
+  }
+  const observedFailure = resource.checkpoints.some(({ phase, checkpointRef }) => {
+    if (phase !== 'created') return false
+    const item = read<NativeRunCheckpoint>(checkpointRef)
+    return item.phase === 'created' && item.nativeState === 'failed' && bound(item) && !item.stop && !item.creationTermination
+  })
+  const record = readRecord(expectedSessionId), state = record?.structuredExecution
+  if (failure.sessionId !== expectedSessionId || checkpoint.nativeState !== 'cancelled' || !observedFailure || !record || !state
+    || !record.archived || !record.stopped || record.harnessSessionId !== null || record.createRequestId !== requestDigest || record.createPayloadHash !== payloadHash
+    || record.session !== expectedSessionId || record.base !== base || record.forkCommit !== base || hash(structuredExecutionPolicy(state)) !== hash(execution)
+    || state.state !== 'cancelled' || (state.errorCode ?? 'failed') !== failure.code || state.error !== failure.message || state.threadId || state.turnId || state.turnStartRequested
+    || state.claudeNative || state.zcodeNative || state.grokNative || state.cursorNative || state.codexNative
+    || state.rejectedOutput || state.failedWorktree || state.resultWorktree || state.output !== undefined || state.resultDigest !== undefined
+    || state.cancellation?.reason !== 'cancelled' || state.cancellation.nativeStopped !== true
+    || state.cancellation.nativeStatus !== 'notStarted' || state.cancellation.acknowledged !== false || state.cancellation.error !== undefined)
+    fail('未启动独审缺少原失败、canonical Native记录及精确停止')
+  return { request, archivedSessionId: expectedSessionId }
 }
 
 /** 额度后继必须来自实际派发及其已结算的原生身份。 */
