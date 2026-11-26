@@ -494,7 +494,7 @@ function settledElaborationReview(store: SyncStore, operation: SyncOperation, pr
   if ((!providerReview && result.status !== 'failed') || !result.structurePassed || result.reviewPassed || !round.draft || !round.candidate || round.review !== null || round.reviewOutput !== null) return
   const rejection = round.rejectedOutput, grokExit = !rejection && isGrokNativeExitFailure(failure)
   const formatWithoutPacket = !rejection && reviewFormatRepairCodes.has(failure.code)
-  const stoppedReview = allowStoppedReview && !rejection && !grokExit && failure.code === 'failed'
+  const stoppedReview = allowStoppedReview && !rejection && !grokExit && (failure.code === 'failed' || failure.code === 'cancellation_pending')
   const key = `${ownerKey}:${round.index}:elaboration_review`
   const quota = !rejection && failure.code === 'provider_quota_exhausted' ? managedQuotaDispatch(store, operation, prior, key) : undefined
   if (providerReview && rejection) return
@@ -507,7 +507,7 @@ function settledElaborationReview(store: SyncStore, operation: SyncOperation, pr
     && state.state === 'failed' && state.claudeNative?.sessionId === session.threadId && state.claudeNative.userUuid === session.turnId
   if (formatWithoutPacket && !nativeClaudeFormat) return
   if (stoppedReview || nativeClaudeFormat) {
-    if (!proof.observedFailure || checkpoint.stop?.nativeStopped !== true || !record.archived || request.worktree?.mode !== 'read'
+    if (!proof.observedFailure && failure.code !== 'cancellation_pending' || checkpoint.stop?.nativeStopped !== true || !record.archived || request.worktree?.mode !== 'read'
       || stoppedReview && (state.state !== 'cancelled' || state.rejectedOutput)
       || nativeClaudeFormat && (checkpoint.stop.nativeStatus !== 'processGroupGone' || !!state.rejectedOutput !== !!rejection))
       fail('review_retry_binding', '独审缺少原失败观察、精确退出或只读归档')
@@ -3169,13 +3169,15 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           const formatAfterAbort = prior.status === 'superseded' && prior.failure?.kind === 'unsupported' && prior.failure.code === 'coordinator_failed'
             && failure && reviewFormatRepairCodes.has(failure.code)
           const managedReviewQuota = failure?.code === 'provider_quota_exhausted' && !!source?.result.structurePassed && !source.result.reviewPassed
+          const interruptedReview = failure?.code === 'cancellation_pending' && source?.result.structurePassed
+            && !source.result.reviewPassed && !round?.review && round?.reviewOutput === null && !round.rejectedOutput
           if (!newerGeneration && source && round && failure
             && (!carriedGenerations.size || carriedGenerations.size === 1 && carriedGenerations.has(canonical(round.traces.find(trace => trace.purpose === 'elaboration_generate'))))
-            && (providerReview || priorElaborationInputMatches(prior, binding) && (managedReviewQuota
+            && (providerReview || priorElaborationInputMatches(prior, binding) && (managedReviewQuota || interruptedReview
               || (prior.failure?.kind === 'repairable' || prior.status === 'superseded' && !prior.failure || formatAfterAbort)
                 && (failure.code === 'native_rpc_timeout' || reviewFormatRepairCodes.has(failure.code) || isGrokNativeExitFailure(failure))))) {
             let settledReview: ElaborationRepairDiagnostics['settledReview']
-            try { settledReview = settledElaborationReview(store, operation, prior, requestKey, source.result, round, failure) }
+            try { settledReview = settledElaborationReview(store, operation, prior, requestKey, source.result, round, failure, interruptedReview) }
             catch (error) {
               const { code, syscall } = (error as NodeJS.ErrnoException | null) ?? {}
               const evidenceReadError = (syscall === 'open' || syscall === 'read')
@@ -3290,7 +3292,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
             || !priorElaborationInputMatches(prior, binding, owner, checkpoints)) return missingFormalReview()
           if (rememberUnavailableQuota(prior, result, owner, checkpoints)) continue
           if (!round?.draft || !round.candidate || !result.structurePassed || result.reviewPassed || result.status !== 'failed' || !failure
-            || !(reviewFormatRepairCodes.has(failure.code) || failure.code === 'provider_quota_exhausted' || failure.code === 'failed')) return missingFormalReview()
+            || !(reviewFormatRepairCodes.has(failure.code) || failure.code === 'provider_quota_exhausted' || failure.code === 'failed' || failure.code === 'cancellation_pending')) return missingFormalReview()
           if (carriedQuotaRefs.size && (failure.code !== 'provider_quota_exhausted' || carriedQuotaRefs.size !== 1 || !carriedQuotaRefs.has(source.resultRef.sha256)
             || carriedGenerations.size !== 1 || !carriedGenerations.has(canonical(round.traces.find(trace => trace.purpose === 'elaboration_generate'))))) return missingFormalReview()
           const requestKey = `sync:${prior.id}:${ownerSuffix}`
