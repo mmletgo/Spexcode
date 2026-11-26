@@ -263,10 +263,12 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
   const crossProviderRetry = defect.startsWith('retry-cross-')
   const providerFormalRetry = providerDraft && (crossProviderRetry || defect === 'other-operation')
   const providerCold = providerDraft && (defect.endsWith('cold-provenance') || defect.endsWith('cold-reserved'))
+  const rejectedSidecars = providerDraft && defect === 'extra-untracked'
+  const ignoredSidecar = '.spex-sync-drafts/_last_run.log'
   const providerDraftAbsent = providerDraft && ['no-draft', 'no-draft-sidecars', 'no-draft-source', 'retry-cross-no-draft-sidecars', 'retry-cross-legacy-quota'].includes(defect)
   const authorSidecars = legacyQuota
     ? ['.spex-sync-drafts/.build/rows.py']
-    : defect.endsWith('no-draft-sidecars') || defect === 'no-draft-source'
+    : rejectedSidecars || providerDraft && defect === 'source' || defect.endsWith('no-draft-sidecars') || defect === 'no-draft-source'
       ? ['.spex-sync-drafts/_gen_data_1.mjs', '.spex-sync-drafts/_gen_data_2.mjs'] : []
   const providerFailure = legacyQuota ? 'ZCode native turn failed (code=unavailable)'
     : defect === 'unrelated' ? 'ZCode model is unsupported' : 'ZCode provider rejected the native turn (retryable=false)'
@@ -432,6 +434,18 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
         assert.equal(existsSync(join(workspace, path)), false, '不合格或无稿的旧记录不能向新seed投影正文')
         assert.ok(authorSidecars.every(sidecar => !existsSync(join(workspace, sidecar))), '新 seed 不带入旧脚本')
         restartedWithoutMaterial = true
+        if (rejectedSidecars) {
+          assert.equal(existsSync(join(workspace, ignoredSidecar)), false, '新 seed 不带入旧运行日志')
+          writeFileSync(join(workspace, path), JSON.stringify(partitionDraft))
+          execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' })
+          execFileSync('git', ['-C', workspace, 'commit', '-m', 'generate a clean draft from the frozen seed'], { stdio: 'pipe' })
+          const dispatch = attempt.dispatchPlans.find(item => item.key === request.requestKey)!
+          const output = { summary: '从冻结 seed 生成并提交新草稿' }
+          return completeNativeWorktree(operation, attempt, request, {
+            sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: 'fresh-author', turnId: 'generation-turn',
+            output, resultDigest: contentHash(JSON.stringify(output)), worktree: nativeWorktreeResult(workspace, seed),
+          })
+        }
         throw Object.assign(new Error('反例安全进入新派发且无旧材料'), { code: 'unsupported' })
       }
       if (claudeFailed) {
@@ -543,6 +557,10 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
       mkdirSync(join(workspace, sidecar, '..'), { recursive: true })
       writeFileSync(join(workspace, sidecar), `// 原作者的未追踪辅助文件 ${sidecar}\n`)
     }
+  if (rejectedSidecars) {
+    writeFileSync(join(f.input.source.commonDir, 'info/exclude'), `/${ignoredSidecar}\n`, { flag: 'a' })
+    writeFileSync(join(workspace, ignoredSidecar), '原作者的运行日志\n')
+  }
     if (defect === 'no-draft-source') writeFileSync(join(workspace, 'src/export.js'), '原作者越界修改的源码')
     for (const text of sibling || providerDraftAbsent || defect === 'not-started' || defect === 'no-commit' || defect.startsWith('no-progress-') ? [] : firstCancelledCommit ? [priorText] : [priorText, latest]) {
       writeFileSync(join(workspace, path), text)
@@ -770,7 +788,7 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
       writeFileSync(exitPath, JSON.stringify({ ...exit, idle: false, closed: false, ...(defect === 'failed-terminal' ? { code: 1 } : { code: null, signal: 'SIGTERM' }) }))
     }
   }
-  if (zcodeCancelledGit && defect === 'untracked' || defect === 'extra-untracked' || defect === 'retry-cross-extra-untracked') writeFileSync(join(oldPath, 'foreign-untracked'), 'foreign worktree change')
+  if (zcodeCancelledGit && defect === 'untracked' || defect === 'retry-cross-extra-untracked') writeFileSync(join(oldPath, 'foreign-untracked'), 'foreign worktree change')
   if (defect === 'dirty') writeFileSync(join(oldPath, /草稿文件=([^\s；]+)/.exec(originalRequest!.prompt)![1]), 'uncommitted replacement must stay outside seed')
   if (zcode && defect === 'missing-exit') { rmSync(join(oldNativeRoot, 'exit.json')); missingExitInjected = true }
   if (defect === 'completed') writeFileSync(join(oldNativeRoot, 'completed.json'), '{CORRUPT_COMPLETED')
@@ -1139,8 +1157,32 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
   assert.equal(continued, materialExpected, JSON.stringify({ result: result.failure, attempts: f.store.listAttempts(activeOperation.id).map(attempt => ({ number: attempt.number, failure: attempt.failure, purposes: attempt.dispatchPlans.map(dispatch => dispatch.purpose) })) }))
   if (providerDraft) {
     const current = f.store.listAttempts(activeOperation.id).at(-1)!
-    assert.deepEqual(current.dispatchPlans.filter(dispatch => dispatch.purpose.startsWith('elaboration_') && dispatch.key !== siblingRequestKey).map(dispatch => dispatch.purpose), materialExpected ? ['elaboration_generate', 'elaboration_review'] : restartedWithoutMaterial ? ['elaboration_generate'] : [], JSON.stringify({ result: result.failure, attempt: current.failure }))
-    assert.equal(restartedWithoutMaterial, ['no-draft', 'no-draft-sidecars', 'unrelated', 'other-operation', 'retry-cross-ancestor', 'retry-cross-no-draft-sidecars', 'retry-cross-legacy-quota'].includes(defect), JSON.stringify(result.failure))
+    const elaborationDispatches = current.dispatchPlans.filter(dispatch => dispatch.purpose.startsWith('elaboration_') && dispatch.key !== siblingRequestKey)
+    assert.deepEqual(elaborationDispatches.map(dispatch => dispatch.purpose), materialExpected || restartedWithoutMaterial && rejectedSidecars ? ['elaboration_generate', 'elaboration_review'] : restartedWithoutMaterial ? ['elaboration_generate'] : [], JSON.stringify({ result: result.failure, attempt: current.failure }))
+    assert.equal(restartedWithoutMaterial, rejectedSidecars || ['no-draft', 'no-draft-sidecars', 'unrelated', 'other-operation', 'retry-cross-ancestor', 'retry-cross-no-draft-sidecars', 'retry-cross-legacy-quota'].includes(defect), JSON.stringify(result.failure))
+    const rejection = current.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
+      .find(wrapper => wrapper.stage.endsWith(':stopped-physical-material-rejection'))
+    assert.equal(!!rejection, rejectedSidecars)
+    if (rejection) {
+      const proof = JSON.parse(readEvidence(f.input.source.commonDir, rejection.resultRef).toString())
+      const oldResource = oldResources.find(resource => resource.plan.key === originalRequest!.requestKey)!
+      assert.equal(proof.code, 'untracked_draft_sidecars')
+      assert.equal(proof.fromAttemptId, oldResource.attemptId)
+      assert.deepEqual(proof.nativePlanRef, oldResource.plan.planBlob)
+      assert.deepEqual(proof.checkpointRef, oldResource.checkpointRef)
+      assert.equal(proof.observedHeadCommit, latestHead)
+      assert.equal(proof.indexSha256, contentHash(oldIndexBytes))
+      const status = execFileSync('/usr/bin/git', ['-C', oldPath, '--no-optional-locks', 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored'])
+      assert.equal(proof.statusSha256, contentHash(status))
+      assert.deepEqual(Buffer.from(JSON.parse(readEvidence(f.input.source.commonDir, proof.draftRef).toString()).source), oldDraftBytes)
+      assert.equal(readFileSync(join(oldPath, ignoredSidecar), 'utf8'), '原作者的运行日志\n')
+      const local = current.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
+        .find(wrapper => /^partition:[^:]+:elaboration$/.test(wrapper.stage))
+      const repaired = JSON.parse(readEvidence(f.input.source.commonDir, local.resultRef).toString())
+      assert.equal(repaired.structurePassed, true)
+      assert.equal(repaired.reviewPassed, true)
+      assert.notEqual(elaborationDispatches[0].session?.sessionId, elaborationDispatches[1].session?.sessionId)
+    }
     for (const sidecar of authorSidecars) assert.equal(readFileSync(join(oldPath, sidecar), 'utf8'), `// 原作者的未追踪辅助文件 ${sidecar}\n`)
     assert.equal(current.candidate, null); assert.equal(current.verification, null)
     assert.equal(f.store.listJournals(activeOperation.id).length, 0)

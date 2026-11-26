@@ -142,7 +142,7 @@ ZCode P1 作者的 provider EPIPE 回归以真实 Git、SQLite 和受控 Native 
 
 物理稿来源已保存及续稿请求已保留两处冷停后，writer67 均在写入和派发前拒绝新版 SQLite。writer68 在原 attempt 恢复，使用同一未批准原稿 SHA，已保留的请求摘要逐值一致。[[sync-migrations]] 所需 online backup、事务及原历史记录由 [[sync-store-regression]] 验证。
 
-授权稿缺席而原工作树仅留未跟踪辅助脚本时，精确 provider EPIPE 的新作者收到原 seed 和零材料，旧脚本逐字保留。夹具还核无稿但有 tracked 源码改动、以及有稿与额外未跟踪文件并存的原拒绝边界。
+授权稿缺席而原工作树仅留未跟踪辅助脚本时，精确 provider EPIPE 的新作者收到原 seed 和零材料，旧脚本逐字保留。同操作续跑时，夹具复现未跟踪草稿、辅助脚本和被忽略的运行日志并存曾中断编排，随后核局部拒绝的原稿及 Native/seed/index/状态摘要留证，新作者获得无违规材料的 seed 并完成结构检查和独立审查，旧工作树、原始资源和检查点逐字保留。有 tracked 源码改动或正式跨执行器重试中的混合文件继续拒绝。
 
 正式跨执行器重试覆盖真实 Git、SQLite 及受控停止 ZCode 原生资源。从原正式失败 operation 启动独立 Cursor 夹具，查原 JSON 逐字进入新作者，正常提交后再独审。核同执行器、多跳祖先、错误原 seed/输入/模型、HTTP 429 及保护面越界不获材料。无稿沿空 seed。另以原生通用失败及已认证的嵌套 HTTP 429 覆盖旧手稿目录有未跟踪文件的情形。新作者从原空 seed 启动，原资源和辅助文件保持。登记来源及保留派发两处冷停均拒绝 writer68，同一 attempt 的新 writer 恢复保持原材料 CAS 和已保留的派发摘要。
 
