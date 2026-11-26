@@ -778,6 +778,37 @@ test('操作员P1复审绑定原Git候选，普通业务拒绝只重派独审', 
     assert.ok(refused.rounds[0].findings.some(item => item.code === (invalid === 'independence' ? 'review_not_independent' : 'review_boundary_missing')))
     assert.deepEqual(f.requests.slice(before).map(request => request.purpose), ['elaboration_review'])
   }
+  const firstRetry = f.requests.length
+  const interrupted = await elaborate({ ...input, requestKey: 'operator-challenge-prelaunch' }, {
+    repairDiagnostics,
+    runner: async request => {
+      assert.equal(request.purpose, 'elaboration_review')
+      await f.run(() => assert.fail('未启动独审不重派作者'))(request)
+      throw Object.assign(new Error('review CLI did not start'), { code: 'failed' })
+    },
+  })
+  assert.equal(interrupted.structurePassed, true)
+  assert.equal(interrupted.reviewPassed, false)
+  assert.equal(interrupted.rounds[0].reviewOutput, null)
+  const unsuccessful = f.requests[firstRetry]
+  assert.ok(unsuccessful.prompt.includes(JSON.stringify(review)))
+  const resumed = await elaborate({ ...input, requestKey: 'operator-challenge-prelaunch-recover' }, {
+    repairDiagnostics: {
+      requestKey: 'operator-challenge-prelaunch', inputDigest: interrupted.inputDigest,
+      resultRef: writeEvidence(f.commonDir, interrupted), failure: interrupted.failure!, round: interrupted.rounds[0],
+      settledReview: {
+        kind: 'unstarted', operatorDiagnostic, prompt: unsuccessful.prompt,
+        worktree: unsuccessful.worktree, schema: unsuccessful.schema,
+      },
+    },
+    runner: f.run(() => assert.fail('续审只派新的独立审查')),
+  })
+  assert.equal(resumed.reviewPassed, true, JSON.stringify(resumed.failure))
+  assert.equal(resumed.candidateDigest, rejected.candidateDigest)
+  assert.deepEqual(resumed.rounds[0].traces[0], rejected.rounds[0].traces[0])
+  assert.deepEqual(f.requests.slice(firstRetry).map(request => request.purpose), ['elaboration_review', 'elaboration_review'])
+  assert.deepEqual(f.requests[firstRetry + 1].worktree, unsuccessful.worktree)
+  assert.equal(f.requests[firstRetry + 1].prompt, unsuccessful.prompt, '保留原独审发现、操作者诊断和冻结候选')
 })
 
 test('冻结owner的非法repair跨请求只续独审，原Git稿和候选不变，取消不派发', async t => {

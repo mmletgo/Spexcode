@@ -22,7 +22,7 @@ import { elaborate, hasApprovedElaborationReview, elaborationGapRepairFindings, 
 import { outputErrors } from './elaboration-schema.js'
 import type { ElaborationGapReviewCheckpoint, ElaborationGapReviewEvidence, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ElaborationTrace, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ReadonlySpecRepair } from './elaboration-types.js'
 import { claimFileMutex } from './file-mutex.js'
-import { authenticateNativeFailure, authenticateNativeRejectedFinal, checkpointStageSelection, composedBeforeNullExpansionMatches, findReviewHandoffParent, managedQuotaDispatch, managedQuotaFailureRef, readSyncCheckpoints, readSyncCheckpointStageIndex, retryOperationLineage, settledApprovalSource, syncCheckpointArtifacts, withCheckpointStageBasis } from './checkpoint-evidence.js'
+import { authenticateNativeFailure, authenticateNativeRejectedFinal, authenticateUnstartedElaborationReview, checkpointStageSelection, composedBeforeNullExpansionMatches, findReviewHandoffParent, managedQuotaDispatch, managedQuotaFailureRef, readSyncCheckpoints, readSyncCheckpointStageIndex, retryOperationLineage, settledApprovalSource, syncCheckpointArtifacts, withCheckpointStageBasis } from './checkpoint-evidence.js'
 import type { SyncCheckpointStageView } from './checkpoint-evidence.js'
 import type { FileMutex } from './file-mutex.js'
 import { checkGenerationContractIntent, isSyncSpecPath, readFrozenContracts } from './frozen-contracts.js'
@@ -401,9 +401,9 @@ function authenticatedDraftResult(store: SyncStore, owner: SyncOperation, prior:
   return result?.worktree && draft && canonical({ baseCommit: result.worktree.baseCommit, tree: result.worktree.baseTree, mode: 'edit' }) === canonical(draft.seed) && result.worktree.headCommit === draft.resultCommit && result.worktree.tree === draft.resultTree ? { result, request } : null
 }
 
-function elaborationReviewOrigin(store: SyncStore, owner: SyncOperation, prior: SyncAttempt, result: SavedElaboration): { owner: SyncOperation; prior: SyncAttempt; result: SavedElaboration } | null {
+function elaborationReviewOrigin(store: SyncStore, owner: SyncOperation, prior: SyncAttempt, result: SavedElaboration, allowSameOperation = false): { owner: SyncOperation; prior: SyncAttempt; result: SavedElaboration } | null {
   const diagnostics = result.repairDiagnostics, binding = result.partitionBinding
-  if (!diagnostics || !owner.retryOf) return null
+  if (!diagnostics || !owner.retryOf && !allowSameOperation) return null
   const key = binding ? `partition:${binding.partitionId}:elaboration` : 'elaboration'
   const provenance = stage<{ fromOperationId: string; fromAttemptId: string; resultRef: BlobRef }>(store, owner, prior, `${key}:repair-diagnostics-provenance`)
   if (!provenance || canonical(provenance.resultRef) !== canonical(diagnostics.resultRef)) return null
@@ -498,6 +498,13 @@ function settledElaborationReview(store: SyncStore, operation: SyncOperation, pr
   const key = `${ownerKey}:${round.index}:elaboration_review`
   const quota = !rejection && failure.code === 'provider_quota_exhausted' ? managedQuotaDispatch(store, operation, prior, key) : undefined
   if (providerReview && rejection) return
+  if (!rejection && !grokExit && failure.code === 'failed' && round.candidateDigest) {
+    const unstarted = authenticateUnstartedElaborationReview(store, operation, prior, key, failure, round.candidateDigest)
+    if (unstarted) {
+      if (prior.dispatchPlans.some(dispatch => store.findResource(prior.id, dispatch.key)?.phase !== 'removed')) fail('review_retry_binding', '未启动独审仍有同轮未结算资源')
+      return { ...boundElaborationReview(store, operation, prior, ownerKey, result, round, unstarted.request, undefined, unstarted.archivedSessionId), kind: 'unstarted' }
+    }
+  }
   if (!providerReview && !quota && !stoppedReview && (rejection ? !reviewFormatRepairCodes.has(failure.code) || rejection.purpose !== 'elaboration_review' || !rejection.ref || rejection.ownerRequestKey !== ownerKey || rejection.ownerInputDigest !== result.inputDigest : !grokExit && !formatWithoutPacket && (failure.code !== 'native_rpc_timeout' || !isZCodeEventsRpcTimeout({ state: 'failed', errorCode: failure.code, error: failure.message })))) return
   const resource = store.findResource(prior.id, key)
   if (!resource || resource.phase !== 'removed' || prior.dispatchPlans.some(dispatch => store.findResource(prior.id, dispatch.key)?.phase !== 'removed')) fail('review_retry_binding', '独审失败缺少原正式资源及结算证明')
@@ -520,14 +527,7 @@ function settledElaborationReview(store: SyncStore, operation: SyncOperation, pr
     assertGrokUnpublishedExitSource(record.session, nativeWorktreePrompt(request.prompt, request.worktree), state, record.worktreePath, 'elaboration_review')
     assertStoppedArchiveTree(operation.input.source.commonDir, record.session, request.worktree.baseCommit, request.worktree.tree)
   }
-  const authenticateRejection = (owner: SyncOperation, source: SyncAttempt, sourceKey: string, sourceFailure: typeof failure, sourceRejection: NonNullable<typeof rejection>, original: NativeRunCheckpoint): void => {
-    const { ownerInputDigest: _ownerInputDigest, ownerRequestKey: _ownerRequestKey, ...packet } = sourceRejection
-    const originalPacket = original.failure?.rejectedOutput
-    if (!originalPacket || original.failure?.code !== sourceFailure.code || original.failure.message !== sourceFailure.message
-      || canonical({ ...originalPacket, ref: undefined }) !== canonical({ ...packet, ref: undefined })) fail('review_retry_binding', '独审拒稿不匹配原正式失败')
-    authenticateNativeRejectedFinal(store, owner, source, sourceKey, sourceFailure, packet)
-  }
-  if (rejection) authenticateRejection(operation, prior, key, failure, rejection, checkpoint)
+  if (rejection) authenticateElaborationReviewRejection(store, operation, prior, key, failure, rejection, checkpoint)
   const failedWorktree = state.failedWorktree
   if (failedWorktree || checkpoint.failure?.failedWorktree) {
     if ((!rejection && !nativeClaudeFormat) || !failedWorktree || request.worktree?.mode !== 'read'
@@ -545,8 +545,7 @@ function settledElaborationReview(store: SyncStore, operation: SyncOperation, pr
   const terminalStatus = stoppedReview ? 'cancelled' : 'failed'
   const expectedFailure = stoppedReview ? undefined : { code: failure.code, message: failure.message, ...(rejection ? { rejectedOutput: checkpoint.failure?.rejectedOutput } : {}), ...(failedWorktree ? { failedWorktree } : {}) }
   if (resource.attemptId !== prior.id || resource.generation !== prior.generation || plan.schemaVersion !== 1 || checkpoint.schemaVersion !== 1
-    || request.purpose !== 'elaboration_review' || request.worktree?.mode !== 'read' || request.frozenContext || !transportMatches || !matchesAttemptNativeModel(operation, prior, request) || request.inputDigest !== elaborationNativeInputDigest(result.inputDigest, request)
-    || request.root !== operation.input.source.canonicalRoot || request.base !== request.worktree.baseCommit || record.base !== request.base || record.forkCommit !== request.base
+    || request.purpose !== 'elaboration_review' || request.worktree?.mode !== 'read' || !transportMatches || record.base !== request.base || record.forkCommit !== request.base
     || !checkpoint.nativeCallRequested || !grokExit && !publishedIdentity || checkpoint.status !== terminalStatus || checkpoint.nativeState !== terminalStatus
     || !quota && !stoppedReview && !nativeClaudeFormat && checkpoint.stop?.nativeStatus !== 'stopped' || checkpoint.result || checkpoint.creationTermination
     || checkpoint.candidateDigest !== null && checkpoint.candidateDigest !== round.candidateDigest
@@ -554,6 +553,22 @@ function settledElaborationReview(store: SyncStore, operation: SyncOperation, pr
     || canonical(checkpoint.failure) !== canonical(expectedFailure)
     || record.harnessSessionId !== session.threadId || state.resultWorktree || state.output !== undefined || state.resultDigest !== undefined) fail('review_retry_binding', '独审失败缺少同owner原只读请求及精确已结算的Native失败身份')
   if (providerReview) assertZCodeSettledProviderFailure(record.session, nativeWorktreePrompt(request.prompt, request.worktree), state as ZCodeStructuredExecution, record.worktreePath, 'elaboration_review')
+  return boundElaborationReview(store, operation, prior, ownerKey, result, round, request, quota)
+}
+
+function authenticateElaborationReviewRejection(store: SyncStore, owner: SyncOperation, source: SyncAttempt, sourceKey: string, sourceFailure: NonNullable<ElaborationResult['failure']>, sourceRejection: NonNullable<ElaborationResult['rounds'][number]['rejectedOutput']>, original: NativeRunCheckpoint): void {
+  const { ownerInputDigest: _ownerInputDigest, ownerRequestKey: _ownerRequestKey, ...packet } = sourceRejection
+  const originalPacket = original.failure?.rejectedOutput
+  if (!originalPacket || original.failure?.code !== sourceFailure.code || original.failure.message !== sourceFailure.message
+    || canonical({ ...originalPacket, ref: undefined }) !== canonical({ ...packet, ref: undefined })) fail('review_retry_binding', '独审拒稿不匹配原正式失败')
+  authenticateNativeRejectedFinal(store, owner, source, sourceKey, sourceFailure, packet)
+}
+
+function boundElaborationReview(store: SyncStore, operation: SyncOperation, prior: SyncAttempt, ownerKey: string, result: SavedElaboration, round: ElaborationResult['rounds'][number], request: NativeRunPlan['request'], quota?: ReturnType<typeof managedQuotaDispatch>, archivedSessionId?: string): NonNullable<ElaborationRepairDiagnostics['settledReview']> {
+  if (!round.draft || !round.candidate || request.worktree?.mode !== 'read' || request.frozenContext || !matchesAttemptNativeModel(operation, prior, request)
+    || request.inputDigest !== elaborationNativeInputDigest(result.inputDigest, request) || request.root !== operation.input.source.canonicalRoot
+    || request.base !== request.worktree.baseCommit) fail('review_retry_binding', '独审失败缺少同owner原只读任务及冻结输入')
+  if (archivedSessionId) assertStoppedArchiveTree(operation.input.source.commonDir, archivedSessionId, request.worktree.baseCommit, request.worktree.tree)
   const generation = elaborationGenerationSource(store, operation, prior, round, result)
   const generationOwner = generation && ownerKey.replace(`sync:${prior.id}:`, `sync:${generation.attempt.id}:`)
   if (!generation?.request || !generation.key.startsWith(`${generationOwner}:`) || generation.request.inputDigest !== elaborationNativeInputDigest(result.inputDigest, generation.request)
@@ -562,20 +577,29 @@ function settledElaborationReview(store: SyncStore, operation: SyncOperation, pr
     || store.findResource(generation.attempt.id, generation.key)?.generation !== generation.attempt.generation
     || round.candidate.inputDigest !== result.inputDigest || round.candidateDigest !== result.candidateDigest || round.candidateDigest !== contentHash(JSON.stringify(round.candidate))) fail('review_retry_binding', '独审失败缺少同owner原Native生成及其精确Git候选绑定')
   const boundReview = { prompt: request.prompt, schema: request.schema, worktree: request.worktree, ...(quota ? { reviewQuota: { route: quota.route, failedSessionId: quota.failedSessionId } } : {}) }
-  const diagnostics = result.repairDiagnostics, previousRound = diagnostics?.round, previous = previousRound?.rejectedOutput
+  let carrier = { owner: operation, prior, result }, diagnostics = result.repairDiagnostics
+  while (diagnostics && !diagnostics.round.rejectedOutput) {
+    const origin = elaborationReviewOrigin(store, carrier.owner, carrier.prior, carrier.result, true)
+    const previous = origin?.result.rounds.at(-1)
+    if (!origin || !previous || previous.candidateDigest !== round.candidateDigest
+      || canonical(previous.traces[0]) !== canonical(round.traces[0])) break
+    carrier = origin
+    diagnostics = carrier.result.repairDiagnostics
+  }
+  const previousRound = diagnostics?.round, previous = previousRound?.rejectedOutput
   if (!diagnostics || !previousRound || previous?.purpose !== 'elaboration_review' || !previous.ref
     || previousRound.candidateDigest !== round.candidateDigest || canonical(previousRound.traces[0]) !== canonical(round.traces[0])) return boundReview
   const original = JSON.parse(readEvidence(operation.input.source.commonDir, diagnostics.resultRef).toString('utf8')) as SavedElaboration
   const source = store.readAttempt(previous.ownerRequestKey.split(':')[1])
   const sourceKey = `${previous.ownerRequestKey}:${previousRound.index}:elaboration_review`
-  const sourceOwner = source.operationId === operation.id
-    ? source.number < prior.number ? operation : null
-    : elaborationReviewOrigin(store, operation, prior, result)?.owner
+  const sourceOwner = source.operationId === carrier.owner.id
+    ? source.number < carrier.prior.number ? carrier.owner : null
+    : elaborationReviewOrigin(store, carrier.owner, carrier.prior, carrier.result)?.owner
   if (sourceOwner?.id !== source.operationId || previous.ownerRequestKey !== ownerKey.replace(`sync:${prior.id}:`, `sync:${source.id}:`)
     || previous.ownerInputDigest !== result.inputDigest || original.inputDigest !== result.inputDigest
     || canonical(original.failure) !== canonical(diagnostics.failure) || canonical(original.rounds.at(-1)) !== canonical(previousRound)) fail('review_retry_binding', '旧独审附件缺少同候选原失败和精确来源')
   const authenticated = authenticateNativeFailure(store, sourceOwner, source, sourceKey, diagnostics.failure, readRecord, true)
-  authenticateRejection(sourceOwner, source, sourceKey, diagnostics.failure, previous, authenticated.checkpoint)
+  authenticateElaborationReviewRejection(store, sourceOwner, source, sourceKey, diagnostics.failure, previous, authenticated.checkpoint)
   return { ...boundReview, previousRejection: { sha256: previous.sha256, text: previous.text } }
 }
 
@@ -3181,9 +3205,11 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           const managedReviewQuota = failure?.code === 'provider_quota_exhausted' && !!source?.result.structurePassed && !source.result.reviewPassed
           const interruptedReview = failure?.code === 'cancellation_pending' && source?.result.structurePassed
             && !source.result.reviewPassed && !round?.review && round?.reviewOutput === null && !round.rejectedOutput
+          const unstartedReview = failure?.code === 'failed' && source?.result.structurePassed
+            && !source.result.reviewPassed && round?.review === null && round.reviewOutput === null && !round.rejectedOutput
           if (!newerGeneration && source && round && failure
             && (!carriedGenerations.size || carriedGenerations.size === 1 && carriedGenerations.has(canonical(round.traces.find(trace => trace.purpose === 'elaboration_generate'))))
-            && (providerReview || priorElaborationInputMatches(prior, binding) && (managedReviewQuota || interruptedReview
+            && (providerReview || priorElaborationInputMatches(prior, binding) && (managedReviewQuota || interruptedReview || unstartedReview
               || (prior.failure?.kind === 'repairable' || prior.status === 'superseded' && !prior.failure || formatAfterAbort)
                 && (failure.code === 'native_rpc_timeout' || reviewFormatRepairCodes.has(failure.code) || isGrokNativeExitFailure(failure))))) {
             let settledReview: ElaborationRepairDiagnostics['settledReview']

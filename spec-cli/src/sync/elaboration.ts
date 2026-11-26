@@ -1071,6 +1071,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
     return { round: structuredClone(source), output, errors }
   }
   const settledParentBindingFailure = settledReview?.kind === 'parent-implementation-binding'
+  const reviewRejection = rejected ?? settledReview?.previousRejection
   const operatorDiagnostic = settledReview?.operatorDiagnostic
   const operatorReview = settledReview?.kind === 'operator-challenge'
   let retryReview = reviewRetry(runtimeDiagnostics?.round ?? (seed ? { index: 0, ...seed, reviewOutput: seed.review ? Object.fromEntries(Object.entries(seed.review).filter(([key]) => key !== 'inputDigest' && key !== 'candidateDigest')) : null } : undefined),
@@ -1117,8 +1118,8 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
             const previous = settledReview.previousRejection && reviewAttachment(settledReview.previousRejection)
             if (!previous || !settledReview.prompt.includes(reviewAttachmentInstruction(previous.path)) || digest(withAttachment(previous)) !== digest(settledReview.worktree)) throw Object.assign(new TypeError('独审失败的原只读候选seed发生变化'), { code: 'review_retry_binding' })
           }
-          if (rejected) {
-            worktree = withAttachment(reviewAttachment(rejected))
+          if (reviewRejection) {
+            worktree = withAttachment(reviewAttachment(reviewRejection))
             requestDigest = bindRequest()
           }
         }
@@ -1212,13 +1213,15 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
           const reviewRepairInstructions = `${reviewScopeInstructions}${reviewItemIdInstructions}${operatorReviewInstructions}${!operatorReviewInstructions && retryReview?.errors.length ? `\n本轮仅修复独审的权限/绑定错误，保留原合法生成和同一候选，不修改文件。以下完整原review及具体拒因为非权威诊断，须核实并重新独立审查，不能自行继承或改签accept：\n${JSON.stringify({ errors: retryReview.errors, reviewOutput: retryReview.round.reviewOutput, review: retryReview.round.review })}` : ''}`
           const nativeReviewTask = `\n任务:\n${snapshot}\n候选范围及适用性:\n${JSON.stringify({ paths: round.candidate.changes.map(change => change.path), applicability: round.candidate.applicability, nodeChanges: round.candidate.nodeChanges, ...(input.recordUnverifiedCoverage && !citationRepair ? { unverifiedContractIds: checked.findings.flatMap(issue => issue.code === 'acceptance-not-executed' && issue.itemId ? [issue.itemId] : []) } : {}) })}`
           if (index === 0 && settledReview && (!settledReview.prompt.startsWith(reviewScopeInstructions) || !settledReview.prompt.endsWith(nativeReviewTask))) throw Object.assign(new TypeError('独审失败的原任务、owner范围或候选摘要不匹配'), { code: 'review_retry_binding' })
-          const rejectionInstruction = index === 0 && settledReview && rejected ? reviewAttachmentInstruction(reviewAttachment(rejected).path) : ''
+          const rejectionInstruction = index === 0 && settledReview && reviewRejection ? reviewAttachmentInstruction(reviewAttachment(reviewRejection).path) : ''
           const reviewPrompt = citationRepair
             ? `${STAGE_READING_INSTRUCTIONS} 独立比较本轮真实Spec候选与repair.baselines的原已审正文，核冻结代码路径和声明，逐项复核所列引用已正确修复。${citationInstructions} 审查员只读，禁止改文件。只返回schema JSON，accept必须findings为空。${rejectionInstruction}${nativeReviewTask}`
             : input.worktree && input.phase === 'interface_seed' && (input.parentInterfaceReview === true || strictParentReview)
               ? `${STAGE_READING_INSTRUCTIONS} 独立审查工作树里的本轮真实父接口候选及冻结证据，逐项核必要共享义务、raw、来源、权限和子区承接边界。本轮父层处理REQ/RULE/GAP，按原授权保留稳定ID、既有精确可信VERIFY并沿用原义务；若必要义务遗漏、被弱化、无来源或条款不准确，提供具体repair。重大未知事实为missing_fact，互斥原意或规则为conflict，列影响ID、证据及具体裁决。源代码和测试都是只读证据：据此纠正父层事实或来源。完整子叶独审核实现和验收绑定，V3执行实际验收。分别核对适用性边界；accept仅允许findings为空。不得改文件，只返回schema JSON。${nativeParentReviewInstructions}${repairInstructions}${rejectionInstruction}${nativeReviewTask}`
             : input.worktree ? `${STAGE_READING_INSTRUCTIONS} 独立审查工作树里的本轮真实Spec候选及相关实现/完整测试，逐项核raw、来源、授权、主流程和边界；不要信构建者结论。${reviewScope}${reviewFindingsScope} 全部适用性边界分别核对，accept只能findings为空。${implementationReviewInstructions} 弱化验收/越权业务须本轮repair，不得改文件。只返回schema JSON。${nativeReviewTestBindingInstructions}${nativeSourceInstructions}${nativeReadonlyImplementationInstructions}${unverifiedCoverageInstructions}${repairInstructions}${rejectionInstruction}${nativeReviewTask}` : `你是独立业务审查者。${input.phase === 'interface_seed' ? '本轮仅独立审查父接口的必要性、原始意图/事实来源、权限及对后续子叶的接口准确性；既有REQ/RULE/GAP及稳定ID必须保留，删除须逐项符合冻结retire授权，父raw追加不能弱化原义务。确认可由不同子目标承接的意图分别保留为独立REQ；父接口不要求包含流程、AC、源码或测试映射，也不能把父阶段结果当作完整P1。' : ''}${reviewScope}候选不是事实，不能信构建者结论。逐项重查所有适用性依据；${reviewFindingsScope}${implementationReviewInstructions}仅返回schema JSON，不修改文件，不生成摘要或版本身份，绑定由程序与受限runtime完成。\n${contractInstructions}\n冻结业务输入:\n${snapshot}\n候选Markdown与适用性:\n${JSON.stringify(round.candidate)}\n以下解析视图由程序从上述同一候选的变更节点提取，包含其全部业务行及解析字段，不重复只读上下文；它是数据视图，不是通过结论，不能替代完整Markdown及独立语义审查。JSON字符串和Markdown表格的转义属于展示编码，不等于业务值增加字符；应以解码后的解析字段值对照raw及冻结事实核实真实语义，不能仅按序列化文本中的反斜杠数量判定业务正则或字面值被改变。\n程序解析的候选业务行:\n${JSON.stringify(parsedBusinessRows)}`
-          const reviewOutput = await call('elaboration_review', `${reviewRepairInstructions}\n${reviewPrompt}`, ELABORATION_REVIEW_SCHEMA)
+          const originalOperatorPrompt = index === 0 && settledReview?.kind === 'unstarted' && operatorDiagnostic
+            && settledReview.prompt.includes(p1ReviewDiagnosticMarker(operatorDiagnostic.ref)) ? settledReview.prompt : undefined
+          const reviewOutput = await call('elaboration_review', originalOperatorPrompt ?? `${reviewRepairInstructions}\n${reviewPrompt}`, ELABORATION_REVIEW_SCHEMA)
           round.reviewOutput = reviewOutput
           if (input.signal?.aborted) throw Object.assign(new Error('细化已取消，保留当前候选和评审产物'), { code: 'cancelled' })
           round.findings.push(...outputErrors(reviewOutput, ELABORATION_REVIEW_SCHEMA).map(message => finding(input, 'review_schema', message)))
