@@ -13,6 +13,8 @@ code:
 
 ## expanded spec
 
+[[sync-p1-review-challenge]] 的诊断正文仅在当次只读评审由 CAS 加载并记录在 Native 请求中。局部结果沿既有失败诊断与 provenance 引用原候选，新的独立追踪及其有效评审产物确立本轮结果。
+
 托管额度续审的原失败路线和会话身份按 [[sync-coordinator]] 认证后，只进入当次新审查请求的冻结身份。结果保留原失败和候选来源，后继选择不成为审查批准或业务字段。
 
 Native 普通叶可随输入携带 attempt 冻结的草稿编辑器入口。编辑器诊断只表示当前未完成草稿状态，批准与结果证据沿原协议冻结。[[incremental-elaboration-draft]]

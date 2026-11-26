@@ -1,4 +1,5 @@
 import { p0ReviewDiagnosticEvidence, p0ReviewDiagnosticRef, readP0ReviewChallengeRequest } from './behavior-review-challenge.js'
+import { p1ReviewDiagnosticEvidence, p1ReviewDiagnosticRef, readP1ReviewChallengeRequest, readP1ReviewDiagnostic } from './elaboration-review-challenge.js'
 import { finiteSyncBudget } from './budget.js'
 import { configuredVerificationTransport } from './verification-transport.js'
 import { randomUUID } from 'node:crypto'
@@ -11,7 +12,7 @@ import type { SessionProtocol } from '@spexcode/session-protocol'
 import { configuredSessionApplication, withoutSessionApplicationExecutionWake } from '../session-application.js'
 import { prepareSpecBodyEdit, readSpecBodyEdit } from '../spec-body-edit.js'
 import type { SpecBodyEdit } from '../spec-body-edit.js'
-import { isSyncInputCurrent, recoverSyncOperationResources, SyncCoordinatorError, prepareP0ReviewChallenge, prepareSyncAdmission, readCurrentSyncAnalysis, readP0ReviewChallenges, runSyncOperation, syncPlanDigest } from './coordinator.js'
+import { isSyncInputCurrent, recoverSyncOperationResources, SyncCoordinatorError, prepareP0ReviewChallenge, prepareP1ReviewChallenge, prepareSyncAdmission, readCurrentSyncAnalysis, readP0ReviewChallenges, runSyncOperation, syncPlanDigest } from './coordinator.js'
 import type { SyncCoordinatorOptions, SyncCoordinatorPlan, SyncCoordinatorResult } from './coordinator-types.js'
 import type { SyncResourceRecoveryResult } from './coordinator.js'
 import { migrateSyncStore } from './migrations.js'
@@ -962,6 +963,29 @@ export class SyncApplication {
       mutex.assertHeld()
       const diagnosticRef = writeEvidence(operation.input.source.commonDir, p0ReviewDiagnosticEvidence(input))
       return this.store.authorizeP0ReviewChallenge(operation.id, { ...challenge, diagnosticRef })
+    } finally { mutex.release() }
+  }
+  async challengeP1(supplied: unknown): Promise<ReturnType<SyncStore['authorizeP1ReviewChallenge']>> {
+    const input = readP1ReviewChallengeRequest(supplied)
+    const mutex = await this.requestMutex(`p1-review:${this.repositoryId}:${this.root}:${input.operationId}`, 30000)
+    try {
+      const operation = this.store.readOperation(input.operationId)
+      this.assertSource(operation)
+      const prior = operation.p1ReviewChallenges?.find(item => item.requestId === input.requestId)
+      if (prior) {
+        if (prior.diagnosticRef.sha256 !== p1ReviewDiagnosticRef(input).sha256) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', input.requestId)
+        readP1ReviewDiagnostic(operation.input.source.commonDir, prior, operation.id)
+        return { operation, challenge: prior }
+      }
+      const current = await captureInputSnapshot(this.root, { committed: operation.input.captureKind === 'commit' })
+      this.requireEnabled(current, operation)
+      if (current.id !== operation.input.id || input.inputId !== operation.input.id) throw new SyncApplicationError('sync_p1_challenge_stale', '复审需要原冻结 source/input，当前输入已变化')
+      let challenge: Awaited<ReturnType<typeof prepareP1ReviewChallenge>>
+      try { challenge = await withReadonlySnapshotQuery(() => prepareP1ReviewChallenge(this.store, operation, this.operationPlan(operation), input)) }
+      catch (error) { if (error instanceof SyncCoordinatorError) throw new SyncApplicationError(error.code, error.message); throw error }
+      mutex.assertHeld()
+      const diagnosticRef = writeEvidence(operation.input.source.commonDir, p1ReviewDiagnosticEvidence(input))
+      return this.store.authorizeP1ReviewChallenge(operation.id, { ...challenge, diagnosticRef })
     } finally { mutex.release() }
   }
   /** 长流程附着于后端进程；拒绝和环境失败必须持久结算，不能成为悬空 Promise。 */

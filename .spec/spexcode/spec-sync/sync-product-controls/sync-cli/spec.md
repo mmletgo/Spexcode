@@ -16,6 +16,8 @@ related:
 
 ## expanded spec
 
+`spex sync challenge` 使用 `--result <sha256> --candidate <sha256>` 登记 [[sync-p1-review-challenge]]。提供原 operation、revision、input、partition、UTF-8 诊断文件及其在原独审 Git 树中的证据路径。P1 的局部结果和候选参数与 P0 的 `--analysis` 互斥。登记后沿正式恢复入口开始独审。
+
 `spex sync challenge <operation-id> --request-id <id> --expected-revision <N> --input-id <id> --partition <id> --analysis <sha256> --diagnostic-file <utf8> --evidence-paths <json-array>` 通过现有后端 `POST /api/sync/operations/:id/challenge` 登记 [[sync-p0-review-challenge]]。成功输出稳定授权，原 operation 仍暂停。证据路径以仓库相对路径 JSON 数组传递，由后端绑定原冻结树。旧命令缺此参数时，仅可重放已有 v1 请求。
 
 `spex sync run` 可将 `--inherit-retry-budget` 与 `--retry-of`、`--model` 合用，向正式后端提交原候选续审交接。保留原预算族、已用调用与截止时间。普通的暂停和恢复沿原模型。

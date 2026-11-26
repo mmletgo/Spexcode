@@ -10,7 +10,7 @@ export async function runSyncCli(argv: readonly string[]): Promise<void> {
   const [verb] = argv
   if (verb === 'check') return (await import('./sync/conformance-cli.js')).runConformanceCli(argv.slice(1))
   const challengeIdentity = ['--expected-revision', '--partition', '--diagnostic-file']
-  const challengeValues = [...challengeIdentity, '--evidence-paths']
+  const challengeValues = [...challengeIdentity, '--evidence-paths', '--result', '--candidate']
   const continuityValues = ['--revision', '--enabled-digest', '--old-common-dev', '--old-root-dev', '--old-git-dev']
   const values = new Set(['--node', '--request-id', '--model', '--retry-of', '--patch-file', '--limit', '--config-digest', '--api', '--port', '--password', '--origin', '--input-id', '--analysis', '--findings', '--choice', '--rule', ...continuityValues, ...challengeValues])
   const allowed = new Set([...values, '--json', '--insecure', '--committed', '--record-unverified-coverage', '--inherit-retry-budget'])
@@ -77,15 +77,20 @@ export async function runSyncCli(argv: readonly string[]): Promise<void> {
     const patch = patchFile ? readSpecBodyEdit(JSON.parse(readFileSync(patchFile, 'utf8')) as unknown) : undefined
     result = await clientSyncRequest(verb === 'verify' ? '/verify' : '/run', { targetTree, nodeId: stripRefSigil(nodeId), requestId: flags.get('--request-id') ?? randomUUID(), ...(retryOf ? { retryOf, ...(flags.has('--origin') ? { origin: flags.get('--origin') } : {}) } : { origin: flags.get('--origin') ?? 'spec' }), ...(flags.has('--model') ? { model: flags.get('--model') } : {}), ...(inheritRetryBudget ? { inheritRetryBudget } : {}), ...(patch ? { patch } : {}), ...(committed ? { committed } : {}), ...(recordUnverifiedCoverage ? { recordUnverifiedCoverage } : {}) })
   } else if (verb === 'challenge') {
-    const required = ['--request-id', '--input-id', '--analysis', ...challengeIdentity]
+    const elaboration = flags.has('--result') || flags.has('--candidate')
+    const digests = elaboration ? ['--result', '--candidate'] : ['--analysis']
+    const required = ['--request-id', '--input-id', ...digests, ...challengeIdentity, ...(elaboration ? ['--evidence-paths'] : [])]
     const expectedRevision = Number(flags.get('--expected-revision'))
     if (positional.length !== 1 || !required.every(flag => flags.get(flag)?.trim()) || !Number.isSafeInteger(expectedRevision) || expectedRevision < 1
-      || !/^[a-f0-9]{64}$/.test(flags.get('--analysis')!)) throw usage('challenge 需要 operation ID、--request-id、--expected-revision、--input-id、--partition、--analysis SHA 和 --diagnostic-file；新复审另需 --evidence-paths JSON 数组')
+      || !digests.every(flag => /^[a-f0-9]{64}$/.test(flags.get(flag)!))) throw usage('challenge 需要 operation ID、--request-id、--expected-revision、--input-id、--partition、--diagnostic-file，以及 P0 的 --analysis SHA 或 P1 的 --result SHA、--candidate SHA 与 --evidence-paths')
     if ([...flags.keys()].some(flag => ![...required, '--evidence-paths', '--api', '--port', '--password'].includes(flag))) throw usage('challenge 仅接受复审身份、诊断文件、证据路径和 API 路由选项')
     const diagnostic = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(readFileSync(flags.get('--diagnostic-file')!))
     const paths = flags.get('--evidence-paths')
+    const binding = elaboration
+      ? { resultRef: { sha256: flags.get('--result') }, candidateDigest: flags.get('--candidate') }
+      : { analysisRef: { sha256: flags.get('--analysis') } }
     result = await clientSyncRequest(`/operations/${encodeURIComponent(positional[0])}/challenge`, { targetTree, requestId: flags.get('--request-id'), expectedRevision,
-      inputId: flags.get('--input-id'), partitionId: flags.get('--partition'), analysisRef: { sha256: flags.get('--analysis') }, diagnostic, ...(paths === undefined ? {} : { evidencePaths: JSON.parse(paths) as unknown }) })
+      inputId: flags.get('--input-id'), partitionId: flags.get('--partition'), ...binding, diagnostic, ...(paths === undefined ? {} : { evidencePaths: JSON.parse(paths) as unknown }) })
   } else if (verb === 'decide') {
     if (positional.length !== 1 || !['--input-id', '--analysis', '--findings', '--choice'].every(flag => flags.has(flag))) throw usage('decide 需要 operation ID、--input-id、--analysis、--findings 与 --choice')
     const choice = flags.get('--choice')!

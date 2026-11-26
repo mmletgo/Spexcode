@@ -11,7 +11,7 @@ import { StructuredSessionError, rejectedFinalOutput } from '../session-structur
 import { nativeWorktreePrompt, nativeWorktreeResult } from '../native-worktree-runtime.js'
 import { draftVerificationOwnershipMatches, elaborate, elaborationMaterialContext, elaborationDigest, freezeElaborationInput, incrementalDraftCommand, sealPartitionedElaboration, verifyElaborationDraftCache, withDraftVerificationRows } from './elaboration.js'
 import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE } from './elaboration-types.js'
-import type { ElaborationInput, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
+import type { ElaborationInput, ElaborationRepairDiagnostics, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence, writeObject, writeTree } from './snapshot.js'
 import { captureStageDraft, overlayStageTree, readStageDraft, readStoppedPhysicalDraft, stageWorktree } from './stage-worktree.js'
 import { syncCheckpointArtifacts } from './checkpoint-evidence.js'
@@ -693,6 +693,67 @@ test('草稿业务schema合法但独审repair时继续原文件，审查错误�
   assert.ok(result.rounds[0].draft!.errors.some(issue => issue.code === 'draft-review-repair'))
   assert.equal(result.rounds[0].review!.verdict, 'repair'); assert.equal(result.rounds[1].review!.verdict, 'accept')
   assert.notEqual(result.rounds[0].traces[0].sessionId, result.rounds[1].traces[1].sessionId)
+})
+
+test('操作员P1复审绑定原Git候选，普通业务拒绝只重派独审', async t => {
+  const f = await fixture(t), input = { ...f.input, maxRepairs: 0 }
+  const review = { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{
+    code: 'ac-test-evidence', kind: 'repair', affectedIds: ['AC-EXPORT-01'], message: '现有验收引用需核对',
+    evidence: `${path} 的 test 引用与冻结用例不匹配`, decision: '核对候选与原测试',
+  }] }
+  const base = f.run(() => JSON.stringify(rows))
+  const rejected = await elaborate(input, { runner: async request => {
+    const result = await base(request)
+    return request.purpose === 'elaboration_review' ? { ...result, output: review, resultDigest: contentHash(JSON.stringify(review)) } : result
+  } })
+  assert.equal(rejected.structurePassed, true)
+  assert.equal(rejected.reviewPassed, false)
+  assert.deepEqual(rejected.rounds[0].findings.filter(item => item.severity === 'error').map(item => item.code), ['ac-test-evidence'])
+  const originalBytes = JSON.stringify(rejected), originalRequest = f.requests[1]
+  const operatorDiagnostic = { ref: writeEvidence(f.commonDir, '原测试引用已核对'), text: '核对同一行的实际测试和源码字段', evidencePaths: [path] }
+  const repairDiagnostics: ElaborationRepairDiagnostics = {
+    requestKey: input.requestKey, inputDigest: rejected.inputDigest, resultRef: writeEvidence(f.commonDir, rejected),
+    failure: rejected.failure!, round: rejected.rounds[0],
+    settledReview: { kind: 'operator-challenge', operatorDiagnostic, prompt: originalRequest.prompt, worktree: originalRequest.worktree, schema: originalRequest.schema },
+  }
+  const changed = { ...repairDiagnostics, round: { ...repairDiagnostics.round, candidateDigest: 'e'.repeat(64) } }
+  await assert.rejects(elaborate({ ...input, requestKey: 'challenged-other-candidate' }, {
+    repairDiagnostics: changed, runner: async () => assert.fail('其他候选不取得授权'),
+  }), { code: 'review_retry_binding' })
+  const restored = await elaborate({ ...input, requestKey: 'operator-challenge' }, {
+    repairDiagnostics, loadDraftMaterial: () => assert.fail('候选不可被其他草稿覆盖'),
+    runner: f.run(() => assert.fail('只重新派发独审')),
+  })
+  assert.equal(restored.status, 'complete', JSON.stringify(restored.failure))
+  assert.equal(restored.candidateDigest, rejected.candidateDigest)
+  assert.deepEqual(restored.rounds[0].traces[0], rejected.rounds[0].traces[0])
+  assert.notEqual(restored.rounds[0].traces[1].sessionId, rejected.rounds[0].traces[1].sessionId)
+  assert.deepEqual(f.requests.map(request => request.purpose), ['elaboration_generate', 'elaboration_review', 'elaboration_review'])
+  assert.deepEqual(f.requests[2].worktree, originalRequest.worktree)
+  assert.deepEqual(f.requests[2].schema, originalRequest.schema)
+  assert.ok(f.requests[2].prompt.includes(operatorDiagnostic.ref.sha256))
+  assert.ok(f.requests[2].prompt.includes(operatorDiagnostic.text))
+  assert.ok(f.requests[2].prompt.includes(JSON.stringify(review)))
+  assert.equal(JSON.stringify(rejected), originalBytes)
+  for (const invalid of ['independence', 'boundary'] as const) {
+    const before = f.requests.length
+    const refused = await elaborate({ ...input, maxRepairs: 2, requestKey: `operator-challenge-${invalid}` }, {
+      repairDiagnostics, runner: async request => {
+        assert.equal(request.purpose, 'elaboration_review', '无有效新独审时不派作者')
+        const native = await f.run(() => assert.fail('无有效新独审时不写稿'))(request)
+        const output = invalid === 'boundary' ? { ...review, checkedBoundaries: [review.checkedBoundaries[1], ...review.checkedBoundaries.slice(1)] } : review
+        const previous = rejected.rounds[0].traces[1]
+        return { ...native, ...(invalid === 'independence' ? { sessionId: previous.sessionId, threadId: previous.threadId, turnId: previous.turnId } : {}), output, resultDigest: contentHash(JSON.stringify(output)) }
+      },
+    })
+    assert.equal(refused.failure?.code, 'p1_challenge_review_invalid')
+    assert.equal(refused.structurePassed, true)
+    assert.equal(refused.reviewPassed, false)
+    assert.equal(refused.candidateDigest, rejected.candidateDigest)
+    assert.equal(refused.rounds[0].draft?.oid, rejected.rounds[0].draft?.oid)
+    assert.ok(refused.rounds[0].findings.some(item => item.code === (invalid === 'independence' ? 'review_not_independent' : 'review_boundary_missing')))
+    assert.deepEqual(f.requests.slice(before).map(request => request.purpose), ['elaboration_review'])
+  }
 })
 
 test('冻结owner的非法repair跨请求只续独审，原Git稿和候选不变，取消不派发', async t => {

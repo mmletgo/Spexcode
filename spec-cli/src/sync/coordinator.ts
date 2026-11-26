@@ -16,6 +16,7 @@ import type { CodeBehaviorAnalysis, CodeBehaviorEvidence, SyncDecisionInput } fr
 import { adoptedDeliveryPaths, baselineResourceKey, baselineSelectionDigest, extendsWithUninitializedResources, isUtf8Text, readCompositionEvidence, selectedRetiredIds, verifyBaselineSelection } from './composition.js'
 import { readHistoryRequest, readReceiptHistoryRestorations } from './history-input.js'
 import { p0ReviewDiagnosticMatches, p0ReviewDiagnosticRef, readP0ReviewDiagnostic, type P0ReviewChallengeRequest } from './behavior-review-challenge.js'
+import { p1ReviewDiagnosticMarker, p1ReviewDiagnosticRef, readP1ReviewDiagnostic, type P1ReviewChallengeRequest } from './elaboration-review-challenge.js'
 import { composeAuthoredInput } from './author-input.js'
 import { elaborate, hasApprovedElaborationReview, elaborationGapRepairFindings, elaborationMaterialContext, freezeElaborationInput, gapBlockedFinding, incrementalDraftCommand, isParentInterfaceImplementationReviewRejection, verifyElaborationDraftCache } from './elaboration.js'
 import { outputErrors } from './elaboration-schema.js'
@@ -39,7 +40,7 @@ import type { GenerationFinding, GenerationInput, GenerationResult, StoppedCandi
 import { captureStageDraft, readStageDraft, readStoppedPhysicalDraft, StageDraftCommitMissingError, stageWorktree, StoppedPhysicalDraftStatusError, verifyStageResult, type StageDraftMaterialRequest } from './stage-worktree.js'
 import { createAttemptRunner, hasSettledGrokP0ExitFailure, hasSettledNativeRpcFailure, hasSettledNativeTurnTransportFailure, matchesNativeDispatchModel, pinSyncNativeRequest } from './native-run.js'
 import type { NativeRunCheckpoint, NativeRunPlan } from './native-run.js'
-import type { AdmitSyncInput, ApplyReceipt, BlobRef, CandidateRef, ComposedInputRef, FrozenBaselineSelection, InputSnapshot, P0ReviewChallenge, SyncAttempt, SyncFailure, SyncOperation, SyncScope, SyncResourceRecord, VerificationResultBlob, WriteFence } from './operation-types.js'
+import type { AdmitSyncInput, ApplyReceipt, BlobRef, CandidateRef, ComposedInputRef, FrozenBaselineSelection, InputSnapshot, P0ReviewChallenge, P1ReviewChallenge, SyncAttempt, SyncFailure, SyncOperation, SyncScope, SyncResourceRecord, VerificationResultBlob, WriteFence } from './operation-types.js'
 import { deliverVerifiedAttempt, planPrivateDelivery } from './private-delivery.js'
 import { assemblePublicationBase, verifyPublicationBase } from './publication-base.js'
 import { obligationPaths, ownedObligationPaths } from './prior-context.js'
@@ -1762,6 +1763,81 @@ export async function prepareP0ReviewChallenge(store: SyncStore, operation: Sync
   return reject('指定分区没有当前已批准且可冷验的原生局部分析')
 }
 
+/** 核验待复审局部结果保留同一 Git 作者和已完成的独立只读拒绝。 */
+function p1ChallengedReviewSource(store: SyncStore, owner: SyncOperation, prior: SyncAttempt, result: SavedElaboration) {
+  const round = result.rounds.at(-1), binding = result.partitionBinding
+  const review = round?.traces.find(trace => trace.purpose === 'elaboration_review')
+  const author = round?.traces.find(trace => trace.purpose === 'elaboration_generate')
+  if (!binding || !round?.draft || !round.candidate || !review || !author || round.traces.length !== 2
+    || result.status !== 'exhausted' || result.failure?.code !== 'repair_budget_exhausted'
+    || !result.structurePassed || result.reviewPassed || round.review?.verdict !== 'repair'
+    || round.candidate.inputDigest !== result.inputDigest || round.candidateDigest !== result.candidateDigest
+    || round.candidateDigest !== contentHash(JSON.stringify(round.candidate))
+    || canonical(round.review) !== canonical({ ...(round.reviewOutput as object), inputDigest: result.inputDigest, candidateDigest: result.candidateDigest })
+    || author.sessionId === review.sessionId || author.threadId === review.threadId) return null
+  const dispatch = prior.dispatchPlans.find(item => item.purpose === review.purpose
+    && canonical(item.session) === canonical({ sessionId: review.sessionId, threadId: review.threadId, turnId: review.turnId }))
+  if (!dispatch) return null
+  const scope = frozenAnalysisScope.getStore() ?? { active: true, operationId: owner.id, inputId: owner.input.id,
+    source: canonical(owner.input.source), policyDigest: owner.policyDigest, refs: new Set<string>() }
+  const { generation, reviewed } = frozenAnalysisScope.run({ ...scope, readNativeRecord: readRecord }, () => ({
+    generation: elaborationGenerationSource(store, owner, prior, round, result),
+    reviewed: authenticatedDraftResult(store, owner, prior, dispatch.key, review.purpose),
+  }))
+  if (!generation?.request || reviewed?.request?.worktree?.mode !== 'read' || !reviewed.result?.worktree
+    || reviewed.result.worktree.headCommit !== reviewed.request.worktree.baseCommit || reviewed.result.worktree.tree !== reviewed.request.worktree.tree
+    || reviewed.request.inputDigest !== review.inputDigest
+    || reviewed.result.resultDigest !== review.resultDigest || canonical(reviewed.result.output) !== canonical(round.reviewOutput)) return null
+  verifyStageResult(owner.input.source.commonDir, reviewed.request.worktree, reviewed.result)
+  for (const request of [generation.request, reviewed.request]) {
+    const isAuthor = request.purpose === 'elaboration_generate'
+    const origin = isAuthor ? generation.attempt : prior
+    if (!matchesAttemptNativeModel(isAuthor ? generation.owner : owner, origin, request)
+      || request.root !== owner.input.source.canonicalRoot || request.frozenContext || !request.worktree
+      || request.base !== request.worktree.baseCommit || request.worktree.mode !== (isAuthor ? 'edit' : 'read')
+      || request.inputDigest !== elaborationNativeInputDigest(result.inputDigest, request)
+      || !request.requestKey.startsWith(`sync:${origin.id}:elaborate:partition:${binding.partitionId}:`)) return null
+  }
+  return { round, request: reviewed.request, failure: result.failure }
+}
+
+/** 复审授权绑定当前同源分区结果、原独审和候选，不运行模型或改变原稿。 */
+export async function prepareP1ReviewChallenge(store: SyncStore, operation: SyncOperation, plan: SyncCoordinatorPlan, request: P1ReviewChallengeRequest): Promise<P1ReviewChallenge> {
+  const reject = (message: string): never => fail('sync_p1_challenge_binding', message)
+  if (plan.version !== 'sync-coordinator-v2' || plan.agentWorkflow !== 'native-worktree-v1'
+    || syncPlanDigest(plan) !== operation.policyDigest || !operation.baselineSelection || operation.id !== request.operationId
+    || operation.revision !== request.expectedRevision || operation.input.id !== request.inputId) return reject('复审须绑定当前操作、同一冻结原生分区输入和计划')
+  if (operation.control !== 'pause' || operation.phase !== 'paused') fail('sync_p1_challenge_unsettled', '复审前须正式暂停并结算原操作')
+  const commonDir = operation.input.source.commonDir, selection = store.readBusinessBaselineSelection(operation.id)
+  const view = await readInput(operation.input, plan, operation.previousBaselinePair, operation.requestBlob, selection, operation.scope.paths)
+  if (view.readSetDigest !== operation.readSetDigest) return reject('原冻结 P1 读集已变化')
+  const key = `partition:${request.partitionId}:elaboration`
+  for (const prior of store.listAttempts(operation.id).reverse()) {
+    const index = readSyncCheckpointStageIndex(store, operation, prior)
+    const local = partitionStage<SavedElaboration>(store, operation, prior, key, selection, index)
+    if (!local) {
+      if (prior.dispatchPlans.some(dispatch => dispatch.key.startsWith(`sync:${prior.id}:elaborate:partition:${request.partitionId}:`))) return reject('指定分区已有更新的派发，不能使用历史候选')
+      continue
+    }
+    if (!['failed', 'superseded', 'settled'].includes(prior.status) || canonical(prior.composedInput) !== canonical(view.composed)
+      || local.resultRef.sha256 !== request.resultRef.sha256 || local.result.candidateDigest !== request.candidateDigest
+      || local.result.partitionBinding?.partitionId !== request.partitionId || local.result.phase === 'partitioned_final') return reject('申请须匹配该分区当前待复审的局部结果和候选')
+    const partitionPlan = partitionStage<SyncPartitionPlan>(store, operation, prior, 'partition-plan', selection, index)
+    if (!partitionPlan?.result.partitions.some(partition => partition.id === request.partitionId)) return reject('局部结果缺少原独审分区计划')
+    const original = p1ChallengedReviewSource(store, operation, prior, local.result)
+    if (!original?.request.worktree) return reject('局部结果缺少合法作者及已完成的独立只读拒绝')
+    const existing = new Set(readTree(commonDir, original.request.worktree.tree).map(entry => entry.path))
+    if (request.evidencePaths.some(path => !existing.has(path))) return reject('复审证据须在原独审冻结 Git 树')
+    const reviewCheckpointRef = index.json.find(({ value }) => (value as Stage).stage === key && (value as Stage).resultRef?.sha256 === local.resultRef.sha256)?.ref
+    if (!reviewCheckpointRef) return reject('局部结果缺少原检查点引用')
+    return { version: 'p1-review-challenge-v1', requestId: request.requestId, expectedRevision: request.expectedRevision,
+      inputId: request.inputId, partitionId: request.partitionId, resultRef: local.resultRef, candidateDigest: request.candidateDigest,
+      diagnosticRef: p1ReviewDiagnosticRef(request), scopeDigest: contentHash(canonical(operation.scope)),
+      origin: { operationId: operation.id, attemptId: prior.id, reviewCheckpointRef, partitionPlanRef: partitionPlan.resultRef } }
+  }
+  return reject('指定分区没有当前待复审的局部结果')
+}
+
 type ApprovalSourceLineage = { ancestors?: SyncOperation[]; settled: Set<string> }
 type ApprovedBehaviorPartition = NonNullable<CodeBehaviorAnalysis['partitionEvidence']>[number]
 type ApprovalSourceOptions = {
@@ -3037,6 +3113,8 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         const parentAttempt = binding?.interfaceSeed ? store.readAttempt(attempt!.id) : null
         const parentReviewScope = parentAttempt && stage<Pick<ElaborationInput, 'parentInterfaceReview'>>(store, operation, parentAttempt, 'elaboration-draft-protocol')?.parentInterfaceReview === 'scope-v2'
         let newerGeneration = hasOwnerGeneration(parentReviewScope ? parentAttempt : attempt!)
+        let challenge = binding && key === `partition:${binding.partitionId}:elaboration`
+          ? operation.p1ReviewChallenges?.slice().reverse().find(item => item.partitionId === binding.partitionId) : undefined
         const carriedGenerations = new Set<string | undefined>()
         const carriedQuotaRefs = new Set<string>()
         const rememberUnavailableQuota = (prior: SyncAttempt, result: SavedElaboration, owner = operation, checkpoints?: SyncCheckpointStageView): boolean => {
@@ -3060,6 +3138,29 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
             && prior.failure?.kind === 'unsupported' && isZCodeProviderRejection(prior.failure) && saved?.status === 'unsupported'
             && isZCodeProviderRejection(saved.failure) && saved.structurePassed && !saved.reviewPassed && saved.phase !== 'partitioned_final'
           const source = binding ? partitionElaborationStage(store, operation, prior, key, binding, inputDigest) : partitionStage<SavedElaboration>(store, operation, prior, key)
+          if (challenge && (newerGeneration || hasOwnerGeneration(prior) && prior.id !== challenge.origin.attemptId)) challenge = undefined
+          if (challenge && source && prior.id !== challenge.origin.attemptId && source.result.candidateDigest === challenge.candidateDigest) {
+            if (source.result.failure?.code === 'p1_challenge_review_invalid'
+              && source.result.repairDiagnostics?.resultRef.sha256 === challenge.resultRef.sha256) continue
+            const repeated = p1ChallengedReviewSource(store, operation, prior, source.result)
+            if (repeated?.request.prompt.includes(p1ReviewDiagnosticMarker(challenge.diagnosticRef))) challenge = undefined
+          }
+          if (challenge && prior.id === challenge.origin.attemptId) {
+            const authorization = challenge
+            const original = source && p1ChallengedReviewSource(store, operation, prior, source.result)
+            if (!source || !original?.request.worktree || source.resultRef.sha256 !== authorization.resultRef.sha256
+              || authorization.origin.operationId !== operation.id || authorization.inputId !== operation.input.id
+              || authorization.scopeDigest !== contentHash(canonical(operation.scope))
+              || authorization.candidateDigest !== original.round.candidateDigest || !priorElaborationInputMatches(prior, binding)
+              || !prior.checkpointRefs.some(ref => ref.sha256 === authorization.origin.reviewCheckpointRef.sha256
+                && ref.artifacts?.some(artifact => artifact.ref.sha256 === authorization.resultRef.sha256))
+              || partitionStage<SyncPartitionPlan>(store, operation, prior, 'partition-plan')?.resultRef.sha256 !== authorization.origin.partitionPlanRef.sha256)
+              fail('sync_p1_challenge_binding', '复审前原冻结分区、只读独审或候选已不匹配')
+            const operatorDiagnostic = readP1ReviewDiagnostic(operation.input.source.commonDir, authorization, operation.id)
+            saveStage(store, fence!, `${key}:repair-diagnostics-provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef })
+            return { requestKey: `sync:${prior.id}:${ownerSuffix}`, inputDigest, resultRef: source.resultRef, failure: original.failure, round: original.round,
+              settledReview: { kind: 'operator-challenge', prompt: original.request.prompt, schema: original.request.schema, worktree: original.request.worktree, operatorDiagnostic } }
+          }
           if (providerReview && (!source || saved.inputDigest !== inputDigest || !priorElaborationInputMatches(prior, binding)))
             fail('review_retry_binding', 'ZCode 原独审失败不匹配当前冻结输入或owner')
           if (saved && (!source || saved.inputDigest !== inputDigest || saved.phase === 'partitioned_final' || saved.reviewPassed)) return null
@@ -3086,6 +3187,8 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
             }
             if (settledReview) {
               saveStage(store, fence!, `${key}:repair-diagnostics-provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef })
+              if (challenge && round.candidateDigest === challenge.candidateDigest && settledReview.prompt.includes(p1ReviewDiagnosticMarker(challenge.diagnosticRef)))
+                settledReview.operatorDiagnostic = readP1ReviewDiagnostic(operation.input.source.commonDir, challenge, operation.id)
               return { requestKey, inputDigest, resultRef: source.resultRef, failure, round, settledReview }
             }
           }

@@ -11,6 +11,11 @@ export type P1ReviewChallengeRequest = Pick<P1ReviewChallenge, 'requestId' | 'ex
 
 export type P1ReviewDiagnostic = { ref: BlobRef; text: string; evidencePaths: readonly string[] }
 
+/** 同一授权标记进入新 Native 只读提示，冷验用它识别复审的真实请求。 */
+export function p1ReviewDiagnosticMarker(ref: BlobRef): string {
+  return `操作员复审诊断 SHA-256 ${ref.sha256}。`
+}
+
 const isSha256 = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
 
 /** 只接收指定候选的身份和只读证据提示，原审查来源由服务冷验。 */
