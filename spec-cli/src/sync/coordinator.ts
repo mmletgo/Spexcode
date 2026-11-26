@@ -18,7 +18,7 @@ import { readHistoryRequest, readReceiptHistoryRestorations } from './history-in
 import { p0ReviewDiagnosticMatches, p0ReviewDiagnosticRef, readP0ReviewDiagnostic, type P0ReviewChallengeRequest } from './behavior-review-challenge.js'
 import { p1ReviewDiagnosticMarker, p1ReviewDiagnosticRef, readP1ReviewDiagnostic, type P1ReviewChallengeRequest } from './elaboration-review-challenge.js'
 import { composeAuthoredInput } from './author-input.js'
-import { elaborate, hasApprovedElaborationReview, elaborationGapRepairFindings, elaborationMaterialContext, freezeElaborationInput, gapBlockedFinding, incrementalDraftCommand, isParentInterfaceImplementationReviewRejection, verifyElaborationDraftCache } from './elaboration.js'
+import { elaborate, hasApprovedElaborationReview, elaborationGapRepairFindings, elaborationMaterialContext, freezeElaborationInput, gapBlockedFinding, incrementalDraftCommand, isParentInterfaceImplementationReviewRejection, matchesProviderDraftSeed, verifyElaborationDraftCache } from './elaboration.js'
 import { outputErrors } from './elaboration-schema.js'
 import type { ElaborationGapReviewCheckpoint, ElaborationGapReviewEvidence, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ElaborationTrace, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ReadonlySpecRepair } from './elaboration-types.js'
 import { claimFileMutex } from './file-mutex.js'
@@ -2930,6 +2930,8 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
       let materialCheckpoints: ReturnType<typeof readSyncCheckpoints> | undefined
       const loadElaborationDraftMaterial = async (key: string, binding?: NonNullable<ElaborationResult['partitionBinding']>, schemaDigest?: string, request?: StageDraftMaterialRequest): Promise<ElaborationDraftMaterial | null> => {
         const commonDir = operation.input.source.commonDir, provenanceKey = `${key}:stopped-git-material-provenance`
+        const ownerSuffix = `elaborate${binding ? `:partition:${binding.partitionId}` : ''}`
+        const ownerRequestKey = `sync:${attempt!.id}:${ownerSuffix}`
         let allowCommitted = false
         if (request?.allowStoppedGitDraft) {
           const saved = stage<{ sourceKind: string; approved: boolean; currentInputDigest: string; currentSeed: StageDraftMaterialRequest['worktree']; schemaDigest: string; draftSha256: string; materialRef: BlobRef }>(store, operation, attempt!, provenanceKey, 'automatic', materialCheckpoints ??= readSyncCheckpoints(store, operation, attempt!))
@@ -2939,8 +2941,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
               || packet.version !== 'stopped-git-draft-v1' || packet.path !== request.binding.path || packet.sourceKind !== 'stopped_git_draft' || typeof packet.source !== 'string' || contentHash(packet.source) !== saved.draftSha256) fail('draft_material_binding', '已冻结的P1提交草稿与本轮owner、seed或原材料摘要不匹配')
             return packet
           }
-          const ownerRequestKey = `sync:${attempt!.id}:elaborate${binding ? `:partition:${binding.partitionId}` : ''}:`
-          allowCommitted = !attempt!.dispatchPlans.some(dispatch => dispatch.purpose === 'elaboration_generate' && dispatch.key.startsWith(ownerRequestKey))
+          allowCommitted = !attempt!.dispatchPlans.some(dispatch => dispatch.purpose === 'elaboration_generate' && dispatch.key.startsWith(`${ownerRequestKey}:`))
         }
         const sources = retryDraftSources(store, operation, attempt!.number), existingDraft = request?.existingDraft
         const identity = ({ errors: _errors, ...draft }: ElaborationDraft) => canonical(draft)
@@ -3010,7 +3011,8 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
                     || request.binding.sourceInputId !== operation.input.id || source.result.inputDigest !== request.inputDigest || canonical(source.result.partitionBinding) !== canonical(binding)
                     || !matchesAttemptNativeModel(owner, prior, native.request) || native.request.root !== operation.input.source.canonicalRoot || native.request.base !== worktree.baseCommit
                     || proof.record.base !== native.request.base || proof.record.forkCommit !== native.request.base
-                    || native.request.inputDigest !== elaborationNativeInputDigest(source.result.inputDigest, native.request) || canonical(worktree) !== canonical(request.worktree)
+                    || native.request.inputDigest !== elaborationNativeInputDigest(source.result.inputDigest, native.request)
+                    || !matchesProviderDraftSeed(commonDir, worktree, `sync:${prior.id}:${ownerSuffix}`, request, ownerRequestKey)
                     || !checkpoint.nativeCallRequested || !checkpoint.nativeStarted || !session.threadId || !session.turnId
                     || checkpoint.status !== 'failed' || checkpoint.nativeState !== 'failed' || checkpoint.stop?.nativeStatus !== 'stopped' || checkpoint.result || checkpoint.creationTermination
                     || canonical(checkpoint.failure) !== canonical({ code: failure!.code, message: failure!.message })
@@ -3036,7 +3038,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
                     store.assertWriteFence(fence!)
                     const physical = readStoppedPhysicalDraft(commonDir, proof.record.worktreePath, worktree, request.binding, { allowCommitted: allowCommitted && !providerDraft, allowUntrackedWithoutDraft: providerDraft })
                     if (physical && (!(grokDraft || completedEventsRpc) || physical.committedOid)) {
-                      if (providerDraft && (physical.observedHeadCommit !== request.worktree.baseCommit || physical.observedTree !== request.worktree.tree)) fail('draft_material_binding', 'ZCode 原生成物理草稿必须位于原 seed')
+                      if (providerDraft && (physical.observedHeadCommit !== worktree.baseCommit || physical.observedTree !== worktree.tree)) fail('draft_material_binding', 'ZCode 原生成物理草稿必须位于原 seed')
                       if (zcode && failed !== true) fail('stale_result', 'ZCode物理细化草稿没有原精确失败终态')
                       const errors = [...existingDraft?.errors ?? [], ...round.findings, ...source.result.failure ? [{ code: source.result.failure.code, message: source.result.failure.message }] : []]
                       if (physical.committedOid) {
@@ -3134,6 +3136,11 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number).reverse()) {
           if (!['failed', 'superseded', 'settled'].includes(prior.status)) return null
           const saved = stage<SavedElaboration>(store, operation, prior, key)
+          const requestKey = `sync:${prior.id}:${ownerSuffix}`
+          if (binding && !saved && prior.status === 'superseded' && prior.failure?.kind === 'unsupported'
+            && !prior.dispatchPlans.some(dispatch => dispatch.key.startsWith(`${requestKey}:`))
+            && priorElaborationInputMatches(prior, binding)
+            && store.listResources(prior.id).every(resource => resource.phase === 'removed' && !resource.plan.key.startsWith(`${requestKey}:`))) continue
           const providerReview = !newerGeneration && prior.status === 'superseded'
             && prior.failure?.kind === 'unsupported' && isZCodeProviderRejection(prior.failure) && saved?.status === 'unsupported'
             && isZCodeProviderRejection(saved.failure) && saved.structurePassed && !saved.reviewPassed && saved.phase !== 'partitioned_final'
@@ -3164,7 +3171,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           if (providerReview && (!source || saved.inputDigest !== inputDigest || !priorElaborationInputMatches(prior, binding)))
             fail('review_retry_binding', 'ZCode 原独审失败不匹配当前冻结输入或owner')
           if (saved && (!source || saved.inputDigest !== inputDigest || saved.phase === 'partitioned_final' || saved.reviewPassed)) return null
-          const failure = source?.result.failure, round = source?.result.rounds.at(-1), requestKey = `sync:${prior.id}:${ownerSuffix}`
+          const failure = source?.result.failure, round = source?.result.rounds.at(-1)
           if (source && rememberUnavailableQuota(prior, source.result)) continue
           const rejectedReviewFormat = failure && reviewFormatRepairCodes.has(failure.code)
           const formatAfterSiblingStop = prior.status === 'superseded' && prior.failure?.kind === 'unsupported' && prior.failure.code === 'cancellation_pending'

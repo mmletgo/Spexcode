@@ -512,8 +512,19 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
           assert(old.priorDraft?.errors.length); assert.equal(current.priorDraft, null, '物理材料清旧Git draft角色')
           for (const error of old.priorDraft.errors) assert(current.materialErrors.some(item => JSON.stringify(item) === JSON.stringify(error)), 'A原具体finding完整进入C，不只剩EPIPE')
         }
-        const protectedEntries = (tree: string) => readTree(f.input.source.commonDir, tree).filter(entry => entry.path !== path)
+        const editor = providerDraft ? path.replace(/\.json$/, '.editor.json') : undefined
+        const protectedEntries = (tree: string) => readTree(f.input.source.commonDir, tree).filter(entry => entry.path !== path && entry.path !== editor)
         assert.deepEqual(protectedEntries(seed.tree), protectedEntries(originalRequest.worktree!.tree), '新P1 seed只复制精确原稿，原readonly overlay/schema/source/tests全保')
+        if (editor) {
+          const readEditor = (tree: string) => {
+            const entry = readTree(f.input.source.commonDir, tree).find(item => item.path === editor)!
+            return JSON.parse(readObject(f.input.source.commonDir, entry.oid).toString('utf8'))
+          }
+          const priorEditor = readEditor(originalRequest.worktree!.tree), nextEditor = readEditor(seed.tree)
+          const key = (request: ElaborationSessionRequest) => request.requestKey.replace(/:\d+:elaboration_generate$/, '')
+          assert.equal(priorEditor.input.requestKey, key(originalRequest))
+          assert.deepEqual(nextEditor, { ...priorEditor, input: { ...priorEditor.input, requestKey: key(request) } })
+        }
         const draft = partitionedP1 ? partitionDraft : adaptElaborationNativeOutput(request, rows(original))
         writeFileSync(join(workspace, path), JSON.stringify(draft))
         execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '-m', 'repair original stopped physical draft'], { stdio: 'pipe' })
@@ -1781,7 +1792,8 @@ async function fixture(t: test.TestContext, budget: import('./operation-types.js
   return { root, parent, managedRoot, artifactRoot, input, index, bytes, protocol, store, operation, plan, options, calls, git, priorCommitCount, realTools, closeForRestart: () => { protocol.close(); closed = true }, useStore: (next: SyncStore) => { store = next }, useOperation: (next: typeof operation) => { operation = next }, transform: (fn: typeof transform) => { transform = fn } }
 }
 
-test('P1定向复审经历无效独审及两次正式恢复，始终沿原Git候选只派独审', async t => {
+for (const siblingFailed of [false, true]) test(`P1定向复审经历无效独审及两次正式恢复，始终沿原Git候选只派独审${siblingFailed ? '，中间兄弟尝试原稿绑定失败' : ''}`, async t => {
+  const firstReviewRetry = siblingFailed ? 3 : 2
   const f = await fixture(t, { maxAttempts: 4, maxCalls: 12, maxRepairs: 3, timeoutMs: 120_000 }, false, original, 'project', original, {
     version: 'sync-coordinator-v2', direction: 'spec_to_code', agentWorkflow: 'native-worktree-v1', sourcePaths: ['src/export.js'],
     partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 },
@@ -1833,8 +1845,8 @@ test('P1定向复审经历无效独审及两次正式恢复，始终沿原Git候
       f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
       resultWorktree = nativeWorktreeResult(workspace, seed)
       const checkedBoundaries = [...ELABORATION_BOUNDARIES]
-      if (attempt.number === 2) checkedBoundaries[0] = checkedBoundaries[1]
-      output = { verdict: attempt.number < 3 ? 'repair' : 'accept', checkedBoundaries, findings: attempt.number < 3 ? repair : [] }
+      if (attempt.number === firstReviewRetry) checkedBoundaries[0] = checkedBoundaries[1]
+      output = { verdict: attempt.number <= firstReviewRetry ? 'repair' : 'accept', checkedBoundaries, findings: attempt.number <= firstReviewRetry ? repair : [] }
     }
     const branch = `codex/fixture-p1-operator-${session}`
     f.git('-C', workspace, 'switch', '-c', branch)
@@ -1885,16 +1897,34 @@ test('P1定向复审经历无效独审及两次正式恢复，始终沿原Git候
   const challenge = await prepareP1ReviewChallenge(f.store, paused, f.plan, request)
   assert.deepEqual(writeEvidence(commonDir, p1ReviewDiagnosticEvidence(request)), challenge.diagnosticRef)
   f.store.authorizeP1ReviewChallenge(id, challenge)
-  f.store.requestControl(id, 'run')
+  const resumed = f.store.requestControl(id, 'run')
+  if (siblingFailed) {
+    const sibling = f.store.claimQueuedAttempt({ operationId: resumed.id, source: resumed.input.source, scope: resumed.scope, leaseMs: 30_000,
+      expectedRevision: resumed.revision, continuation: true })
+    f.store.bindComposedInput(sibling.fence, first.composedInput!)
+    for (const ref of first.checkpointRefs) {
+      const checkpoint = JSON.parse(readEvidence(commonDir, ref).toString('utf8')) as { stage: string }
+      if (checkpoint.stage !== 'partition-plan' && checkpoint.stage !== 'analysis') continue
+      const rebound = writeEvidence(commonDir, { ...checkpoint, attemptId: sibling.attempt.id })
+      f.store.checkpoint(sibling.fence, { ...rebound, artifacts: ref.artifacts })
+    }
+    f.store.recordFailure(sibling.fence, { code: 'draft_material_binding', kind: 'unsupported',
+      message: '另一分区的已停作者原稿绑定失败', evidenceRefs: [] })
+    assert.deepEqual(f.store.readAttempt(sibling.attempt.id).dispatchPlans, [])
+    f.store.requestControl(id, 'pause')
+    f.store.requestControl(id, 'run')
+  }
   const invalid = await runSyncOperation(f.store, id, f.options)
+  assert.deepEqual(calls.filter(call => call.purpose.startsWith('elaboration_')).map(call => call.purpose),
+    ['elaboration_generate', 'elaboration_review', 'elaboration_review'], '后续失败不应遮蔽本分区的已授权候选')
   assert.equal(invalid.operation.phase, 'paused', JSON.stringify(invalid.failure))
-  const second = local(f.store.listAttempts(id)[1]).result
+  const second = local(f.store.listAttempts(id)[firstReviewRetry - 1]).result
   assert.equal(second.failure?.code, 'p1_challenge_review_invalid')
   assert.equal(second.reviewPassed, false)
   assert.equal(second.rounds[0].draft?.oid, originalRound.draft?.oid)
   f.store.requestControl(id, 'run')
   await runSyncOperation(f.store, id, f.options)
-  const third = local(f.store.listAttempts(id)[2]).result
+  const third = local(f.store.listAttempts(id)[firstReviewRetry]).result
   assert.equal(third.reviewPassed, true)
   for (const next of [second, third]) {
     assert.equal(next.candidateDigest, originalLocal.result.candidateDigest)
