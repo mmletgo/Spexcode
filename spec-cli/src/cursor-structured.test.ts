@@ -9,14 +9,17 @@ import { delimiter, join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { processStartToken } from '@spexcode/spec-core'
 import { assertCursorRejectedFinalSource, cursorStructuredTurn, stopCursorStructuredTurn, type CursorStructuredExecution } from './cursor-structured.js'
+import { managedModel } from './llm-manager-route.js'
 import { NATIVE_PROCESS_OBSERVATION_LIMIT_MS, nativeWorktreePrompt, nativeWorktreeResult } from './native-worktree-runtime.js'
 import { StructuredSessionError, structuredExecutionPolicy } from './session-structured-policy.js'
 
 const schema = { type: 'object', properties: { marker: { type: 'string' } }, required: ['marker'], additionalProperties: false }
 const finalText = '{"marker":"终态"}'
+const limitNotice = '\n\nUpgrade your plan to continue\n'
+const managedCursor = managedModel({ routeId: 'a'.repeat(64), vendor: 'cursor', model: 'default', kind: 'cli' })
 const sha256 = (text: string): string => createHash('sha256').update(text).digest('hex')
 const readJson = <T>(path: string): T => JSON.parse(readFileSync(path, 'utf8')) as T
-type Scenario = 'edit' | 'edit-sticky' | 'external-exit' | 'read' | 'bad-json' | 'bad-schema' | 'duplicate-terminal' | 'wrong-id' | 'auth' | 'rpc-error' | 'cancel' | 'cancel-blocked' | 'read-wrong-mode' | 'read-mode-refused' | 'periodic'
+type Scenario = 'edit' | 'edit-sticky' | 'external-exit' | 'read' | 'bad-json' | 'bad-schema' | 'duplicate-terminal' | 'wrong-id' | 'auth' | 'rpc-error' | 'usage-notice' | 'usage-notice-with-tool' | 'usage-notice-dirty' | 'usage-notice-json' | 'usage-notice-late-permission' | 'cancel' | 'cancel-blocked' | 'read-wrong-mode' | 'read-mode-refused' | 'periodic'
 
 function fixture(t: TestContext, scenario: Scenario, model = 'cursor:default', afterTerminal: ReadonlyArray<Record<string, unknown>> = []) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'spex-cursor-fixture-')))
@@ -122,6 +125,17 @@ createInterface({ input: process.stdin, crlfDelay: Infinity }).on('line', line =
     }
     writeFileSync(join(root, 'fixture-started.json'), JSON.stringify({ args, promptId, sessionId, descendant, prompt: packet.params.prompt }), { flag: 'wx' })
     if (scenario === 'cancel' || scenario === 'cancel-blocked') return
+    if (scenario.startsWith('usage-notice')) {
+      if (scenario === 'usage-notice-with-tool') update('tool_call', { rawInput: 'fixture tool' })
+      if (scenario === 'usage-notice-dirty') writeFileSync(join(cwd, 'draft.json'), '{}')
+      const notice = scenario === 'usage-notice-json' ? JSON.stringify({ marker: ${JSON.stringify(limitNotice)} }) : ${JSON.stringify(limitNotice)}
+      text(notice.slice(0, 8))
+      text(notice.slice(8))
+      reply(promptId, { stopReason: 'end_turn' })
+      if (scenario === 'usage-notice-late-permission')
+        send({ method: 'session/request_permission', id: 'post-terminal-permission', params: { sessionId } })
+      return
+    }
     if (scenario === 'periodic') {
       releasePoll = setInterval(() => {
         if (!existsSync(join(root, 'fixture-release'))) return
@@ -157,6 +171,8 @@ createInterface({ input: process.stdin, crlfDelay: Infinity }).on('line', line =
         reply(promptId, { stopReason: 'cancelled' })
       }, 15)
     }
+  } else if (packet.id === 'post-terminal-permission') {
+    assert.equal(packet.result.outcome.outcome, 'cancelled')
   } else if (pendingPermission && packet.id === pendingPermission.id) {
     const { expected, after } = pendingPermission
     pendingPermission = undefined
@@ -510,6 +526,62 @@ for (const scenario of ['bad-json', 'bad-schema'] as const) {
     assert.throws(() => assertCursorRejectedFinalSource(f.prompt, f.state(), f.workspace), { code: 'stale_result' })
   })
 }
+
+test('Cursor settles a bare managed ACP usage notice as provider quota and retains the original terminal', async t => {
+  const f = fixture(t, 'usage-notice', managedCursor)
+  await assert.rejects(f.run(), { code: 'provider_quota_exhausted' })
+  const request = readJson<{ sessionId: string; requestId: string }>(join(f.sessionRoot, 'request.json'))
+  const terminal = readJson<{ text: string; stopReason: string }>(join(f.sessionRoot, 'result.json'))
+  const receiptPath = join(f.sessionRoot, 'provider-quota.json')
+  const receipt = readJson<Record<string, unknown>>(receiptPath)
+  assert.equal(terminal.text, limitNotice)
+  assert.equal(terminal.stopReason, 'end_turn')
+  assert.deepEqual(receipt, { requestDigest: sha256(JSON.stringify(request)), sessionId: request.sessionId, requestId: request.requestId,
+    evidence: 'usage_limit', source: 'acp_terminal', outputDigest: sha256(JSON.stringify(terminal)) })
+  const settlementPath = join(f.sessionRoot, 'settlement.json')
+  const { quotaDigest, ...oldSettlement } = readJson<Record<string, unknown>>(settlementPath)
+  assert.equal(quotaDigest, sha256(JSON.stringify(receipt)))
+  await assert.rejects(f.run(f.state(), replayCallbacks), { code: 'provider_quota_exhausted' })
+  await assert.rejects(f.run({ ...f.state(), state: 'completed' }, replayCallbacks), { code: 'stale_result' })
+  rmSync(receiptPath)
+  await assert.rejects(f.run(f.state(), replayCallbacks), { code: 'stale_result' })
+  writeFileSync(receiptPath, JSON.stringify(receipt))
+  rmSync(settlementPath)
+  writeFileSync(settlementPath, JSON.stringify(oldSettlement))
+  await assert.rejects(f.run(f.state(), replayCallbacks), { code: 'stale_result' })
+  rmSync(receiptPath)
+  await assert.rejects(f.run(f.state(), replayCallbacks), { code: 'structured_output_format_invalid' })
+})
+
+test('Cursor keeps unmanaged notices and notices from worktree or tool activity as rejected output', async t => {
+  for (const [scenario, model] of [['usage-notice', 'cursor:default'], ['usage-notice-with-tool', managedCursor], ['usage-notice-dirty', managedCursor]] as const) {
+    await t.test(scenario, async t => {
+      const f = fixture(t, scenario, model)
+      await assert.rejects(f.run(), (error: unknown) => {
+        assert(error instanceof StructuredSessionError)
+        assert.equal(error.code, 'structured_output_format_invalid')
+        assert.equal(error.rejectedOutput?.text, limitNotice)
+        return true
+      })
+      assert.equal(existsSync(join(f.sessionRoot, 'provider-quota.json')), false)
+    })
+  }
+})
+
+test('Cursor accepts valid business JSON containing a usage notice as normal structured output', async t => {
+  const f = fixture(t, 'usage-notice-json', managedCursor)
+  assert.deepEqual(JSON.parse((await f.run()).text), { marker: limitNotice })
+  assert.equal(existsSync(join(f.sessionRoot, 'provider-quota.json')), false)
+})
+
+test('Cursor does not treat a notice followed by a same-session permission request as quota', async t => {
+  const f = fixture(t, 'usage-notice-late-permission', managedCursor)
+  await assert.rejects(f.run(), (error: unknown) => {
+    assert.notEqual((error as StructuredSessionError).code, 'provider_quota_exhausted')
+    return true
+  })
+  assert.equal(existsSync(join(f.sessionRoot, 'provider-quota.json')), false)
+})
 
 for (const scenario of ['duplicate-terminal', 'wrong-id'] as const) {
   test(`Cursor rejects ${scenario} without dispatching a second prompt`, async t => {
