@@ -512,8 +512,19 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
           assert(old.priorDraft?.errors.length); assert.equal(current.priorDraft, null, '物理材料清旧Git draft角色')
           for (const error of old.priorDraft.errors) assert(current.materialErrors.some(item => JSON.stringify(item) === JSON.stringify(error)), 'A原具体finding完整进入C，不只剩EPIPE')
         }
-        const protectedEntries = (tree: string) => readTree(f.input.source.commonDir, tree).filter(entry => entry.path !== path)
+        const editor = providerDraft ? path.replace(/\.json$/, '.editor.json') : undefined
+        const protectedEntries = (tree: string) => readTree(f.input.source.commonDir, tree).filter(entry => entry.path !== path && entry.path !== editor)
         assert.deepEqual(protectedEntries(seed.tree), protectedEntries(originalRequest.worktree!.tree), '新P1 seed只复制精确原稿，原readonly overlay/schema/source/tests全保')
+        if (editor) {
+          const readEditor = (tree: string) => {
+            const entry = readTree(f.input.source.commonDir, tree).find(item => item.path === editor)!
+            return JSON.parse(readObject(f.input.source.commonDir, entry.oid).toString('utf8'))
+          }
+          const priorEditor = readEditor(originalRequest.worktree!.tree), nextEditor = readEditor(seed.tree)
+          const key = (request: ElaborationSessionRequest) => request.requestKey.replace(/:\d+:elaboration_generate$/, '')
+          assert.equal(priorEditor.input.requestKey, key(originalRequest))
+          assert.deepEqual(nextEditor, { ...priorEditor, input: { ...priorEditor.input, requestKey: key(request) } })
+        }
         const draft = partitionedP1 ? partitionDraft : adaptElaborationNativeOutput(request, rows(original))
         writeFileSync(join(workspace, path), JSON.stringify(draft))
         execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '-m', 'repair original stopped physical draft'], { stdio: 'pipe' })

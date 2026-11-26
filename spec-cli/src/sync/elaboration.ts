@@ -67,6 +67,31 @@ export function verifyElaborationDraftCache(input: ElaborationInput, result: Pic
 }
 const specPath = (path: string): boolean => path.startsWith('.spec/') && path.endsWith('/spec.md') && posix.normalize(path) === path && !path.includes('\\')
 
+/** 已认证的旧作者种子仍绑定原请求。仅允许本 owner 草稿和程序编辑描述的请求键随恢复重建。 */
+export function matchesProviderDraftSeed(commonDir: string, previous: NonNullable<ElaborationSessionRequest['worktree']>, previousOwnerKey: string, current: StageDraftMaterialRequest, currentOwnerKey: string): boolean {
+  if (digest(previous) === digest(current.worktree)) return true
+  if (previous.mode !== 'edit' || current.worktree.mode !== 'edit') return false
+  const editor = stageDraftEditorPath(current.binding)
+  const oldTree = readTree(commonDir, previous.tree), newTree = readTree(commonDir, current.worktree.tree)
+  const protectedEntries = (tree: typeof oldTree) => tree.filter(entry => entry.path !== current.binding.path && entry.path !== editor)
+  if (digest(protectedEntries(oldTree)) !== digest(protectedEntries(newTree))) return false
+  const oldEditor = oldTree.find(entry => entry.path === editor), newEditor = newTree.find(entry => entry.path === editor)
+  if (!oldEditor || !newEditor) return false
+  if (oldEditor.mode !== '100644' || newEditor.mode !== '100644') return false
+  type EditorPlan = { version: string; inputDigest: string; binding: StageDraftBinding; input: Record<string, unknown> }
+  try {
+    const oldPlan = JSON.parse(readObject(commonDir, oldEditor.oid).toString('utf8')) as EditorPlan
+    const newPlan = JSON.parse(readObject(commonDir, newEditor.oid).toString('utf8')) as EditorPlan
+    if (!oldPlan?.input || !newPlan?.input || oldPlan.version !== 'incremental-elaboration-draft-v1'
+      || oldPlan.inputDigest !== current.inputDigest || digest(oldPlan.binding) !== digest(current.binding)
+      || oldPlan.input.requestKey !== previousOwnerKey || newPlan.input.requestKey !== currentOwnerKey) return false
+    return digest({ ...oldPlan, input: { ...oldPlan.input, requestKey: currentOwnerKey } }) === digest(newPlan)
+  } catch (error) {
+    if (error instanceof SyntaxError) return false
+    throw error
+  }
+}
+
 /** 只读原程序冻结任务的overlay角色与诊断；调用者仍须认证Native及完整原seed。 */
 export function elaborationMaterialContext(commonDir: string, previous: Pick<ElaborationSessionRequest, 'prompt' | 'worktree'>, current: StageDraftMaterialRequest): { diagnostics: Record<string, unknown>; previousReadonlyOverlay: NonNullable<StageDraftMaterialRequest['readonlyOverlay']>; currentReadonlyOverlay: NonNullable<StageDraftMaterialRequest['readonlyOverlay']> } | null {
   const invalid = (): never => { throw new Error('P1物理材料缺少精确程序任务、诊断或只读overlay投影') }

@@ -9,11 +9,11 @@ import { buildContractGraph, CONTRACT_COLUMNS, parseContract, parseFrontmatter, 
 import type { ContractFinding } from '@spexcode/spec-core/contracts'
 import { StructuredSessionError, rejectedFinalOutput } from '../session-structured-policy.js'
 import { nativeWorktreePrompt, nativeWorktreeResult } from '../native-worktree-runtime.js'
-import { draftVerificationOwnershipMatches, elaborate, elaborationMaterialContext, elaborationDigest, freezeElaborationInput, incrementalDraftCommand, sealPartitionedElaboration, verifyElaborationDraftCache, withDraftVerificationRows } from './elaboration.js'
+import { draftVerificationOwnershipMatches, elaborate, elaborationMaterialContext, elaborationDigest, freezeElaborationInput, incrementalDraftCommand, matchesProviderDraftSeed, sealPartitionedElaboration, verifyElaborationDraftCache, withDraftVerificationRows } from './elaboration.js'
 import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE } from './elaboration-types.js'
 import type { ElaborationInput, ElaborationRepairDiagnostics, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence, writeObject, writeTree } from './snapshot.js'
-import { captureStageDraft, overlayStageTree, readStageDraft, readStoppedPhysicalDraft, stageWorktree } from './stage-worktree.js'
+import { captureStageDraft, overlayStageTree, readStageDraft, readStoppedPhysicalDraft, stageDraftEditorPath, stageWorktree, type StageDraftMaterialRequest } from './stage-worktree.js'
 import { syncCheckpointArtifacts } from './checkpoint-evidence.js'
 import { freezeCandidate } from './candidate.js'
 import { bindElaborationTargets, projectVerificationTable, renderElaboration } from './elaboration-markdown.js'
@@ -526,6 +526,30 @@ for (const mode of ['editable', 'readonly'] as const) test(`Native完整P1冷稿
   }
   const acceptedRows = current.result.contracts.find(contract => contract.path === path)!.items
   assert.equal(acceptedRows.find(item => item.kind === 'AC' && item.id === futureId)?.kind, 'AC')
+})
+
+test('provider 停态续稿仅重建本 owner 编辑请求键和未批准草稿槽', async t => {
+  const f = await fixture(t), oldKey = 'sync:old:elaborate:partition:owner', newKey = 'sync:new:elaborate:partition:owner'
+  const input = { ...f.input, incrementalDraft: incrementalDraftCommand() }
+  const source = JSON.stringify(rows)
+  await elaborate({ ...input, requestKey: oldKey }, { draftMaterial: { source, errors: [] }, runner: f.run(() => source) })
+  let observed: StageDraftMaterialRequest | undefined
+  await elaborate({ ...input, requestKey: newKey }, { loadDraftMaterial: (_, request) => { observed = request; return null }, runner: f.run(() => source) })
+  const current = observed!
+  assert.ok(current)
+  const previous = f.requests[0].worktree!, editor = stageDraftEditorPath(current.binding)
+  assert.notEqual(previous.tree, current.worktree.tree)
+  assert.ok(readTree(f.commonDir, previous.tree).some(entry => entry.path === current.binding.path))
+  assert.ok(!readTree(f.commonDir, current.worktree.tree).some(entry => entry.path === current.binding.path))
+  assert.equal(matchesProviderDraftSeed(f.commonDir, previous, oldKey, current, newKey), true)
+  assert.equal(matchesProviderDraftSeed(f.commonDir, previous, oldKey, current, newKey + ':foreign'), false)
+  const editorObject = readTree(f.commonDir, current.worktree.tree).find(item => item.path === editor)!
+  const sidecar = JSON.parse(readObject(f.commonDir, editorObject.oid).toString('utf8'))
+  for (const changed of [{ path: editor, source: JSON.stringify({ ...sidecar, input: { ...sidecar.input, implementationWritePaths: ['src/export.js'] } }) },
+    { path: editor, source: null }, { path: editor, source: '{ INVALID' }, { path: 'tests/export.test.mjs', source: 'foreign' }]) {
+    const worktree = stageWorktree(f.commonDir, f.snapshot.headCommit, overlayStageTree(f.commonDir, current.worktree.tree, [changed]), 'edit')
+    assert.equal(matchesProviderDraftSeed(f.commonDir, previous, oldKey, { ...current, worktree }, newKey), false, changed.path)
+  }
 })
 
 test('跨source/父上下文只迁移同owner草稿；新seed保留新父Spec、全部源码/tests对象与absence', async t => {
