@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
@@ -161,6 +162,47 @@ class HostTests(unittest.TestCase):
         self.assertEqual(len(self.settings("status")["breakers"]), 6)
         self.assertEqual(len(self.settings("list_keys", provider_id="api")["keys"]), 1)
         self.assertNotIn(SYNTHETIC_KEY.encode(), self.database.read_bytes())
+
+    def test_upgrade_keeps_existing_provider_times_and_persists_global_timezone(self) -> None:
+        provider = self.add_provider("grok", kind="cli", cli_vendor="grok", model_mode="account",
+                                     timezone="Asia/Singapore")
+        with sqlite3.connect(self.database) as connection:
+            connection.execute("DROP TABLE llm_owner_schedule")
+        command = [sys.executable, "-IB", str(HOST), "upgrade", str(self.config)]
+        result = subprocess.run(command, text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(json.loads(result.stdout), {"ok": True, "value": None})
+        self.assertEqual(self.settings("get_schedule_timezone"), {"timezone": None})
+
+        provider.pop("timezone")
+        self.settings("save_provider", input={"mode": "update", "provider": provider})
+        self.assertEqual(self.settings("list_providers")["providers"][0]["timezone"], "Asia/Singapore")
+        self.assertEqual(self.settings("set_schedule_timezone", timezone="America/New_York"),
+                         {"timezone": "America/New_York"})
+        result = subprocess.run(command, text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.settings("get_schedule_timezone"), {"timezone": "America/New_York"})
+        self.assertEqual(self.settings("list_providers")["providers"][0]["timezone"], "America/New_York")
+        with sqlite3.connect(self.database) as connection:
+            timezone, = connection.execute("SELECT timezone FROM llm_provider WHERE id = 'grok'").fetchone()
+        self.assertEqual(timezone, "Asia/Singapore")
+
+    def test_settings_timezone_controls_the_next_host_route(self) -> None:
+        hour = datetime.now(UTC).hour
+        hours = sorted({(hour + offset) % 24 for offset in (-1, 0, 1)})
+        windows = [[(f"{start:02d}:00", f"{start + 1:02d}:00") for start in hours] for _ in range(7)]
+        self.add_provider("grok", kind="cli", cli_vendor="grok", model_mode="account", weekly_windows=windows,
+                          models=[{"id": "grok-model", "name": "grok"}])
+        self.add_native("codex", "account")
+        self.group("grok", "codex")
+        self.assertEqual(self.rpc(action="resolve")["vendor"], "grok")
+        self.assertEqual(self.settings("set_schedule_timezone", timezone="Etc/GMT+12"), {"timezone": "Etc/GMT+12"})
+        self.assertEqual(self.rpc(action="resolve")["vendor"], "codex")
+        invalid = self.call(action="settings", body={"op": "set_schedule_timezone", "timezone": "Invalid/Zone"})
+        self.assertEqual(invalid["code"], "llm_manager_invalid")
+        self.assertEqual(self.settings("get_schedule_timezone"), {"timezone": "Etc/GMT+12"})
+        self.settings("set_schedule_timezone", timezone="UTC")
+        self.assertEqual(self.rpc(action="resolve")["vendor"], "grok")
 
     def test_codex_account_route_owns_the_session_and_usage(self) -> None:
         self.add_native("codex", "account")

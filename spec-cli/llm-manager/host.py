@@ -70,6 +70,7 @@ from llm_manager import (
     create_schema,
     is_configured_available,
     reported_absent,
+    upgrade_schedule_schema,
     validate_feature_group_catalog,
 )
 from llm_manager.catalog import provider_satisfies_capability_gate
@@ -362,6 +363,22 @@ def initialize(config: HostConfig) -> None:
         for path in reversed(created):
             path.unlink()
         raise
+
+
+def upgrade(config: HostConfig) -> None:
+    """
+    Business Logic（为什么需要这个函数）:
+        已初始化的宿主需要新增全局时区设置，历史 Provider 调度和运行记录需要保留。
+
+    Code Logic（这个函数做什么）:
+        打开配置指向的现有数据库，调用 Manager 的增量迁移，并释放数据库连接。
+    """
+
+    engine = database(config.database)
+    try:
+        upgrade_schedule_schema(engine)
+    finally:
+        engine.dispose()
 
 
 @contextmanager
@@ -812,7 +829,7 @@ GROUP_MEMBERS = TypeAdapter(list[GroupMemberWrite], config=ConfigDict(strict=Tru
 def settings(manager: LlmManager, body: dict[str, object]) -> object:
     """
     Business Logic（为什么需要这个函数）:
-        官方设置组件要管理正式派发所用的同一 owner、Provider、Key 和功能组，查看其状态与用量。
+        官方设置组件要管理正式派发所用的同一 owner 的时区、Provider、Key 和功能组，查看其状态与用量。
 
     Code Logic（这个函数做什么）:
         给各设置操作适配 Manager 的公开类型，并返回公开视图。
@@ -824,6 +841,10 @@ def settings(manager: LlmManager, body: dict[str, object]) -> object:
                 "catalog": [group.model_dump(mode="json") for group in manager.catalog],
                 "providerCapabilities": {provider: sorted(names) for provider, names in manager.provider_capabilities.items()},
             }
+        case "get_schedule_timezone":
+            return {"timezone": manager.get_schedule_timezone()}
+        case "set_schedule_timezone":
+            return {"timezone": manager.set_schedule_timezone(TEXT.validate_python(body.get("timezone")))}
         case "list_providers":
             return {"providers": manager.list_providers()}
         case "save_provider":
@@ -844,7 +865,8 @@ def settings(manager: LlmManager, body: dict[str, object]) -> object:
             existing = manager.get_provider(data.id)
             if existing.kind != data.kind:
                 raise HostError("llm_manager_invalid")
-            return manager.update_provider(data.id, ProviderUpdate.model_validate(data.model_dump(exclude={"id", "kind"})))
+            patch = data.model_dump(exclude={"id", "kind", "timezone"})
+            return manager.update_provider(data.id, ProviderUpdate.model_validate(patch))
         case "delete_provider":
             provider = TEXT.validate_python(body.get("provider_id"))
             lease = manager.session.scalars(select(Lease.id).where(
@@ -972,7 +994,7 @@ def rpc(config: HostConfig) -> object:
 def main(argv: Sequence[str]) -> int:
     """
     Business Logic（为什么需要这个函数）:
-        SpexCode 通过窄进程协议初始化 Manager、执行设置或正式派发。
+        SpexCode 通过窄进程协议初始化和升级 Manager、执行设置或正式派发。
 
     Code Logic（这个函数做什么）:
         校验命令格式、读取配置，仅输出 JSON 信封或执行器状态码，不输出错误对象和输入正文。
@@ -995,6 +1017,9 @@ def main(argv: Sequence[str]) -> int:
             return launch_claude(config, path, argv[2], argv[3], Path(argv[4]), args, sandbox)
         if action == "init" and len(argv) == 2:
             initialize(config)
+            result = None
+        elif action == "upgrade" and len(argv) == 2:
+            upgrade(config)
             result = None
         elif action == "rpc" and len(argv) == 2:
             result = rpc(config)
