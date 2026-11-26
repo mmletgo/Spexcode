@@ -123,6 +123,10 @@ Settings page refit locally without claiming tmux geometry; returning to Session
 
 ### optional LLM Manager settings page
 
+Choose one IANA time zone under 调度时区. All providers use that setting for weekly windows and holiday dates.
+Existing providers keep their historical time zone until the first selection. Provider forms edit the windows
+and holiday calendar directly.
+
 Use the compiled `dist` directory from the same pinned LLM Manager release as the host. With a permitted
 LLM Manager checkout, run its `npm ci` and `npm run build` there to produce that directory. From the
 SpexCode checkout run:
@@ -134,8 +138,14 @@ npm run build:llm-manager -w @spexcode/spec-dashboard -- /path/to/llm_manager/di
 ```
 
 The build resolves React 19 and the bundler in a temporary workspace through the public npm registry.
-It produces a private single-file document outside SpexCode's distribution. Start the local SpexCode
-host with that environment variable so its settings endpoint can serve the document.
+It produces a private single-file document outside SpexCode's distribution. For an existing host, apply the
+[[llm-manager-host]] database upgrade before restarting with the new dependency and settings document:
+
+```sh
+"$SPEX_LLM_MANAGER_PYTHON" -I spec-cli/llm-manager/host.py upgrade "$SPEX_LLM_MANAGER_CONFIG"
+```
+
+Start the local SpexCode host with `SPEX_LLM_MANAGER_SETTINGS_HTML` so the endpoint can serve the document.
 
 ### the hotkey
 
