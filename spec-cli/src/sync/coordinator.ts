@@ -401,9 +401,9 @@ function authenticatedDraftResult(store: SyncStore, owner: SyncOperation, prior:
   return result?.worktree && draft && canonical({ baseCommit: result.worktree.baseCommit, tree: result.worktree.baseTree, mode: 'edit' }) === canonical(draft.seed) && result.worktree.headCommit === draft.resultCommit && result.worktree.tree === draft.resultTree ? { result, request } : null
 }
 
-function elaborationReviewOrigin(store: SyncStore, owner: SyncOperation, prior: SyncAttempt, result: SavedElaboration): { owner: SyncOperation; prior: SyncAttempt; result: SavedElaboration } | null {
+function elaborationReviewOrigin(store: SyncStore, owner: SyncOperation, prior: SyncAttempt, result: SavedElaboration, allowSameOperation = false): { owner: SyncOperation; prior: SyncAttempt; result: SavedElaboration } | null {
   const diagnostics = result.repairDiagnostics, binding = result.partitionBinding
-  if (!diagnostics || !owner.retryOf) return null
+  if (!diagnostics || !owner.retryOf && !allowSameOperation) return null
   const key = binding ? `partition:${binding.partitionId}:elaboration` : 'elaboration'
   const provenance = stage<{ fromOperationId: string; fromAttemptId: string; resultRef: BlobRef }>(store, owner, prior, `${key}:repair-diagnostics-provenance`)
   if (!provenance || canonical(provenance.resultRef) !== canonical(diagnostics.resultRef)) return null
@@ -502,7 +502,7 @@ function settledElaborationReview(store: SyncStore, operation: SyncOperation, pr
     const unstarted = authenticateUnstartedElaborationReview(store, operation, prior, key, failure, round.candidateDigest)
     if (unstarted) {
       if (prior.dispatchPlans.some(dispatch => store.findResource(prior.id, dispatch.key)?.phase !== 'removed')) fail('review_retry_binding', '未启动独审仍有同轮未结算资源')
-      return boundElaborationReview(store, operation, prior, ownerKey, result, round, unstarted.request, undefined, unstarted.archivedSessionId)
+      return { ...boundElaborationReview(store, operation, prior, ownerKey, result, round, unstarted.request, undefined, unstarted.archivedSessionId), kind: 'unstarted' }
     }
   }
   if (!providerReview && !quota && !stoppedReview && (rejection ? !reviewFormatRepairCodes.has(failure.code) || rejection.purpose !== 'elaboration_review' || !rejection.ref || rejection.ownerRequestKey !== ownerKey || rejection.ownerInputDigest !== result.inputDigest : !grokExit && !formatWithoutPacket && (failure.code !== 'native_rpc_timeout' || !isZCodeEventsRpcTimeout({ state: 'failed', errorCode: failure.code, error: failure.message })))) return
@@ -577,15 +577,24 @@ function boundElaborationReview(store: SyncStore, operation: SyncOperation, prio
     || store.findResource(generation.attempt.id, generation.key)?.generation !== generation.attempt.generation
     || round.candidate.inputDigest !== result.inputDigest || round.candidateDigest !== result.candidateDigest || round.candidateDigest !== contentHash(JSON.stringify(round.candidate))) fail('review_retry_binding', '独审失败缺少同owner原Native生成及其精确Git候选绑定')
   const boundReview = { prompt: request.prompt, schema: request.schema, worktree: request.worktree, ...(quota ? { reviewQuota: { route: quota.route, failedSessionId: quota.failedSessionId } } : {}) }
-  const diagnostics = result.repairDiagnostics, previousRound = diagnostics?.round, previous = previousRound?.rejectedOutput
+  let carrier = { owner: operation, prior, result }, diagnostics = result.repairDiagnostics
+  while (diagnostics && !diagnostics.round.rejectedOutput) {
+    const origin = elaborationReviewOrigin(store, carrier.owner, carrier.prior, carrier.result, true)
+    const previous = origin?.result.rounds.at(-1)
+    if (!origin || !previous || previous.candidateDigest !== round.candidateDigest
+      || canonical(previous.traces[0]) !== canonical(round.traces[0])) break
+    carrier = origin
+    diagnostics = carrier.result.repairDiagnostics
+  }
+  const previousRound = diagnostics?.round, previous = previousRound?.rejectedOutput
   if (!diagnostics || !previousRound || previous?.purpose !== 'elaboration_review' || !previous.ref
     || previousRound.candidateDigest !== round.candidateDigest || canonical(previousRound.traces[0]) !== canonical(round.traces[0])) return boundReview
   const original = JSON.parse(readEvidence(operation.input.source.commonDir, diagnostics.resultRef).toString('utf8')) as SavedElaboration
   const source = store.readAttempt(previous.ownerRequestKey.split(':')[1])
   const sourceKey = `${previous.ownerRequestKey}:${previousRound.index}:elaboration_review`
-  const sourceOwner = source.operationId === operation.id
-    ? source.number < prior.number ? operation : null
-    : elaborationReviewOrigin(store, operation, prior, result)?.owner
+  const sourceOwner = source.operationId === carrier.owner.id
+    ? source.number < carrier.prior.number ? carrier.owner : null
+    : elaborationReviewOrigin(store, carrier.owner, carrier.prior, carrier.result)?.owner
   if (sourceOwner?.id !== source.operationId || previous.ownerRequestKey !== ownerKey.replace(`sync:${prior.id}:`, `sync:${source.id}:`)
     || previous.ownerInputDigest !== result.inputDigest || original.inputDigest !== result.inputDigest
     || canonical(original.failure) !== canonical(diagnostics.failure) || canonical(original.rounds.at(-1)) !== canonical(previousRound)) fail('review_retry_binding', '旧独审附件缺少同候选原失败和精确来源')

@@ -43,7 +43,7 @@ import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, 
 import { readCodeBehaviorContext } from './code-behavior.js'
 import { createAttemptRunner, type NativeRunCheckpoint, type NativeRunPlan, type NativeRunRecord } from './native-run.js'
 import { SyncStore } from './store.js'
-import { sessionIdForCreateKey, closeSession } from '../sessions.js'
+import { recoverSessionCreateTermination, readSessionCreateTermination, sessionIdForCreateKey, closeSession } from '../sessions.js'
 import { configuredSessionApplication, withoutSessionApplicationExecutionWake } from '../session-application.js'
 import { readRecord, writeRecord } from '../session-record.js'
 import { claimFileMutex } from './file-mutex.js'
@@ -5231,8 +5231,9 @@ for (const target of ['code_behavior_analyze', 'elaboration_generate'] as const)
   assert.equal(f.calls.some(call => call.purpose === 'code_generate'), false)
 })
 
-for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read-witness', 'format-read-witness-twice', 'format-wrong-witness', 'format-formal-retry', 'format-terminal-retry', 'format-terminal-claude-missing-final', 'format-terminal-parent-aggregate-raw', 'format-terminal-managed-quota', 'format-terminal-managed-quota-unavailable', 'format-terminal-stopped-review', 'format-terminal-stopped-review-unobserved', 'format-terminal-stopped-review-cancelling', 'format-terminal-stopped-review-cancelling-unobserved', 'format-terminal-stopped-review-cancelling-resume', 'format-terminal-stopped-review-prelaunch-resume', 'format-sibling-stopped-draft', 'format-sibling-cancellation-pending', 'format-sibling-cancellation-pending-wrong-packet', 'format-sibling-cancellation-pending-newer-generation', 'format-sibling-cancellation-pending-unsettled', 'format-wrong-packet', 'format-wrong-candidate', 'legacy-review', 'v3-review', 'paused', 'paused-review', 'newer-generation', 'wrong-stop', 'wrong-candidate', 'wrong-task', 'partition-settled-interrupted-review'] as const) test(`P1已结算${mode.startsWith('format-terminal-stopped-review') ? '失败后正式停止的独审' : mode.startsWith('format-terminal-managed-quota') ? '托管额度失败独审' : mode.startsWith('format') ? '格式失败独审' : mode === 'partition-settled-interrupted-review' ? '中断前独审绑定拒绝' : 'session/events独审超时'}只重审同一Git候选 ${mode}`, async t => {
+for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read-witness', 'format-read-witness-twice', 'format-read-witness-prelaunch', 'format-wrong-witness', 'format-formal-retry', 'format-terminal-retry', 'format-terminal-claude-missing-final', 'format-terminal-parent-aggregate-raw', 'format-terminal-managed-quota', 'format-terminal-managed-quota-unavailable', 'format-terminal-stopped-review', 'format-terminal-stopped-review-unobserved', 'format-terminal-stopped-review-cancelling', 'format-terminal-stopped-review-cancelling-unobserved', 'format-terminal-stopped-review-cancelling-resume', 'format-terminal-stopped-review-prelaunch-resume', 'format-sibling-stopped-draft', 'format-sibling-cancellation-pending', 'format-sibling-cancellation-pending-wrong-packet', 'format-sibling-cancellation-pending-newer-generation', 'format-sibling-cancellation-pending-unsettled', 'format-wrong-packet', 'format-wrong-candidate', 'legacy-review', 'v3-review', 'paused', 'paused-review', 'newer-generation', 'wrong-stop', 'wrong-candidate', 'wrong-task', 'partition-settled-interrupted-review'] as const) test(`P1已结算${mode.startsWith('format-terminal-stopped-review') ? '失败后正式停止的独审' : mode.startsWith('format-terminal-managed-quota') ? '托管额度失败独审' : mode.startsWith('format') ? '格式失败独审' : mode === 'partition-settled-interrupted-review' ? '中断前独审绑定拒绝' : 'session/events独审超时'}只重审同一Git候选 ${mode}`, async t => {
   const prelaunchReview = mode === 'format-terminal-stopped-review-prelaunch-resume'
+  const prelaunchDiagnostic = mode === 'format-read-witness-prelaunch'
   const stoppedReview = mode.startsWith('format-terminal-stopped-review'), omitFailedObservation = mode === 'format-terminal-stopped-review-unobserved'
   const pendingReview = mode.startsWith('format-terminal-stopped-review-cancelling')
   const resumeInterruptedReview = mode === 'format-terminal-stopped-review-cancelling-resume' || prelaunchReview
@@ -5248,8 +5249,8 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
   const quotaAnchor = { vendor: 'claude', model: 'preferred', kind: 'anthropic-messages', routeId: '1'.repeat(64) } as const
   const quotaSuccessor = { vendor: 'zcode', model: 'bigmodel-api/GLM-5.3-Flash', kind: 'cli', routeId: '2'.repeat(64) } as const
   const quotaLookups: string[] = []
-  const formatTwice = mode === 'format-twice' || mode === 'format-read-witness-twice'
-  const readWitness = mode === 'format-read-witness' || mode === 'format-read-witness-twice' || mode === 'format-wrong-witness'
+  const formatTwice = mode === 'format-twice' || mode === 'format-read-witness-twice' || prelaunchDiagnostic
+  const readWitness = mode === 'format-read-witness' || mode === 'format-read-witness-twice' || mode === 'format-wrong-witness' || prelaunchDiagnostic
   const wrongWitness = mode === 'format-wrong-witness'
   const wrongPacket = mode === 'format-wrong-packet' || mode === 'format-sibling-cancellation-pending-wrong-packet'
   const wrongCandidate = mode === 'wrong-candidate' || mode === 'format-wrong-candidate'
@@ -5279,7 +5280,7 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
     'src/beta/import.js': readFileSync(new URL('src/export.js', fixturePath), 'utf8'),
     'tests/import.test.mjs': readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', 'IMPORT').replaceAll('../src/export.js', '../src/beta/import.js'),
   } : {}
-  const f = await fixture(t, { maxAttempts: ['newer-generation', 'paused-review', 'wrong-task', 'format-formal-retry', 'format-wrong-packet'].includes(mode) || siblingWithNewerAuthor || formatTwice ? 3 : 2, maxCalls: 30, maxRepairs: ['wrong-task', 'format-wrong-packet'].includes(mode) || formatTwice ? 2 : 1, timeoutMs: 120_000 }, false, original, 'project', original, { ...plan, ...retryPartition, agentWorkflow: 'native-worktree-v1', ...(formalRetry || terminalRetry ? { executionScope: { paths: terminalRetry ? [contractPath, siblingPath] : [contractPath], contractIds: [], flowIds: [] } } : {}) }, undefined, codeToSpec ? 'code' : 'spec', terminalQuota ? managedModel(quotaAnchor) : claudeReviewFixture ? 'claude:default' : 'zcode:default', partitioned, siblingFiles)
+  const f = await fixture(t, { maxAttempts: prelaunchDiagnostic ? 4 : ['newer-generation', 'paused-review', 'wrong-task', 'format-formal-retry', 'format-wrong-packet'].includes(mode) || siblingWithNewerAuthor || formatTwice ? 3 : 2, maxCalls: 30, maxRepairs: prelaunchDiagnostic ? 3 : ['wrong-task', 'format-wrong-packet'].includes(mode) || formatTwice ? 2 : 1, timeoutMs: 120_000 }, false, original, 'project', original, { ...plan, ...retryPartition, agentWorkflow: 'native-worktree-v1', ...(formalRetry || terminalRetry ? { executionScope: { paths: terminalRetry ? [contractPath, siblingPath] : [contractPath], contractIds: [], flowIds: [] } } : {}) }, undefined, codeToSpec ? 'code' : 'spec', terminalQuota ? managedModel(quotaAnchor) : claudeReviewFixture ? 'claude:default' : 'zcode:default', partitioned, siblingFiles)
   if (claudeReviewFixture || terminalQuota || prelaunchReview) {
     const priorCwd = process.cwd()
     process.chdir(f.root)
@@ -5416,12 +5417,20 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
   f.store.startGeneration = () => { throw new StructuredSessionError('unsupported', 'fixture在P1正式独审通过后停止') }
   const runtime: NonNullable<import('./native-run.js').AttemptRunnerOptions['runtime']> = {
       readRecord: runtimeReadRecord,
+      readCreateTermination: readSessionCreateTermination,
       cancel: async () => { throw new Error('fixture禁止真实Native控制') },
       run: async actual => {
         if (terminalQuota) calls.push(actual)
         const operation = store.readOperation(active.id), attempt = store.readAttempt(operation.currentAttemptId!)
         const seed = actual.worktree!, execution = structuredExecutionPolicy(actual), key = actual.sessionCreateKey!, sessionId = sessionIdForCreateKey(key)
         const identity = { threadId: `p1-timeout-${sessionId}`, turnId: 'turn' }, workspace = join(f.parent, `p1-timeout-${calls.length}`)
+        const createTerminationFailure = prelaunchDiagnostic && actual.purpose === 'elaboration_review' && (attempt.number === 2 || attempt.number === 3)
+        if (createTerminationFailure) {
+          const prompt = nativeWorktreePrompt(actual.prompt, seed)
+          const payloadHash = contentHash(JSON.stringify({ prompt, parent: null, launcher: null, base: seed.baseCommit, structuredExecution: execution }))
+          await recoverSessionCreateTermination(key, { prompt, payloadHash, base: seed.baseCommit, signal: AbortSignal.timeout(30_000), structuredExecution: execution })
+          throw new StructuredSessionError('cancelled', 'native creation cancelled and exact cleanup settled')
+        }
         const sibling = terminalRetry && ownerPath(actual) === siblingPath
         const authorRejected = !prelaunchReview && sibling && (active.id === f.operation.id || parentAggregateRaw) && actual.purpose === 'elaboration_generate'
           && (!resumeInterruptedReview || attempt.number === 1)
@@ -5533,7 +5542,11 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
     const operation = store.readOperation(active.id), attempt = store.readAttempt(operation.currentAttemptId!)
     if (mode === 'paused-review' && attempt.number === 2 && request.purpose === 'elaboration_review') throw new StructuredSessionError('cancelled', '仅续审中暂停，保留同一生成来源')
     const fence = { operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }
-    return createAttemptRunner(store, fence, { pollMs: 2, runtime })(request)
+    try { return await createAttemptRunner(store, fence, { pollMs: 2, runtime })(request) }
+    catch (error) {
+      if (prelaunchDiagnostic && (attempt.number === 2 || attempt.number === 3) && request.purpose === 'elaboration_review' && error instanceof StructuredSessionError && error.code === 'cancelled') throw new StructuredSessionError('failed', 'ZCode CLI version could not be recorded for this runtime')
+      throw error
+    }
   }
   let result = await runSyncOperation(f.store, f.operation.id, f.options)
   if (terminalRetry) {
@@ -5949,7 +5962,7 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
     assert.equal(attempts.length, 2, '绑定失败在有剩余预算时也不可重派生成')
     return
   }
-  assert.deepEqual(elaborationCalls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review', 'elaboration_review', ...(mode === 'paused-review' || formatTwice ? ['elaboration_review'] : [])], '正式独审已结算失败只重审同一候选')
+  assert.deepEqual(elaborationCalls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review', 'elaboration_review', ...(mode === 'paused-review' || formatTwice ? ['elaboration_review'] : []), ...(prelaunchDiagnostic ? ['elaboration_review'] : [])], '正式独审已结算失败只重审同一候选')
   const reviewed = savedLocal(retry), reviewedRound = reviewed.rounds.at(-1)!
   assert.equal(reviewed.reviewPassed, true)
   assert.equal(retry.failure?.code, 'unsupported', JSON.stringify(retry.failure))
@@ -5961,6 +5974,42 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
   assert.notEqual(reviewedRound.traces[1].sessionId, originalResult.failure?.sessionId)
   assert.notEqual(reviewedRound.traces[1].threadId, originalResult.failure?.threadId)
   assert.notEqual(reviewedRound.traces[1].sessionId, originalRound.traces[0].sessionId)
+  if (prelaunchDiagnostic) {
+    const raw = originalRound.rejectedOutput!
+    assert.ok(raw.ref)
+    const attachmentPath = `.spex-sync-diagnostics/${raw.sha256}/elaboration-review-rejected.raw`
+    const reviews = elaborationCalls.filter(call => call.purpose === 'elaboration_review')
+    assert.equal(reviews.length, 4)
+    for (const request of reviews.slice(1)) {
+      assert.deepEqual(request.worktree, reviews[1].worktree, '连续未启动后仍只读同一附诊断候选')
+      assert.ok(request.prompt.includes(attachmentPath))
+      const attachment = readTree(f.input.source.commonDir, request.worktree!.tree).find(entry => entry.path === attachmentPath)
+      assert.ok(attachment)
+      assert.deepEqual(readObject(f.input.source.commonDir, attachment.oid), Buffer.from(raw.text))
+    }
+    assert.equal(attempts.length, 4)
+    for (const stopped of attempts.slice(1, 3)) {
+      const rejected = savedLocal(stopped), round = rejected.rounds.at(-1)!
+      assert.equal(rejected.failure?.code, 'failed')
+      assert.equal(rejected.failure?.sessionId, undefined)
+      assert.equal(rejected.reviewPassed, false)
+      assert.equal(rejected.candidateDigest, originalResult.candidateDigest)
+      assert.deepEqual(round.candidate, originalRound.candidate)
+      assert.deepEqual(round.traces[0], originalRound.traces[0])
+      const dispatch = stopped.dispatchPlans.find(dispatch => dispatch.purpose === 'elaboration_review')!
+      const resource = f.store.findResource(stopped.id, dispatch.key)!
+      const checkpoint = JSON.parse(readEvidence(f.input.source.commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
+      assert.equal(checkpoint.phase, 'removed')
+      assert.equal(checkpoint.status, 'cancelled')
+      assert.equal(checkpoint.nativeState, 'unpublished')
+      assert.equal(checkpoint.nativeCallRequested, true)
+      assert.equal(checkpoint.nativeStarted, false)
+      assert.deepEqual(checkpoint.session, { sessionId: checkpoint.expectedSessionId, threadId: null, turnId: null })
+      assert.equal(checkpoint.creationTermination?.nativeStatus, 'notStarted')
+      assert.equal(readRecord(checkpoint.expectedSessionId), null)
+    }
+    return
+  }
   if (formatFailure) {
     const commonDir = f.input.source.commonDir, oldTree = readTree(commonDir, elaborationCalls[1].worktree!.tree)
     for (const [index, request] of elaborationCalls.slice(2).entries()) {

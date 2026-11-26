@@ -43,7 +43,7 @@ draft.errors保留每项原finding的code/message及实际存在的severity、no
 
 可选 `sharedDraftDiagnostics` 只选择 [[sync-elaboration]] 的提示投影。两组原诊断继续保存在各自对象中，若同序原值完全相等，提示可共用一份内容。业务输入摘要、原失败记录、候选和独审资格保持。
 
-可选 `parentInterfaceReview` 选择 [[sync-elaboration]] 的 Native 纯父接口独审提示。历史 `true` 重放原字节，新 attempt 选择 `scope-v2`。业务输入与候选摘要保持。Native 实际请求摘要绑定冻结提示和独审诊断。认证已完成原独审的 `settledReview.kind` 只用于当次输入前重建，其完整原报告、拒绝和原件引用沿原诊断持久化。
+可选 `parentInterfaceReview` 选择 [[sync-elaboration]] 的 Native 纯父接口独审提示。历史 `true` 重放原字节，新 attempt 选择 `scope-v2`。业务输入与候选摘要保持。Native 实际请求摘要绑定冻结提示和独审诊断。认证原独审或其未启动结算的 `settledReview.kind` 只在当次重建新独审请求时使用。完整原报告、拒稿和原件继续沿既有诊断及来源引用保留。
 
 已结算的P1独审超时可经repairDiagnostics引用原失败round及resultRef。原评审prompt/schema/只读seed由协调器冷验后仅在内存传递，持久结果保留原诊断形状。新轮保留原生成trace和Git稿，独审原件只来自新派发。
 
