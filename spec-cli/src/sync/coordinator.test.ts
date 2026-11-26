@@ -5201,7 +5201,7 @@ for (const target of ['code_behavior_analyze', 'elaboration_generate'] as const)
   assert.equal(f.calls.some(call => call.purpose === 'code_generate'), false)
 })
 
-for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read-witness', 'format-read-witness-twice', 'format-wrong-witness', 'format-formal-retry', 'format-terminal-retry', 'format-terminal-claude-missing-final', 'format-terminal-parent-aggregate-raw', 'format-terminal-managed-quota', 'format-terminal-managed-quota-unavailable', 'format-terminal-stopped-review', 'format-terminal-stopped-review-unobserved', 'format-terminal-stopped-review-cancelling', 'format-terminal-stopped-review-cancelling-unobserved', 'format-terminal-stopped-review-cancelling-resume', 'format-sibling-stopped-draft', 'format-wrong-packet', 'format-wrong-candidate', 'legacy-review', 'v3-review', 'paused', 'paused-review', 'newer-generation', 'wrong-stop', 'wrong-candidate', 'wrong-task', 'partition-settled-interrupted-review'] as const) test(`P1已结算${mode.startsWith('format-terminal-stopped-review') ? '失败后正式停止的独审' : mode.startsWith('format-terminal-managed-quota') ? '托管额度失败独审' : mode.startsWith('format') ? '格式失败独审' : mode === 'partition-settled-interrupted-review' ? '中断前独审绑定拒绝' : 'session/events独审超时'}只重审同一Git候选 ${mode}`, async t => {
+for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read-witness', 'format-read-witness-twice', 'format-wrong-witness', 'format-formal-retry', 'format-terminal-retry', 'format-terminal-claude-missing-final', 'format-terminal-parent-aggregate-raw', 'format-terminal-managed-quota', 'format-terminal-managed-quota-unavailable', 'format-terminal-stopped-review', 'format-terminal-stopped-review-unobserved', 'format-terminal-stopped-review-cancelling', 'format-terminal-stopped-review-cancelling-unobserved', 'format-terminal-stopped-review-cancelling-resume', 'format-sibling-stopped-draft', 'format-sibling-cancellation-pending', 'format-sibling-cancellation-pending-wrong-packet', 'format-sibling-cancellation-pending-newer-generation', 'format-sibling-cancellation-pending-unsettled', 'format-wrong-packet', 'format-wrong-candidate', 'legacy-review', 'v3-review', 'paused', 'paused-review', 'newer-generation', 'wrong-stop', 'wrong-candidate', 'wrong-task', 'partition-settled-interrupted-review'] as const) test(`P1已结算${mode.startsWith('format-terminal-stopped-review') ? '失败后正式停止的独审' : mode.startsWith('format-terminal-managed-quota') ? '托管额度失败独审' : mode.startsWith('format') ? '格式失败独审' : mode === 'partition-settled-interrupted-review' ? '中断前独审绑定拒绝' : 'session/events独审超时'}只重审同一Git候选 ${mode}`, async t => {
   const stoppedReview = mode.startsWith('format-terminal-stopped-review'), omitFailedObservation = mode === 'format-terminal-stopped-review-unobserved'
   const pendingReview = mode.startsWith('format-terminal-stopped-review-cancelling')
   const resumeInterruptedReview = mode === 'format-terminal-stopped-review-cancelling-resume'
@@ -5220,12 +5220,15 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
   const formatTwice = mode === 'format-twice' || mode === 'format-read-witness-twice'
   const readWitness = mode === 'format-read-witness' || mode === 'format-read-witness-twice' || mode === 'format-wrong-witness'
   const wrongWitness = mode === 'format-wrong-witness'
-  const wrongPacket = mode === 'format-wrong-packet'
+  const wrongPacket = mode === 'format-wrong-packet' || mode === 'format-sibling-cancellation-pending-wrong-packet'
   const wrongCandidate = mode === 'wrong-candidate' || mode === 'format-wrong-candidate'
   const failureCode = terminalQuota ? 'provider_quota_exhausted' : pendingReview ? 'cancellation_pending' : stoppedReview ? 'failed' : formatFailure ? 'structured_output_format_invalid' : 'native_rpc_timeout'
   const formalRetry = mode === 'format-formal-retry', terminalRetry = mode === 'format-terminal-retry' || parentAggregateRaw || claudeReviewFixture || terminalQuota, codeToSpec = formatTwice || formalRetry || terminalRetry
   const interruptedReview = mode === 'partition-settled-interrupted-review'
-  const siblingStoppedDraft = mode === 'format-sibling-stopped-draft'
+  const siblingCancellationPending = mode.startsWith('format-sibling-cancellation-pending')
+  const siblingWithNewerAuthor = mode === 'format-sibling-cancellation-pending-newer-generation'
+  const siblingResourceUnsettled = mode === 'format-sibling-cancellation-pending-unsettled'
+  const siblingStoppedDraft = mode === 'format-sibling-stopped-draft' || siblingCancellationPending
   const partitioned = mode === 'partition' || codeToSpec || interruptedReview || siblingStoppedDraft
   const plan = partitioned ? { version: 'sync-coordinator-v2' as const, direction: codeToSpec ? 'code_to_spec' as const : 'spec_to_code' as const, sourcePaths: ['src/export.js'], ...(codeToSpec ? { writePaths: ['.spec'], commitTrigger: { before: null, paths: ['src/export.js'] } } : {}), partitionPolicy: { version: 'sync-partition-policy-v1' as const, maxReadBytes: 524288, maxParallel: 1 } } : {}
   const siblingPath = '.spec/project/beta/import-contract/spec.md'
@@ -5245,7 +5248,7 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
     'src/beta/import.js': readFileSync(new URL('src/export.js', fixturePath), 'utf8'),
     'tests/import.test.mjs': readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', 'IMPORT').replaceAll('../src/export.js', '../src/beta/import.js'),
   } : {}
-  const f = await fixture(t, { maxAttempts: ['newer-generation', 'paused-review', 'wrong-task', 'format-formal-retry', 'format-wrong-packet'].includes(mode) || formatTwice ? 3 : 2, maxCalls: 30, maxRepairs: ['wrong-task', 'format-wrong-packet'].includes(mode) || formatTwice ? 2 : 1, timeoutMs: 120_000 }, false, original, 'project', original, { ...plan, ...retryPartition, agentWorkflow: 'native-worktree-v1', ...(formalRetry || terminalRetry ? { executionScope: { paths: terminalRetry ? [contractPath, siblingPath] : [contractPath], contractIds: [], flowIds: [] } } : {}) }, undefined, codeToSpec ? 'code' : 'spec', terminalQuota ? managedModel(quotaAnchor) : claudeReviewFixture ? 'claude:default' : 'zcode:default', partitioned, siblingFiles)
+  const f = await fixture(t, { maxAttempts: ['newer-generation', 'paused-review', 'wrong-task', 'format-formal-retry', 'format-wrong-packet'].includes(mode) || siblingWithNewerAuthor || formatTwice ? 3 : 2, maxCalls: 30, maxRepairs: ['wrong-task', 'format-wrong-packet'].includes(mode) || formatTwice ? 2 : 1, timeoutMs: 120_000 }, false, original, 'project', original, { ...plan, ...retryPartition, agentWorkflow: 'native-worktree-v1', ...(formalRetry || terminalRetry ? { executionScope: { paths: terminalRetry ? [contractPath, siblingPath] : [contractPath], contractIds: [], flowIds: [] } } : {}) }, undefined, codeToSpec ? 'code' : 'spec', terminalQuota ? managedModel(quotaAnchor) : claudeReviewFixture ? 'claude:default' : 'zcode:default', partitioned, siblingFiles)
   if (claudeReviewFixture || terminalQuota) {
     const priorCwd = process.cwd()
     process.chdir(f.root)
@@ -5266,6 +5269,7 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
       if (!wrapper.stage.startsWith('partition:') || !wrapper.stage.endsWith(':elaboration')) return saved
       const value = JSON.parse(readEvidence(commonDir, wrapper.resultRef).toString()) as ElaborationResult
       assert.equal(value.failure?.code, failureCode)
+      if (siblingCancellationPending) throw new continuationCoordinator.SyncCoordinatorError('cancellation_pending', '兄弟分区的原生停止仍待确认')
       throw new Error('已停物理草稿的owner/seed、只读文件或index发生越界变化')
     }
   }
@@ -5309,7 +5313,7 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
     const recordFailure = f.store.recordFailure.bind(f.store), findResource = f.store.findResource.bind(f.store)
     f.store.recordFailure = (fence, issue) => {
       const result = recordFailure(fence, issue)
-      if (issue.code !== failureCode) return result
+      if (issue.code !== (siblingCancellationPending ? 'cancellation_pending' : failureCode)) return result
       f.store.findResource = (attemptId, key) => {
         const resource = findResource(attemptId, key)
         if (!resource || attemptId !== fence.attemptId || !key.endsWith(':elaboration_review')) return resource
@@ -5751,13 +5755,33 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
   if (siblingStoppedDraft) {
     const [failed] = f.store.listAttempts(f.operation.id)
     assert.equal(failed.status, 'failed')
-    assert.equal(failed.failure?.code, 'coordinator_failed')
+    assert.equal(failed.failure?.code, siblingCancellationPending ? 'cancellation_pending' : 'coordinator_failed')
     assert.equal(failed.failure?.kind, 'unsupported')
     assert.equal(f.store.listAttempts(f.operation.id).length, 1)
     assert.ok(failed.dispatchPlans.every(dispatch => f.store.findResource(failed.id, dispatch.key)?.phase === 'removed'))
-    assert.ok(!failed.checkpointRefs.some(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()).stage === 'elaboration'))
+    const commonDir = f.input.source.commonDir
+    assert.ok(!failed.checkpointRefs.some(ref => JSON.parse(readEvidence(commonDir, ref).toString()).stage === 'elaboration'))
+    const priorAuthor = failed.dispatchPlans.find(dispatch => dispatch.purpose === 'elaboration_generate')!
     assert.equal(f.store.requestControl(f.operation.id, 'pause').phase, 'paused')
-    f.store.requestControl(f.operation.id, 'run')
+    const resumed = f.store.requestControl(f.operation.id, 'run')
+    if (siblingWithNewerAuthor) {
+      const middle = f.store.claimQueuedAttempt({ operationId: resumed.id, source: resumed.input.source, scope: resumed.scope, leaseMs: 30_000, expectedRevision: resumed.revision, continuation: true })
+      f.store.bindComposedInput(middle.fence, failed.composedInput!)
+      const planRef = failed.checkpointRefs.find(ref => JSON.parse(readEvidence(commonDir, ref).toString()).stage === 'partition-plan')!
+      const plan = JSON.parse(readEvidence(commonDir, planRef).toString())
+      const reboundPlan = writeEvidence(commonDir, { ...plan, attemptId: middle.attempt.id })
+      f.store.checkpoint(middle.fence, { ...reboundPlan, artifacts: planRef.artifacts })
+      f.store.reserveDispatch(middle.fence, { key: priorAuthor.key.replace(failed.id, middle.attempt.id), purpose: priorAuthor.purpose, requestDigest: contentHash('较新的已冻结分区生成请求') })
+      f.store.requestControl(f.operation.id, 'pause')
+      f.store.requestControl(f.operation.id, 'run')
+    }
+    if (siblingResourceUnsettled) {
+      const findResource = f.store.findResource.bind(f.store)
+      f.store.findResource = (attemptId, key) => {
+        const resource = findResource(attemptId, key)
+        return resource && attemptId === failed.id && key === priorAuthor.key ? { ...resource, phase: 'terminal' } : resource
+      }
+    }
     result = await runSyncOperation(f.store, f.operation.id, f.options)
   }
   if (interruptedReview) {
@@ -5816,11 +5840,18 @@ for (const mode of ['whole', 'partition', 'format', 'format-twice', 'format-read
   assert.equal(originalRound.reviewOutput, null)
   assert.equal(originalRound.traces.length, 1)
   assert.ok(originalRound.draft?.resultCommit)
-  for (const dispatch of old.dispatchPlans) assert.equal(f.store.findResource(old.id, dispatch.key)?.phase, 'removed')
+  for (const dispatch of old.dispatchPlans) assert.equal(f.store.findResource(old.id, dispatch.key)?.phase, siblingResourceUnsettled && dispatch.purpose === 'elaboration_generate' ? 'terminal' : 'removed')
   const elaborationCalls = calls.filter(call => call.purpose.startsWith('elaboration_'))
-  if (mode === 'newer-generation') {
-    assert.deepEqual(elaborationCalls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review', 'elaboration_generate', 'elaboration_review'])
+  if (mode === 'newer-generation' || siblingWithNewerAuthor) {
+    assert.deepEqual(elaborationCalls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review', 'elaboration_generate', 'elaboration_review'],
+      JSON.stringify({ result: result.failure, phase: result.operation.phase, attempts: attempts.map(attempt => ({ status: attempt.status, failure: attempt.failure?.code, calls: attempt.dispatchPlans.length })) }))
     assert.equal(savedLocal(retry).repairDiagnostics, undefined)
+    return
+  }
+  if (siblingResourceUnsettled) {
+    assert.deepEqual(elaborationCalls.map(call => call.purpose), ['elaboration_generate', 'elaboration_review'])
+    assert.equal(result.operation.callsUsed, old.dispatchPlans.length)
+    assert.ok(attempts.slice(1).every(attempt => attempt.dispatchPlans.length === 0))
     return
   }
   if (mode === 'wrong-stop' || wrongCandidate || mode === 'wrong-task' || wrongPacket || wrongWitness) {

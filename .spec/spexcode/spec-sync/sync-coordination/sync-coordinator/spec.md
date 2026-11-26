@@ -131,6 +131,8 @@ ZCode 已结算的 provider 拒绝保留原 `unsupported` 结论。操作员显�
 
 P1 并发执行因另一分区的协调异常停止时，已落地的局部检查点仍能提供结构通过的候选与原独审格式失败。正式暂停并恢复同一 operation 后，仅在冻结局部输入、原作者 Git 稿、原只读独审及所有原派发资源的结算证明均成立时，为该候选新派只读独审。保留原不支持结论、候选、作者追踪及审批空值。无 aggregate、原独审格式拒绝以外的失败或未结算资源不能自行取得候选批准；认证失败保持明确拒绝。
 
+整轮因兄弟资源停止待证留下 `cancellation_pending` 时，正式恢复仍按本 owner 的局部失败定性。结构已通过且只读独审因格式失败时，沿现有 Native 停止与拒稿认证规则仅续审原 Git 候选。已预留的较新 owner 生成保持优先。冻结输入、原计划、owner、格式证据或派发资源结算失配时拒绝续审。
+
 P1 作者的 provider EPIPE 沿同一 operation 的显式暂停恢复接续未批准物理稿。先由原 attempt 的正式 `unsupported` 类结论和暂停后 `superseded` 证明非自动重试。分区可由同批另一 owner 的 `unsupported` 主导汇总，provider 资格由本 owner 的局部失败和 [[zcode-structured-runtime]] 原公开终态证明。原各派发资源须全部结算，本 owner 的 canonical failed 请求、模型、完整 session/thread/turn、removed/stop、输入、分区、seed 和 schema 逐项匹配，且没有原候选、生成结果或拒稿见证。沿 [[sync-stage-worktree]] 在原 HEAD/tree 等于 seed 时只读观察授权物理草稿，核对源、测试、其他路径和 index。原件以及原失败保持，当前 fence 只记录既有 `physical_draft` 未批准来源并复制精确字节。缺稿沿既有无稿流程，原件或保护面失配停止承接。新作者在该稿上续修并正常提交，照常执行结构检查和独立审查。其它 provider 归因、真实模型不支持以及未写出正式非自动失败的中断保持原材料资格。
 
 授权草稿缺席且原工作区仅有其他未跟踪文件时，[[sync-stage-worktree]] 完整认证后按无稿派发。原文件留在作者工作区，新 seed 和证据使用原冻结输入。已有授权草稿的完整写范围检查继续执行。
