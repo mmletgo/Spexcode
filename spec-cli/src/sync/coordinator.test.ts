@@ -264,10 +264,11 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
   const providerFormalRetry = providerDraft && (crossProviderRetry || defect === 'other-operation')
   const providerCold = providerDraft && (defect.endsWith('cold-provenance') || defect.endsWith('cold-reserved'))
   const rejectedSidecars = providerDraft && defect === 'extra-untracked'
+  const ignoredSidecar = '.spex-sync-drafts/_last_run.log'
   const providerDraftAbsent = providerDraft && ['no-draft', 'no-draft-sidecars', 'no-draft-source', 'retry-cross-no-draft-sidecars', 'retry-cross-legacy-quota'].includes(defect)
   const authorSidecars = legacyQuota
     ? ['.spex-sync-drafts/.build/rows.py']
-    : rejectedSidecars || defect.endsWith('no-draft-sidecars') || defect === 'no-draft-source'
+    : rejectedSidecars || providerDraft && defect === 'source' || defect.endsWith('no-draft-sidecars') || defect === 'no-draft-source'
       ? ['.spex-sync-drafts/_gen_data_1.mjs', '.spex-sync-drafts/_gen_data_2.mjs'] : []
   const providerFailure = legacyQuota ? 'ZCode native turn failed (code=unavailable)'
     : defect === 'unrelated' ? 'ZCode model is unsupported' : 'ZCode provider rejected the native turn (retryable=false)'
@@ -434,6 +435,7 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
         assert.ok(authorSidecars.every(sidecar => !existsSync(join(workspace, sidecar))), '新 seed 不带入旧脚本')
         restartedWithoutMaterial = true
         if (rejectedSidecars) {
+          assert.equal(existsSync(join(workspace, ignoredSidecar)), false, '新 seed 不带入旧运行日志')
           writeFileSync(join(workspace, path), JSON.stringify(partitionDraft))
           execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' })
           execFileSync('git', ['-C', workspace, 'commit', '-m', 'generate a clean draft from the frozen seed'], { stdio: 'pipe' })
@@ -555,6 +557,10 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
       mkdirSync(join(workspace, sidecar, '..'), { recursive: true })
       writeFileSync(join(workspace, sidecar), `// 原作者的未追踪辅助文件 ${sidecar}\n`)
     }
+  if (rejectedSidecars) {
+    writeFileSync(join(f.input.source.commonDir, 'info/exclude'), `/${ignoredSidecar}\n`, { flag: 'a' })
+    writeFileSync(join(workspace, ignoredSidecar), '原作者的运行日志\n')
+  }
     if (defect === 'no-draft-source') writeFileSync(join(workspace, 'src/export.js'), '原作者越界修改的源码')
     for (const text of sibling || providerDraftAbsent || defect === 'not-started' || defect === 'no-commit' || defect.startsWith('no-progress-') ? [] : firstCancelledCommit ? [priorText] : [priorText, latest]) {
       writeFileSync(join(workspace, path), text)
@@ -1166,7 +1172,10 @@ for (const [mode, defect] of [...claudeFailedPhysicalCases, ['pause', 'archived'
       assert.deepEqual(proof.checkpointRef, oldResource.checkpointRef)
       assert.equal(proof.observedHeadCommit, latestHead)
       assert.equal(proof.indexSha256, contentHash(oldIndexBytes))
+      const status = execFileSync('/usr/bin/git', ['-C', oldPath, '--no-optional-locks', 'status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored'])
+      assert.equal(proof.statusSha256, contentHash(status))
       assert.deepEqual(Buffer.from(JSON.parse(readEvidence(f.input.source.commonDir, proof.draftRef).toString()).source), oldDraftBytes)
+      assert.equal(readFileSync(join(oldPath, ignoredSidecar), 'utf8'), '原作者的运行日志\n')
       const local = current.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
         .find(wrapper => /^partition:[^:]+:elaboration$/.test(wrapper.stage))
       const repaired = JSON.parse(readEvidence(f.input.source.commonDir, local.resultRef).toString())

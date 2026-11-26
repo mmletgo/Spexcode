@@ -95,12 +95,14 @@ export function readStoppedPhysicalDraft(commonDir: string, worktreePath: string
   const status = inspectCommit ? undefined : git(...statusArgs)
   if (status?.length === 0) return null
   const rows = status?.toString('utf8').split('\0').filter(Boolean) ?? []
-  const onlyUntracked = rows.length > 0 && rows.every(row => row.startsWith('?? ')) && !entries.some(entry => entry.path === binding.path)
-  const untrackedDraft = onlyUntracked && rows.includes(`?? ${binding.path}`)
-  const untrackedWithoutDraft = options?.allowUntrackedWithoutDraft && onlyUntracked && !untrackedDraft
-  const rejectedSidecars = options?.observeRejectedSidecars && untrackedDraft && rows.length > 1
+  const untracked = rows.filter(row => row.startsWith('?? '))
+  const absentFromTree = !entries.some(entry => entry.path === binding.path)
+  const untrackedDraft = untracked.includes(`?? ${binding.path}`)
+  const untrackedWithoutDraft = options?.allowUntrackedWithoutDraft && absentFromTree && untracked.length > 0 && untracked.length === rows.length && !untrackedDraft
+  const rejectedSidecars = options?.observeRejectedSidecars && absentFromTree && untrackedDraft && untracked.length > 1
+    && rows.every(row => row.startsWith('?? ') || row.startsWith('!! '))
   const noMaterial = rows.length > 0 && (rows.every(row => row.startsWith('!! ')) || untrackedWithoutDraft)
-  if (rows.some(row => /^!! \.spex-sync-drafts(?:\/|$)/iu.test(row))) invalid()
+  if (!rejectedSidecars && rows.some(row => /^!! \.spex-sync-drafts(?:\/|$)/iu.test(row))) invalid()
   if (noMaterial || rejectedSidecars) {
     if (observedHeadCommit !== seed.baseCommit || observedTree !== seed.tree) invalid()
   } else if (rows.some(row => !row.startsWith('!! ') && (!/^(?:\?\?|[ AM]{2}) /.test(row) || row.slice(3) !== binding.path))) throw new StoppedPhysicalDraftStatusError(stoppedDraftBoundaryMessage)
