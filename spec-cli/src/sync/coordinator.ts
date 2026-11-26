@@ -3134,6 +3134,11 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number).reverse()) {
           if (!['failed', 'superseded', 'settled'].includes(prior.status)) return null
           const saved = stage<SavedElaboration>(store, operation, prior, key)
+          const requestKey = `sync:${prior.id}:${ownerSuffix}`
+          if (binding && !saved && prior.status === 'superseded' && prior.failure?.kind === 'unsupported'
+            && !prior.dispatchPlans.some(dispatch => dispatch.key.startsWith(`${requestKey}:`))
+            && priorElaborationInputMatches(prior, binding)
+            && store.listResources(prior.id).every(resource => resource.phase === 'removed' && !resource.plan.key.startsWith(`${requestKey}:`))) continue
           const providerReview = !newerGeneration && prior.status === 'superseded'
             && prior.failure?.kind === 'unsupported' && isZCodeProviderRejection(prior.failure) && saved?.status === 'unsupported'
             && isZCodeProviderRejection(saved.failure) && saved.structurePassed && !saved.reviewPassed && saved.phase !== 'partitioned_final'
@@ -3164,7 +3169,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           if (providerReview && (!source || saved.inputDigest !== inputDigest || !priorElaborationInputMatches(prior, binding)))
             fail('review_retry_binding', 'ZCode 原独审失败不匹配当前冻结输入或owner')
           if (saved && (!source || saved.inputDigest !== inputDigest || saved.phase === 'partitioned_final' || saved.reviewPassed)) return null
-          const failure = source?.result.failure, round = source?.result.rounds.at(-1), requestKey = `sync:${prior.id}:${ownerSuffix}`
+          const failure = source?.result.failure, round = source?.result.rounds.at(-1)
           if (source && rememberUnavailableQuota(prior, source.result)) continue
           const rejectedReviewFormat = failure && reviewFormatRepairCodes.has(failure.code)
           const formatAfterSiblingStop = prior.status === 'superseded' && prior.failure?.kind === 'unsupported' && prior.failure.code === 'cancellation_pending'
