@@ -365,6 +365,8 @@ P1 `session/events` 独审超时回归用真实Git提交、隔离SQLite及受控
 
 P1独审格式失败回归使用真实Git、隔离SQLite及受控Native资源桥，覆盖单体、Code→Spec分区连续两次失败、原正式拒稿失配和候选正文失配。候选、Git生成对象、原生成追踪、review schema与保护树保持，只读seed每轮只增加当轮所需的上一份拒稿原字节，后续正常审查返回前无批准。原checkpoint未存CAS ref时仍原样保留；错packet不能派发新会话；Code→Spec零代码生成。已有V3超时请求与同策略新独审在相同候选下提示逐字相等。
 
+兄弟资源待停止留下整轮 `cancellation_pending` 时，局部结构通过的格式失败分区在正式暂停恢复后仅新派独审。回归保留原 Git 候选、作者追踪和只读树，验证拒稿失配或原派发资源尚未结算时零新派发，同 owner 已预留较新生成时不回退原候选。
+
 正式换模型 retryOf 复制含已拒格式原文的已审 P1 分区时，用真实 Git 提交、隔离 SQLite、受控 Native 格式失败及后续独审，按生产 wrapper 写入同一原局部 resultRef 和来源。冷读保留批准与原失败 owner、原文和摘要，拒稿只能从 untrusted_final 读取。缺失来源、来源不在重试链、未批准来源 attempt、缺失或替换来源 resultRef、读集漂移、转接给其它 owner 或直接把同一拒稿 SHA 绑定为新轮失败证据均拒绝。
 
 历史检查点索引回归对照完整读取的根wrapper与拒稿SHA，验证候选正文无需留在索引中。改动返回值、错误role、正文CAS损坏、累计缓存越界及单份超大原件各有针对性断言。
