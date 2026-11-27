@@ -21,7 +21,7 @@ related:
 
 宿主通过同一设置端点读写当前 owner 的全局调度时区。Manager 验证 IANA 时区，并用保存值判断所有 Provider 的周时段与节假日。首次选择前由历史 Provider 时区继续决定可用时段，保存 Provider 表单时保留该历史值。已有宿主在升级 Manager 依赖后、恢复服务前执行 `host.py upgrade <绝对配置路径>`。该命令通过 Manager 加入调度时区表，可重复执行。初始化新库时直接创建该表。
 
-Manager 按功能组挑选已就绪路线。SpexCode 使用本机已安装 Manager 的[[llm-manager-native-entry]]，并在运行前登记可精确核验的进程身份。SpexCode 持有工作树、固定请求、原件校验和交付门禁。Claude Code 的 API 路线通过会话专属 loopback 转发连接兼容 Anthropic Messages 的 Provider，并由官方 Claude CLI 完成原有结构化工具执行。Manager 只解密该轮选定的 Key，SpexCode 宿主交付已核验的路线身份，Claude 获得同轮临时地址和授权。其余受支持路线使用真实原生 CLI 及原生登录。模型缺省沿用原生 CLI，固定模型原样交给对应执行器。
+Manager 按功能组挑选已就绪路线。SpexCode 使用本机已安装 Manager 的[[llm-manager-native-entry]]，并在运行前登记可精确核验的进程身份。SpexCode 持有工作树、固定请求、原件校验和交付门禁。 新选路与租约申请先核对原生适配合同 3。运行时使用实际安装包，冷复验使用发行版内同一 Manager 源构建的解析器。Claude Code 的 API 路线通过会话专属 loopback 转发连接兼容 Anthropic Messages 的 Provider，并由官方 Claude CLI 完成原有结构化工具执行。Manager 只解密该轮选定的 Key，SpexCode 宿主交付已核验的路线身份，Claude 获得同轮临时地址和授权。其余受支持路线使用真实原生 CLI 及原生登录。模型缺省沿用原生 CLI，固定模型原样交给对应执行器。
 
 宿主声明支持的 API 协议、原生厂商和任务能力。Manager 将声明与原功能组能力合并并筛选执行路线。API 冷却到期时，Manager 使用当前候选的模型、端点、协议和该次凭据进行按需试探，根据真实结果恢复该路线或沿原游标继续。核对已绑定的准入路线和已存额度后继时，Manager 只判断指定路线当前是否就绪。现有操作新建托管会话时，宿主认证原准入路线与当前 owner 和功能组一致，Manager 从该组首位选路。原准入路线的供应商配置发生变化时，只要其原归属仍能认证，就可为新会话选择同组当前健康路线。既有会话继续按所登记的路线执行。
 

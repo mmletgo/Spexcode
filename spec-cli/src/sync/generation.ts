@@ -1,6 +1,6 @@
 import { Ajv } from 'ajv'
 import { isDeepStrictEqual } from 'node:util'
-import { candidateReviewError, candidateReviewLocationError, candidateReviewSchema, contractOmissionBound, CANDIDATE_REVIEW_INSTRUCTIONS } from './candidate-review.js'
+import { candidateReviewError, candidateReviewLocationError, candidateReviewSchema, isEmptyCandidateReviewRejection, contractOmissionBound, CANDIDATE_REVIEW_INSTRUCTIONS } from './candidate-review.js'
 import type { CandidateReviewBinding } from './candidate-review.js'
 export { contractOmissionBound, GENERATION_REVIEW_SCHEMA } from './candidate-review.js'
 import type { Contract } from '@spexcode/spec-core/contracts'
@@ -177,11 +177,12 @@ export function generationReviewRequest(input: GenerationInput, candidate: Candi
     if (prior.reviewOutput !== null) {
       const originalTrace = prior.traces.find(trace => trace.purpose === 'code_review')
       const schemaError = candidateReviewError(prior.reviewOutput, reviewBinding)
-      if (schemaError) throw new StructuredSessionError('stale_result', schemaError)
-      const locationError = candidateReviewLocationError(prior.reviewOutput as GenerationReview, [...candidateFiles].filter(([path]) => path.startsWith('.spec/') && path.endsWith('/spec.md')).flatMap(([path, source]) => parseContract({ nodeId: path.split('/').at(-2)!, path, source }).contract ?? []), specWritePaths)
-      if (!originalTrace || locationError?.code !== 'review_location_format' || checkpoint.status !== 'completed' || checkpoint.phase !== 'removed' || !checkpoint.result || checkpoint.result.sessionId !== originalTrace.sessionId || checkpoint.result.threadId !== originalTrace.threadId || checkpoint.result.turnId !== originalTrace.turnId || checkpoint.result.resultDigest !== originalTrace.resultDigest || originalTrace.inputDigest !== prior.inputDigest || originalTrace.resultDigest !== contentHash(JSON.stringify(prior.reviewOutput)) || JSON.stringify(checkpoint.result.output) !== JSON.stringify(prior.reviewOutput)) throw new StructuredSessionError('stale_result', 'review draft material differs from authenticated completed Native output')
+      const emptyRejection = prior.review === null && prior.failure && isEmptyCandidateReviewRejection(prior.reviewOutput, prior.failure) && schemaError === prior.failure.message
+      if (schemaError && !emptyRejection) throw new StructuredSessionError('stale_result', schemaError)
+      const protocolError = emptyRejection ? prior.failure : candidateReviewLocationError(prior.reviewOutput as GenerationReview, [...candidateFiles].filter(([path]) => path.startsWith('.spec/') && path.endsWith('/spec.md')).flatMap(([path, source]) => parseContract({ nodeId: path.split('/').at(-2)!, path, source }).contract ?? []), specWritePaths)
+      if (!originalTrace || !protocolError || !emptyRejection && protocolError.code !== 'review_location_format' || checkpoint.status !== 'completed' || checkpoint.phase !== 'removed' || !checkpoint.result || checkpoint.result.sessionId !== originalTrace.sessionId || checkpoint.result.threadId !== originalTrace.threadId || checkpoint.result.turnId !== originalTrace.turnId || checkpoint.result.resultDigest !== originalTrace.resultDigest || originalTrace.inputDigest !== prior.inputDigest || originalTrace.resultDigest !== contentHash(JSON.stringify(prior.reviewOutput)) || JSON.stringify(checkpoint.result.output) !== JSON.stringify(prior.reviewOutput)) throw new StructuredSessionError('stale_result', 'review draft material differs from authenticated completed Native output')
       if (!request.worktree) throw new StructuredSessionError('unsupported', 'review draft repair requires the original native worktree workflow')
-      text = JSON.stringify(prior.reviewOutput); error = locationError; trace = originalTrace
+      text = JSON.stringify(prior.reviewOutput); error = { code: protocolError.code, message: protocolError.message }; trace = originalTrace
     } else {
       if (!prior.failure || prior.review !== null || !packet || prior.failure.requestKey !== native.request.requestKey || prior.failure.inputDigest !== native.request.inputDigest || checkpoint.failure?.code !== prior.failure.code || checkpoint.failure.message !== prior.failure.message) throw new StructuredSessionError('stale_result', 'review repair differs from its original failed candidate/request')
       assertRejectedOutput(packet, native.request.worktree ? nativeWorktreePrompt(native.request.prompt, native.request.worktree) : native.request.prompt, native.request, prior.failure)

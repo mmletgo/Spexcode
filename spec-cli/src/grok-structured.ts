@@ -55,7 +55,7 @@ type NativeSettlement = { launchDigest: string; outputDigest: string; stopDigest
 type StopResult = { nativeStopped: boolean; acknowledged: false; nativeStatus?: string; error?: string }
 
 const STOP_MS = 15_000
-const { grokCompletedTerminalEvidence } = grokReplay as { grokCompletedTerminalEvidence(terminal: Terminal): boolean }
+const { grokSettledOutputMatches } = grokReplay as { grokSettledOutputMatches(output: NativeOutput, request: { sessionId: string; cwd: string; promptId?: string; nativeSchema: boolean }): boolean }
 const NATIVE_SHUTDOWN_GRACE_MS = 5_000
 export const GROK_NATIVE_EXIT_DEADLINE_FAILURE = 'Grok native exit was not observed before the settlement deadline'
 export const isGrokNativeExitFailure = ({ code, message }: { code: string; message: string }): boolean =>
@@ -121,11 +121,6 @@ function assertLaunch(plan: NativePlan, launch: NativeLaunch, execution: GrokStr
     throw stale('Grok original detached launch or receipt differs')
 }
 
-function terminalMatches(terminal: Terminal, plan: NativePlan): boolean {
-  return terminal.sessionId === plan.sessionId && terminal.cwd === plan.workspace && typeof terminal.requestId === 'string' && !!terminal.requestId.trim()
-    && (plan.acp === undefined || terminal.requestId === plan.acp.promptId)
-}
-
 function verifyFinal(native: NativeOutput, prompt: string, execution: GrokStructuredExecution): NativeResult {
   const identity = { threadId: native.terminal.sessionId, turnId: native.terminal.requestId }
   let output: unknown
@@ -156,12 +151,9 @@ function readSettledOutput(root: string, prompt: string, execution: GrokStructur
   const output = read<NativeOutput>(root, 'result.json'), settlement = read<NativeSettlement>(root, 'settlement.json')
   if (settlement?.launchDigest !== digest(launch) || settlement.outputDigest !== digest(output) || typeof settlement.stopDigest !== 'string'
     || settlement.exit?.code !== 0 || settlement.exit.signal !== null || existsSync(join(root, 'cancel.json'))
-    || !output?.terminal || !terminalMatches(output.terminal, plan) || !grokCompletedTerminalEvidence(output.terminal)
+    || !grokSettledOutputMatches(output, { sessionId: plan.sessionId, cwd: plan.workspace, promptId: plan.acp?.promptId, nativeSchema: plan.structuredOutput === 'native-schema-v1' })
     || output.terminal.requestId !== execution.turnId || output.terminal.requestId !== execution.grokNative?.turnId
-    || output.terminal.sessionId !== execution.threadId || typeof output.text !== 'string'
-    || (plan.structuredOutput === 'native-schema-v1'
-      ? output.structuredOutput !== 'present' && output.structuredOutput !== 'missing'
-      : output.structuredOutput !== undefined))
+    || output.terminal.sessionId !== execution.threadId)
     throw stale('Grok settled native terminal or stopped process evidence differs')
   stopObservation(root, launch, settlement.stopDigest)
   return output

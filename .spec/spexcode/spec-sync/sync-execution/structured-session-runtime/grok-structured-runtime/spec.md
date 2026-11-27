@@ -21,7 +21,7 @@ LLM Manager 为短时原生 streaming-json 执行关闭该子进程的厂商 tra
 
 [[llm-manager-host]] 管理的 Grok 工作树在原生 stdout 无原终态、真实非零退出且精确进程组已停止时，只用已排空且未截断的 stderr 诊断中的原 429 或明确额度耗尽，报告可申请正式续路的额度失败。用户取消、其他退出原因和未知停止不触发该分类。
 
-已持久化的 Grok 终态使用同一 Manager 源的离线解析核对完成状态与实际模型，沿已保存的原进程和原请求身份认证。
+已持久化的 Grok 终态使用同一 Manager 源的离线解析核对完成状态与实际模型，沿已保存的原进程和原请求身份认证。 Manager 同时核对原请求的 ACP prompt 身份与是否要求原生 Schema 结果，宿主重验结果与业务 Schema。
 
 明确的 `grok:<模型或别名>` 仅进入 [[structured-session-runtime]] 的原生 worktree 路由。`grok:default` 沿用本机配置。每轮记录实际 CLI 版本和模型。选择、输入、预算、独审身份与正式重试规则沿 [[sync-model-selection]]。
 
