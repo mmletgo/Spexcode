@@ -2662,7 +2662,7 @@ export async function readManagedFrozenArchivedTurn(rec: HarnessLivenessRecord &
       { toolOutputTokenLimit: execution.readerRuntime.toolOutputTokenLimit, outputs: recovered.outputs }, adapter, 'verify')
     return { ...identity, text: recovered.finalText, frozenReadProof }
   } catch (error) {
-    throw new StructuredSessionError('stale_result', `managed frozen native archive proof is unavailable: ${error instanceof Error ? error.message : String(error)}`)
+    throw new StructuredSessionError('stale_result', `managed frozen native archive evidence is unavailable: ${error instanceof Error ? error.message : String(error)}`)
   }
 }
 
