@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, sep } from 'node:path'
 import { test } from 'node:test'
 import { openProtocol } from '@spexcode/session-protocol'
+import { sessionRecordPath } from '@spexcode/spec-core'
 import { parseContract } from '@spexcode/spec-core/contracts'
 import { nativeWorktreePrompt, nativeWorktreeResult } from '../native-worktree-runtime.js'
 import { configuredSessionApplication } from '../session-application.js'
@@ -29,9 +30,11 @@ const stopBeforeGeneration = 'fixture reached P1 whole before generation'
 const oldReviewFailure = 'fixture old read-only reviewer stopped without a verdict'
 const digest = (value: unknown): string => contentHash(JSON.stringify(value))
 
-for (const oldApproved of [true, false]) test('跨冻结正式 P1 只承接原稿并执行当前独审 oldApproved=' + oldApproved, async t => {
-  assert.ok(process.env.SPEXCODE_TEST_HOME, '正式会话夹具必须通过 test-home 隔离')
-  assert.equal(process.env.SPEX_SESSION_DATABASE_PATH, join(process.env.SPEXCODE_TEST_HOME, 'sessions.sqlite'))
+for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent', 'prior-attempt-reviewer-present', 'prior-attempt-reviewer-absent'] as const) test('跨冻结正式 P1 复用与冷验 ' + mode, async t => {
+  const oldApproved = mode !== 'old-unapproved', acrossAttempt = mode.startsWith('prior-attempt-')
+  const testHome = process.env.SPEXCODE_TEST_HOME
+  assert.ok(testHome, '正式会话夹具必须通过 test-home 隔离')
+  assert.equal(process.env.SPEX_SESSION_DATABASE_PATH, join(testHome, 'sessions.sqlite'))
   const parent = realpathSync(mkdtempSync(join(tmpdir(), 'sync-cross-freeze-p1-coordinator-')))
   const root = join(parent, 'source'), managedRoot = join(parent, 'managed'), artifactRoot = join(parent, 'artifacts')
   cpSync(fixture, root, { recursive: true })
@@ -80,7 +83,7 @@ for (const oldApproved of [true, false]) test('跨冻结正式 P1 只承接原�
   }
   const admit = async (input: typeof oldInput, name: string) => {
     const next = store.admitAndEnqueue(await prepareSyncAdmission(input, plan, {
-      ingressKey: name, rootCauseId: name, origin: 'initial', budget: { maxAttempts: 1, maxCalls: 24, maxRepairs: 0, timeoutMs: 120_000 },
+      ingressKey: name, rootCauseId: name, origin: 'initial', budget: { maxAttempts: acrossAttempt ? 2 : 1, maxCalls: 24, maxRepairs: 0, timeoutMs: 120_000 },
       managedRoot, model: 'claude:default',
     }))
     assert.equal(next.retryOf, undefined)
@@ -231,19 +234,61 @@ for (const oldApproved of [true, false]) test('跨冻结正式 P1 只承接原�
   const approvedRef = stages(store.listAttempts(active.id)[0]).get(localKey)
   assert.ok(approvedRef)
   interruptAfter = undefined
+  if (acrossAttempt) {
+    assert.equal(store.requestControl(active.id, 'pause').control, 'pause')
+    assert.equal(store.requestControl(active.id, 'run').phase, 'queued')
+  }
   reopen()
+
+  const current = read<ElaborationResult>(approvedRef)
+  const round = current.rounds.at(-1)!
+  if (mode === 'current-reviewer-absent' || mode === 'prior-attempt-reviewer-absent') {
+    const reviewer = round.traces.find(trace => trace.purpose === 'elaboration_review')!
+    assert.ok(reviewer && round.crossFreezeAuthor)
+    const reviewerPath = realpathSync(sessionRecordPath(reviewer.sessionId)), backup = join(parent, 'current-reviewer.runtime.json')
+    assert.ok(reviewerPath.startsWith(realpathSync(testHome) + sep), '只修改此 test-home 内的实际 reviewer 原件')
+    assert.equal(readRecord(reviewer.sessionId)?.structuredExecution?.state, 'completed')
+    const savedBytes = readFileSync(reviewerPath)
+    const before = store.listAttempts(active.id)[0], beforeStages = stages(before)
+    const impactRef = beforeStages.get(impactKey)!
+    const evidenceRefs = [approvedRef, oldRef, impactRef]
+    const evidenceBefore = evidenceRefs.map(ref => readEvidence(commonDir, ref))
+    renameSync(reviewerPath, backup)
+    try {
+      assert.equal(readRecord(reviewer.sessionId)?.structuredExecution, undefined)
+      assert.equal(readRecord(round.traces[0].sessionId)?.structuredExecution?.state, 'completed')
+      const rejected = await runUntilP1()
+      assert.deepEqual(currentCalls().map(call => call.impact ?? call.purpose), ['p0', 'code_behavior_review', 'p1', 'elaboration_review'])
+      const recoveredAttempts = store.listAttempts(active.id)
+      assert.equal(recoveredAttempts.length, acrossAttempt ? 2 : 1, JSON.stringify(rejected.failure))
+      const resumedStages = stages(recoveredAttempts.at(-1)!)
+      assert.equal(resumedStages.has('elaboration'), false, '缺少当前 reviewer 原件时不得进入 P1 全树封口')
+      assert.equal(rejected.failure?.code, 'cross_freeze_p1_approval_binding', JSON.stringify(rejected.failure))
+      if (acrossAttempt) {
+        assert.equal(resumedStages.has(localKey), false, '新 attempt 不得保存缺原件的当前已审候选')
+        assert.equal(resumedStages.has(localKey + ':provenance'), false, '新 attempt 不得登记缺原件的当前审批来源')
+      }
+      const originalStages = stages(recoveredAttempts[0])
+      assert.deepEqual(originalStages.get(localKey), approvedRef)
+      assert.deepEqual(originalStages.get(impactKey), impactRef)
+      assert.deepEqual(evidenceRefs.map(ref => readEvidence(commonDir, ref)), evidenceBefore)
+      assert.deepEqual({ operation: store.readOperation(old.id), attempts: store.listAttempts(old.id), resources: store.listResources(oldAttempt.id) }, oldBefore)
+    } finally {
+      renameSync(backup, reviewerPath)
+      assert.deepEqual(readFileSync(reviewerPath), savedBytes)
+    }
+    return
+  }
 
   const second = await runUntilP1()
   assert.equal(second.failure?.message, stopBeforeGeneration, JSON.stringify(second.failure))
   const attempts = store.listAttempts(active.id)
-  assert.equal(attempts.length, 1)
-  const [attempt] = attempts, currentStages = stages(attempt)
+  assert.equal(attempts.length, acrossAttempt ? 2 : 1, JSON.stringify(second.failure))
+  const attempt = attempts.at(-1)!, currentStages = stages(attempt)
   assert.deepEqual(currentCalls().map(call => call.impact ?? call.purpose), ['p0', 'code_behavior_review', 'p1', 'elaboration_review'])
-  assert.ok(store.listResources(attempt.id).every(resource => resource.phase === 'removed'))
+  assert.ok(attempts.every(item => store.listResources(item.id).every(resource => resource.phase === 'removed')))
   assert.deepEqual(currentStages.get(localKey), approvedRef, '冷验保持精确当前 P1 审查的 resultRef')
-  const current = read<ElaborationResult>(approvedRef)
-  const round = current.rounds.at(-1)!
-  const impactRef = currentStages.get(impactKey)!
+  const impactRef = stages(attempts[0]).get(impactKey)!
   const impact = read<{ evidence: CrossFreezeImpactEvidence }>(impactRef).evidence
   assert.equal(current.structurePassed, true); assert.equal(current.reviewPassed, true)
   assert.equal(round.crossFreezeAuthor?.oldInputId, old.input.id)
