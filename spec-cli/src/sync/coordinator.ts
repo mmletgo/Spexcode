@@ -14,7 +14,7 @@ import type { CodeBehaviorCheckpoints, CodeBehaviorContinuation, CodeBehaviorMat
 import type { CrossFreezeSource } from './cross-freeze-source.js'
 import { lockCrossFreezeSource } from './cross-freeze-binding.js'
 import { frozenSyncCanonicalBranch } from './settings.js'
-import { CrossFreezeImpactVerdictError, prepareCrossFreezeImpactReview, restoreCrossFreezeImpactReview, verifyCrossFreezeImpactReview, type CrossFreezeImpactEvidence, type CrossFreezeImpactReview } from './cross-freeze-impact-review.js'
+import { CROSS_FREEZE_IMPACT_PURPOSE, CrossFreezeImpactVerdictError, prepareCrossFreezeImpactReview, restoreCrossFreezeImpactReview, verifyCrossFreezeImpactReview, type CrossFreezeImpactEvidence, type CrossFreezeImpactReview } from './cross-freeze-impact-review.js'
 import { analyzeCodeBehavior, authoredContractChanges, CODE_BEHAVIOR_DRAFT_COMMIT_MISSING, CODE_BEHAVIOR_FAILURE_STATUS, CODE_BEHAVIOR_GUIDANCE_VERSION, CODE_BEHAVIOR_REVIEW_COVERAGE_MISSING, LEGACY_CODE_BEHAVIOR_GUIDANCE_VERSION, codeBehaviorReviewSchema, codeBehaviorContinuationStatus, codeBehaviorDraftStatus, deriveBehaviorAuthorization, isCodeBehaviorContextTransport, readCodeBehaviorContext, type CodeBehaviorContextTransport, type CodeBehaviorCrossFreezeAuthor, type CodeBehaviorReviewReference } from './code-behavior.js'
 import type { CodeBehaviorAnalysis, CodeBehaviorCrossFreezeAuthorProof, CodeBehaviorEvidence, SyncDecisionInput } from './writeback-types.js'
 import { adoptedDeliveryPaths, baselineResourceKey, baselineSelectionDigest, extendsWithUninitializedResources, isUtf8Text, readCompositionEvidence, selectedRetiredIds, verifyBaselineSelection } from './composition.js'
@@ -711,9 +711,23 @@ function authenticatedApprovedElaboration(store: SyncStore, owner: SyncOperation
     || round.candidate.inputDigest !== result.inputDigest || round.candidateDigest !== contentHash(JSON.stringify(round.candidate)) || round.candidateDigest !== result.candidateDigest
     || canonical(round.review) !== canonical({ ...(round.reviewOutput as object), inputDigest: result.inputDigest, candidateDigest: result.candidateDigest })
     || ELABORATION_BOUNDARIES.some(boundary => !round.review!.checkedBoundaries.includes(boundary))) return false
-  const generation = elaborationGenerationSource(store, owner, prior, round, result)
   const reviewed = store.listAttempts(owner.id).filter(attempt => attempt.number <= prior.number).find(attempt => attempt.dispatchPlans.some(dispatch => dispatch.purpose === review.purpose && canonical(dispatch.session) === canonical({ sessionId: review.sessionId, threadId: review.threadId, turnId: review.turnId })))
   if (options.reviewInSourceAttempt && reviewed?.id !== prior.id) return false
+  if (!reviewed && owner.retryOf && result.partitionBinding && result.rounds.some(item => item.crossFreezeAuthor)) {
+    const key = `partition:${result.partitionBinding.partitionId}:elaboration`
+    const local = partitionStage<SavedElaboration>(store, owner, prior, key)
+    const provenance = partitionStage<{ fromOperationId: string; fromAttemptId: string; resultRef: BlobRef }>(store, owner, prior, key + ':provenance')?.result
+    if (!provenance || local?.resultRef.sha256 !== provenance.resultRef.sha256 || local.resultRef.sha256 !== contentHash(JSON.stringify(result))) return false
+    for (const originalOwner of crossFreezeRetryOwners(store, owner)) {
+      if (originalOwner.id === owner.id || originalOwner.id !== provenance.fromOperationId) continue
+      const origin = store.listAttempts(originalOwner.id).find(item => item.id === provenance.fromAttemptId)
+      if (!origin || !['failed', 'superseded', 'settled'].includes(origin.status) || canonical(origin.composedInput) !== canonical(prior.composedInput)) return false
+      const original = partitionStage<SavedElaboration>(store, originalOwner, origin, key)
+      return original?.resultRef.sha256 === local.resultRef.sha256 && authenticatedApprovedElaboration(store, originalOwner, origin, original.result, options)
+    }
+    return false
+  }
+  const generation = elaborationGenerationSource(store, owner, prior, round, result)
   const dispatch = reviewed?.dispatchPlans.find(dispatch => dispatch.purpose === review.purpose && dispatch.session?.sessionId === review.sessionId)
   const source = reviewed && dispatch ? authenticatedDraftResult(store, owner, reviewed, dispatch.key, review.purpose) : null
   if (!generation?.request || !source?.request || !source.result || source.request.inputDigest !== review.inputDigest || source.result.resultDigest !== review.resultDigest || canonical(source.result.output) !== canonical(round.reviewOutput)
@@ -2063,14 +2077,90 @@ function readLockedCrossFreezeSource(store: SyncStore, operation: SyncOperation)
   return selected
 }
 
-function findLockedCrossFreezeSource(store: SyncStore, operation: SyncOperation, bindingRef: BlobRef) {
+function* crossFreezeRetryOwners(store: SyncStore, operation: SyncOperation): Generator<SyncOperation> {
+  yield operation
+  if (!operation.retryOf) return
+  const selection = canonical(store.readBusinessBaselineSelection(operation.id))
   for (const owner of retryOperationLineage(store, operation)) {
-    if (owner.input.id !== operation.input.id) break
+    if (owner.id === operation.id) continue
+    if (!settledApprovalSource(store, owner) || canonical(owner.input) !== canonical(operation.input)
+      || owner.readSetDigest !== operation.readSetDigest || owner.planBlob?.sha256 !== operation.planBlob?.sha256
+      || owner.impactDigest !== operation.impactDigest || canonical(owner.scope) !== canonical(operation.scope)
+      || canonical(store.readBusinessBaselineSelection(owner.id)) !== selection) return
+    yield owner
+  }
+}
+
+function findLockedCrossFreezeSource(store: SyncStore, operation: SyncOperation, bindingRef: BlobRef) {
+  for (const owner of crossFreezeRetryOwners(store, operation)) {
     if (owner.crossFreezeBinding?.ref.sha256 !== bindingRef.sha256) continue
     const selected = readLockedCrossFreezeSource(store, owner)
     if (selected) return { owner, selected }
   }
   return null
+}
+
+/** 只以原分区失败记录选取既有来源，不替正式重试重新挑选旧冻结。 */
+function pendingCrossFreezeImpactSource(store: SyncStore, operation: SyncOperation, key: string, inputDigest: string, composed: ComposedInputRef) {
+  if (!operation.retryOf) return null
+  for (const owner of crossFreezeRetryOwners(store, operation)) {
+    if (owner.id === operation.id) continue
+    for (const prior of store.listAttempts(owner.id).reverse()) {
+      if (!['failed', 'superseded', 'settled'].includes(prior.status) || canonical(prior.composedInput) !== canonical(composed)) continue
+      const retry = partitionStage<CrossFreezeImpactRetry>(store, owner, prior, `${key}:cross-freeze-impact-retry`)?.result
+      if (retry?.version !== 'cross-freeze-impact-retry-v1' || retry.currentInputDigest !== inputDigest) continue
+      const locked = findLockedCrossFreezeSource(store, owner, retry.sourceRef)
+      if (!locked) fail('cross_freeze_native_binding', '跨冻结影响续审缺少原正式来源绑定')
+      return locked
+    }
+  }
+  return null
+}
+
+function* crossFreezeImpactHistory(store: SyncStore, operation: SyncOperation, current: SyncAttempt, bindingOwner: SyncOperation) {
+  const start = current.operationId === operation.id ? operation : store.readOperation(current.operationId)
+  for (const owner of crossFreezeRetryOwners(store, start)) {
+    for (const prior of store.listAttempts(owner.id).reverse()) {
+      if (prior.operationId === current.operationId && prior.number > current.number
+        || prior.id !== current.id && !['failed', 'superseded', 'settled'].includes(prior.status)) continue
+      yield { owner, prior }
+    }
+    if (owner.id === bindingOwner.id) return
+  }
+}
+
+/** 续审只消费原只读请求的已结算格式拒绝，不能把旧裁决改签为本轮影响复核。 */
+function authenticateCrossFreezeImpactRetry(
+  store: SyncStore, operation: SyncOperation, origin: SyncAttempt, retry: CrossFreezeImpactRetry,
+  input: (timeout: ElaborationSessionRequest['timeoutMs']) => Parameters<typeof restoreCrossFreezeImpactReview>[0],
+  readNativeRecord: (id: string) => NativeRunRecord | null = readRecord,
+): void {
+  const commonDir = operation.input.source.commonDir
+  const resource = store.listResources(origin.id).find(resource => resource.checkpointRef.sha256 === retry.checkpointRef.sha256)
+  const dispatch = origin.dispatchPlans.find(dispatch => dispatch.purpose === CROSS_FREEZE_IMPACT_PURPOSE && dispatch.key === resource?.plan.key)
+  if (resource?.phase !== 'removed' || resource.operationId !== operation.id || resource.generation !== origin.generation || !dispatch)
+    fail('cross_freeze_native_binding', '影响复核续审缺少原已移除 Native 资源')
+  const { request } = JSON.parse(readEvidence(commonDir, resource.plan.planBlob).toString('utf8')) as NativeRunPlan
+  const checkpoint = JSON.parse(readEvidence(commonDir, retry.checkpointRef).toString('utf8')) as NativeRunCheckpoint
+  if (request.worktree?.mode !== 'read' || request.frozenContext || request.frozenEntries
+      || checkpoint.phase !== 'removed' || !checkpoint.nativeCallRequested || !checkpoint.nativeStarted)
+    fail('cross_freeze_native_binding', '影响复核续审缺少原已执行并结算的只读阶段')
+  const prepared = restoreCrossFreezeImpactReview(input(request.timeoutMs), request.worktree)
+  if (!matchesScheduledNativeReview(operation, origin, dispatch, request, prepared.request))
+    fail('cross_freeze_native_binding', '影响复核续审的原请求和 Git 只读材料不匹配')
+  if (checkpoint.result) {
+    verifyStageResult(commonDir, prepared.request.worktree, checkpoint.result)
+    const { sessionId, threadId, turnId, resultDigest, output } = checkpoint.result
+    const trace = { purpose: CROSS_FREEZE_IMPACT_PURPOSE, sessionId, threadId, turnId, resultDigest, inputDigest: request.inputDigest }
+    try { authenticateCrossFreezeImpact(store, operation, origin, prepared, trace, output, readNativeRecord) }
+    catch (error) { if (error instanceof CrossFreezeImpactVerdictError) return; throw error }
+    fail('cross_freeze_native_binding', '有效的原影响裁决不能作为格式拒绝续审')
+  }
+  const { failure, session, stop } = checkpoint
+  if (!failure || !reviewFormatRepairCodes.has(failure.code) || stop?.nativeStopped !== true)
+    fail('cross_freeze_native_binding', '影响复核格式拒绝缺少原生停止凭证')
+  authenticateNativeFailure(store, operation, origin, request.requestKey, { code: failure.code, message: failure.message,
+    sessionId: session.sessionId, threadId: session.threadId ?? undefined, turnId: session.turnId ?? undefined })
 }
 
 function crossFreezeP0ImpactInput(
@@ -2132,9 +2222,8 @@ function authenticateCrossFreezeP0Author(
   if (!locked) return false
   const author = historicalBehaviorAuthor(store, locked.selected.source, marker.oldPartitionId, changedPaths)
   if (!author || canonical(author.authorTrace) !== canonical(local.traces[0])) return false
-  for (const attempt of store.listAttempts(locked.owner.id).reverse()) {
-    if (locked.owner.id === owner.operationId && attempt.number > owner.number) continue
-    const impact = readCrossFreezeP0Impact(store, locked.owner, attempt, key, local.inputDigest, locked.selected, author)
+  for (const { owner: source, prior } of crossFreezeImpactHistory(store, operation, owner, locked.owner)) {
+    const impact = readCrossFreezeP0Impact(store, source, prior, key, local.inputDigest, locked.selected, author)
     if (impact?.resultRef.sha256 !== marker.impactReviewRef.sha256 || canonical(impact.proof) !== canonical(marker)) continue
     const currentReviewer = local.traces[1]
     return impact.result.evidence.verdict === 'reuse' && [author.reviewTrace, impact.result.evidence.trace].every(trace =>
@@ -2234,21 +2323,18 @@ function authenticateCrossFreezeP1Generation(
 ): HistoricalElaborationAuthor['generation'] | null {
   const marker = round.crossFreezeAuthor!
   if (result.partitionBinding?.partitionId !== marker.oldPartitionId || !round.draft) return null
-  for (const candidate of retryOperationLineage(store, operation)) {
-    const selected = readLockedCrossFreezeSource(store, candidate)
-    if (!selected || selected.bindingRef.sha256 !== marker.bindingRef.sha256 || candidate.input.id !== operation.input.id) continue
-    const author = historicalElaborationAuthor(store, selected.source, marker.oldPartitionId)
-    if (!author || canonical(round.draft) !== canonical(author.draft) || canonical(round.output) !== canonical(author.receipt)
-      || canonical(round.traces[0]) !== canonical(author.trace)) return null
-    const key = `partition:${marker.oldPartitionId}:elaboration`
-    for (const origin of store.listAttempts(candidate.id).reverse()) {
-      if (origin.operationId === operation.id && origin.number > owner.number) continue
-      const review = readCrossFreezeP1Impact(store, candidate, origin, key, result.inputDigest, selected, author)
-      if (review?.verdict !== 'reuse' || canonical(review.author.proof) !== canonical(marker)) continue
-      const currentReviewer = round.traces.find(trace => trace.purpose === 'elaboration_review')
-      if (currentReviewer && review.author.independentOf.some(trace => trace.sessionId === currentReviewer.sessionId || trace.threadId === currentReviewer.threadId)) return null
-      return author.generation
-    }
+  const locked = findLockedCrossFreezeSource(store, operation, marker.bindingRef)
+  if (!locked) return null
+  const author = historicalElaborationAuthor(store, locked.selected.source, marker.oldPartitionId)
+  if (!author || canonical(round.draft) !== canonical(author.draft) || canonical(round.output) !== canonical(author.receipt)
+    || canonical(round.traces[0]) !== canonical(author.trace)) return null
+  const key = `partition:${marker.oldPartitionId}:elaboration`
+  for (const { owner: source, prior } of crossFreezeImpactHistory(store, operation, owner, locked.owner)) {
+    const review = readCrossFreezeP1Impact(store, source, prior, key, result.inputDigest, locked.selected, author)
+    if (review?.verdict !== 'reuse' || canonical(review.author.proof) !== canonical(marker)) continue
+    const currentReviewer = round.traces.find(trace => trace.purpose === 'elaboration_review')
+    if (currentReviewer && review.author.independentOf.some(trace => trace.sessionId === currentReviewer.sessionId || trace.threadId === currentReviewer.threadId)) return null
+    return author.generation
   }
   return null
 }
@@ -4261,23 +4347,33 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         return null
       }
       const loadCrossFreezeBehaviorAuthor: NonNullable<PartitionCheckpoints['loadCrossFreezeBehaviorAuthor']> = async (key, plan, partition, currentInputDigest, binding, existing) => {
-        const locked = existing ? findLockedCrossFreezeSource(store, operation, existing.bindingRef) : crossFreezeSource && { owner: operation, selected: crossFreezeSource }
+        const locked = existing ? findLockedCrossFreezeSource(store, operation, existing.bindingRef)
+          : crossFreezeSource ? { owner: operation, selected: crossFreezeSource }
+            : pendingCrossFreezeImpactSource(store, operation, key, currentInputDigest, view.composed)
         if (!locked) return null
-        const { owner, selected } = locked
+        const { owner: bindingOwner, selected } = locked
         assertMaterialFence()
         const author = historicalBehaviorAuthor(store, selected.source, partition.id, binding.changedPaths)
+        if (!author && !existing && bindingOwner.id !== operation.id) fail('cross_freeze_native_binding', 'P0 影响续审缺少可核验的原 Git 作者')
         if (!author) return null
         const commonDir = operation.input.source.commonDir
-        const current = store.readAttempt(fence!.attemptId)
-        const history = store.listAttempts(owner.id).reverse(), retryKey = `${key}:cross-freeze-impact-retry`
-        let retrying = false
-        for (const prior of history) {
-          if (prior.operationId === current.operationId && prior.number > current.number || prior.id !== current.id && !['failed', 'superseded', 'settled'].includes(prior.status)) continue
+        const current = store.readAttempt(fence!.attemptId), retryKey = `${key}:cross-freeze-impact-retry`
+        let seed: StageWorktree | undefined, rawRef: BlobRef | undefined, retrying = false
+        const impactInput = (owner: SyncOperation, prior: SyncAttempt, timeoutMs: ElaborationSessionRequest['timeoutMs']) =>
+          crossFreezeP0ImpactInput(owner, prior.id, selected.source, partition.id, author,
+            seed ??= stageWorktree(commonDir, operation.input.headCommit, view.composed.tree), partition.readPaths, timeoutMs,
+            rawRef ??= writeEvidenceBytes(commonDir, Buffer.from(readStageDraft(commonDir, author.draft, author.draft), 'utf8')))
+        for (const { owner, prior } of crossFreezeImpactHistory(store, operation, current, bindingOwner)) {
           await yieldToControl()
           assertMaterialFence()
           const index = readSyncCheckpointStageIndex(store, owner, prior)
-          const retry = stage<CrossFreezeImpactRetry>(store, owner, prior, retryKey, 'automatic', index)
-          retrying ||= matchesCrossFreezeImpactRetry(retry, selected.bindingRef, author.analysisRef, currentInputDigest)
+          const retry = partitionStage<CrossFreezeImpactRetry>(store, owner, prior, retryKey, undefined, index)?.result
+          if (!retrying && retry && retry.currentInputDigest === currentInputDigest) {
+            if (!matchesCrossFreezeImpactRetry(retry, selected.bindingRef, author.analysisRef, currentInputDigest)
+              || canonical(prior.composedInput) !== canonical(view.composed)) fail('cross_freeze_native_binding', 'P0 影响续审缺少同一冻结原稿或组合输入')
+            authenticateCrossFreezeImpactRetry(store, owner, prior, retry, timeoutMs => impactInput(owner, prior, timeoutMs), options.nativeExecution?.runtime?.readRecord)
+            retrying = true
+          }
           if (stage(store, owner, prior, `${key}:cross-freeze-structure-rejection`, 'automatic', index)) return null
           const previous = partitionStage<CodeBehaviorContinuation>(store, owner, prior, `${key}:continuation`, undefined, index)?.result
           if (previous?.inputDigest === currentInputDigest && previous.crossFreezeAuthorReviewRepair) return null
@@ -4285,14 +4381,10 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           if (impact && (!existing || canonical(existing) === canonical(impact.proof))) return impact.result.evidence.verdict === 'reuse'
             ? { draft: author.draft, trace: author.authorTrace, proof: impact.proof, independentOf: [author.reviewTrace, impact.result.evidence.trace] } : null
         }
-        if (existing || owner.id !== operation.id) return null
+        if (existing || bindingOwner.id !== operation.id && !retrying) return null
         const sizing = stage<{ minimumCalls: number; remainingCalls: number | null }>(store, operation, current, 'partition-budget')
         if (budget && !retrying && (!sizing || sizing.remainingCalls === null || sizing.remainingCalls < sizing.minimumCalls + 2 * plan.partitions.length)) return null
-        const original = readStageDraft(commonDir, author.draft, author.draft)
-        const rawRef = writeEvidenceBytes(commonDir, Buffer.from(original, 'utf8'))
-        const seed = stageWorktree(commonDir, operation.input.headCommit, view.composed.tree)
-        const prepared = prepareCrossFreezeImpactReview(crossFreezeP0ImpactInput(operation, current.id, selected.source,
-          partition.id, author, seed, partition.readPaths, callTimeoutMs, rawRef))
+        const prepared = prepareCrossFreezeImpactReview(impactInput(operation, current, callTimeoutMs))
         const evidence = await runCrossFreezeImpact(runner, store, operation, current.id, prepared, signal, assertMaterialFence,
           checkpointRef => { saveStage(store, fence!, retryKey, { version: 'cross-freeze-impact-retry-v1',
             sourceRef: selected.bindingRef, authorRef: author.analysisRef, currentInputDigest, checkpointRef } satisfies CrossFreezeImpactRetry) },
@@ -4307,42 +4399,50 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         } satisfies CodeBehaviorCrossFreezeAuthor : null
       }
       const loadCrossFreezeElaborationAuthor: NonNullable<PartitionCheckpoints['loadCrossFreezeElaborationAuthor']> = async (key, plan, partition, input, inputDigest, existing) => {
-        const selected = existing
-          ? findLockedCrossFreezeSource(store, operation, existing.bindingRef)
-          : crossFreezeSource && { owner: operation, selected: crossFreezeSource }
-        if (!selected?.selected || !input.worktree || input.phase || input.refinement || input.gapRepair || input.readonlySpecRepair) return null
+        if (!input.worktree || input.phase || input.refinement || input.gapRepair || input.readonlySpecRepair) return null
+        const locked = existing ? findLockedCrossFreezeSource(store, operation, existing.bindingRef)
+          : crossFreezeSource ? { owner: operation, selected: crossFreezeSource }
+            : pendingCrossFreezeImpactSource(store, operation, key, inputDigest, view.composed)
+        if (!locked) return null
+        const { owner: bindingOwner, selected } = locked
         assertMaterialFence()
-        const author = historicalElaborationAuthor(store, selected.selected.source, partition.id)
+        const author = historicalElaborationAuthor(store, selected.source, partition.id)
+        if (!author && !existing && bindingOwner.id !== operation.id) fail('cross_freeze_native_binding', 'P1 影响续审缺少可核验的原 Git 作者')
         if (!author) return null
         const current = store.readAttempt(fence!.attemptId), retryKey = `${key}:cross-freeze-impact-retry`
-        let retrying = false
-        for (const prior of store.listAttempts(selected.owner.id).reverse()) {
-          if (prior.operationId === current.operationId && prior.number > current.number || prior.id !== current.id && !['failed', 'superseded', 'settled'].includes(prior.status)) continue
+        const commonDir = operation.input.source.commonDir, { tree } = input.worktree
+        let seed: StageWorktree | undefined, rawRef: BlobRef | undefined, retrying = false
+        const impactInput = (owner: SyncOperation, prior: SyncAttempt, timeoutMs: ElaborationSessionRequest['timeoutMs']) =>
+          crossFreezeP1ImpactInput(owner, prior.id, selected.source, partition.id, author,
+            seed ??= stageWorktree(commonDir, operation.input.headCommit, overlayStageTree(commonDir, tree, input.context ?? [])), partition.readPaths, timeoutMs,
+            rawRef ??= writeEvidenceBytes(commonDir, Buffer.from(readStageDraft(commonDir, author.draft, author.draft), 'utf8')))
+        for (const { owner, prior } of crossFreezeImpactHistory(store, operation, current, bindingOwner)) {
           await yieldToControl()
           assertMaterialFence()
-          const retry = stage<CrossFreezeImpactRetry>(store, selected.owner, prior, retryKey)
-          retrying ||= matchesCrossFreezeImpactRetry(retry, selected.selected.bindingRef, author.resultRef, inputDigest)
-          const proof = readCrossFreezeP1Impact(store, selected.owner, prior, key, inputDigest, selected.selected, author, options.nativeExecution?.runtime?.readRecord)
+          const retry = partitionStage<CrossFreezeImpactRetry>(store, owner, prior, retryKey)?.result
+          if (!retrying && retry && retry.currentInputDigest === inputDigest) {
+            if (!matchesCrossFreezeImpactRetry(retry, selected.bindingRef, author.resultRef, inputDigest)
+              || canonical(prior.composedInput) !== canonical(view.composed)) fail('cross_freeze_native_binding', 'P1 影响续审缺少同一冻结原稿或组合输入')
+            authenticateCrossFreezeImpactRetry(store, owner, prior, retry, timeoutMs => impactInput(owner, prior, timeoutMs), options.nativeExecution?.runtime?.readRecord)
+            retrying = true
+          }
+          const proof = readCrossFreezeP1Impact(store, owner, prior, key, inputDigest, selected, author, options.nativeExecution?.runtime?.readRecord)
           if (proof && (!existing || canonical(existing) === canonical(proof.author.proof))) return proof.verdict === 'reuse' ? proof.author : null
         }
-        if (existing || selected.owner.id !== operation.id || input.worktree.tree !== view.composed.tree) return null
+        if (existing || bindingOwner.id !== operation.id && !retrying || tree !== view.composed.tree) return null
         const sizing = stage<{ minimumCalls: number; remainingCalls: number | null }>(store, operation, current, 'partition-budget')
         if (budget && !retrying && (!sizing || sizing.remainingCalls === null || sizing.remainingCalls < sizing.minimumCalls + 2 * plan.partitions.length)) return null
-        const commonDir = operation.input.source.commonDir, original = readStageDraft(commonDir, author.draft, author.draft)
-        const rawRef = writeEvidenceBytes(commonDir, Buffer.from(original, 'utf8'))
-        const seed = stageWorktree(commonDir, operation.input.headCommit, overlayStageTree(commonDir, input.worktree.tree, input.context ?? []))
-        const prepared = prepareCrossFreezeImpactReview(crossFreezeP1ImpactInput(operation, current.id, selected.selected.source,
-          partition.id, author, seed, partition.readPaths, callTimeoutMs, rawRef))
+        const prepared = prepareCrossFreezeImpactReview(impactInput(operation, current, callTimeoutMs))
         const evidence = await runCrossFreezeImpact(runner, store, operation, current.id, prepared, signal, assertMaterialFence,
           checkpointRef => { saveStage(store, fence!, retryKey, { version: 'cross-freeze-impact-retry-v1',
-            sourceRef: selected.selected!.bindingRef, authorRef: author.resultRef, currentInputDigest: inputDigest, checkpointRef } satisfies CrossFreezeImpactRetry) },
+            sourceRef: selected.bindingRef, authorRef: author.resultRef, currentInputDigest: inputDigest, checkpointRef } satisfies CrossFreezeImpactRetry) },
           options.nativeExecution?.runtime?.readRecord)
         const reviewRef = saveStage(store, fence!, `${key}:cross-freeze-impact`, {
-          version: 'cross-freeze-p1-impact-v1', sourceRef: selected.selected.bindingRef, currentInputDigest: inputDigest,
+          version: 'cross-freeze-p1-impact-v1', sourceRef: selected.bindingRef, currentInputDigest: inputDigest,
           composedDigest: view.composed.contentDigest, checkedPaths: [...partition.readPaths].sort(),
           worktree: prepared.request.worktree, timeoutMs: callTimeoutMs, evidence,
         } satisfies SavedCrossFreezeP1Impact, operation.baselineSelection ? undefined : { readSetDigest: operation.readSetDigest })
-        return evidence.verdict === 'reuse' ? crossFreezeP1Author(author, evidence, selected.selected.bindingRef, reviewRef) : null
+        return evidence.verdict === 'reuse' ? crossFreezeP1Author(author, evidence, selected.bindingRef, reviewRef) : null
       }
       const partitionCheckpoints: PartitionCheckpoints = {
         continueAfterSettledGrokExit: error => error instanceof StructuredSessionError

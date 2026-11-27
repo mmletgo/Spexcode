@@ -33,10 +33,11 @@ const stopBeforeGeneration = 'fixture reached P1 whole before generation'
 const oldReviewFailure = 'fixture old read-only reviewer stopped without a verdict'
 const digest = (value: unknown): string => contentHash(JSON.stringify(value))
 
-for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent', 'prior-attempt-reviewer-present', 'prior-attempt-reviewer-absent', 'operator-challenge', 'impact-format-retry'] as const) test('跨冻结正式 P1 复用与冷验 ' + mode, async t => {
+for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent', 'prior-attempt-reviewer-present', 'prior-attempt-reviewer-absent', 'operator-challenge', 'impact-format-retry', 'impact-format-formal-retry', 'impact-format-formal-retry-missing-native'] as const) test('跨冻结正式 P1 复用与冷验 ' + mode, async t => {
   const oldApproved = mode !== 'old-unapproved', operatorChallenge = mode === 'operator-challenge'
-  const retryImpactFormat = mode === 'impact-format-retry'
-  const acrossAttempt = mode.startsWith('prior-attempt-') || operatorChallenge || retryImpactFormat
+  const formalImpactRetry = mode.startsWith('impact-format-formal-retry')
+  const retryImpactFormat = mode === 'impact-format-retry' || formalImpactRetry
+  const acrossAttempt = mode.startsWith('prior-attempt-') || operatorChallenge || mode === 'impact-format-retry'
   const testHome = process.env.SPEXCODE_TEST_HOME
   assert.ok(testHome, '正式会话夹具必须通过 test-home 隔离')
   assert.equal(process.env.SPEX_SESSION_DATABASE_PATH, join(testHome, 'sessions.sqlite'))
@@ -283,12 +284,55 @@ for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent',
   assert.equal(oldBefore.operation.phase, 'superseded')
   const currentCalls = () => calls.filter(call => call.operationId === active.id)
   if (retryImpactFormat) {
-    const result = await runUntilP1()
+    let result = await runUntilP1()
+    const originalCurrent = active
+    if (formalImpactRetry) {
+      assert.equal(result.operation.phase, 'budget_exhausted', JSON.stringify(result.failure))
+      assert.equal(store.readRetryEligibility(active.id).eligible, true)
+      assert.equal(store.listAttempts(active.id).length, 1)
+      reopen()
+      const retry = store.admitAndEnqueue(await prepareSyncAdmission(currentInput, plan, {
+        ingressKey: 'p1-formal-impact-retry', rootCauseId: 'p1-formal-impact-retry', retryOf: originalCurrent.id,
+        origin: originalCurrent.origin, budget: originalCurrent.budget, managedRoot, model: 'claude:default',
+        baselineSelection: store.readBusinessBaselineSelection(originalCurrent.id), executionScope: originalCurrent.scope, impactDigest: originalCurrent.impactDigest,
+      }))
+      active = store.ackDispatch(currentInput.source.repositoryId, retry.dispatchMessageId)
+      assert.equal(active.input.id, originalCurrent.input.id)
+      assert.equal(active.crossFreezeBinding, undefined)
+      if (mode === 'impact-format-formal-retry-missing-native') {
+        const failed = calls.find(call => call.operationId === originalCurrent.id && call.owner === failedImpactOwner && call.impact === 'p1')!
+        const path = realpathSync(sessionRecordPath(failed.sessionId)), backup = join(parent, 'failed-impact.runtime.json')
+        assert.ok(path.startsWith(realpathSync(testHome) + sep))
+        assert.equal(readRecord(failed.sessionId)?.structuredExecution?.state, 'completed')
+        renameSync(path, backup)
+        try {
+          const blocked = await runUntilP1()
+          assert.equal(blocked.failure?.code, 'cross_freeze_native_binding', JSON.stringify(blocked.failure))
+          assert.deepEqual(currentCalls(), [])
+          assert.equal(stages(store.listAttempts(active.id)[0]).has('elaboration'), false)
+        } finally { renameSync(backup, path) }
+        return
+      }
+      assert.ok(failedImpactOwner)
+      interruptAfter = 'partition:' + failedImpactOwner + ':elaboration'
+      const interruptedFormalRetry = await runUntilP1()
+      assert.equal(interruptedFormalRetry.status, 'recovery_required', JSON.stringify(interruptedFormalRetry.failure))
+      const approvedBeforeRestart = stages(store.listAttempts(active.id)[0]).get(interruptAfter)
+      assert.ok(approvedBeforeRestart)
+      const beforeRestart = currentCalls().map(call => call.sessionId)
+      reopen()
+      const resultKey = interruptAfter
+      interruptAfter = undefined
+      result = await runUntilP1()
+      assert.deepEqual(currentCalls().map(call => call.sessionId), beforeRestart, '正式重试已经产生的当前审核冷验不重派')
+      assert.deepEqual(stages(store.listAttempts(active.id)[0]).get(resultKey), approvedBeforeRestart)
+    }
+    const allCalls = calls.filter(call => [originalCurrent.id, active.id].includes(call.operationId))
     assert.equal(result.failure?.message, stopBeforeGeneration, JSON.stringify({ failure: result.failure, calls: currentCalls() }))
     assert.equal(result.operation.id, active.id)
-    assert.equal(result.operation.retryOf, undefined)
+    assert.equal(result.operation.retryOf, formalImpactRetry ? originalCurrent.id : undefined)
     assert.ok(firstImpactOwner && failedImpactOwner && firstImpactOwner !== failedImpactOwner)
-    const attempts = store.listAttempts(active.id)
+    const attempts = formalImpactRetry ? [...store.listAttempts(originalCurrent.id), ...store.listAttempts(active.id)] : store.listAttempts(active.id)
     assert.equal(attempts.length, 2)
     const [bad, recovered] = attempts, badStages = stages(bad), recoveredStages = stages(recovered)
     assert.equal(bad.failure?.code, 'cross_freeze_impact_review_retry')
@@ -304,16 +348,18 @@ for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent',
     assert.ok(badStages.get(siblingKey))
     assert.deepEqual(recoveredStages.get(siblingKey), badStages.get(siblingKey), '已审兄弟 P1 继续使用同一结果引用')
     assert.deepEqual(recovered.dispatchPlans.map(dispatch => dispatch.purpose), [CROSS_FREEZE_IMPACT_PURPOSE, 'elaboration_review'])
-    assert.ok(omittedBudgetHint && omittedBudgetHint.remainingCalls >= omittedBudgetHint.minimumCalls)
-    assert.equal(recoveredStages.has('partition-budget'), false, '已开始的影响复核续审不靠首次复用预算提示')
-    assert.equal(store.readBudgetUsage(active.id).callsUsed, 9, '夹具保留正式预算计账')
-    assert.equal(currentCalls().some(call => ['code_behavior_analyze', 'elaboration_generate'].includes(call.purpose)), false)
-    assert.deepEqual(currentCalls().filter(call => call.owner === failedImpactOwner).map(call => call.impact ?? call.purpose),
+    if (!formalImpactRetry) {
+      assert.ok(omittedBudgetHint && omittedBudgetHint.remainingCalls >= omittedBudgetHint.minimumCalls)
+      assert.equal(recoveredStages.has('partition-budget'), false, '已开始的影响复核续审不靠首次复用预算提示')
+    } else assert.equal(store.readBudgetUsage(originalCurrent.id).callsUsed, 7)
+    assert.equal(store.readBudgetUsage(active.id).callsUsed, formalImpactRetry ? 2 : 9, '夹具保留正式预算计账')
+    assert.equal(allCalls.some(call => ['code_behavior_analyze', 'elaboration_generate'].includes(call.purpose)), false)
+    assert.deepEqual(allCalls.filter(call => call.owner === failedImpactOwner).map(call => call.impact ?? call.purpose),
       ['p0', 'code_behavior_review', 'p1', 'p1', 'elaboration_review'])
-    assert.deepEqual(currentCalls().filter(call => call.owner === firstImpactOwner).map(call => call.impact ?? call.purpose),
+    assert.deepEqual(allCalls.filter(call => call.owner === firstImpactOwner).map(call => call.impact ?? call.purpose),
       ['p0', 'code_behavior_review', 'p1', 'elaboration_review'])
     assert.ok(attempts.every(attempt => store.listResources(attempt.id).every(resource => resource.phase === 'removed')))
-    const failedCall = currentCalls().find(call => call.owner === failedImpactOwner && call.impact === 'p1')!
+    const failedCall = allCalls.find(call => call.owner === failedImpactOwner && call.impact === 'p1')!
     const failedDispatch = bad.dispatchPlans.find(dispatch => dispatch.session?.sessionId === failedCall.sessionId)!
     const failedResource = store.findResource(bad.id, failedDispatch.key)!
     const failedNative = read<NativeRunCheckpoint>(failedResource.checkpointRef)
@@ -323,7 +369,7 @@ for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent',
     const final = read<ElaborationResult>(recoveredStages.get(failedKey)!), finalRound = final.rounds.at(-1)!
     assert.equal(final.reviewPassed, true)
     assert.deepEqual(read(badStages.get(failedKey + ':cross-freeze-impact-retry')!), {
-      version: 'cross-freeze-impact-retry-v1', sourceRef: result.operation.crossFreezeBinding?.ref,
+      version: 'cross-freeze-impact-retry-v1', sourceRef: store.readOperation(originalCurrent.id).crossFreezeBinding?.ref,
       authorRef: originalRef, currentInputDigest: final.inputDigest, checkpointRef: failedResource.checkpointRef,
     })
     assert.deepEqual(finalRound.crossFreezeAuthor?.oldResultRef, originalRef)

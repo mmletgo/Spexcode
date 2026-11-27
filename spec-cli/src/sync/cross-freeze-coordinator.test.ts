@@ -40,11 +40,12 @@ const scenarios = [
   { useBaseline: true, mainBranch: 'stable', checkout: 'stable' },
   { useBaseline: true, mainBranch: 'main', checkout: 'main', hideCurrentReview: true },
   { useBaseline: true, mainBranch: 'main', checkout: 'main', retryImpactFormat: true },
+  { useBaseline: true, mainBranch: 'main', checkout: 'main', retryImpactFormat: true, formalImpactRetry: true },
   { useBaseline: true, mainBranch: 'main', checkout: 'main', challengeApproval: true },
 ] as const
 
 for (const scenario of scenarios) test(
-  '跨冻结正式 P0 ' + ('retryImpactFormat' in scenario ? '影响复核覆盖格式沿原稿续审'
+  '跨冻结正式 P0 ' + ('formalImpactRetry' in scenario ? 'formal-impact-retry' : 'retryImpactFormat' in scenario ? '影响复核覆盖格式沿原稿续审'
     : 'hideCurrentReview' in scenario ? 'whole 冷恢复缺少当前独审原件'
     : 'challengeApproval' in scenario ? '正式质疑沿原稿派带诊断的独审'
     : `configured=${scenario.mainBranch} checkout=${scenario.checkout} baseline=${scenario.useBaseline}`),
@@ -52,6 +53,7 @@ for (const scenario of scenarios) test(
   const { useBaseline, mainBranch, checkout } = scenario
   const hideCurrentReview = 'hideCurrentReview' in scenario
   const retryImpactFormat = 'retryImpactFormat' in scenario
+  const formalImpactRetry = 'formalImpactRetry' in scenario
   const challengeApproval = 'challengeApproval' in scenario
   const canonicalCheckout = mainBranch === checkout
   assert.ok(process.env.SPEXCODE_TEST_HOME, '必须通过 test-home 隔离正式会话夹具')
@@ -114,7 +116,7 @@ for (const scenario of scenarios) test(
     const selected = useBaseline ? store.readBaselineSelection(input.source, executionScope.paths.map(path => ({ kind: 'path' as const, path }))) : undefined
     if (selected && !('selection' in selected)) assert.fail(selected.failure.message)
     const next = store.admitAndEnqueue(await prepareSyncAdmission(input, plan, {
-      ingressKey: name, rootCauseId: name, origin: 'initial', budget: { mode: 'unlimited' }, managedRoot, model: 'claude:default',
+      ingressKey: name, rootCauseId: name, origin: 'initial', budget: formalImpactRetry ? { maxAttempts: 1, maxCalls: 24, maxRepairs: 1, timeoutMs: 150_000 } : { mode: 'unlimited' }, managedRoot, model: 'claude:default',
       ...(selected ? { baselineSelection: selected.selection, executionScope } : {}),
     }))
     return store.ackDispatch(input.source.repositoryId, next.dispatchMessageId)
@@ -153,7 +155,7 @@ for (const scenario of scenarios) test(
               evidence: 'Read the complete frozen path and surrounding calls: ' + path, reason: 'Import dependency changes are material to ImportService only.' })),
           }
           impactMaterials.set(sessionId, readFileSync(join(workspace, dirname(materialPath), 'candidate.json')))
-          if (retryImpactFormat && !affected && !calls.some(call => call.freeze === active.id && call.owner === owner && call.purpose === CROSS_FREEZE_IMPACT_PURPOSE)) {
+          if (retryImpactFormat && !affected && !calls.some(call => call.owner === owner && call.purpose === CROSS_FREEZE_IMPACT_PURPOSE)) {
             impact.paths[1] = { ...impact.paths[0] }
             assert.equal(new Ajv().validate(request.schema, impact), true, '重复路径须通过冻结 JSON schema，仅精确覆盖检查拒绝')
           }
@@ -262,7 +264,23 @@ for (const scenario of scenarios) test(
   }
   interruptAfterWhole = hideCurrentReview
   pauseAfterWhole = challengeApproval
-  const second = await runUntilP0()
+  let second = await runUntilP0()
+  const originalCurrent = active
+  if (formalImpactRetry) {
+    assert.equal(second.operation.phase, 'budget_exhausted', JSON.stringify(second.failure))
+    assert.equal(store.readRetryEligibility(active.id).eligible, true)
+    assert.equal(store.listAttempts(active.id).length, 1)
+    reopen()
+    const retry = store.admitAndEnqueue(await prepareSyncAdmission(currentInput, plan, {
+      ingressKey: 'p0-formal-impact-retry', rootCauseId: 'p0-formal-impact-retry', retryOf: originalCurrent.id,
+      origin: originalCurrent.origin, budget: originalCurrent.budget, managedRoot, model: 'claude:default',
+      baselineSelection: store.readBusinessBaselineSelection(originalCurrent.id), executionScope: originalCurrent.scope, impactDigest: originalCurrent.impactDigest,
+    }))
+    active = store.ackDispatch(currentInput.source.repositoryId, retry.dispatchMessageId)
+    assert.equal(active.input.id, originalCurrent.input.id)
+    assert.equal(active.crossFreezeBinding, undefined)
+    second = await runUntilP0()
+  }
   if (challengeApproval) {
     assert.equal(second.operation.phase, 'paused', JSON.stringify(second.failure))
     assert.equal(second.operation.control, 'pause')
@@ -273,18 +291,19 @@ for (const scenario of scenarios) test(
     assert.equal(second.failure?.message, boundary, JSON.stringify(second.failure))
     assert.equal(second.operation.phase, 'failed')
   }
-  const attempts = store.listAttempts(active.id)
+  const attempts = formalImpactRetry ? [...store.listAttempts(originalCurrent.id), ...store.listAttempts(active.id)] : store.listAttempts(active.id)
   assert.equal(attempts.length, retryImpactFormat ? 2 : 1)
   const currentAttempt = attempts.at(-1)!, currentStages = stages(currentAttempt)
-  const currentCalls = calls.filter(call => call.freeze === active.id)
+  const currentCalls = calls.filter(call => [originalCurrent.id, active.id].includes(call.freeze))
   if (canonicalCheckout) {
     const reusedCalls = currentCalls.filter(call => call.owner === unaffected)
     assert.deepEqual(reusedCalls.map(call => call.purpose), [
       ...(retryImpactFormat ? [CROSS_FREEZE_IMPACT_PURPOSE] : []), CROSS_FREEZE_IMPACT_PURPOSE, 'code_behavior_review',
     ])
     assert.deepEqual(currentCalls.filter(call => call.owner === affected).map(call => call.purpose), [CROSS_FREEZE_IMPACT_PURPOSE, 'code_behavior_analyze', 'code_behavior_review'])
-    assert.ok(second.operation.crossFreezeBinding)
-    const binding = read<{ canonicalBranch: string; oldOperationId: string }>(second.operation.crossFreezeBinding.ref)
+    const locked = store.readOperation(originalCurrent.id).crossFreezeBinding
+    assert.ok(locked)
+    const binding = read<{ canonicalBranch: string; oldOperationId: string }>(locked.ref)
     assert.equal(binding.canonicalBranch, `refs/heads/${mainBranch}`)
     assert.equal(binding.oldOperationId, old.id)
     const originalDraft = oldContinuation.drafts.code_behavior_analyze
@@ -313,7 +332,7 @@ for (const scenario of scenarios) test(
       assert.equal(rejected.composedInput?.sourceInputId, currentInput.id)
       assert.deepEqual(currentAttempt.composedInput, rejected.composedInput)
       assert.deepEqual(second.operation.input, active.input)
-      assert.equal(second.operation.retryOf, undefined)
+      assert.equal(second.operation.retryOf, formalImpactRetry ? originalCurrent.id : undefined)
       assert.equal(stages(rejected).has(impactKey), false)
       assert.deepEqual(currentAttempt.dispatchPlans.map(dispatch => dispatch.purpose), [CROSS_FREEZE_IMPACT_PURPOSE, 'code_behavior_review'])
       const brotherStage = 'partition:' + affected + ':analysis'
