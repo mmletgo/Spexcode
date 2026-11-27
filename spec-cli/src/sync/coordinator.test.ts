@@ -2038,12 +2038,22 @@ async function historicalBehaviorCoordinator(parent: string, guidance: 'v7' | 'v
   return (await import(pathToFileURL(join(directory, 'coordinator.mts')).href) as typeof continuationCoordinator).runSyncOperation
 }
 
-for (const scenario of ['独审退出超时', '分析退出超时', '分析续稿未提交'] as const) test(`Grok P0 ${scenario}并结算后在同一操作接续`, async t => {
-  const reviewFailure = scenario === '独审退出超时', commitMissing = scenario === '分析续稿未提交'
-  const f = await fixture(t, { maxAttempts: 3, maxCalls: 8, maxRepairs: 2, timeoutMs: 120_000 }, false, original, 'project', original, {
+for (const scenario of ['独审退出超时', '分析退出超时', '分析续稿未提交', '最后一次尝试', '无返修额度'] as const) test(`Grok P0 ${scenario}并结算后在同一操作接续`, async t => {
+  const lastAttempt = scenario === '最后一次尝试', noRepairs = scenario === '无返修额度'
+  const sameAttemptOnly = lastAttempt || noRepairs
+  const reviewFailure = scenario === '独审退出超时' || sameAttemptOnly, commitMissing = scenario === '分析续稿未提交'
+  const siblingPath = 'src/import.js', siblingSpecPath = '.spec/project/import-contract/spec.md', siblingTestPath = 'tests/import.test.mjs'
+  const siblingFiles: Readonly<Record<string, string>> = sameAttemptOnly ? {
+    [siblingSpecPath]: original.replaceAll('export-job', 'import-job').replaceAll('EXPORT', 'IMPORT').replaceAll('export-contract', 'import-contract').replaceAll('src/export.js', siblingPath).replaceAll('tests/export.test.mjs', siblingTestPath),
+    [siblingPath]: 'export class ImportService {}\n',
+    [siblingTestPath]: readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', 'IMPORT').replaceAll('ExportService', 'ImportService').replaceAll('export.js', 'import.js'),
+  } : {}
+  const f = await fixture(t, { maxAttempts: lastAttempt ? 1 : 3, maxCalls: sameAttemptOnly ? 12 : 8, maxRepairs: noRepairs ? 0 : 2, timeoutMs: 120_000 }, false, original, 'project', original, {
     version: 'sync-coordinator-v2', direction: 'code_to_spec', sourcePaths: ['src'], writePaths: ['.spec'], agentWorkflow: 'native-worktree-v1',
-    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 }, commitTrigger: { before: null, paths: ['src/export.js'] },
-  }, undefined, 'code', 'grok:default', true)
+    ...(sameAttemptOnly ? { targets: [{ nodeId: 'export-contract', path: contractPath }, { nodeId: 'import-contract', path: siblingSpecPath }] } : {}),
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: sameAttemptOnly ? 32768 : 524288, maxParallel: 1 },
+    commitTrigger: { before: null, paths: sameAttemptOnly ? ['src/export.js', siblingPath] : ['src/export.js'] },
+  }, undefined, 'code', 'grok:default', true, siblingFiles)
   const previousCwd = process.cwd(); process.chdir(f.root); t.after(() => process.chdir(previousCwd))
   const bin = join(f.parent, 'grok-bin'), reviews = join(f.parent, 'pending-reviews.ndjson'), analyses = join(f.parent, 'analysis-seeds.ndjson')
   mkdirSync(bin, { mode: 0o700 })
@@ -2075,7 +2085,10 @@ if (review) {
   fs.appendFileSync(reviews, JSON.stringify(context.pendingAnalysis) + '\\n', { mode: 0o600 })
   output = { inputDigest: context.inputDigest, analysisDigest, verdict: 'accept', checkedPaths: changedPaths, checkedChangeIds: analysis.changes.map(change => change.id), findings: [] }
 } else if (context.purpose === 'code_behavior_analyze') {
-  output = { changes: changedPaths.map(file => ({ kind: 'refactor', paths: [file], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保留导出明确原意', previousBehavior: '导出任务结果保持不变', sourceBehavior: '仅修改内部实现文字', deliveryBehavior: '共同已验证语义保持不变', evidence: '冻结源码与断言 ' + file, counterexample: '重复 COMPLETE 仍保留首次结果' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+  output = { changes: changedPaths.map(file => {
+    const rule = file === ${JSON.stringify(siblingPath)} ? 'RULE-IMPORT-05' : 'RULE-EXPORT-05'
+    return { kind: 'refactor', paths: [file], affectedIds: [rule], ruleIds: [rule], originalIntent: '保留任务明确原意', previousBehavior: '任务结果保持不变', sourceBehavior: '仅修改内部实现文字', deliveryBehavior: '共同已验证语义保持不变', evidence: '冻结源码与断言 ' + file, counterexample: '重复 COMPLETE 仍保留首次结果' }
+  }), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
   const source = fs.existsSync(path.join(cwd, draftPath)) ? fs.readFileSync(path.join(cwd, draftPath), 'utf8') : null
   fs.appendFileSync(analyses, JSON.stringify({ source, draft: JSON.stringify(output) }) + '\\n', { mode: 0o600 })
 } else process.exit(21)
@@ -2096,17 +2109,52 @@ else setTimeout(() => process.exit(0), 100)
   t.after(() => { if (previousPath === undefined) delete process.env.PATH; else process.env.PATH = previousPath })
   f.options.runner = undefined
 
-  await runSyncOperation(f.store, f.operation.id, f.options)
+  const result = await runSyncOperation(f.store, f.operation.id, f.options)
   const attempts = f.store.listAttempts(f.operation.id)
   const before = attempts[0], after = attempts.at(-1)!
+  const operation = f.store.readOperation(f.operation.id)
+  if (sameAttemptOnly) {
+    const frozenPlan = readSyncCheckpointStageIndex(f.store, operation, before).json.map(({ value }) => value as { stage: string; resultRef: BlobRef })
+      .find(value => value.stage === 'partition-plan')
+    assert.ok(frozenPlan, JSON.stringify(result.failure))
+    const plan = JSON.parse(readEvidence(f.input.source.commonDir, frozenPlan.resultRef).toString()) as import('./partitioning.js').SyncPartitionPlan
+    assert.deepEqual(plan.partitions.map(({ changedPaths }) => changedPaths).sort(), [['src/export.js'], [siblingPath]])
+    assert.deepEqual(plan.dependencies, [])
+  }
   const failedPurposes = reviewFailure ? ['code_behavior_analyze', 'code_behavior_review'] : ['code_behavior_analyze']
-  assert.deepEqual(before.dispatchPlans.map(dispatch => dispatch.purpose), failedPurposes, JSON.stringify(before.failure))
-  const rejected = before.dispatchPlans.at(-1)!, removed = f.store.findResource(before.id, rejected.key)!
+  const rejected = before.dispatchPlans[failedPurposes.length - 1]
+  assert.ok(rejected, JSON.stringify(result.failure))
+  const removed = f.store.findResource(before.id, rejected.key)!
   const checkpoint = JSON.parse(readEvidence(f.input.source.commonDir, removed.checkpointRef).toString()) as NativeRunCheckpoint
   assert.equal(removed.phase, 'removed')
   assert.equal(checkpoint.status, 'failed'); assert.equal(checkpoint.stop?.nativeStopped, true)
   assert.equal(checkpoint.failure?.message, 'Grok native exit was not observed before the settlement deadline')
   assert.equal(checkpoint.result, undefined)
+  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
+  assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
+  assert.equal(f.store.listJournals(f.operation.id).length, 0)
+  if (sameAttemptOnly) {
+    assert.equal(attempts.length, 1, '耗尽跨轮额度后不开始新尝试')
+    assert.equal(result.failure?.message, checkpoint.failure?.message)
+    assert.deepEqual(before.dispatchPlans.map(dispatch => dispatch.purpose), [...failedPurposes, 'code_behavior_analyze', 'code_behavior_review'],
+      '已结算的 Grok 独审仍允许同一尝试派发兄弟分析和独审')
+    assert.equal(operation.callsUsed, 4)
+    assert.equal(operation.phase, 'failed')
+    assert.equal(readCurrentSyncAnalysis(f.store, operation), null)
+    const siblingReview = before.dispatchPlans[3]
+    assert.ok(siblingReview.session?.sessionId)
+    assert.notEqual(siblingReview.session.sessionId, rejected.session?.sessionId)
+    assert.equal(f.store.findResource(before.id, siblingReview.key)?.phase, 'removed')
+    const approvals = readSyncCheckpoints(f.store, operation, before).json.map(({ value }) => value as { reviewPassed?: boolean; traces?: { sessionId: string }[] })
+      .filter(value => value.reviewPassed)
+    assert.equal(approvals.length, 1)
+    assert.equal(approvals[0].traces?.at(-1)?.sessionId, siblingReview.session.sessionId)
+    const reviewedPaths = readFileSync(reviews, 'utf8').trimEnd().split('\n').map(line => (JSON.parse(line) as { analysis: { changes: { paths: string[] }[] } }).analysis.changes.flatMap(change => change.paths))
+    assert.deepEqual(reviewedPaths.flat().sort(), ['src/export.js', siblingPath])
+    assert.ok(reviewedPaths.every(paths => paths.length === 1))
+    return
+  }
+  assert.deepEqual(before.dispatchPlans.map(dispatch => dispatch.purpose), failedPurposes, JSON.stringify(before.failure))
   assert.equal(attempts.length, commitMissing ? 3 : 2, JSON.stringify(after.failure))
   assert.equal(before.failure?.kind, 'repairable')
   assert.deepEqual(after.dispatchPlans.filter(dispatch => dispatch.purpose.startsWith('code_behavior_')).map(dispatch => dispatch.purpose), reviewFailure ? ['code_behavior_review'] : ['code_behavior_analyze', 'code_behavior_review'])
@@ -2115,7 +2163,6 @@ else setTimeout(() => process.exit(0), 100)
   const accepted = after.dispatchPlans.find(dispatch => dispatch.purpose === 'code_behavior_review')!
   assert.notEqual(accepted.session?.sessionId, rejected.session?.sessionId)
   assert.equal(f.store.findResource(after.id, accepted.key)?.phase, 'removed')
-  const operation = f.store.readOperation(f.operation.id)
   const priorEvidence = readSyncCheckpoints(f.store, operation, before).json.map(({ value }) => value as { reviewPassed?: boolean })
   assert.ok(priorEvidence.every(value => !value.reviewPassed))
   const evidence = readSyncCheckpoints(f.store, operation, after).json.map(({ value }) => value as { reviewPassed?: boolean; traces?: { sessionId: string }[]; sourceKind?: string; approved?: boolean; oid?: string; fromAttemptId?: string; checkpointRef?: BlobRef })
@@ -2151,9 +2198,6 @@ else setTimeout(() => process.exit(0), 100)
     assert.ok(finalResult.result?.worktree)
     assert.notEqual(finalResult.result.worktree.headCommit, finalResult.result.worktree.baseCommit)
   }
-  assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
-  assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
-  assert.equal(f.store.listJournals(f.operation.id).length, 0)
 })
 
 function committedDraftFixture(f: Awaited<ReturnType<typeof fixture>>, request: ElaborationSessionRequest, output: unknown, workspace: string): ReturnType<typeof nativeWorktreeResult> {
