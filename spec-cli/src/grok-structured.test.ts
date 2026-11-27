@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { assertGrokRejectedFinalSource, grokNativeModel, grokStructuredTurn, stopGrokStructuredTurn, type GrokStructuredExecution } from './grok-structured.js'
+import { managedModel } from './llm-manager-route.js'
 import { NATIVE_PROCESS_OBSERVATION_LIMIT_MS, nativeWorktreePrompt, nativeWorktreeResult } from './native-worktree-runtime.js'
 import { StructuredSessionError, structuredExecutionPolicy } from './session-structured-policy.js'
 
@@ -19,6 +20,7 @@ const sha256 = (text: string): string => createHash('sha256').update(text).diges
 
 type Scenario = 'startup-error' | 'success' | 'wrong-session' | 'wrong-cwd' | 'missing-request' | 'duplicate-terminal' | 'missing-terminal' | 'wrong-format' | 'bad-schema' | 'hang' | 'read' | 'periodic' | 'split-settlement-window' | 'cancel-during-settlement' | 'inherited-stdout' | 'inherited-stdout-trailing' | 'parent-awaits-owned-child' | 'parent-restarts-owned-child' | 'mcp-transport-reconnect' | 'natural-child-shutdown' | 'short-lived-terminal-parent' | 'unowned-stdout' | 'terminal-exit-timeout' | 'terminal-timeout-unowned-stdout'
   | 'native-schema-success' | 'native-schema-trailing' | 'native-schema-missing' | 'native-schema-mismatch'
+  | 'acp-success' | 'acp-missing' | 'acp-quota' | 'acp-startup-quota' | 'acp-startup-delayed-quota' | 'acp-auth-quota' | 'acp-auth-stderr-quota' | 'acp-prompt-stderr-quota' | 'acp-signal'
 
 function fixture(t: TestContext, scenario: Scenario, model = 'grok:default', purpose = 'grok-fixture', stderrChunks: readonly string[] = []) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'spex-grok-fixture-')))
@@ -46,11 +48,68 @@ const { dirname, join } = require('node:path')
 const args = process.argv.slice(2)
 const scenario = ${JSON.stringify(scenario)}
 const nativeSchema = scenario.startsWith('native-schema-')
+const acp = scenario.startsWith('acp-')
 if (args[0] === '--version') { console.log(nativeSchema ? 'grok 1.0.92 (fixture) [stable]' : 'grok 1.0.77 (fixture) [stable]'); process.exit(0) }
 if (args[0] === '--help') {
   console.log('Options:\n    --output-format <FORMAT>')
   if (nativeSchema) console.log('    --json-schema <SCHEMA>  JSON Schema for structured output')
   process.exit(0)
+}
+if (args.join(' ') === '--no-auto-update agent --help') {
+  if (acp || scenario === 'read') console.log('  stdio     Run the agent over stdio\n      --no-leader')
+  process.exit(0)
+}
+if (acp) {
+  assert.deepEqual(args, ['--no-auto-update', '--permission-mode', 'bypassPermissions', 'agent', '--no-leader', 'stdio'])
+  const input = require('node:readline').createInterface({ input: process.stdin })
+  const send = packet => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...packet }) + '\n')
+  let sessionId
+  input.on('line', line => {
+    const { id, method, params } = JSON.parse(line)
+    const reply = result => send({ id, result })
+    const quota = () => send({ id, error: { code: -32003, message: 'Rate limited' } })
+    const stderrQuota = () => process.stderr.write('HTTP 429: rate limited\n', () => process.exit(1))
+    if (method === 'initialize') {
+      if (scenario === 'acp-startup-quota') stderrQuota()
+      else if (scenario === 'acp-startup-delayed-quota') process.stderr.write('HTTP 429: rate limited\n', () => {
+        process.stdout.end()
+        setTimeout(() => process.exit(1), 1000)
+      })
+      else reply({ protocolVersion: 1, authMethods: [{ id: 'cached_token' }] })
+    } else if (method === 'authenticate') {
+      assert.equal(params.methodId, 'cached_token')
+      if (scenario === 'acp-auth-quota') quota()
+      else if (scenario === 'acp-auth-stderr-quota') stderrQuota()
+      else reply({})
+    } else if (method === 'session/new') {
+      assert.equal(params.cwd, process.cwd())
+      sessionId = params._meta.sessionId
+      assert.match(sessionId, /^[0-9a-f-]{36}$/)
+      if (scenario === 'acp-success') assert.equal(params._meta.modelId, 'grok-4.7-build')
+      reply({ sessionId, _meta: { currentWorkingDirectory: process.cwd() } })
+    } else if (method === 'session/prompt') {
+      assert.equal(params.sessionId, sessionId)
+      const requestId = params._meta.promptId
+      assert.match(requestId, /^[0-9a-f-]{36}$/)
+      assert.deepEqual(params._meta.outputSchema, ${JSON.stringify(schema)})
+      writeFileSync(join(process.env.TMPDIR, '..', 'fixture-started.json'), JSON.stringify({ args, requestId, prompt: params.prompt[0].text }), { flag: 'wx' })
+      if (scenario === 'acp-quota') {
+        quota()
+        return
+      }
+      if (scenario === 'acp-prompt-stderr-quota') {
+        stderrQuota()
+        return
+      }
+      writeFileSync('draft.json', ${JSON.stringify(finalText)})
+      for (const argv of [['add', 'draft.json'], ['commit', '-qm', 'native ACP draft']]) execFileSync('git', argv, { stdio: 'ignore' })
+      send({ method: 'session/update', params: { sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ${JSON.stringify(nativeSchemaText)} } } } })
+      reply({ stopReason: 'end_turn', _meta: { sessionId, requestId, usage: { modelUsage: { 'grok-4.7-build': { inputTokens: 100 } } },
+        ...(scenario === 'acp-missing' ? {} : { structuredOutput: ${JSON.stringify(nativeSchemaValue)} }) } })
+    }
+  })
+  if (scenario === 'acp-signal') input.on('close', () => process.kill(process.pid, 'SIGTERM'))
+  return
 }
 const option = key => args[args.indexOf(key) + 1]
 const cwd = option('--cwd'), sessionId = option('--session-id'), promptFile = option('--prompt-file')
@@ -325,6 +384,87 @@ test('Grok native schema uses the split terminal value and replays it without th
   renameSync(f.cli, f.cli + '.unavailable')
   assert.deepEqual(await f.run(f.state(), replayCallbacks), result)
 })
+
+test('Grok ACP edits bind the original Git result and replay after natural zero and EOF', async t => {
+  const f = fixture(t, 'acp-success', 'grok:grok-4.7-build')
+  const result = await f.run()
+  const plan = JSON.parse(readFileSync(join(f.sessionRoot, 'plan.json'), 'utf8'))
+  const start = JSON.parse(readFileSync(f.started, 'utf8'))
+  assert.equal(start.prompt, readFileSync(join(f.sessionRoot, 'prompt.txt'), 'utf8'))
+  assert.deepEqual(plan.acp, { version: 1, promptId: start.requestId })
+  assert.equal(result.threadId, plan.sessionId)
+  assert.equal(result.turnId, plan.acp.promptId)
+  assert.deepEqual(JSON.parse(result.text), nativeSchemaValue)
+  const stored = JSON.parse(readFileSync(join(f.sessionRoot, 'result.json'), 'utf8'))
+  assert.deepEqual(stored.terminal.models, ['grok-4.7-build'])
+  assert.deepEqual(JSON.parse(readFileSync(join(f.sessionRoot, 'settlement.json'), 'utf8')).exit, { code: 0, signal: null })
+  const git = nativeWorktreeResult(f.workspace, f.worktree)
+  assert.notEqual(git.headCommit, f.worktree.baseCommit)
+  assert.equal(f.git('show', `${git.headCommit}:draft.json`), finalText)
+  f.update({ state: 'completed', output: JSON.parse(result.text), resultDigest: sha256(result.text), resultWorktree: git })
+  f.git('worktree', 'remove', f.workspace)
+  renameSync(f.cli, f.cli + '.unavailable')
+  assert.deepEqual(await f.run(f.state(), replayCallbacks), result)
+})
+
+test('Grok ACP preserves a matching missing-schema result for authentic rejected-draft repair', async t => {
+  const f = fixture(t, 'acp-missing')
+  await assert.rejects(f.run(), error => {
+    assert(error instanceof StructuredSessionError)
+    assert.equal(error.code, 'structured_output_format_invalid')
+    assert.equal(error.rejectedOutput?.representation, 'text')
+    assert.equal(error.rejectedOutput?.text, nativeSchemaText)
+    f.update({ rejectedOutput: error.rejectedOutput, errorCode: error.code })
+    return true
+  })
+  const stop = await stopGrokStructuredTurn(f.state())
+  assert.equal(stop.nativeStopped, true)
+  f.update({ state: 'failed', cancellation: { reason: 'cancelled', requestedAt: Date.now(), ...stop }, failedWorktree: nativeWorktreeResult(f.workspace, f.worktree) })
+  renameSync(f.cli, f.cli + '.unavailable')
+  assertGrokRejectedFinalSource(f.prompt, f.state(), f.workspace)
+})
+
+const managedGrok = managedModel({ routeId: 'a'.repeat(64), vendor: 'grok', model: 'default', kind: 'cli' })
+
+test('Grok ACP reports the bound native prompt quota after exact natural settlement', async t => {
+  const f = fixture(t, 'acp-quota', managedGrok)
+  await assert.rejects(f.run(), { code: 'provider_quota_exhausted' })
+  const proof = JSON.parse(readFileSync(join(f.sessionRoot, 'acp-rate-limit-diagnostic.json'), 'utf8'))
+  const plan = JSON.parse(readFileSync(join(f.sessionRoot, 'plan.json'), 'utf8'))
+  assert.equal(proof.sessionId, plan.sessionId)
+  assert.equal(proof.requestId, plan.acp.promptId)
+  assert.equal(proof.rpcCode, -32003)
+  assert.deepEqual(proof.exit, { code: 0, signal: null })
+  assert.equal(proof.stdoutEnded, true)
+  assert.equal(existsSync(join(f.sessionRoot, 'result.json')), false)
+  assert.equal(existsSync(join(f.sessionRoot, 'settlement.json')), false)
+})
+
+for (const scenario of ['acp-startup-quota', 'acp-startup-delayed-quota'] as const) test(`Grok ACP ${scenario} keeps the settled nonzero CLI stderr quota path`, async t => {
+  const f = fixture(t, scenario, managedGrok)
+  await assert.rejects(f.run(), { code: 'provider_quota_exhausted' })
+  const proof = JSON.parse(readFileSync(join(f.sessionRoot, 'missing-terminal-diagnostic.json'), 'utf8'))
+  assert.deepEqual(proof.exit, { code: 1, signal: null })
+  assert.deepEqual(proof.stderr.httpStatuses, [429])
+  assert.equal(proof.stderr.ended, true)
+  assert.equal(existsSync(join(f.sessionRoot, 'result.json')), false)
+})
+
+for (const scenario of ['acp-auth-quota', 'acp-auth-stderr-quota', 'acp-prompt-stderr-quota', 'acp-signal'] as const) {
+  test(`Grok ACP rejects ${scenario} without publishing a result or manager quota`, async t => {
+    const f = fixture(t, scenario, managedGrok)
+    await assert.rejects(f.run(), error => {
+      assert(error instanceof StructuredSessionError)
+      assert.equal(error.code, 'failed')
+      return true
+    })
+    assert.equal(f.state().turnId, undefined)
+    assert.equal(existsSync(join(f.sessionRoot, 'result.json')), false)
+    assert.equal(existsSync(join(f.sessionRoot, 'settlement.json')), false)
+    assert.equal(existsSync(join(f.sessionRoot, 'acp-rate-limit-diagnostic.json')), false)
+    assert.equal((await stopGrokStructuredTurn(f.state())).nativeStopped, true)
+  })
+}
 
 test('Grok native schema rejects another event after the original terminal', async t => {
   const f = fixture(t, 'native-schema-trailing')

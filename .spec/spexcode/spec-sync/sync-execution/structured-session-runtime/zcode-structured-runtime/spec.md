@@ -19,6 +19,8 @@ related:
 
 ## expanded spec
 
+新派发从 [[llm-manager-host]] 解析同一安装中的 ZCode 适配器和 CLI。Manager 原生适配器构造启动参数与 SDK 请求，校验模型、权限请求、事件身份和原生响应，投影用量与失败分类。SpexCode 持有工作区授权、隔离策略、进程所有权、原始证据落盘和最终业务 Schema 校验。冷恢复和草稿认证继续读取原件，同步入口无需加载 SDK 或 Manager 运行时。
+
 [[llm-manager-host]] 的 ZCode 可从同一输入和 turn 的原 `turn.failed` 认证 provider HTTP 429。先独立确认原生停止，再记录正式续路分类。普通 provider EPIPE、非额度拒绝和其他执行协议维持原失败语义。
 
 原生 worktree 只从 `turn.completed.payload.usage` 中 source 为 provider 的同轮摘要投影安全非负整数。totalInputTokens 已包含缓存读写，cacheReadInputTokens 和 cacheWriteInputTokens 是其中的分量；输出另列。缺值或非法值缺席，明确的零保留。新终态文件只保存规范化计数，原始 usage blob 不进入该路径的终态文件；必须经既有同 session/input/query/turn、消息、模型与停止认证后才交给 [[structured-session-runtime]]。不从 tokenCount、cacheStats、会话累计值或历史记录补算。

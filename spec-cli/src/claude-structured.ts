@@ -1,8 +1,8 @@
-import { managedClaudeCommand } from './llm-manager-host.js'
+import { loadManagerNativeRuntime, managedClaudeCommand } from './llm-manager-host.js'
 import { managedRoute, nativeModelValue } from './llm-manager-route.js'
 import { NATIVE_PROCESS_OBSERVATION_LIMIT_MS, NATIVE_PROCESS_OBSERVATION_PENDING, nativeWorktreeLaunch, nativeWorktreeProcessesStopped, sampleNativeWorktreeProcesses } from './native-worktree-runtime.js'
 import { Ajv } from 'ajv'
-import { spawn, spawnSync, execFileSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { spawnSync, execFileSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url'
 import { createInterface } from 'node:readline'
 import { detachedRuntimeIsGone, processStartToken, verifyDetachedRuntime, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
 import { checkClaudeHistoryChain, claudeRecoveryCompanion, claudeApiRequestHashes, claudeApiSourceDigest, claudeApiToolResultIds, claudeMessageBlocks, claudeMessageDigest, claudeOutputLimitCompanions, matchingClaudeRecoveries, recordClaudeRecoveryRequest, consumeClaudeRecoveryRequest, proveClaudeFrozenReads, readClaudeApiMessageBlobs, readClaudeApiSourceMetadata, readClaudeMcpToolNames, readClaudePublicHistory, verifyFrozenReadProof, type ClaudeRecovery, type ClaudeFrozenWitness, type ClaudePublicMessage, type ClaudePublicRecord, type FrozenReadProof } from './frozen-context.js'
-import { isNativeTokenCount, rejectedFinalOutput, structuredExecutionTimer, StructuredSessionError, structuredExecutionPolicy, structuredSeatbeltProfile, type NativeTokenUsage, type StructuredExecution } from './session-structured-policy.js'
+import { rejectedFinalOutput, structuredExecutionTimer, StructuredSessionError, structuredExecutionPolicy, structuredSeatbeltProfile, type NativeTokenUsage, type StructuredExecution } from './session-structured-policy.js'
 import { sessionIdentityEnvVars } from './harness-shim.js'
 
 const CLI_VERSION = '2.1.309 (Claude Code)'
@@ -28,26 +28,48 @@ type Completed = { plan: NativePlan; witness: ClaudeFrozenWitness; result: Nativ
 type TerminalStopRequest = { version: 1; reason: 'terminal_settlement'; sessionId: string; userUuid: string; pid: number; receiptDigest: string; requestDigest: string; resultDigest: string; signal: 'SIGTERM'; requestedAt: number }
 type TerminalStopObservation = { version: 1; requestObservationDigest: string; outcome: 'sent' | 'gone'; observedAt: number }
 type NativeCallbacks = { onThread(id: string): Promise<void>; onTurn(id: string): Promise<void>; onTurnStarting?(): Promise<void>; onNative(state: NonNullable<StructuredExecution['claudeNative']>): Promise<void>; onTimeout?(): Promise<void>; signal?: AbortSignal }
-const active = new Map<string, { child: ChildProcessWithoutNullStreams; interrupt: () => void }>()
-const authenticationKeys = ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_BASE_URL'] as const
-
-/** 只在没有显式认证整组时，内存投影原生用户配置的四个认证/路由键；不继承其它设置。 */
-export function prepareClaudeAuthenticationEnvironment(environment: NodeJS.ProcessEnv, settingsPath = join(homedir(), '.claude', 'settings.json')): { environment: NodeJS.ProcessEnv; source: 'process' | 'native-user-settings' | 'cli' } {
-  if (authenticationKeys.some(key => Object.hasOwn(environment, key))) return { environment: Object.fromEntries(authenticationKeys.filter(key => Object.hasOwn(environment, key)).map(key => [key, environment[key]])), source: 'process' }
-  if (!existsSync(settingsPath)) return { environment: {}, source: 'cli' }
-  let settings: { env?: Record<string, unknown> }
-  try { settings = JSON.parse(readFileSync(settingsPath, 'utf8')) as typeof settings }
-  catch { throw new StructuredSessionError('unsupported', 'Claude native user authentication settings could not be parsed safely') }
-  if (!settings || typeof settings !== 'object' || Array.isArray(settings) || settings.env !== undefined && (settings.env === null || typeof settings.env !== 'object' || Array.isArray(settings.env))) throw new StructuredSessionError('unsupported', 'Claude native user authentication settings have an invalid shape')
-  const selected: NodeJS.ProcessEnv = {}
-  for (const key of authenticationKeys) {
-    if (!settings.env || !Object.hasOwn(settings.env, key)) continue
-    if (typeof settings.env[key] !== 'string') throw new StructuredSessionError('unsupported', 'Claude native user authentication setting must be a string')
-    selected[key] = settings.env[key]
-  }
-  return { environment: selected, source: Object.keys(selected).length ? 'native-user-settings' : 'cli' }
+type ClaudeModelOptions = { sessionId: string; model: string; schema: Record<string, unknown>; effort?: string }
+type ClaudeConfiguration = 'cli-config-v1'
+type ClaudeProjection =
+  | { kind: 'init'; init: ClaudeInit }
+  | { kind: 'user-echo'; echo: ClaudeFrozenWitness['echo'] }
+  | { kind: 'interrupt-ack'; requestId: string }
+  | { kind: 'result'; result: ClaudeFrozenWitness['result']; receipt: WorktreeTerminalResult }
+type ClaudeAdapter = {
+  CLAUDE_LEGACY_CLI_VERSION: string
+  CLAUDE_VERSION_ARGS: readonly string[]
+  ClaudeNativeProtocolError: new (...args: never[]) => Error & { code: 'unsupported' | 'stale_result' }
+  assertClaudeLegacyConfiguration(environment: NodeJS.ProcessEnv): void
+  claudeNativeModel(model: string | undefined, configuration?: ClaudeConfiguration, managedModel?: string): string
+  claudeStructuredArgs(options: ClaudeModelOptions & { mcpConfig: string; allowedTools: readonly string[]; systemPrompt: string }): string[]
+  claudeWorktreeArgs(options: ClaudeModelOptions & { mode?: 'read' | 'edit'; nativeConfiguration?: ClaudeConfiguration; managedApi?: true }): string[]
+  prepareClaudeAuthenticationEnvironment(env: NodeJS.ProcessEnv, settingsPath?: string): { environment: NodeJS.ProcessEnv; source: string }
+  claudeProcessEnvironment(input: {
+    environment: NodeJS.ProcessEnv; nativeConfiguration?: ClaudeConfiguration; configHome: string; tmpDir: string; debugDir: string
+    stripEnvironment?: readonly string[]
+  }): { environment: NodeJS.ProcessEnv; source: string }
+  claudeAuthenticationArgs(): string[]
+  interpretClaudeAuthenticationStatus(output: string, status: number | null): { loggedIn?: boolean; authMethod?: string; apiProvider?: string }
+  encodeClaudeUserMessage(sessionId: string, userUuid: string, prompt: string): string
+  encodeClaudeInterrupt(requestId: string): string
+  readClaudeStreamEvent(line: string): Record<string, unknown>
+  claudeProtocolObservation(event: Record<string, unknown>, ordinal: number): object | undefined
+  interpretClaudeStreamEvent(event: Record<string, unknown>, options: {
+    sessionId: string; userUuid: string; model: string; nativeConfiguration?: ClaudeConfiguration; worktree: boolean
+    managedRoute: boolean; hasInit: boolean; allowedTools?: readonly string[]; interruptId?: string
+  }): ClaudeProjection | undefined
+  isClaudeRateLimitTerminal(result: WorktreeTerminalResult, exit: Pick<NativeExit, 'code' | 'signal'>): boolean
 }
 
+export async function loadClaudeNativeAdapter(): Promise<ClaudeAdapter> {
+  return await (await loadManagerNativeRuntime()).loadNativeAdapter('claude') as ClaudeAdapter
+}
+
+function claudeAdapterError(adapter: ClaudeAdapter, error: unknown): unknown {
+  return error instanceof adapter.ClaudeNativeProtocolError ? new StructuredSessionError(error.code, error.message) : error
+}
+
+const active = new Map<string, { child: ChildProcessWithoutNullStreams; interrupt: () => void }>()
 /** MCP可能由CLI另建进程组；还需逐个核本桥自记的PID/start，不能只看CLI leader。 */
 function claudeMcpStopped(root: string, terminate = false): boolean {
   const path = join(root, 'mcp-public.jsonl')
@@ -81,26 +103,6 @@ function persistCompletionJson(path: string, value: unknown): void {
   writeFileSync(temporary, bytes, { mode: 0o400 }); renameSync(temporary, path)
 }
 
-function claudeModelUsage(value: unknown): NativeTokenUsage | undefined {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return
-  const models: unknown[] = Object.values(value)
-  if (!models.length || !models.every((model): model is Record<string, unknown> => !!model && typeof model === 'object' && !Array.isArray(model))) return
-
-  const usage: NativeTokenUsage = { source: 'claude-model-usage' }
-  for (const [field, nativeField] of [
-    ['uncachedInputTokens', 'inputTokens'],
-    ['outputTokens', 'outputTokens'],
-    ['cacheReadInputTokens', 'cacheReadInputTokens'],
-    ['cacheWriteInputTokens', 'cacheCreationInputTokens'],
-  ] as const) {
-    const counts = models.map(model => model[nativeField])
-    if (!counts.every(isNativeTokenCount)) continue
-    const total = counts.reduce((sum, count) => sum + count, 0)
-    if (Number.isSafeInteger(total)) usage[field] = total
-  }
-  if (Object.keys(usage).length > 1) return usage
-}
-
 /** CLI会缩短过长cwd目录名；只在固定配置根的projects一层目录查找精确UUID。 */
 function nativeHistoryPath(root: string, sessionId: string, configRoot = join(root, 'claude-home')): string {
   const projects = join(configRoot, 'projects')
@@ -119,23 +121,6 @@ export function claudeNativeModel(model: string | undefined, nativeConfiguration
   }
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value) || ['sonnet', 'opus', 'haiku', 'fable', 'default'].includes(value.toLowerCase())) throw new StructuredSessionError('unsupported', 'Claude execution requires claude:<exact-native-model-id>')
   return value
-}
-
-/** 官方restricted模式兼容现有认证；配置与可调用工具只来自本轮可信控制面。 */
-export function claudeStructuredArgs(input: { sessionId: string; model: string; mcpConfig: string; schema: Record<string, unknown>; effort?: string }): string[] {
-  if (input.effort && !['low', 'medium', 'high', 'xhigh'].includes(input.effort)) throw new StructuredSessionError('unsupported', 'Claude effort must be an explicitly supported native value')
-  return ['-p', '--session-id', input.sessionId, '--model', input.model, '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--replay-user-messages',
-    '--restricted', '--setting-sources', '', '--settings', JSON.stringify({ disableAllHooks: true, autoMemoryEnabled: false, claudeMdExcludes: ['**'], enabledPlugins: {} }),
-    '--strict-mcp-config', '--mcp-config', input.mcpConfig, '--tools', '', '--allowedTools', ...toolNames, '--disallowedTools', 'EndConversation', '--permission-mode', 'dontAsk', '--permission-prompts', 'none',
-    '--disable-slash-commands', '--no-chrome', '--system-prompt', systemPrompt, '--json-schema', JSON.stringify(input.schema), ...(input.effort ? ['--effort', input.effort] : [])]
-}
-
-/** 正常工作区能力仅约束结果格式，内置读取、编辑和 shell 工具保持可用。 */
-export function claudeWorktreeArgs(input: { sessionId: string; model: string; schema: Record<string, unknown>; effort?: string; mode?: 'read' | 'edit'; nativeConfiguration?: 'cli-config-v1'; managedApi?: true }): string[] {
-  if (input.effort && !['low', 'medium', 'high', 'xhigh'].includes(input.effort)) throw new StructuredSessionError('unsupported', 'Claude effort must be an explicitly supported native value')
-  return ['-p', '--session-id', input.sessionId, ...(input.nativeConfiguration && input.model === 'default' ? [] : ['--model', input.model]), '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--replay-user-messages',
-    ...(input.nativeConfiguration && !input.managedApi ? [] : ['--setting-sources', '', '--settings', JSON.stringify({ autoMemoryEnabled: false, enabledPlugins: {}, ...(input.managedApi ? { disableAllHooks: true } : {}) }), '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}']),
-    '--permission-mode', input.mode === 'read' ? 'plan' : 'bypassPermissions', '--json-schema', JSON.stringify(input.schema), ...(input.effort ? ['--effort', input.effort] : [])]
 }
 
 type ClaudeToolReply = Exclude<ClaudePublicMessage['content'], string>[number]
@@ -575,25 +560,34 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
   const nativeConfiguration = execution.nativeConfiguration
   if (nativeConfiguration && !worktree) throw new StructuredSessionError('unsupported', 'Claude native CLI configuration requires a native worktree request')
   if (!worktree && (execution.version !== (execution.timeoutMs === null ? 5 : 3) || execution.policy !== 'claude-frozen-read-only-v1' || !execution.frozenContext || execution.readerRuntime)) throw new StructuredSessionError('unsupported', 'Claude requires its exact isolated frozen policy')
-  const model = claudeNativeModel(execution.model, nativeConfiguration), root = join(realm, id)
+  const root = join(realm, id)
   const replay = worktree
     ? existsSync(join(root, 'plan.json')) && ['init.json', 'user-echo.json', 'result.json', 'exit.json'].every(name => existsSync(join(root, name))) ? settleClaudeWorktreeResult(JSON.parse(readFileSync(join(root, 'plan.json'), 'utf8')) as NativePlan, prompt, execution, undefined, callbacks.signal).then(publish => publish()) : null
     : completedResult(root, prompt, execution)
   if (replay) return replay
   if (execution.claudeNative || execution.turnStartRequested || execution.threadId || execution.turnId || existsSync(join(root, 'plan.json'))) throw new StructuredSessionError('cancellation_pending', 'Claude in-progress dispatch cannot be resumed by appending another prompt; exact stop is required')
   if (!worktree && (process.platform !== 'darwin' || !existsSync('/usr/bin/sandbox-exec'))) throw new StructuredSessionError('unsupported', 'Claude requires the verified outer macOS read-only sandbox')
-  if (!nativeConfiguration) {
-    if (['CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY'].some(key => process.env[key])) throw new StructuredSessionError('unsupported', 'Claude third-party provider isolation has not been verified')
-    for (const name of ['CLAUDE.md', 'managed-settings.json', 'managed-mcp.json']) if (existsSync(join('/Library/Application Support/ClaudeCode', name))) throw new StructuredSessionError('unsupported', 'Claude managed policy isolation needs separate capability evidence')
-  }
-  const resolved = spawnSync('/usr/bin/which', ['claude'], { encoding: 'utf8' })
-  if (resolved.error || resolved.status !== 0) throw new StructuredSessionError('unsupported', 'Claude CLI is unavailable in the current process PATH')
-  const cliPath = realpathSync(resolved.stdout.trim())
+  const runtime = await loadManagerNativeRuntime()
+  const provider = await runtime.loadNativeAdapter('claude') as ClaudeAdapter
+  const route = nativeConfiguration ? managedRoute(execution.model) : undefined
+  let model: string
+  try {
+    if (!nativeConfiguration) provider.assertClaudeLegacyConfiguration(process.env)
+    model = provider.claudeNativeModel(execution.model, nativeConfiguration, route?.model)
+  } catch (error) { throw claudeAdapterError(provider, error) }
+  const cliPath = runtime.findNativeExecutable('claude')
+  if (!cliPath) throw new StructuredSessionError('unsupported', 'Claude CLI is unavailable in the current process PATH')
   const worktreeLaunch = worktree ? nativeWorktreeLaunch(worktreePath!, cliPath, []) : undefined
-  const cliVersion = execFileSync(worktreeLaunch?.command ?? cliPath, [...(worktreeLaunch?.args ?? []), '--version'], { encoding: 'utf8' }).trim()
-  if (!cliVersion || !nativeConfiguration && cliVersion !== CLI_VERSION) throw new StructuredSessionError('unsupported', 'Claude CLI version has no verified isolated capability identity')
+  const cliVersion = execFileSync(worktreeLaunch?.command ?? cliPath, [...(worktreeLaunch?.args ?? []), ...provider.CLAUDE_VERSION_ARGS], { encoding: 'utf8' }).trim()
+  if (!cliVersion || !nativeConfiguration && cliVersion !== provider.CLAUDE_LEGACY_CLI_VERSION) throw new StructuredSessionError('unsupported', 'Claude CLI version has no verified isolated capability identity')
   const binaryDigest = createHash('sha256').update(readFileSync(cliPath)).digest('hex')
-  mkdirSync(root, { recursive: true, mode: 0o700 })
+  mkdirSync(realm, { recursive: true, mode: 0o700 })
+  try { mkdirSync(root, { mode: 0o700 }) }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST')
+      throw new StructuredSessionError('cancellation_pending', 'Claude original dispatch directory is already reserved')
+    throw error
+  }
   for (const name of [...(nativeConfiguration ? [] : ['cwd', 'claude-home']), 'tmp', 'debug']) mkdirSync(join(root, name), { recursive: true, mode: 0o700 })
   const native = { version: nativeConfiguration ? 2 as const : 1 as const, root, sessionId: randomUUID(), userUuid: randomUUID() }
   const configHome = join(root, 'claude-home'), cwd = worktree ? worktreePath! : join(root, 'cwd')
@@ -606,30 +600,33 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
     writeFileSync(mcpConfig, JSON.stringify({ mcpServers: { frozen: { type: 'stdio', command: process.execPath, args: readerArgs } } }), { mode: 0o400 })
     writeFileSync(profile, structuredSeatbeltProfile(realpathSync(root)), { mode: 0o400 })
   }
-  const env: NodeJS.ProcessEnv = nativeConfiguration
-    ? { ...process.env, TMPDIR: join(root, 'tmp'), CLAUDE_CODE_TMPDIR: join(root, 'tmp'), CLAUDE_CODE_DEBUG_LOGS_DIR: join(root, 'debug') }
-    : { PATH: process.env.PATH, HOME: homedir(), TMPDIR: join(root, 'tmp'), CLAUDE_CONFIG_DIR: configHome, CLAUDE_CODE_TMPDIR: join(root, 'tmp'), CLAUDE_CODE_DEBUG_LOGS_DIR: join(root, 'debug'), MAX_MCP_OUTPUT_TOKENS: '500000' }
-  if (nativeConfiguration) {
-    for (const key of sessionIdentityEnvVars()) delete env[key]
-    delete env.CLAUDECODE
-    env.SPEXCODE_SESSION_ID = id
-  }
-  const authenticationEnvironment = nativeConfiguration ? { environment: {}, source: 'native' } : prepareClaudeAuthenticationEnvironment(process.env)
-  if (!nativeConfiguration) Object.assign(env, authenticationEnvironment.environment)
-  if (!worktree) {
-    const auth = spawnSync('/usr/bin/sandbox-exec', ['-f', profile, cliPath, '--restricted', '--setting-sources', '', '--settings', JSON.stringify({ disableAllHooks: true, autoMemoryEnabled: false, claudeMdExcludes: ['**'], enabledPlugins: {} }), 'auth', 'status', '--json'], { cwd, env, encoding: 'utf8', timeout: 10000 })
-    if (auth.error) throw new StructuredSessionError('unsupported', `Claude isolated authentication status failed (${(auth.error as NodeJS.ErrnoException).code ?? 'unknown'})`)
-    let authentication: { loggedIn?: boolean; authMethod?: string; apiProvider?: string }
-    try { authentication = JSON.parse(auth.stdout) as typeof authentication }
-    catch { throw new StructuredSessionError('unsupported', `Claude isolated authentication returned invalid status (exit ${auth.status ?? 'signal'})`) }
-    if (!['none', 'claude.ai', 'oauth_token', 'api_key', 'api_key_helper'].includes(authentication.authMethod ?? '') || authentication.apiProvider !== 'firstParty') throw new StructuredSessionError('unsupported', 'Claude isolated authentication provider/status has no verified capability identity')
-    writeFileSync(join(root, 'auth-status.json'), JSON.stringify({ loggedIn: authentication.loggedIn, authMethod: authentication.authMethod, apiProvider: authentication.apiProvider, source: authenticationEnvironment.source, exitStatus: auth.status }), { mode: 0o600 })
-    if (auth.status !== 0 || authentication.loggedIn !== true) throw new StructuredSessionError('unsupported', 'The actual Claude CLI reports authentication unavailable in its isolated runtime; existing keychain/wrapper authentication is preserved and credentials are never copied')
-  }
+  let env: NodeJS.ProcessEnv, args: string[]
+  try {
+    const environment = provider.claudeProcessEnvironment({
+      environment: process.env, nativeConfiguration, configHome, tmpDir: join(root, 'tmp'), debugDir: join(root, 'debug'),
+      stripEnvironment: sessionIdentityEnvVars(),
+    })
+    env = environment.environment
+    if (nativeConfiguration) env.SPEXCODE_SESSION_ID = id
+    if (!worktree) {
+      const auth = spawnSync('/usr/bin/sandbox-exec', ['-f', profile, cliPath, ...provider.claudeAuthenticationArgs()], { cwd, env, encoding: 'utf8', timeout: 10000 })
+      if (auth.error) throw new StructuredSessionError('unsupported', `Claude isolated authentication status failed (${(auth.error as NodeJS.ErrnoException).code ?? 'unknown'})`)
+      const authentication = provider.interpretClaudeAuthenticationStatus(auth.stdout, auth.status)
+      writeFileSync(join(root, 'auth-status.json'), JSON.stringify({
+        loggedIn: authentication.loggedIn, authMethod: authentication.authMethod, apiProvider: authentication.apiProvider,
+        source: environment.source, exitStatus: auth.status,
+      }), { mode: 0o600 })
+      if (auth.status !== 0 || authentication.loggedIn !== true) throw new StructuredSessionError('unsupported', 'The actual Claude CLI reports authentication unavailable in its isolated runtime; existing keychain/wrapper authentication is preserved and credentials are never copied')
+    }
+    args = worktree
+      ? provider.claudeWorktreeArgs({
+        sessionId: native.sessionId, model, schema: execution.schema, effort: execution.effort, mode: execution.worktree!.mode,
+        nativeConfiguration, ...(route?.kind === 'anthropic-messages' ? { managedApi: true } : {}),
+      })
+      : provider.claudeStructuredArgs({ sessionId: native.sessionId, model, mcpConfig, schema: execution.schema, effort: execution.effort, allowedTools: toolNames, systemPrompt })
+  } catch (error) { throw claudeAdapterError(provider, error) }
   writeFileSync(join(root, 'plan.json'), JSON.stringify(plan), { mode: 0o600 })
   await callbacks.onNative(native)
-  const route = nativeConfiguration ? managedRoute(execution.model) : undefined
-  const args = worktree ? claudeWorktreeArgs({ sessionId: native.sessionId, model, schema: execution.schema, effort: execution.effort, mode: execution.worktree!.mode, ...(nativeConfiguration ? { nativeConfiguration } : {}), ...(route?.kind === 'anthropic-messages' ? { managedApi: true } : {}) }) : claudeStructuredArgs({ sessionId: native.sessionId, model, mcpConfig, schema: execution.schema, effort: execution.effort })
   writeFileSync(join(root, 'launch.json'), JSON.stringify({ command: cliPath, args, environmentNames: Object.keys(env), cwd, capability: { cliVersion, binaryDigest, ...(nativeConfiguration ? { configurationSource: 'native' } : { maxReadBytes: 65536, maxResultSizeChars: 500000, maxMcpOutputTokens: 500000 }) } }), { mode: 0o400 })
   if (worktree) await sampleNativeWorktreeProcesses(plan)
   if (callbacks.signal?.aborted) throw new StructuredSessionError('cancelled', 'Claude native launch cancelled before spawn')
@@ -638,7 +635,7 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
     ? managedClaudeCommand(route, id, cliPath, worktreeLaunch?.command === '/usr/bin/sandbox-exec' ? worktreeLaunch.args[1] : undefined)
     : undefined
   const launch = managedLaunch ?? worktreeLaunch ?? { command: '/usr/bin/sandbox-exec', args: ['-f', profile, cliPath] }
-  const child = spawn(launch.command, [...launch.args, ...args], { cwd, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
+  const child = runtime.spawnNativeProcess(launch.command, [...launch.args, ...args], { cwd, env })
   if (!child.pid) throw new StructuredSessionError('failed', 'Claude isolated process could not start')
   const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => child.once('close', (code, signal) => resolve({ code, signal })))
   child.once('error', () => {})
@@ -694,7 +691,7 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
     writeFileSync(join(root, 'interrupt-request.json'), JSON.stringify({ requestId, sessionId: native.sessionId, userUuid: native.userUuid }), { mode: 0o600 })
     if (!child.stdin.writable) return
     interruptId = requestId
-    child.stdin.write(`${JSON.stringify({ type: 'control_request', request_id: interruptId, request: { subtype: 'interrupt' } })}\n`)
+    child.stdin.write(provider.encodeClaudeInterrupt(interruptId))
   }
   active.set(root, { child, interrupt })
   const abort = (): void => interrupt()
@@ -751,41 +748,32 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
     work = work.then(async () => {
       if (failure) return
       ordinal = ++protocolOrdinal
-      const event = JSON.parse(line) as Record<string, unknown>
-      if (event.type === 'result' || event.type === 'system' && event.subtype === 'init') {
-        const initEvent = event.type === 'system', strings = (value: unknown): value is string[] => Array.isArray(value) && value.every(item => typeof item === 'string')
-        appendFileSync(join(root, 'native-protocol.jsonl'), JSON.stringify({
-          version: 1, ordinal, kind: initEvent ? 'init' : 'result',
-          sessionId: typeof event.session_id === 'string' ? event.session_id : undefined,
-          uuid: typeof event.uuid === 'string' ? event.uuid : undefined,
-          parentToolUseIdOwn: Object.hasOwn(event, 'parent_tool_use_id'),
-          ...(typeof event.parent_tool_use_id === 'string' || event.parent_tool_use_id === null ? { parentToolUseId: event.parent_tool_use_id } : {}),
-          ...(initEvent ? { modelDigest: typeof event.model === 'string' ? hash(event.model) : undefined, toolsDigest: strings(event.tools) ? hash(event.tools) : undefined, toolsCount: Array.isArray(event.tools) ? event.tools.length : undefined }
-            : { subtype: typeof event.subtype === 'string' && /^[a-z0-9_-]{1,80}$/i.test(event.subtype) ? event.subtype : undefined, isError: typeof event.is_error === 'boolean' ? event.is_error : undefined,
-              userUuid: typeof event.user_message_uuid === 'string' ? event.user_message_uuid : undefined, userUuidsDigest: strings(event.user_message_uuids) ? hash(event.user_message_uuids) : undefined, userUuidsCount: Array.isArray(event.user_message_uuids) ? event.user_message_uuids.length : undefined, structuredOutputOwn: Object.hasOwn(event, 'structured_output') }),
-        }) + '\n', { mode: 0o600 })
-      }
-      if (event.type === 'system' && event.subtype === 'init') {
-        if (init) throw new StructuredSessionError('stale_result', 'Claude emitted more than one native init identity')
-        init = event as unknown as ClaudeInit
-        if (!init || init.session_id !== native.sessionId || typeof init.model !== 'string' || !init.model.trim() || !nativeConfiguration && init.model !== model || (!worktree && JSON.stringify([...init.tools].sort()) !== JSON.stringify([...toolNames].sort()))) throw new StructuredSessionError('unsupported', 'Claude actual init model or tool surface differs from fixed isolation policy')
-        writeFileSync(join(root, 'init.json'), JSON.stringify({ session_id: init.session_id, model: init.model, tools: init.tools }), { mode: 0o400 })
+      const event = provider.readClaudeStreamEvent(line)
+      const observation = provider.claudeProtocolObservation(event, ordinal)
+      if (observation) appendFileSync(join(root, 'native-protocol.jsonl'), JSON.stringify(observation) + '\n', { mode: 0o600 })
+      const nativeEvent = provider.interpretClaudeStreamEvent(event, {
+        sessionId: native.sessionId, userUuid: native.userUuid, model, nativeConfiguration, worktree, managedRoute: !!route,
+        hasInit: !!init, ...(!worktree ? { allowedTools: toolNames } : {}), interruptId,
+      })
+      if (nativeEvent?.kind === 'init') {
+        init = nativeEvent.init
+        writeFileSync(join(root, 'init.json'), JSON.stringify(init), { mode: 0o400 })
         if (nativeConfiguration) { plan = { ...plan, resolvedModel: init.model }; writeFileSync(join(root, 'plan.json'), JSON.stringify(plan), { mode: 0o600 }) }
         await callbacks.onThread(native.sessionId)
-      } else if (event.type === 'user' && event.uuid === native.userUuid) {
-        echo = { uuid: String(event.uuid), session_id: String(event.session_id), message: event.message as ClaudePublicMessage }
-        writeFileSync(join(root, 'user-echo.json'), JSON.stringify(echo), { mode: 0o400 }); await callbacks.onTurn(native.userUuid)
-      } else if (event.type === 'control_response' && interruptId && (event.response as { request_id?: string; subtype?: string })?.request_id === interruptId) {
-        const response = event.response as { request_id: string; subtype: string }
-        if (response.subtype === 'success') writeFileSync(join(root, 'interrupt-ack.json'), JSON.stringify({ requestId: response.request_id, sessionId: native.sessionId }), { mode: 0o400 })
-      } else if (event.type === 'result') {
-        result = Object.fromEntries(['type', 'subtype', 'is_error', 'session_id', 'uuid', 'user_message_uuid', 'user_message_uuids', 'structured_output'].map(key => [key, event[key]])) as ClaudeFrozenWitness['result']
-        const nativeTokenUsage = worktree && claudeModelUsage(event.modelUsage)
-        const apiErrorStatus = worktree && managedRoute(execution.model) && event.is_error === true && event.api_error_status === 429 ? 429 : undefined
-        writeFileSync(join(root, 'result.json'), JSON.stringify({ ...result, ...(nativeTokenUsage ? { nativeTokenUsage } : {}), apiErrorStatus }), { mode: 0o400 }); armStop(); child.stdin.end()
+      } else if (nativeEvent?.kind === 'user-echo') {
+        echo = nativeEvent.echo
+        writeFileSync(join(root, 'user-echo.json'), JSON.stringify(echo), { mode: 0o400 })
+        await callbacks.onTurn(native.userUuid)
+      } else if (nativeEvent?.kind === 'interrupt-ack') {
+        writeFileSync(join(root, 'interrupt-ack.json'), JSON.stringify({ requestId: nativeEvent.requestId, sessionId: native.sessionId }), { mode: 0o400 })
+      } else if (nativeEvent?.kind === 'result') {
+        result = nativeEvent.result
+        writeFileSync(join(root, 'result.json'), JSON.stringify(nativeEvent.receipt), { mode: 0o400 })
+        armStop()
+        child.stdin.end()
       }
     }).catch(error => {
-      failure ??= error as Error
+      failure ??= claudeAdapterError(provider, error) as Error
       stopAt ??= Date.now() + 15000
       clearInterval(processCensus)
       killOwnGroup()
@@ -799,7 +787,7 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
   let answer: NativeResult | (() => WorktreeNativeResult)
   let finallyStopped = false
   try {
-    child.stdin.write(`${JSON.stringify({ type: 'user', session_id: native.sessionId, uuid: native.userUuid, message: { role: 'user', content: [{ type: 'text', text: prompt }] } })}\n`)
+    child.stdin.write(provider.encodeClaudeUserMessage(native.sessionId, native.userUuid, prompt))
     if (callbacks.signal?.aborted) interrupt()
     const exit = await Promise.race([exited, stopDeadline])
     await work
@@ -813,9 +801,9 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
     if (aborted) throw new StructuredSessionError(timedOut ? 'timeout' : 'cancelled', 'Claude exact process group stopped after cancellation')
     if (failure) throw failure
     if (!init || !echo || !result) throw new StructuredSessionError('failed', `Claude execution is missing native events: ${[!init ? 'init' : '', !echo ? 'user-echo' : '', !result ? 'result' : ''].filter(Boolean).join(', ')}`)
-    if (worktree && managedRoute(execution.model) && exit.code === 1 && exit.signal === null && result.is_error === true && result.subtype === 'success') {
+    if (worktree && route) {
       const publicResult = JSON.parse(readFileSync(join(root, 'result.json'), 'utf8')) as WorktreeTerminalResult
-      if (publicResult.apiErrorStatus === 429) {
+      if (provider.isClaudeRateLimitTerminal(publicResult, exit)) {
         authenticateClaudeWorktreeResult(plan, prompt, { ...execution, claudeNative: { ...native, pid: plan.pid, receiptFile: plan.receiptFile } })
         throw new StructuredSessionError('provider_quota_exhausted', 'Claude provider returned HTTP 429 for the original native turn',
           { threadId: plan.sessionId, turnId: plan.userUuid, nativeTokenUsage: publicResult.nativeTokenUsage })

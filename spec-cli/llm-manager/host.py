@@ -4,9 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import secrets
-import signal
-import subprocess
 import stat
 import sys
 from collections.abc import Iterator, Sequence
@@ -15,19 +12,13 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 from functools import partial
 from hashlib import sha256
-from http.client import HTTPConnection, HTTPException, HTTPResponse, HTTPSConnection
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from io import BufferedIOBase
 from pathlib import Path
-from socket import socket
 from sqlite3 import connect
-from threading import Lock, Thread
-from typing import Literal, Self, TypeAlias, cast
+from typing import Literal, Self, TypeAlias
 from urllib.parse import urlsplit
 
 from llm_manager import (
     ApiFormat,
-    BreakerScope,
     CapabilityError,
     CapacityError,
     CircuitBreaker,
@@ -47,15 +38,12 @@ from llm_manager import (
     MasterKeyRequiredError,
     NotFoundError,
     PricingPreference,
-    ProbeRequest,
-    ProbeResult,
     ProviderInUseError,
     ProviderKey,
     ProviderKind,
     ProviderUpdate,
     ProviderView,
     ProviderWrite,
-    RevalidateRequest,
     RouteChoice,
     RouteDisposition,
     SettlementOutcome,
@@ -73,7 +61,9 @@ from llm_manager import (
     upgrade_schedule_schema,
     validate_feature_group_catalog,
 )
+from llm_manager.api_probe import probe_api, revalidate_api
 from llm_manager.catalog import provider_satisfies_capability_gate
+from llm_manager.claude_relay import ClaudeRelayError
 from llm_manager.db import enable_sqlite_foreign_keys
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 from sqlalchemy import ForeignKeyConstraint, create_engine, select
@@ -435,78 +425,6 @@ def execution_manager(manager: LlmManager, config: HostConfig, key: bytes | None
     gated = requested.model_copy(update={"required_capabilities": (capability,)})
     catalog = tuple(gated if group.id == config.group_id else group for group in manager.catalog)
     return LlmManager(manager.owner_id, manager.session, key, catalog, provider_capabilities=capable)
-
-
-def probe_provider(
-    base_url: str, api_format: ApiFormat, secret: str, model: str, timeout: float,
-) -> ProbeResult:
-    """
-    Business Logic（为什么需要这个函数）:
-        手动测试与正式选路试探都应验证配置的真实端点及认证，并向 Manager 报告分类。
-
-    Code Logic（这个函数做什么）:
-        对标准 API 发最短模型请求，自定义协议检查基础地址。不跟重定向，不读取响应正文。
-    """
-
-    target = urlsplit(base_url)
-    if target.scheme not in ("http", "https") or not target.hostname or target.username is not None or target.query or target.fragment:
-        return ProbeResult(ok=False, failure=FailureReport(scope=BreakerScope.config))
-    path = target.path.rstrip("/")
-    headers: dict[str, str] = {"content-type": "application/json"}
-    payload: bytes | None = None
-    if api_format == ApiFormat.anthropic_messages:
-        path = path if path.endswith("/v1/messages") else f"{path.removesuffix('/v1')}/v1/messages"
-        headers.update({"x-api-key": secret, "anthropic-version": "2023-06-01"})
-    elif api_format == ApiFormat.openai_compat:
-        path = path if path.endswith("/chat/completions") else f"{path or '/v1'}/chat/completions"
-        headers["authorization"] = f"Bearer {secret}"
-    else:
-        headers["authorization"] = f"Bearer {secret}"
-    if api_format != ApiFormat.custom:
-        payload = json.dumps({"model": model, "max_tokens": 1, "messages": [{"role": "user", "content": "ping"}]}).encode()
-    connect_http = HTTPSConnection if target.scheme == "https" else HTTPConnection
-    try:
-        connection = connect_http(target.hostname, target.port, timeout=min(timeout, 4.0))
-        try:
-            connection.request("GET" if payload is None else "POST", path or "/", body=payload, headers=headers)
-            status = connection.getresponse().status
-        finally:
-            connection.close()
-    except TimeoutError:
-        return ProbeResult(ok=False, failure=FailureReport(transport="timeout"))
-    except (OSError, HTTPException):
-        return ProbeResult(ok=False, failure=FailureReport(transport="dns"))
-    if 200 <= status < 300:
-        return ProbeResult(ok=True)
-    if status in (401, 402, 403, 429) or 500 <= status <= 599:
-        return ProbeResult(ok=False, failure=FailureReport(status_code=status))
-    return ProbeResult(ok=False, failure=FailureReport(scope=BreakerScope.config))
-
-
-def manual_probe(request: ProbeRequest) -> ProbeResult:
-    """
-    Business Logic（为什么需要这个函数）:
-        官方设置页测试使用 Manager 选择的真实凭据和模型。
-
-    Code Logic（这个函数做什么）:
-        将 Manager 测试请求交给宿主 HTTP 回调。
-    """
-
-    return probe_provider(request.base_url, request.api_format, request.secret, request.model_name, request.timeout_seconds)
-
-
-def revalidate_api(model: str, request: RevalidateRequest) -> ProbeResult:
-    """
-    Business Logic（为什么需要这个函数）:
-        API 冷却到期须通过 Manager 试探后才能重新派发。
-
-    Code Logic（这个函数做什么）:
-        用 Manager 选中路线的模型与试探请求提供的 Key 调同一 HTTP 探测，拒绝非法的跨种类请求。
-    """
-
-    if request.base_url is None or request.api_format is None or request.secret is None:
-        raise HostError("llm_manager_route_stale")
-    return probe_provider(request.base_url, request.api_format, request.secret, model, request.timeout_seconds)
 
 
 def frozen_choice(binding: RouteBinding) -> RouteChoice:
@@ -894,7 +812,7 @@ def settings(manager: LlmManager, body: dict[str, object]) -> object:
         case "test":
             test = TestInput.model_validate_json(json.dumps(body.get("request")))
             result = manager.probe(
-                test.provider_id, manual_probe, group_id=test.group_id,
+                test.provider_id, probe_api, group_id=test.group_id,
                 model_id=test.model_id, thinking_effort=test.thinking_effort, include_cooled_keys=True,
             )
             return {"ok": result.ok, "detail": "连通" if result.ok else "探测失败"}
@@ -1029,7 +947,7 @@ def main(argv: Sequence[str]) -> int:
         print(json.dumps(response, default=json_public))
         return 0
     except Exception as error:
-        code = error.args[0] if isinstance(error, HostError) else next(
+        code = error.args[0] if isinstance(error, (HostError, ClaudeRelayError)) else next(
             (code for kind, code in OBSERVABLE_ERRORS if isinstance(error, kind)), "llm_manager_host_failure",
         )
         if argv and argv[0] == "claude":
@@ -1039,237 +957,55 @@ def main(argv: Sequence[str]) -> int:
         return 0 if argv and argv[0] == "rpc" else 1
 
 
-class ClaudeRelay(ThreadingHTTPServer):
-    """
-    Business Logic（为什么需要这个类）:
-        Claude CLI 及其原生工具能看到继承环境，真实上游 Key 必须只留在 Manager 进程。
-
-    Code Logic（这个类做什么）:
-        一次调用持有自己的回环地址、随机认证令牌、冻结上游和 session。
-    """
-
-    def __init__(
-        self, config: HostConfig, route_id: str, session_id: str, url: str,
-        secret: str, model: str, timeout: float,
-    ) -> None:
-        """
-        Business Logic（为什么需要这个函数）:
-            一次正式调用只暴露到其指定模型的临时回环入口。
-
-        Code Logic（这个函数做什么）:
-            保存冻结身份、内存凭据及上游地址，在 IPv4 回环绑定随机端口。
-        """
-
-        self.config = config
-        self.route_id = route_id
-        self.session_id = session_id
-        self.target = urlsplit(url)
-        if self.target.hostname is None or self.target.scheme not in ("http", "https"):
-            raise HostError("llm_manager_invalid_url")
-        self.upstream_host = self.target.hostname
-        self.upstream_secret = secret
-        self.model = model
-        self.timeout = timeout
-        self._timeout_lock = Lock()
-        self._timed_out_ordinal = 0
-        self.ticket = secrets.token_urlsafe(32)
-        super().__init__(("127.0.0.1", 0), ClaudeRelayHandler)
-
-    def get_request(self) -> tuple[socket, tuple[str, int]]:
-        """
-        Business Logic（为什么需要这个函数）:
-            无效本机连接不应让代理无限等待请求正文。
-
-        Code Logic（这个函数做什么）:
-            返回接受到的套接字并为读写应用与该 Provider 一致的超时。
-        """
-
-        connection, address = super().get_request()
-        connection.settimeout(self.timeout)
-        return connection, address
-
-    def handle_error(self, request: object, client_address: tuple[str, int]) -> None:
-        """
-        Business Logic（为什么需要这个函数）:
-            代理故障不应往真实 CLI 的 stderr 发 HTTP 头、路径或异常正文。
-
-        Code Logic（这个函数做什么）:
-            捕获 HTTP server 未处理的线程异常，只输出固定诊断码。
-        """
-
-        print("llm_manager_relay_failure", file=sys.stderr)
-
-    def message_status(self, ordinal: int | None = None, status: int | None = None) -> int:
-        """
-        Business Logic（为什么需要这个函数）:
-            只有最后一个正式 Messages 请求的上游状态可作为本次额度证据。
-
-        Code Logic（这个函数做什么）:
-            锁定当前 claim；开始请求分配序号并使旧状态失效，收到头按相同序号写入安全状态。
-        """
-
-        with transaction(self.config, None) as manager:
-            claim = manager.session.get(RouteClaim, (manager.owner_id, self.session_id))
-            if claim is None or claim.route_id != self.route_id or claim.outcome is not None:
-                raise HostError("llm_manager_route_stale")
-            if ordinal is None:
-                claim.upstream_ordinal += 1
-                claim.upstream_status = None
-            elif claim.upstream_ordinal == ordinal:
-                claim.upstream_status = status
-            return claim.upstream_ordinal
-
-    def observe_upstream_timeout(self, ordinal: int) -> None:
-        """
-        Business Logic（为什么需要这个函数）:
-            宿主需要记住本轮真实 Messages 上游的超时，等原生进程完成后交给 Manager。
-
-        Code Logic（这个函数做什么）:
-            用锁记录收到响应头之前超时的最大正式请求序号。
-        """
-
-        with self._timeout_lock:
-            self._timed_out_ordinal = max(self._timed_out_ordinal, ordinal)
-
-    def report_terminal_timeout(self, key: bytes | None) -> None:
-        """
-        Business Logic（为什么需要这个函数）:
-            新派发依赖 Manager 的 Provider 健康记录，同一轮后续成功的请求可取代较早超时。
-
-        Code Logic（这个函数做什么）:
-            结算时核对最新消息序号、活跃租约及当前绑定，把已证上游超时交给 Manager。
-        """
-
-        with self._timeout_lock:
-            ordinal = self._timed_out_ordinal
-        if ordinal == 0:
-            return
-        with transaction(self.config, key) as manager:
-            claim = manager.session.get(RouteClaim, (manager.owner_id, self.session_id))
-            if (claim is None or claim.route_id != self.route_id or claim.outcome is not None
-                    or claim.upstream_ordinal != ordinal or claim.upstream_status is not None):
-                return
-            binding = manager.session.get_one(RouteBinding, (manager.owner_id, self.route_id))
-            lease = manager.session.get_one(Lease, (manager.owner_id, claim.lease_id))
-            if binding.request_group != self.config.group_id or lease.released_at is not None:
-                return
-            execution = execution_manager(manager, self.config, key)
-            choice = frozen_choice(binding)
-            if is_current(execution, binding, choice):
-                execution.report_failure(choice, FailureReport(transport="timeout"))
-
-
-class ClaudeRelayHandler(BaseHTTPRequestHandler):
-    """
-    Business Logic（为什么需要这个类）:
-        官方 Claude 仍走 Anthropic Messages 和 SSE，Manager 负责实际端点、Key、429 信号和流式传输。
-
-    Code Logic（这个类做什么）:
-        验证每次请求的回环令牌、允许的路径与模型，调用固定上游并流式下发公开响应。
-    """
-
-    def log_message(self, format: str, *args: object) -> None:
-        """HTTP 日志含请求数据，宿主协议只保留固定分类。"""
-
-    def do_POST(self) -> None:
-        """
-        Business Logic（为什么需要这个函数）:
-            Claude 只能代理指定模型的 Messages 与 token 计数，无法转发到任意端点。
-
-        Code Logic（这个函数做什么）:
-            验证临时 token，约束 HTTP 路径、模型及大小，并在 HTTP 响应前记录正式消息状态。
-        """
-
-        relay = cast(ClaudeRelay, self.server)
-        ticket = self.headers.get("x-api-key", "").encode()
-        if not secrets.compare_digest(ticket, relay.ticket.encode()):
-            self.send_error(401)
-            return
-        path, _, query = self.path.partition("?")
-        if path not in ("/v1/messages", "/v1/messages/count_tokens") or query not in ("", "beta=true"):
-            self.send_error(404)
-            return
-        length = self.headers.get("content-length", "")
-        if not length.isascii() or not length.isdecimal() or len(length) > 8 or not 0 < int(length) <= 32 * 1024 * 1024:
-            self.send_error(413)
-            return
-        try:
-            body = self.rfile.read(int(length))
-            data: object = json.loads(body)
-        except (ValueError, OSError):
-            self.send_error(400)
-            return
-        if not isinstance(data, dict) or data.get("model") != relay.model:
-            self.send_error(400)
-            return
-        headers = {
-            "x-api-key": relay.upstream_secret,
-            "anthropic-version": self.headers.get("anthropic-version", "2023-06-01"),
-            "content-type": "application/json",
-        }
-        if beta := self.headers.get("anthropic-beta"):
-            headers["anthropic-beta"] = beta
-        target = relay.target
-        http = HTTPSConnection if target.scheme == "https" else HTTPConnection
-        upstream = http(relay.upstream_host, target.port, timeout=relay.timeout)
-        # Once headers are sent, closing the stream preserves the real transport failure.
-        sent = False
-        try:
-            ordinal = relay.message_status() if path == "/v1/messages" else None
-            prefix = target.path.rstrip("/").removesuffix("/v1/messages").removesuffix("/v1")
-            try:
-                upstream.request("POST", prefix + path + (f"?{query}" if query else ""), body=body, headers=headers)
-                response = upstream.getresponse()
-            except TimeoutError:
-                if ordinal is not None:
-                    relay.observe_upstream_timeout(ordinal)
-                raise
-            if ordinal is not None:
-                relay.message_status(ordinal, response.status)
-            if 300 <= response.status < 400:
-                self.send_error(502)
-                return
-            self.send_response_only(response.status)
-            content_type = response.headers.get_content_type()
-            self.send_header("Content-Type", "text/event-stream" if content_type == "text/event-stream" else "application/json")
-            retry_after = response.getheader("retry-after", "")
-            if retry_after.isascii() and retry_after.isdecimal() and len(retry_after) <= 8:
-                self.send_header("Retry-After", retry_after)
-            self.send_header("Connection", "close")
-            self.end_headers()
-            sent = True
-            forward_stream(response, self.wfile, relay.upstream_secret.encode())
-        except (OSError, HTTPException, SQLAlchemyError, HostError):
-            if not sent:
-                self.send_error(502)
-        finally:
-            upstream.close()
-
-
-def forward_stream(response: HTTPResponse, output: BufferedIOBase, secret: bytes) -> None:
+def record_api_message_status(
+    config: HostConfig, route_id: str, session_id: str, ordinal: int | None, status: int | None,
+) -> int:
     """
     Business Logic（为什么需要这个函数）:
-        在保留 Claude SSE 流的同时，不能把上游意外回显的真实 Key 交给 CLI。
+        只允许同一活跃调用中最后一个正式请求的上游状态作为额度证据。
 
     Code Logic（这个函数做什么）:
-        增量传输响应，只为跨块的 Key 匹配保留短尾部并遮掉匹配内容。
+        通过宿主事务绑定 claim。开始正式消息时递增序号，按相同序号写入安全的响应状态。
     """
 
-    pending = b""
-    while chunk := response.read1(65536):
-        pending += chunk
-        while (index := pending.find(secret)) >= 0:
-            output.write(pending[:index] + b"[redacted]")
-            pending = pending[index + len(secret):]
-        retain = min(len(secret) - 1, len(pending))
-        while retain and not secret.startswith(pending[-retain:]):
-            retain -= 1
-        through = len(pending) - retain
-        output.write(pending[:through])
-        output.flush()
-        pending = pending[through:]
-    output.write(pending)
-    output.flush()
+    with transaction(config, None) as manager:
+        claim = manager.session.get(RouteClaim, (manager.owner_id, session_id))
+        if claim is None or claim.route_id != route_id or claim.outcome is not None:
+            raise ClaudeRelayError("llm_manager_route_stale")
+        if ordinal is None:
+            claim.upstream_ordinal += 1
+            claim.upstream_status = None
+        elif claim.upstream_ordinal == ordinal:
+            claim.upstream_status = status
+        return claim.upstream_ordinal
+
+
+def report_api_terminal_timeout(
+    config: HostConfig, key: bytes | None, route_id: str, session_id: str, ordinal: int,
+) -> None:
+    """
+    Business Logic（为什么需要这个函数）:
+        Manager 按最后一条正式请求的真实超时决定后续调用的健康状态。
+
+    Code Logic（这个函数做什么）:
+        核对当前消息序号、活跃租约和原路线后提交已观测的上游超时。
+    """
+
+    if ordinal == 0:
+        return
+    with transaction(config, key) as manager:
+        claim = manager.session.get(RouteClaim, (manager.owner_id, session_id))
+        if (claim is None or claim.route_id != route_id or claim.outcome is not None
+                or claim.upstream_ordinal != ordinal or claim.upstream_status is not None):
+            return
+        binding = manager.session.get_one(RouteBinding, (manager.owner_id, route_id))
+        lease = manager.session.get_one(Lease, (manager.owner_id, claim.lease_id))
+        if binding.request_group != config.group_id or lease.released_at is not None:
+            return
+        execution = execution_manager(manager, config, key)
+        choice = frozen_choice(binding)
+        if is_current(execution, binding, choice):
+            execution.report_failure(choice, FailureReport(transport="timeout"))
 
 
 def launch_claude(
@@ -1313,40 +1049,13 @@ def launch_claude(
         provider = manager.get_provider(choice.provider_id)
         if not is_configured_available(provider.weekly_windows, provider.holiday_calendar, provider.timezone, datetime.now(UTC)):
             raise HostError("llm_manager_route_unavailable")
-        exported = manager.export_provider(choice.provider_id)
-        selected = next(item for item in exported.keys if item.id == choice.key_id and item.enabled)
-        relay = ClaudeRelay(config, route_id, session_id, exported.base_url, selected.secret, route.model, provider.timeout_seconds)
-        inherited = {
-            name: value for name, value in os.environ.items()
-            if name != "CLAUDECODE" and not name.startswith(("ANTHROPIC_", "CLAUDE_CODE_OAUTH_", "CLAUDE_CODE_USE_", "SPEX_LLM_MANAGER_"))
-        }
-        bypass = ",".join(part for part in (inherited.get("NO_PROXY", inherited.get("no_proxy", "")), "127.0.0.1", "localhost") if part)
-        inherited.update({
-            "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{relay.server_port}",
-            "ANTHROPIC_API_KEY": relay.ticket,
-            "NO_PROXY": bypass,
-            "no_proxy": bypass,
-        })
-        with relay:
-            manager.session.commit()
-            process = subprocess.Popen(command, env=inherited)
-            worker = Thread(target=relay.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
-            worker.start()
-
-            def stop_child(signum: int, frame: object) -> None:
-                """SpexCode 停止 wrapper 时，同样通知继承进程组中的官方 CLI。"""
-                process.send_signal(signum)
-
-            previous = {signum: signal.signal(signum, stop_child) for signum in (signal.SIGTERM, signal.SIGINT)}
-            try:
-                status = process.wait()
-            finally:
-                relay.shutdown()
-                worker.join()
-                for signum, handler in previous.items():
-                    signal.signal(signum, handler)
-    relay.report_terminal_timeout(key)
-    return status if status >= 0 else 128 - status
+        status, timed_out_ordinal = manager.launch_claude_api(
+            choice, command, environment=os.environ, private_env_prefixes=("SPEX_LLM_MANAGER_",),
+            message_status=partial(record_api_message_status, config, route_id, session_id),
+            before_process=manager.session.commit,
+        )
+    report_api_terminal_timeout(config, key, route_id, session_id, timed_out_ordinal)
+    return status
 
 
 if __name__ == "__main__":
