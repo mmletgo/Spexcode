@@ -19,7 +19,7 @@ test('settings and operation selection share the authoritative Manager bridge', 
   const unmanaged = await readSyncModelSettings()
   const runtime = await loadManagerNativeRuntime()
   assert.equal(runtime.nativeRuntimeVersion, 1)
-  assert.equal(runtime.nativeAdapterContract, 4)
+  assert.equal(runtime.nativeAdapterContract, 5)
   for (const [vendor, method] of [
     ['grok', 'classifyGrokNativeExit'],
     ['claude', 'claudeControlledTerminalExit'],
@@ -28,6 +28,12 @@ test('settings and operation selection share the authoritative Manager bridge', 
     ['codex', 'codexReadLegacyFrozenVisibleOutputs'],
   ] as const) {
     assert.equal(typeof (await runtime.loadNativeAdapter(vendor) as Record<string, unknown>)[method], 'function')
+  }
+  const codex = await runtime.loadNativeAdapter('codex') as {
+    CodexPersistentAppServer: { prototype: Record<string, unknown> }
+  }
+  for (const method of ['listLegacyThreadRows', 'readLegacyColdTurn', 'mutateLegacyThread']) {
+    assert.equal(typeof codex.CodexPersistentAppServer.prototype[method], 'function')
   }
   assert.deepEqual(unmanaged.llmManager, { configured: false })
   assert.deepEqual(unmanaged.nativeVendors.map(({ id }) => id).sort(), ['claude', 'codex', 'cursor', 'grok', 'zcode'])
@@ -63,7 +69,7 @@ if (process.argv[3] === '-m' && process.argv[4] === 'llm_manager.native_runtime'
 
   const oldNative = join(root, 'old-native.mjs'), oldPython = join(root, 'old-python')
   writeFileSync(oldNative, `export const nativeRuntimeVersion=1
-export const nativeAdapterContract=3
+export const nativeAdapterContract=4
 export const findNativeExecutable = () => { throw new Error('must not probe the CLI') }
 export const spawnGatedNativeProcess = findNativeExecutable
 export const spawnNativeProcess = findNativeExecutable

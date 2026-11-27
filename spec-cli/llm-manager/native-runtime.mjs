@@ -2324,7 +2324,9 @@ Sec-WebSocket-Key: ${key}\r
           this.#pending.delete(id);
           if (packet.error) {
             const { message } = object2(packet.error);
-            if (nonempty(message) && (message.includes("rollout at ") && message.includes(" is empty") || message.includes("is not materialized yet"))) {
+            if (waiter.mapRefusal) {
+              waiter.reject(waiter.mapRefusal(message));
+            } else if (nonempty(message) && (message.includes("rollout at ") && message.includes(" is empty") || message.includes("is not materialized yet"))) {
               waiter.reject(new CodexNativeProtocolError("not_materialized", "Codex persistent rollout is not materialized yet"));
             } else {
               waiter.reject(failed(`Codex persistent ${waiter.method} was refused`));
@@ -2363,8 +2365,8 @@ Sec-WebSocket-Key: ${key}\r
         }
         this.#send({ id, error: { code: -32601, message: "Codex persistent transport grants no external tools or approvals" } });
       }
-      /** @param {string} method @param {Packet} params @param {() => void} [beforeSend] @returns {Promise<Packet>} */
-      async #request(method, params, beforeSend) {
+      /** @param {string} method @param {Packet} params @param {() => void} [beforeSend] @param {(message: unknown) => CodexNativeProtocolError} [mapRefusal] @returns {Promise<Packet>} */
+      async #request(method, params, beforeSend, mapRefusal) {
         await this.#ready;
         if (this.#failure) throw this.#failure;
         beforeSend?.();
@@ -2372,7 +2374,7 @@ Sec-WebSocket-Key: ${key}\r
         const timer = setTimeout(() => this.#fail(new CodexNativeProtocolError("transport", `Codex persistent ${method} timed out`)), this.#requestTimeoutMs);
         try {
           return await new Promise((resolve2, reject) => {
-            this.#pending.set(id, { method, resolve: resolve2, reject });
+            this.#pending.set(id, { method, mapRefusal, resolve: resolve2, reject });
             this.#send({ id, method, params });
           });
         } finally {
@@ -2671,15 +2673,45 @@ Sec-WebSocket-Key: ${key}\r
           ids
         )];
       }
-      /** @param {string} cwd @param {boolean} archived @returns {Promise<string[]>} */
-      async listThreads(cwd, archived) {
-        const rows = await this.#pages("thread/list", {
-          cwd,
-          archived,
+      /** @param {{ archived: boolean, cwd?: string, ancestorThreadId?: string, parentThreadId?: string }} scope */
+      async listLegacyThreadRows(scope) {
+        return this.#pages("thread/list", {
+          ...scope,
           sourceKinds: persistentThreadSourceKinds,
           useStateDbOnly: true,
           limit: 100
         });
+      }
+      /** @param {string} threadId @returns {Promise<{ turnPresence: 'idle' | 'active' | 'unknown', turnId?: string, unmaterialized?: true }>} */
+      async readLegacyColdTurn(threadId) {
+        try {
+          const result = await this.#request("thread/turns/list", {
+            threadId,
+            limit: 1,
+            sortDirection: "desc",
+            itemsView: "notLoaded"
+          }, void 0, (message) => {
+            if (typeof message === "string" && (/^thread (\S+) is not materialized yet; thread\/turns\/list is unavailable before first user message$/.exec(message)?.[1] === threadId || message === `thread not loaded: ${threadId}`)) return new CodexNativeProtocolError("not_materialized", "Codex exact thread is not materialized");
+            return failed("Codex persistent thread/turns/list was refused");
+          });
+          if (!Array.isArray(result.data)) return { turnPresence: "unknown" };
+          const active = result.data.map(object2).find((turn) => turn.status === "inProgress");
+          if (!active) return { turnPresence: "idle" };
+          return nonempty(active.id) ? { turnPresence: "active", turnId: active.id } : { turnPresence: "unknown" };
+        } catch (error) {
+          if (error instanceof CodexNativeProtocolError && error.code === "not_materialized")
+            return { turnPresence: "idle", unmaterialized: true };
+          throw error;
+        }
+      }
+      /** @param {'archive' | 'delete' | 'unarchive'} operation @param {string} threadId @param {() => void} [beforeSend] */
+      async mutateLegacyThread(operation, threadId, beforeSend) {
+        if (!nonempty(threadId)) throw new CodexNativeProtocolError("stale_result", "Codex persistent thread mutation requires an exact thread identity");
+        await this.#request(`thread/${operation}`, { threadId }, beforeSend);
+      }
+      /** @param {string} cwd @param {boolean} archived @returns {Promise<string[]>} */
+      async listThreads(cwd, archived) {
+        const rows = await this.listLegacyThreadRows({ cwd, archived });
         const ids = rows.map((row) => {
           const thread = object2(row);
           if (!nonempty(thread.id) || thread.cwd !== cwd)
@@ -4279,7 +4311,7 @@ init_zcode();
 import { spawn, spawnSync as spawnSync2 } from "node:child_process";
 import { realpathSync as realpathSync2 } from "node:fs";
 var nativeRuntimeVersion = 1;
-var nativeAdapterContract = 4;
+var nativeAdapterContract = 5;
 var commands = Object.freeze({
   claude: "claude",
   codex: "codex",
