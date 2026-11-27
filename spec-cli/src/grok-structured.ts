@@ -346,7 +346,7 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
   if (callbacks.signal?.aborted) throw cancelled()
   await callbacks.onTurnStarting?.()
 
-  const env: NodeJS.ProcessEnv = { ...process.env, TMPDIR: tmp }
+  const env: NodeJS.ProcessEnv = { ...process.env, TMPDIR: tmp, GROK_MCP_AUTO_RESTART: '0' }
   for (const key of sessionIdentityEnvVars()) delete env[key]
   const launchedAt = performance.now()
   const child = spawn('/bin/sh', ['-c', 'IFS= read -r ready && [ "$ready" = start ] || exit 1; exec "$@"', 'spex-grok-launch', launch.command, ...launch.args, ...args], { cwd: worktreePath, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
