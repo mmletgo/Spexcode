@@ -23,7 +23,11 @@ SpexCode 启动的每个一次性 Grok 工作树进程照常初始化已配置�
 
 一轮只派发一次本机 CLI，使用实际托管工作树和预先绑定的会话 UUID。原生流必须以同一会话、同一工作目录且带唯一原生 request ID 的成功终态结束。终态的 request ID 是 turn 身份。
 
-当 CLI 帮助声明 `--json-schema` 且冻结 schema 的 UTF-8 参数不超过 64 KiB，新派发在既有原生流上启用该选项，并在原生计划记录 `native-schema-v1`。成功输出取自同一终态的原生 `structuredOutput`，并通过冻结 JSON schema。终态缺少该字段时，格式失败保留已结算原请求和最后一段原生文本，供返修时认证未批准草稿。未使用该选项的计划从最后一个工具之后的完整原生文本验证冻结 JSON schema。不同计划共用原生进程、停止与 EOF 证明。
+使用 streaming-json 的新派发在 CLI 帮助声明 `--json-schema` 且冻结 schema 的 UTF-8 参数不超过 64 KiB 时启用该选项，并在原生计划记录 `native-schema-v1`。成功输出取自同一终态的原生 `structuredOutput`，并通过冻结 JSON schema。终态缺少该字段时，格式失败保留已结算原请求和最后一段原生文本，供返修时认证未批准草稿。未使用该选项的计划从最后一个工具之后的完整原生文本验证冻结 JSON schema。不同计划共用原生进程、停止与 EOF 证明。
+
+编辑工作树的新派发在 Grok CLI 声明支持 standalone ACP stdio 时使用 [[grok-native-acp]]。Native plan 固定协议和本轮 prompt UUID，launch receipt 先于独立启动管道的放行。收到原 prompt 终态后关闭真实 stdin，继续验证 stdout EOF、原进程自然退出码为零和精确停止。只读工作树继续使用原生 streaming-json 和已有计划权限。已保存的计划沿其原协议、原提示和原摘要冷复验。
+
+ACP 的额度判定绑定到匹配的 prompt RPC 错误。仅真实 Grok ACP 的固定 `-32003` 与 `Rate limited` 表示采样 HTTP 429。需要实际 stdout EOF、原进程自然退出码为零以及精确停止后才报告可续路的额度失败。其他 RPC 错误以及取消、逾期或未知停止保持原失败语义。LLM Manager 按验收组的原顺序处理续路。
 
 只读任务使用计划模式，并成对关闭进入和退出计划模式的工具。细化与最终候选的两类新只读独审在 Native plan 固定 native-review-table-read-v4，读取 Markdown 表格时先解释表格转义及代码跨度，再比较业务单元格与实现的字面内容。其他新只读派发继续固定 native-file-read-v2。已检出的证据使用原生只读文件工具，避免通用终端和动态工具发现。任务确需读取当前树未检出的历史 Git 对象时才用精确只读 Git 命令。细化独审的节点生命周期及候选代码独审的 priorRefs 可能要求核对当前工作树未检出的历史 Git 对象，因此新独审沿原生只读计划的工具面。独审核对实际候选、相关源码和测试，测试执行由独立验证阶段承担。冷复验按原计划标记重建并核对真实提示摘要，已保存 native-file-read-v2、native-candidate-read-v3 的独审按各自原提示认证。工具权限和必审范围沿原定义。编辑任务在独立工作树中使用明确授权。模型的工作和正常 Git 提交由 [[native-worktree-runtime]] 从实际 Git 对象核验。
 
