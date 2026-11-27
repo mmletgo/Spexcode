@@ -15,10 +15,10 @@ import { CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts, type Con
 import { putBlob, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
 import { authenticateNativeFailure, authenticateNativeRejectedFinal, managedQuotaDispatch, readSyncCheckpoints, readSyncCheckpointStageIndex, syncCheckpointArtifacts, withCheckpointStageBasis } from './checkpoint-evidence.js'
 import { outputErrors } from './elaboration-schema.js'
-import type { ContractCell, GeneratedElaboration, GeneratedTables } from './elaboration-markdown.js'
+import type { ContractCell, GeneratedElaboration, GeneratedTables, GeneratedTargetElaboration } from './elaboration-markdown.js'
 import { sameContractBusinessMeaning } from './contract-evolution.js'
 import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE, ELABORATION_GENERATION_GUIDANCE_V3, ELABORATION_GENERATION_GUIDANCE_V4 } from './elaboration-types.js'
-import { elaborate, freezeElaborationInput, hasApprovedElaborationReview, incrementalDraftCommand } from './elaboration.js'
+import { elaborate, freezeElaborationInput, hasApprovedElaborationReview, incrementalDraftCommand, withDraftVerificationRows } from './elaboration.js'
 import { checkGenerationContractIntent, readFrozenContracts } from './frozen-contracts.js'
 import type { ElaborationDraft, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ReadonlySpecRepair } from './elaboration-types.js'
 import { buildSyncApplicationPlan } from './planning.js'
@@ -56,7 +56,7 @@ import { stopClaudeStructuredTurn } from '../claude-structured.js'
 import { nativeWorktreePrompt, nativeWorktreeResult, sampleNativeWorktreeProcesses } from '../native-worktree-runtime.js'
 import { cancelStructuredSession, SettledSessionCreateTimeoutError } from '../session-structured.js'
 import { FROZEN_READ_MAX_BYTES, FROZEN_READ_TOOL, freezeContext, prepareFrozenPrompt, proveFrozenReads, readFrozenManifest, readFrozenRange, type FrozenNativeItem } from '../frozen-context.js'
-import { readStageDraft, stageWorktree } from './stage-worktree.js'
+import { readStageDraft, stageDraftEditorPath, stageWorktree } from './stage-worktree.js'
 import { retainHistoricalFrozenWorkflow } from './historical-workflow.test-helpers.js'
 import { stopZCodeStructuredTurn, zcodeCapability, zcodeNativeConfigSelection, zcodeNativeSelection, type ZCodeStructuredExecution } from '../zcode-structured.js'
 
@@ -2199,6 +2199,15 @@ else setTimeout(() => process.exit(0), 100)
     assert.notEqual(finalResult.result.worktree.headCommit, finalResult.result.worktree.baseCommit)
   }
 })
+
+function elaborationDraftFixtureOutput(request: ElaborationSessionRequest, commonDir: string, generated: GeneratedElaboration): GeneratedTargetElaboration {
+  const wire = adaptElaborationNativeOutput(request, generated) as GeneratedTargetElaboration
+  const draftPath = /草稿文件=([^\s；]+)/.exec(request.prompt)?.[1]
+  const editor = draftPath && request.worktree && readTree(commonDir, request.worktree.tree).find(entry => entry.path === stageDraftEditorPath({ path: draftPath }))
+  if (!editor) return wire
+  const { input } = JSON.parse(readObject(commonDir, editor.oid).toString('utf8')) as { input: ElaborationInput }
+  return withDraftVerificationRows(input, wire)
+}
 
 function committedDraftFixture(f: Awaited<ReturnType<typeof fixture>>, request: ElaborationSessionRequest, output: unknown, workspace: string): ReturnType<typeof nativeWorktreeResult> {
   const seed = request.worktree!, path = /草稿文件=([^\s；]+)/.exec(request.prompt)![1]
@@ -12528,20 +12537,26 @@ for (const mode of ['repair', 'repair-restart', 'repair-complete-restart', 'nati
         { code: 'genuine_missing_policy', kind: 'missing_fact', affectedIds: ['RULE-EXPORT-01'], message: '跨租户授权仍未定义', evidence: '原意和冻结实现均没有跨租户分享政策', decision: '保留真实GAP及其阻塞' },
       ] }
     } else if (request.purpose === 'elaboration_generate') {
-      const task = nativeTask(request, commonDir) as { targets: { nodeId: string; path: string }[]; repair?: { kind: string } }
+      const task = nativeTask(request, commonDir) as { targets: { nodeId: string; path: string }[]; repair?: { kind: string; acceptedRef: BlobRef } }
       owner = task.targets[0].nodeId
+      let accepted: ElaborationResult | undefined
       if (mode === 'p2-handoff' && p2Issue) {
         assert.equal(owner, 'export-contract')
         const partitionId = request.requestKey.split(':partition:')[1].split(':')[0]
         const provenance = readSyncCheckpoints(f.store, f.store.readOperation(admitted.id), attempt).json.map(({ value }) => value as { stage?: string; resultRef: BlobRef }).find(saved => saved.stage === `partition:${partitionId}:elaboration:readonly-repair-provenance`)!
         const source = JSON.parse(readEvidence(commonDir, provenance.resultRef).toString()) as { resultRef: BlobRef }
-        const prior = JSON.parse(readEvidence(commonDir, source.resultRef).toString()) as ElaborationResult
-        assert.ok(prior.gapRepair); assert.equal(prior.gaps.length, 0, 'P2回授必须基于已结清候选GAP的新owner批准')
+        accepted = JSON.parse(readEvidence(commonDir, source.resultRef).toString()) as ElaborationResult
+        assert.ok(accepted.gapRepair); assert.equal(accepted.gaps.length, 0, 'P2回授必须基于已结清候选GAP的新owner批准')
         p2HandedBack = true
       }
       const source = owner === 'export-contract' ? original + (!inspections || mode === 'unchanged' ? gap + genuineGap : genuineGap ? gap.slice(0, gap.indexOf(`| ${gapId}`)) + genuineGap : '') : other
       const generated = rows(source, task.targets[0].path)
       generated.changes[0].nodeId = owner
+      if (task.repair?.kind === 'candidate_gap') accepted = JSON.parse(readEvidence(commonDir, task.repair.acceptedRef).toString('utf8')) as ElaborationResult
+      if (accepted) {
+        const prior = accepted.changes.find(change => change.path === task.targets[0].path)!
+        generated.changes[0].tables.VERIFY = rows(prior.source, prior.path).changes[0].tables.VERIFY
+      }
       generated.applicability = generated.applicability.map(item => ({ ...item, affectedIds: [owner === 'export-contract' ? 'REQ-EXPORT-01' : 'REQ-IMPORT-01'] }))
       if (inspections && !p2HandedBack) assert.equal(task.repair?.kind, 'candidate_gap')
       if (inspections) {
@@ -12551,7 +12566,7 @@ for (const mode of ['repair', 'repair-restart', 'repair-complete-restart', 'nati
       }
       if (inspections && mode === 'scope') generated.changes[0].tables.RULE.find(row => row.id === 'RULE-EXPORT-06')!.constraint = '借GAP诊断扩展重试权限'
       if (p2HandedBack) generated.changes[0].tables.RULE.find(row => row.id === 'RULE-EXPORT-05')!.basis = '当前冻结代码保持首次发布结果'
-      output = adaptElaborationNativeOutput(request, generated)
+      output = elaborationDraftFixtureOutput(request, f.input.source.commonDir, generated)
     } else if (request.purpose === 'elaboration_review') {
       const task = nativeTask(request, commonDir) as { repair?: { kind: string; reviewRef: BlobRef; specs: { path: string; diagnosticPath: string }[] } }
       if (task.repair?.kind === 'candidate_gap') {
@@ -12794,7 +12809,7 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
       }
       return completeReview(request, output, { baseCommit: seed.baseCommit, baseTree: seed.tree, headCommit: seed.baseCommit, tree: seed.tree, worktreePath: join(f.parent, 'closed-review') })
     }
-    const task = request.prompt.includes('任务:\n') ? nativeTask(request, f.input.source.commonDir) as { requiredChangedPaths?: string[]; targets?: { nodeId: string }[]; readonlySpecRepair?: ReadonlySpecRepair; refinement?: unknown; repair?: { kind: string; acceptedRef: BlobRef } } : null
+    const task = request.prompt.includes('任务:\n') ? nativeTask(request, f.input.source.commonDir) as { requiredChangedPaths?: string[]; targets?: { nodeId: string }[]; partitionBinding?: { partitionId: string }; readonlySpecRepair?: ReadonlySpecRepair; refinement?: unknown; repair?: { kind: string; acceptedRef: BlobRef } } : null
     const definition = definitions.find(item => task?.requiredChangedPaths?.includes(item.sourcePath) || task?.targets?.some(target => target.nodeId === item.nodeId)) ?? definitions[0]
     call.nodeId = definition.nodeId
     if (producingAncestors && request.purpose === 'elaboration_generate' && definition.nodeId !== 'export-contract') throw Object.assign(new Error('历史P0与首个P1已批准，正式重试前停在其余P1'), { code: 'unsupported' })
@@ -12836,8 +12851,16 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
           else generated.changes[0].tables.AC.push({ ...generated.changes[0].tables.AC.find(row => row.id === 'AC-EXPORT-03')!, id: newAcceptanceId })
         }
       }
+      if (factBaseline && definition.word === 'export' && attempt.number > 1) {
+        const provenance = stages(attempt).find(stage => stage.stage === `partition:${task!.partitionBinding!.partitionId}:elaboration:readonly-repair-provenance`)
+        const acceptedRef = task?.repair?.acceptedRef ?? (provenance && read<{ resultRef: BlobRef }>(provenance.resultRef).resultRef)
+        if (acceptedRef) {
+          const accepted = read<ElaborationResult>(acceptedRef).changes.find(change => change.path === definition.path)!
+          generated.changes[0].tables.VERIFY = rows(accepted.source, accepted.path).changes[0].tables.VERIFY
+        }
+      }
       for (const applicability of generated.applicability) applicability.affectedIds = [`REQ-${definition.upper}-01`]
-      output = adaptElaborationNativeOutput(request, generated)
+      output = elaborationDraftFixtureOutput(request, f.input.source.commonDir, generated)
     }
     const dispatch = attempt.dispatchPlans.find(dispatch => dispatch.key === request.requestKey)!
     let worktree = seed.mode === 'edit' ? committedDraftFixture(f, request, output, join(f.parent, `mixed-stage-${handedOff ? 'handoff-' : ''}${calls.length}`)) : undefined
