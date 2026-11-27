@@ -52,7 +52,7 @@ Claude 采用显式500000字符和500000 MCP token上限，并核实际序列化
 
 reader 的非法范围仍在读取正文前即时拒绝。同一原生轮中，只有独立重算同一冻结上下文/参数确实在范围边界抛出精确错误、公开 `is_error:true` 回复逐字匹配该错误、专属 MCP 无外部派发且后续 API 已消费错误时，才将它保留为无读取覆盖的参数拒绝事件，允许随后自行纠正。原意/entry 身份错误、正文摘要损坏、权限错误及未知错误不享有此例外；不能把失败请求算作已读。读取指引要求逐项照用计划 endByte，65536 只是最大跨度，不是短 entry 的结束位置。
 
-托管 Codex v7 从 [[llm-manager-native-entry]] 取得归一化调用参数、回复全文和实际可见输出。宿主重算原冻结字节、逐块 receipt、完整覆盖与原始 items 摘要。归档复验用实际原件与此前可见性证明计算同一 v2 identity。
+托管 Codex v7 从 [[llm-manager-native-entry]] 取得归一化调用参数、回复全文和实际可见输出。宿主重算原冻结字节、逐块 receipt、完整覆盖与原始 items 摘要。归档复验用实际原件与此前可见性证明计算同一 v2 identity。v7 冷复验仅核原有逐块响应、原始历史和可见历史的内容寻址文件，缺项不得重建。
 
 [[structured-readonly-policy]] 的v2仍保留既有只读隔离，仅增加spex_read_frozen。源码树外0700目录存储内容寻址字节与清单；contextDigest绑定logicalentry、类型、SHA256、字节长度、required及业务requestKey/inputDigest。真实attempt/policy存在时额外严格绑定，普通结构化调用不编造身份。相同bytes去重，logical身份仍保留。
 

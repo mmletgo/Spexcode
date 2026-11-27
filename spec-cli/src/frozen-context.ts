@@ -254,14 +254,25 @@ export function readFrozenRange(ref: FrozenContextRef, value: unknown): { argume
   return serializeFrozenRange(entry, args, bytes)
 }
 
+type FrozenEvidenceAccess = 'record' | 'verify'
+
+function frozenEvidence(path: string, bytes: Buffer, digest: string, description: string, access: FrozenEvidenceAccess): void {
+  if (!existsSync(path)) {
+    if (access === 'verify') stale(`${description} is missing`)
+    writeFileSync(path, bytes, { mode: 0o400 })
+  } else if (sha(readFileSync(path)) !== digest) stale(`${description} was modified`)
+}
+
 /** 在发送RPC回复前持久保存真实返回字节；RPC id不作为可恢复的调用身份。 */
 export function persistFrozenRead(ref: FrozenContextRef, identity: { threadId: string; turnId: string; callId: string }, value: unknown): { receipt: FrozenReadReceipt; response: FrozenToolResponse } {
   const { arguments: args, response } = readFrozenRange(ref, value)
+  return { receipt: frozenReadReceipt(ref, identity, args, response, 'record'), response }
+}
+
+function frozenReadReceipt(ref: FrozenContextRef, identity: { threadId: string; turnId: string; callId: string }, args: FrozenReadArguments, response: FrozenToolResponse, access: FrozenEvidenceAccess): FrozenReadReceipt {
   const bytes = encode(response), responseDigest = sha(bytes)
-  const path = join(dirname(ref.manifestPath), 'responses', responseDigest)
-  if (!existsSync(path)) writeFileSync(path, bytes, { mode: 0o400 })
-  else if (sha(readFileSync(path)) !== responseDigest) stale('persisted frozen response bytes were modified')
-  return { receipt: { ...identity, arguments: args, responseDigest }, response }
+  frozenEvidence(join(dirname(ref.manifestPath), 'responses', responseDigest), bytes, responseDigest, 'persisted frozen response bytes', access)
+  return { ...identity, arguments: args, responseDigest }
 }
 
 /** 仅提取精确 turn 中真实配对的公开 exec/wait 回复；不把完整rollout等同于模型实际可见的history。 */
@@ -330,30 +341,28 @@ export function proveFrozenReads(ref: FrozenContextRef, identity: { threadId: st
 }
 
 /** 管理端证实原生调用形态后，宿主仍把每个回复逐字重算并绑定原始历史。 */
-export function proveManagedFrozenReads(ref: FrozenContextRef, identity: { threadId: string; turnId: string }, items: readonly Record<string, unknown>[], reads: readonly NormalizedFrozenRead[], visibility: FrozenVisibility, verifyVisibility: (outputs: FrozenVisibleOutput[], limit: number, responses: string[]) => void): FrozenReadProof {
+export function proveManagedFrozenReads(ref: FrozenContextRef, identity: { threadId: string; turnId: string }, items: readonly Record<string, unknown>[], reads: readonly NormalizedFrozenRead[], visibility: FrozenVisibility, verifyVisibility: (outputs: FrozenVisibleOutput[], limit: number, responses: string[]) => void, access: FrozenEvidenceAccess): FrozenReadProof {
   const responses: string[] = []
   const receipts = reads.map(read => {
     const { arguments: args, response } = readFrozenRange(ref, read.arguments)
     const text = response.contentItems[0].text
     if (read.text !== text) stale('native frozen read result bytes differ from the immutable entry')
     responses.push(text)
-    return persistFrozenRead(ref, { ...identity, callId: read.callId }, args).receipt
+    return frozenReadReceipt(ref, { ...identity, callId: read.callId }, args, response, access)
   })
   if (visibility.toolOutputTokenLimit !== frozenReadOutputTokenLimit(ref)) stale('frozen visible history limit differs from the immutable manifest')
-  return commitFrozenReadProof(ref, identity, items, receipts, visibility, () => verifyVisibility(visibility.outputs, visibility.toolOutputTokenLimit, responses))
+  return commitFrozenReadProof(ref, identity, items, receipts, visibility, () => verifyVisibility(visibility.outputs, visibility.toolOutputTokenLimit, responses), access)
 }
 
-function commitFrozenReadProof(ref: FrozenContextRef, identity: { threadId: string; turnId: string }, items: readonly unknown[], receipts: FrozenReadReceipt[], visibility?: FrozenVisibility, auditVisibility?: () => void): FrozenReadProof {
+function commitFrozenReadProof(ref: FrozenContextRef, identity: { threadId: string; turnId: string }, items: readonly unknown[], receipts: FrozenReadReceipt[], visibility?: FrozenVisibility, auditVisibility?: () => void, access: FrozenEvidenceAccess = 'record'): FrozenReadProof {
   const coveredEntryIds = frozenReadCoverage(ref, receipts)
   const history = encode(items), historyDigest = sha(history), historyPath = join(dirname(ref.manifestPath), 'histories', historyDigest)
-  if (!existsSync(historyPath)) writeFileSync(historyPath, history, { mode: 0o400 })
-  else if (sha(readFileSync(historyPath)) !== historyDigest) stale('persisted native frozen history was modified')
+  frozenEvidence(historyPath, history, historyDigest, 'persisted native frozen history', access)
   const proof = { contextDigest: ref.contextDigest, ...identity, receipts, coveredEntryIds, historyDigest }
   if (!visibility) return proof
   auditVisibility!()
   const visible = encode({ ...identity, ...visibility }), visibilityDigest = sha(visible), visiblePath = join(dirname(ref.manifestPath), 'histories', visibilityDigest)
-  if (!existsSync(visiblePath)) writeFileSync(visiblePath, visible, { mode: 0o400 })
-  else if (sha(readFileSync(visiblePath)) !== visibilityDigest) stale('persisted frozen visible history was modified')
+  frozenEvidence(visiblePath, visible, visibilityDigest, 'persisted frozen visible history', access)
   return { ...proof, version: 2, visibilityDigest, toolOutputTokenLimit: visibility.toolOutputTokenLimit }
 }
 

@@ -298,7 +298,7 @@ export async function prepareFrozenReaderRuntime(root: string, frozenContext: Fr
           }
           return { endpoint, runtime, beforeDigest: catalog.beforeDigest, changedFields: catalog.changedFields }
         } finally {
-          if (hosted) await stopUnboundManagedFrozenRealm(join(metadataRoot, 'control'), async () => hosted).catch((error: Error) => {
+          if (hosted) await stopUnboundManagedFrozenRealm(join(metadataRoot, 'control'), async () => hosted, join(metadataRoot, 'data/codex-home')).catch((error: Error) => {
             throw new StructuredSessionError('cancellation_pending', `Manager metadata realm needs exact recovery: ${error.message}`)
           })
         }

@@ -1,10 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { assertFrozenBinding, freezeContext, frozenContextPrompt, frozenReadOutputTokenLimit, frozenReadTool, frozenVisibleOutputs, persistFrozenRead, prepareFrozenPrompt, proveFrozenReads, readFrozenManifest, readFrozenRange, verifyFrozenReadProof, claudeMessageDigest, readClaudePublicHistory, readClaudeApiSourceMetadata, FROZEN_READ_MAX_BYTES, type FrozenContextInput, type FrozenNativeItem, type FrozenVisibleOutput } from './frozen-context.js'
+import { assertFrozenBinding, freezeContext, frozenContextPrompt, frozenReadOutputTokenLimit, frozenReadTool, frozenVisibleOutputs, persistFrozenRead, prepareFrozenPrompt, proveFrozenReads, proveManagedFrozenReads, readFrozenManifest, readFrozenRange, verifyFrozenReadProof, claudeMessageDigest, readClaudePublicHistory, readClaudeApiSourceMetadata, FROZEN_READ_MAX_BYTES, type FrozenContextInput, type FrozenNativeItem, type FrozenVisibleOutput } from './frozen-context.js'
 
 const binding = { requestKey: 'exact-request', inputDigest: 'exact-input' }
 function fixture(entries: FrozenContextInput[] = [{ id: 'a', label: 'frozen source', kind: 'utf8', bytes: Buffer.from('首abc尾') }]) {
@@ -79,6 +79,28 @@ test('model-visible frozen proof rejects inner-only coverage, cropped or wrapped
     restored.version = undefined
     assert.throws(() => verifyFrozenReadProof(f.ref, restored, identity, limit), /requires.*v2/)
   } finally { f.close() }
+})
+
+test('managed cold evidence requires the original response, native history and visibility files without recreating them', t => {
+  const f = fixture()
+  t.after(f.close)
+  const args = f.args(0, 9), item = f.item(0, 9, 'exact-read')
+  const text = readFrozenRange(f.ref, args).response.contentItems[0].text
+  const limit = frozenReadOutputTokenLimit(f.ref)
+  const visibility = { toolOutputTokenLimit: limit, outputs: [{ callId: 'outer', output: text, historyTokenLimit: Math.ceil(limit * 1.2) }] }
+  const derive = (mode: 'record' | 'verify') => proveManagedFrozenReads(f.ref, identity, [item],
+    [{ callId: 'exact-read', arguments: args, text }], visibility,
+    (outputs, _limit, responses) => assert.deepEqual(outputs.map(output => output.output), responses), mode)
+  const proof = derive('record')
+  assert.equal(proof.version, 2)
+  assert.deepEqual(derive('verify'), proof)
+  for (const [directory, digest] of [['responses', proof.receipts[0].responseDigest], ['histories', proof.historyDigest], ['histories', proof.visibilityDigest]]) {
+    const path = join(dirname(f.ref.manifestPath), directory, digest), original = readFileSync(path)
+    rmSync(path)
+    assert.throws(() => derive('verify'), { code: 'stale_result' })
+    assert.equal(existsSync(path), false)
+    writeFileSync(path, original, { mode: 0o400 })
+  }
 })
 
 test('visible exec and wait history pairs exact call outputs within explicit native turn boundaries', () => {

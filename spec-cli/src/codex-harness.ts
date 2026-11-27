@@ -2659,7 +2659,7 @@ export async function readManagedFrozenArchivedTurn(rec: HarnessLivenessRecord &
     const { reads } = adapter.codexDecodeFrozenItems(recovered.items, FROZEN_READ_TOOL)
     const identity = { threadId, turnId: options.turnId }
     const frozenReadProof = proveManagedFrozenReads(execution.frozenContext, identity, recovered.items, reads,
-      { toolOutputTokenLimit: execution.readerRuntime.toolOutputTokenLimit, outputs: recovered.outputs }, adapter.codexValidateFrozenVisibility)
+      { toolOutputTokenLimit: execution.readerRuntime.toolOutputTokenLimit, outputs: recovered.outputs }, adapter.codexValidateFrozenVisibility, 'verify')
     return { ...identity, text: recovered.finalText, frozenReadProof }
   } catch (error) {
     throw new StructuredSessionError('stale_result', `managed frozen native archive proof is unavailable: ${error instanceof Error ? error.message : String(error)}`)
@@ -2990,7 +2990,7 @@ async function managedCodexFrozenTurn(sock: string, cwd: string, prompt: string,
     if (!thread.path) throw new StructuredSessionTransportError('exact frozen rollout path is not materialized yet')
     const visibility = hosted.codexReadFrozenRollout({ path: thread.path, threadId, turnId: terminal.id, cwd })
     const frozenReadProof = proveManagedFrozenReads(ref, { threadId, turnId: terminal.id }, items, decoded.reads,
-      { toolOutputTokenLimit: runtime.toolOutputTokenLimit, outputs: visibility.outputs }, hosted.codexValidateFrozenVisibility)
+      { toolOutputTokenLimit: runtime.toolOutputTokenLimit, outputs: visibility.outputs }, hosted.codexValidateFrozenVisibility, execution.state === 'completed' ? 'verify' : 'record')
     return { threadId, turnId: terminal.id, text: decoded.finalText, frozenReadProof }
   } catch (error) { throw managedCodexPersistentError(error as Error) }
   finally {
