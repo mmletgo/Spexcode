@@ -84,6 +84,7 @@ export function hasSettledGrokP0ExitFailure(store: SyncStore, operation: SyncOpe
   try {
     const current = store.assertWriteFence({ operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, sourceFingerprint: operation.input.source.physicalFingerprint, leaseToken: attempt.leaseToken })
     if (!hasSettledNativeFailure(store, current.operation, current.attempt, failure, settlement)) return false
+    if (settlement === 'native-session') return true
     const budget = finiteSyncBudget(current.operation.budget)
     if (budget) {
       const usage = store.readBudgetUsage(operation.id)
