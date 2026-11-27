@@ -1083,12 +1083,10 @@ function projectClaudeFrozenSchemaFailure(history, source, original, options) {
         throw new ClaudeNativeProtocolError("stale_result", "Claude assistant has no preceding actual API request");
       }
       consumeClaudeRecoveryRequest(recoveries, row.requestRef);
+      const blocks = row.message?.content;
+      if (!Array.isArray(blocks)) throw new ClaudeNativeProtocolError("stale_result", "Claude schema failure assistant has no exact tool content");
       assistants.add(uuid);
-      for (
-        const block of
-        /** @type {HistoryBlock[]} */
-        row.message?.content
-      ) {
+      for (const block of blocks) {
         if (!block.id || calls.has(block.id)) throw new ClaudeNativeProtocolError("stale_result", "Claude schema failure reused a native tool call identity");
         calls.set(block.id, row);
       }
