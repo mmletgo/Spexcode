@@ -348,6 +348,8 @@ candidate-present控制桥回归先以真实Git/私有SQLite生成FLOW.req误引
 
 真实Git/私有SQLite的全局seal回归先复现局部父/叶accept后因父REQ缺FLOW而零调用重播；修后同operation下一attempt向父接口与真实承接叶发新生成及独审，严格seal通过。多轮未修好继续扣原calls/attempts/repairs，错误input/policy/readSet/plan/composed/legacy缺绑定、候选自摘要/局部并集串线、局部ref/独审摘要失配、缺owner及无法路由均有负例；无新派发的同候选同error明确typed停止。新的全局accept阻止早期seal反馈复活，后续只读owner修复保无关最新accept。受控runner仅证明通用编排机制，不冒称真实Native模型、Docker或交付通过。
 
+Code→Spec 稀疏返修回归在 P1 改写一行，最终独审只退回同 owner 另一行。原生作者提交仅含退回行的真实 Git 草稿，SQLite 重开后沿同一保留请求核验局部批准、严格封口及最终 Git 树。新版本继承第一行已审字节，缺席版本重放原字节。两者保留原 beforeDigest 及非 Spec 对象，受控夹具在 V3 前结算。
+
 全局seal返修回归同时保纯父和full owner的不同门：原父REQ缺FLOW允许父先真实生成/独审，程序以完整真实全图文件集校验，不因父局部files省略叶源码制造missing-governed-file；Agent父任务投影及冻结摘要不扩。纯父新增REQ造成的新完成性错误及真实不存在源码治理仍在新独审前拒绝。原错误未修的full叶只真实生成，不获得review或accept；最终仍计算strict全图失败seal，不取得全局批准；四attempt实际派发为4→3→1→1、总9调用，A2已审父原ref与完整provenance在A3/A4承接，叶每轮真实返修且原预算如实结算，不能强制重派合法父accept来凑旧调用数。
 
 父RULE真实缺代码来源回归先由叶FLOW.req/AC.covers完整承接父REQ/RULE，独立断言首轮strict aggregate只有父RULE的missing-source-file。下一父稿保持坏来源时，旧门先复现父独审accept及后代耗预算；收窄委派完成性后，每轮仅真实父生成，原完整来源finding在父新独审前阻断，不派无父写权的叶代修，四attempt总7调用如实结算；source/index/tests与零candidate/verification/journal保持。不能把最终strict失败替代父局部早门证明。

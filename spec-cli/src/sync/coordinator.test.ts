@@ -4768,6 +4768,127 @@ test('v2 code→Spec协调器保留分区证据并跳过代码生成，最终候
 })
 
 
+for (const legacy of [false, true]) test(`Code→Spec同owner稀疏返修按原版本冷重放 legacy=${legacy}`, async t => {
+  const f = await fixture(t, { maxAttempts: 2, maxCalls: 8, maxRepairs: 1, timeoutMs: 120_000 }, false, original, 'project', original, {
+    version: 'sync-coordinator-v2', direction: 'code_to_spec', agentWorkflow: 'native-worktree-v1', sourcePaths: ['src'], writePaths: ['.spec'],
+    commitTrigger: { before: null, paths: ['src/export.js'] },
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 },
+  }, undefined, 'code', 'claude:default', true)
+  const id = f.operation.id, commonDir = f.input.source.commonDir
+  const firstId = 'STEP-EXPORT-02', secondId = 'STEP-EXPORT-03'
+  const firstAction = '按当前执行编号开始任务', secondAction = '核对当前执行编号后处理回调'
+  const stopped = '候选通过独审并核对真实Git对象，停在V3前'
+  const read = <T>(ref: BlobRef): T => JSON.parse(readEvidence(commonDir, ref).toString('utf8')) as T
+  const stageEntries = (attempt: SyncAttempt) => attempt.checkpointRefs.map(ref => read<{ stage: string; resultRef: BlobRef }>(ref))
+  const actualSpec = (tree: string) => readObject(commonDir, readTree(commonDir, tree).find(entry => entry.path === contractPath)!.oid).toString('utf8')
+  let savedRequest: Omit<ElaborationSessionRequest, 'signal'> | undefined, replayed = false
+  let originTree: string | undefined
+  {
+    const checkpoint = f.store.checkpoint.bind(f.store)
+    f.store.checkpoint = (fence, ref) => {
+      const wrapper = read<{ stage: string; resultRef: BlobRef }>(ref)
+      if (savedRequest && !replayed && wrapper.stage.startsWith('partition:') && wrapper.stage.endsWith(':elaboration')) {
+        throw new SyncStoreError('SYNC_FENCE_EXPIRED', '测试中断于已 reserve 的返修请求')
+      }
+      if (!legacy || wrapper.stage !== 'repair-input') return checkpoint(fence, ref)
+      const result = checkpoint(fence, ref)
+      const binding = read<{ readonlyOwnerRepair?: { generationRef: BlobRef; owners: { key: string; resultRef: BlobRef; fromAttemptId: string }[] } }>(wrapper.resultRef).readonlyOwnerRepair
+      for (const { key, resultRef, fromAttemptId } of binding?.owners ?? []) {
+        const provenance = { fromAttemptId, resultRef, generationRef: binding!.generationRef }
+        const originalRef = writeEvidence(commonDir, provenance)
+        checkpoint(fence, { ...writeEvidence(commonDir, { ...wrapper, stage: `${key}:readonly-repair-provenance`, resultRef: originalRef }), artifacts: syncCheckpointArtifacts(provenance, originalRef) })
+      }
+      return result
+    }
+  }
+  f.options.runner = async request => {
+    const attempt = f.store.readAttempt(f.store.readOperation(id).currentAttemptId!), seed = request.worktree!
+    let output: unknown
+    if (request.purpose === 'code_behavior_analyze') {
+      const paths = nativeTask(request, commonDir).requiredChangedPaths as string[]
+      output = { changes: paths.map(path => ({ kind: 'allowed_change', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'], originalIntent: '保留导出原意', previousBehavior: '按当前执行编号开始任务', sourceBehavior: '当前执行编号的检查保持', deliveryBehavior: '共同语义不变', evidence: path, counterexample: '旧回调保原状态' })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    } else if (request.purpose === 'code_behavior_review') {
+      const { task, pendingAnalysis } = readCodeBehaviorContext(request, commonDir)
+      const analysis = pendingAnalysis as { analysisDigest: string; analysis: { changes: { id: string }[] } }
+      output = { inputDigest: request.inputDigest, analysisDigest: analysis.analysisDigest, verdict: 'accept', checkedPaths: task.requiredChangedPaths, checkedChangeIds: analysis.analysis.changes.map(change => change.id), findings: [] }
+    } else if (request.purpose === 'elaboration_generate') {
+      const generated = rows(original)
+      const node = generated.changes[0]
+      const selectedId = attempt.number === 1 ? firstId : secondId
+      const row = node.tables.STEP.find(item => item.id === selectedId)!
+      for (const kind of Object.keys(node.tables) as (keyof GeneratedTables)[]) node.tables[kind] = []
+      node.tables.STEP = [{ ...row, action: attempt.number === 1 ? firstAction : secondAction }]
+      node.prose = null
+      if (attempt.number === 2) {
+        const { signal: _signal, ...payload } = request
+        if (!savedRequest) {
+          savedRequest = payload
+          throw Object.assign(new Error('只在返修派发已保留时冷停'), { code: 'SYNC_FENCE_EXPIRED' })
+        }
+        assert.deepEqual(payload, savedRequest)
+        assert.ok(originTree)
+        assert.equal(actualSpec(seed.tree), actualSpec(originTree))
+        replayed = true
+      }
+      output = adaptElaborationNativeOutput(request, generated)
+    } else if (request.purpose === 'elaboration_review') {
+      output = { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+    } else {
+      assert.equal(request.purpose, 'code_review')
+      const identity = JSON.parse(request.prompt.split('候选绑定:\n')[1].split('\n')[0]) as { inputId: string; candidateDigest: string; requiredIds: string[] }
+      if (attempt.number === 1) originTree = seed.tree
+      output = { inputId: identity.inputId, candidateDigest: identity.candidateDigest, verdict: attempt.number === 1 ? 'repair' : 'accept', checkedIds: identity.requiredIds, findings: attempt.number === 1 ? [{ kind: 'repair', affectedIds: [secondId], ruleLocation: `contract:${contractPath}#${secondId}`, codeLocation: 'src/export.js#ExportService', evidence: '需明确回调前核对执行编号', counterexample: '过期回调必须保持原状态', message: '只澄清该步骤中的执行编号检查' }] : [] }
+    }
+    const dispatch = attempt.dispatchPlans.find(call => call.key === request.requestKey)!
+    const worktree = seed.mode === 'edit' ? committedDraftFixture(f, request, output, join(f.parent, `sparse-${dispatch.sessionCreateKey}`))
+      : { baseCommit: seed.baseCommit, baseTree: seed.tree, headCommit: seed.baseCommit, tree: seed.tree, worktreePath: join(f.parent, 'readonly-review') }
+    if (seed.mode === 'edit') output = { summary: '正常提交本轮单行草稿' }
+    return { sessionId: sessionIdForCreateKey(dispatch.sessionCreateKey), threadId: `sparse-${dispatch.sessionCreateKey}`, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)), worktree }
+  }
+  const initial = await runSyncOperation(f.store, id, f.options)
+  assert.equal(initial.status, 'recovery_required', JSON.stringify({ failure: initial.failure, attempts: f.store.listAttempts(id).map(item => ({ failure: item.failure, purposes: item.dispatchPlans.map(call => call.purpose) })) }))
+  const [first, interrupted] = f.store.listAttempts(id)
+  const provenance = stageEntries(interrupted).find(entry => entry.stage.endsWith(':readonly-repair-provenance'))!
+  assert.ok(provenance, JSON.stringify({ attempts: [first, interrupted].map(attempt => ({ failure: attempt.failure, dispatches: attempt.dispatchPlans.map(call => call.purpose), stages: stageEntries(attempt).filter(entry => entry.stage.endsWith(':elaboration') || entry.stage === 'generation').map(entry => {
+    const result = read<{ failure: unknown; validationFindings?: ContractFinding[]; rounds?: { findings: ContractFinding[] }[] }>(entry.resultRef)
+    return { stage: entry.stage, failure: result.failure, findings: result.validationFindings ?? result.rounds?.flatMap(round => round.findings).filter(finding => finding.severity === 'error') }
+  }) })) }))
+  assert.equal(read<{ renderBase?: string }>(provenance.resultRef).renderBase, legacy ? undefined : 'reviewed-owner-v1')
+  const reservation = interrupted.dispatchPlans.find(call => call.purpose === 'elaboration_generate')!
+  assert.equal(reservation.session, null)
+  f.closeForRestart()
+  const reopened = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => reopened.close())
+  f.store = new SyncStore(reopened, { readBlob: ref => readEvidence(commonDir, ref) }); f.useStore(f.store)
+  f.store.freezeCandidate = () => { throw Object.assign(new Error(stopped), { code: 'unsupported' }) }
+  const repaired = await runSyncOperation(f.store, id, f.options)
+  assert.equal(repaired.failure?.message, stopped, JSON.stringify(repaired.failure))
+  assert.equal(replayed, true)
+  assert.deepEqual(f.store.readAttempt(first.id), first)
+  const completed = f.store.readAttempt(interrupted.id), stages = stageEntries(completed)
+  assert.equal(completed.dispatchPlans.find(call => call.key === reservation.key)?.requestDigest, reservation.requestDigest)
+  assert.equal(stages.filter(entry => entry.stage === provenance.stage).length, 1)
+  assert.deepEqual(stages.find(entry => entry.stage === provenance.stage), provenance)
+  const prior = read<ElaborationResult>(stageEntries(first).find(entry => entry.stage === 'elaboration')!.resultRef)
+  const aggregate = read<ElaborationResult>(stages.find(entry => entry.stage === 'elaboration')!.resultRef)
+  assert.equal(aggregate.partitionSeal?.passed, true)
+  assert.equal(aggregate.changes[0].beforeDigest, contentHash(original))
+  assert.equal(aggregate.changes[0].beforeDigest, prior.changes[0].beforeDigest)
+  const candidate = read<import('./generation-types.js').GenerationResult>(stages.find(entry => entry.stage === 'generation')!.resultRef)
+  assert.equal(candidate.reviewPassed, true)
+  assert.equal(candidate.candidateValidated, true)
+  const firstRow = (source: string) => parseContract({ nodeId: 'export-contract', path: contractPath, source }).contract!.items.find(item => item.id === firstId)
+  const originalRow = firstRow(original), reviewedRow = firstRow(prior.changes[0].source)
+  assert.equal(originalRow?.kind, 'STEP'); assert.equal(reviewedRow?.kind, 'STEP')
+  assert.equal(reviewedRow.action, firstAction)
+  assert.equal(contentHash(prior.changes[0].source), contentHash(actualSpec(originTree!)))
+  const secondRow = parseContract({ nodeId: 'export-contract', path: contractPath, source: original }).contract!.items.find(item => item.id === secondId)
+  assert.equal(secondRow?.kind, 'STEP')
+  const expected = (legacy ? prior.changes[0].source.replace(firstAction, originalRow.action) : prior.changes[0].source).replace(secondRow.action, secondAction)
+  assert.equal(contentHash(actualSpec(candidate.candidate!.tree)), contentHash(expected))
+  assert.deepEqual(readTree(commonDir, candidate.candidate!.tree).filter(entry => !entry.path.startsWith('.spec/')),
+    readTree(commonDir, f.input.immutableTree).filter(entry => !entry.path.startsWith('.spec/')))
+})
+
 for (const [native, retry] of [[false, "none"], [true, "none"], [true, "valid"], [true, "foreign"], [true, "pending-review"]] as const) test(`协调器真实只分析P0分区进入P1全局封口 native=${native} retry=${retry}`, async t => {
   const testPath = 'tests/independent-smoke.test.mjs'
   const f = await fixture(t, { maxAttempts: 2, maxCalls: 16, maxRepairs: 1, timeoutMs: 120000 }, false, original, 'project', original,

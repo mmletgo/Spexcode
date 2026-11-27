@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+writer82 追加无 DDL 标记保护 [[sync-coordinator]] 的只读候选返修渲染版本，writer81 在写入或派发前拒绝新版。先停稳与结算旧 writer，保存一致 writer81 SQLite online backup 和配套 enabled、Git/CAS。回滚先停稳与结算新版，再恢复整套备份和原检查点。
+
 writer80 追加无 DDL 的标记，保护 [[sync-p1-review-challenge]] 暂停登记后等待真实独审的授权。writer79 在写入与派发之前拒绝新版。升级先停稳并结算旧 writer，保存一致 writer79 SQLite online backup 与配套 enabled、Git/CAS。回滚先停稳并结算新版，再恢复该套备份与原检查点。既有表和历史迁移逐字保留。
 
 writer79 追加无 DDL 的标记，保护 [[sync-coordinator]] 普通正式重试的 P1 局部独审来源。升级先停稳并结算旧 writer 的原生资源、租约和交付 journal，再保存与实际旧版本一致的 SQLite online backup 和配套 Git/CAS。回滚先停稳新 writer，再恢复整套原备份。
