@@ -23,8 +23,8 @@ import { bindElaborationTargets, elaborationPatchErrors, elaborationTargetBindin
 import { p1ReviewDiagnosticMarker } from './elaboration-review-challenge.js'
 import type { GeneratedElaboration, GeneratedTargetElaboration, GeneratedTables } from './elaboration-markdown.js'
 import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE, ELABORATION_GENERATION_GUIDANCE_V1, ELABORATION_GENERATION_GUIDANCE_V2, ELABORATION_GENERATION_GUIDANCE_V3, ELABORATION_GENERATION_GUIDANCE_V4 } from './elaboration-types.js'
-import type { Applicability, ElaborationCandidate, ElaborationChange, ElaborationGapReviewBasis, ElaborationGapReviewCheckpoint, ElaborationGapReviewEvidence, ElaborationInput, ElaborationPartitionSeal, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ElaborationResult, ElaborationReview, ElaborationRound, ElaborationRunner, ElaborationTrace, ElaborationTarget, ElaborationSessionRequest, ElaborationSessionResult, ReadonlySpecRepair } from './elaboration-types.js'
-export type { Applicability, AuthorizedContractChange, BlockedElaborationFlow, ElaborationCandidate, ElaborationChange, ElaborationFact, ElaborationInput, ElaborationPartitionSeal, ElaborationPhase, ElaborationPriorReference, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ElaborationResult, ElaborationReview, ElaborationReviewFinding, ElaborationRound, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ElaborationTarget, ElaborationTrace } from './elaboration-types.js'
+import type { Applicability, ElaborationCandidate, ElaborationChange, ElaborationCrossFreezeAuthor, ElaborationGapReviewBasis, ElaborationGapReviewCheckpoint, ElaborationGapReviewEvidence, ElaborationInput, ElaborationPartitionSeal, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ElaborationResult, ElaborationReview, ElaborationRound, ElaborationRunner, ElaborationTrace, ElaborationTarget, ElaborationSessionRequest, ElaborationSessionResult, ReadonlySpecRepair } from './elaboration-types.js'
+export type { Applicability, AuthorizedContractChange, BlockedElaborationFlow, ElaborationCandidate, ElaborationChange, ElaborationFact, ElaborationInput, ElaborationPartitionSeal, ElaborationPhase, ElaborationCrossFreezeAuthor, ElaborationCrossFreezeAuthorProof, ElaborationPriorReference, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ElaborationResult, ElaborationReview, ElaborationReviewFinding, ElaborationRound, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ElaborationTarget, ElaborationTrace } from './elaboration-types.js'
 
 const DEFAULT_CALL_TIMEOUT_MS = 900_000
 export const elaborationDigest = (source: string): string => createHash('sha256').update(source, 'utf8').digest('hex')
@@ -35,23 +35,51 @@ function elaborationDraftBinding(input: ElaborationInput, schema: Record<string,
   return { ownerDigest, sourceInputId: input.historyInput?.id ?? '', schemaDigest: digest(schema), path: `.spex-sync-drafts/${ownerDigest}.json` }
 }
 
+const usesDraftEditor = (input: ElaborationInput): boolean => !!(input.incrementalDraft && input.draftProtocol === 'elaboration-draft-v1'
+  && input.phase !== 'interface_seed' && !input.readonlySpecRepair && !input.gapRepair && !input.nodeChanges?.length
+  && !input.authorizedChanges?.some(change => change.id.startsWith('VERIFY-')))
+
+function readCrossFreezeElaborationDraft(input: ElaborationInput, binding: StageDraftBinding, author: ElaborationCrossFreezeAuthor): string {
+  const { draft, trace, receipt, proof } = author
+  if (!input.worktree || !input.historyInput || input.draftProtocol !== 'elaboration-draft-v1' || !input.partitionBinding
+    || proof.version !== 'elaboration-cross-freeze-author-v1' || proof.oldPartitionId !== input.partitionBinding.partitionId
+    || input.historyInput.id === proof.oldInputId || draft.sourceInputId !== proof.oldInputId
+    || trace.purpose !== 'elaboration_generate' || trace.inputDigest !== proof.oldAuthorRequestDigest
+    || !trace.sessionId || !trace.threadId || !trace.turnId || !author.independentOf.length
+    || outputErrors(receipt, DRAFT_RECEIPT_SCHEMA).length || trace.resultDigest !== digest(receipt)) {
+    throw Object.assign(new TypeError('跨冻结细化缺少同一已认证的旧作者及回执'), { code: 'elaboration_cross_freeze_binding' })
+  }
+  return readStageDraft(input.historyInput.source.commonDir, draft, { ...binding, sourceInputId: proof.oldInputId, schemaDigest: draft.schemaDigest })
+}
+
+const crossFreezeAuthorRoundMatches = (round: ElaborationRound, author: ElaborationCrossFreezeAuthor): boolean =>
+  !!round.draft && digest(round.crossFreezeAuthor) === digest(author.proof) && digest(round.draft) === digest(author.draft)
+  && !!round.traces[0] && digest(round.traces[0]) === digest(author.trace) && digest(round.output) === digest(author.receipt)
+
 /** 冷接受重核原件及本区范围；范围失效仅撤当前复用资格，不改变旧批准或草稿身份。 */
-export function verifyElaborationDraftCache(input: ElaborationInput, result: Pick<ElaborationResult, 'rounds' | 'inputDigest' | 'candidateDigest' | 'changes' | 'structurePassed' | 'reviewPassed'>, sourceTagged = false): boolean {
+export function verifyElaborationDraftCache(input: ElaborationInput, result: Pick<ElaborationResult, 'rounds' | 'inputDigest' | 'candidateDigest' | 'changes' | 'structurePassed' | 'reviewPassed'>, sourceTagged = false, crossFreezeAuthor?: ElaborationCrossFreezeAuthor, partitionSealFiles?: ReadonlyMap<string, string>): boolean {
   const preservesInheritedScope = (changes: readonly ElaborationChange[]): boolean => !input.inheritedAuthoredParentScope?.length || changes.every(change => {
     const target = input.targets.find(target => target.nodeId === change.nodeId && target.path === change.path)
     return !target || inheritedParentScopeFindings(input, target, parseContract(change).contract).length === 0
   })
-  if (!sourceTagged && !result.rounds.some(round => round.draft)) return preservesInheritedScope(result.changes) && result.changes.every(change => {
+  if (!sourceTagged && !result.rounds.some(round => round.draft || round.crossFreezeAuthor)) return preservesInheritedScope(result.changes) && result.changes.every(change => {
     const target = input.targets.find(target => target.nodeId === change.nodeId && target.path === change.path)
     return !target || targetHasCurrentChanges(input, target) || change.source === target.source || readonlyFactRepairPreservesTarget(target, change.source, readonlyFactRepairIds(input, target))
   })
   if (!input.worktree || !input.historyInput || result.inputDigest !== freezeElaborationInput(input).inputDigest) throw new Error('已审草稿缓存不匹配当前完整局部输入/source')
   const schema = elaborationSchema(input, { purpose: input.phase === 'interface_seed' ? 'interface_seed' : 'generation' }), binding = elaborationDraftBinding(input, schema)
   let lastSource: string | undefined
-  for (const round of result.rounds) if (round.draft) {
-    if (round.draft.sourceInputId !== input.historyInput.id) throw new Error('已审草稿缓存source input不匹配')
-    const source = readStageDraft(input.historyInput.source.commonDir, round.draft, binding)
-    if (round === result.rounds.at(-1)) lastSource = source
+  let crossFreezeSource: string | undefined
+  for (const round of result.rounds) {
+    if (round.crossFreezeAuthor) {
+      if (!crossFreezeAuthor || !crossFreezeAuthorRoundMatches(round, crossFreezeAuthor)) throw new Error('已审草稿缓存缺少精确跨冻结作者原件')
+      crossFreezeSource ??= readCrossFreezeElaborationDraft(input, binding, crossFreezeAuthor)
+      if (round === result.rounds.at(-1)) lastSource = crossFreezeSource
+    } else if (round.draft) {
+      if (round.draft.sourceInputId !== input.historyInput.id) throw new Error('已审草稿缓存source input不匹配')
+      const source = readStageDraft(input.historyInput.source.commonDir, round.draft, binding)
+      if (round === result.rounds.at(-1)) lastSource = source
+    }
   }
   if (!result.structurePassed || !result.reviewPassed) return true
   const round = result.rounds.at(-1)!
@@ -63,6 +91,20 @@ export function verifyElaborationDraftCache(input: ElaborationInput, result: Pic
   const candidate = renderElaboration(input, generated, result.inputDigest), candidateDigest = digest(candidate)
   if (digest(round.candidate) !== candidateDigest || round.candidateDigest !== candidateDigest || result.candidateDigest !== candidateDigest
     || digest(result.changes) !== digest(candidate.changes.map(change => ({ ...change, contentDigest: elaborationDigest(change.source) })))) throw new Error('已审候选并非当前Git草稿正文的真实渲染结果')
+  if (round.crossFreezeAuthor) {
+    const review = round.review, reviewer = round.traces[1]
+    const reviewOutput = review && Object.fromEntries(Object.entries(review).filter(([key]) => key !== 'inputDigest' && key !== 'candidateDigest'))
+    if (!review || round.traces.length !== 2 || reviewer?.purpose !== 'elaboration_review'
+      || !reviewer.sessionId || !reviewer.threadId || !reviewer.turnId || !reviewer.inputDigest || reviewer.resultDigest !== digest(round.reviewOutput)
+      || digest(round.reviewOutput) !== digest(reviewOutput) || outputErrors(reviewOutput, ELABORATION_REVIEW_SCHEMA).length
+      || [...result.rounds.slice(0, -1).flatMap(previous => previous.traces), round.traces[0], ...crossFreezeAuthor!.independentOf,
+        ...input.analysis?.analysis.traces ?? []].some(trace => trace.sessionId === reviewer.sessionId || trace.threadId === reviewer.threadId)
+      || usesDraftEditor(input) && !draftVerificationOwnershipMatches(input, output as GeneratedTargetElaboration)) return false
+    const checked = checkCandidate(input, candidate, result.inputDigest, { partitionSealFiles })
+    const coverage = projectContractCoverage(checked.graph)
+    if ([...checked.findings, ...reviewErrors(input, review, result.inputDigest, candidateDigest, checked.graph)]
+      .some(issue => repairRequired(issue, coverage))) return false
+  }
   return elaborationScopeErrors(input, generated).length === 0 && preservesInheritedScope(candidate.changes)
 }
 const specPath = (path: string): boolean => path.startsWith('.spec/') && path.endsWith('/spec.md') && posix.normalize(path) === path && !path.includes('\\')
@@ -871,7 +913,7 @@ function validateRepairSeed(input: ElaborationInput, seed: ElaborationRepairSeed
 }
 
 /** 从不可变业务输入连续生成、解析和独立审查；仅返回候选，不拥有交付树写权限。 */
-export async function elaborate(input: ElaborationInput, options: { runner?: ElaborationRunner; seed?: ElaborationRepairSeed; repairDiagnostics?: ElaborationRepairDiagnostics; draft?: ElaborationDraft; draftMaterial?: ElaborationDraftMaterial; partitionSealFiles?: ReadonlyMap<string, string>; loadDraft?(schemaDigest: string): ElaborationDraft | null; loadDraftMaterial?(schemaDigest: string, request?: StageDraftMaterialRequest): ElaborationDraftMaterial | null | Promise<ElaborationDraftMaterial | null> } = {}): Promise<ElaborationResult> {
+export async function elaborate(input: ElaborationInput, options: { runner?: ElaborationRunner; seed?: ElaborationRepairSeed; repairDiagnostics?: ElaborationRepairDiagnostics; draft?: ElaborationDraft; draftMaterial?: ElaborationDraftMaterial; partitionSealFiles?: ReadonlyMap<string, string>; loadDraft?(schemaDigest: string): ElaborationDraft | null; loadCrossFreezeAuthor?(inputDigest: string, binding: StageDraftBinding): ElaborationCrossFreezeAuthor | null | Promise<ElaborationCrossFreezeAuthor | null>; loadDraftMaterial?(schemaDigest: string, request?: StageDraftMaterialRequest): ElaborationDraftMaterial | null | Promise<ElaborationDraftMaterial | null> } = {}): Promise<ElaborationResult> {
   checkInput(input)
   // 在任何 await 前复制调用者输入，后续生成/评审不能混入继续编辑的字节。
   const frozenInput = freezeElaborationInput(input)
@@ -983,11 +1025,9 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
     : input.worktree ? { ...(sealRepairBrief || anchorRepairBrief || gapRepairBrief ? { repair: sealRepairBrief ?? anchorRepairBrief ?? gapRepairBrief } : {}), intent: input.intent, targets: input.targets.map((target, targetIndex) => ({ targetIndex, nodeId: target.nodeId, path: target.path, rawSource: target.rawSource })), relatedSpecs: input.context?.map(context => ({ nodeId: context.nodeId, path: context.path })), facts: input.facts, authorizedChanges: input.authorizedChanges, verifications: input.verifications, implementationWritePaths: input.implementationWritePaths, readonlyTestPaths: input.readonlyTestPaths, ...(input.recordUnverifiedCoverage ? { recordUnverifiedCoverage: true } : {}), retiredIds: input.retiredIds, nodeChanges: input.nodeChanges, mode: input.mode, analysis: input.analysis, partitionBinding: input.partitionBinding, inheritedParentObligations: input.inheritedAuthoredParentScope?.map(({ nodeId, path, affectedIds }) => ({ nodeId, path, affectedIds })), decisionAuthorities: input.decisionAuthorities, refinement: input.refinement } : { ...modelInput, targets: frozenInput.frozen.targets.map((target, targetIndex) => ({ targetIndex, ...target })) })
   const generationSchema = elaborationSchema(input, { purpose: input.phase === 'interface_seed' ? 'interface_seed' : 'generation' })
   const draftBinding = elaborationDraftBinding(input, generationSchema)
-  const editor = input.incrementalDraft && draftMode && input.phase !== 'interface_seed' && !input.readonlySpecRepair && !input.gapRepair
-    && !input.nodeChanges?.length && !input.authorizedChanges?.some(change => change.id.startsWith('VERIFY-'))
-    ? { path: stageDraftEditorPath(draftBinding), source: incrementalDraftPlan(input, inputDigest, draftBinding) }
-    : undefined
-  const challengedDraft = settledReview?.operatorDiagnostic ? runtimeDiagnostics?.round.draft : undefined
+  const editor = usesDraftEditor(input) ? { path: stageDraftEditorPath(draftBinding), source: incrementalDraftPlan(input, inputDigest, draftBinding) } : undefined
+  const savedCrossFreezeAuthor = settledReview ? runtimeDiagnostics?.round.crossFreezeAuthor : undefined
+  const challengedDraft = settledReview?.operatorDiagnostic && !savedCrossFreezeAuthor ? runtimeDiagnostics?.round.draft : undefined
   const sourceDraft = challengedDraft ?? options.loadDraft?.(draftBinding.schemaDigest) ?? options.draft
   let draft = sourceDraft ? structuredClone(sourceDraft) : undefined
   let draftSource = draftMode && draft ? readStageDraft(input.historyInput!.source.commonDir, draft, draftBinding) : undefined
@@ -1000,6 +1040,11 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
   const draftMaterial = draftSource === undefined ? selectedMaterial ?? options.draftMaterial : observedMaterial
   if (draftMaterial?.sourceKind === 'physical_draft' || draftMaterial?.sourceKind === 'stopped_git_draft') { draft = undefined; draftSource = draftMaterial.source }
   if (draftMode && draftSource === undefined) draftSource = draftMaterial?.source ?? (seed ? JSON.stringify(seed.output) : rejected?.text)
+  const ordinaryCrossFreezeAuthor = draftMode && input.partitionBinding && draftSource === undefined && !runtimeDiagnostics
+    && !seed && !input.readonlySpecRepair && !input.gapRepair && !input.refinement && !input.signal?.aborted
+  const crossFreezeAuthor = ordinaryCrossFreezeAuthor || savedCrossFreezeAuthor
+    ? structuredClone(await options.loadCrossFreezeAuthor?.(inputDigest, draftBinding) ?? undefined) : undefined
+  const crossFreezeSource = crossFreezeAuthor && readCrossFreezeElaborationDraft(input, draftBinding, crossFreezeAuthor)
   const targetBindings = elaborationTargetBindings(input), targetIndices = targetBindings.map(target => target.targetIndex)
   const requiredTargetIndices = targetBindings.filter(target => target.required).map(target => target.targetIndex)
   let verificationRepairErrors = [...draft?.errors ?? [], ...draftMaterial?.errors ?? [], ...runtimeDiagnostics?.round.findings ?? [], ...seed?.findings ?? []]
@@ -1055,10 +1100,15 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
       if (outputErrors(nativeReview, ELABORATION_REVIEW_SCHEMA).length || review.inputDigest !== inputDigest || review.candidateDigest !== source.candidateDigest) throw Object.assign(new TypeError('续审原review schema或候选绑定不匹配'), { code: 'review_retry_binding' })
       if (reviews.length !== 1 || source.traces.length !== 2 || reviews[0].resultDigest !== digest(source.reviewOutput) || digest(source.reviewOutput) !== digest(nativeReview)) throw Object.assign(new TypeError('续审原review追踪或输出摘要不匹配'), { code: 'review_retry_binding' })
     }
-    if (source.draft && source.draft.sourceInputId !== input.historyInput?.id) throw new TypeError('续审草稿必须绑定当前source input，不能沿用跨source材料的生成资格')
-    const output = source.draft ? JSON.parse(readStageDraft(input.historyInput!.source.commonDir, source.draft, draftBinding)) as unknown : source.output
+    if (source.crossFreezeAuthor && (!crossFreezeAuthor || !crossFreezeSource || !crossFreezeAuthorRoundMatches(source, crossFreezeAuthor))) {
+      throw Object.assign(new TypeError('跨冻结续审需要同一已认证原作者及影响复核'), { code: 'review_retry_binding' })
+    }
+    if (source.draft && !source.crossFreezeAuthor && source.draft.sourceInputId !== input.historyInput?.id) throw new TypeError('续审草稿必须绑定当前source input，不能沿用跨source材料的生成资格')
+    const output = source.draft ? JSON.parse(source.crossFreezeAuthor ? crossFreezeSource! : readStageDraft(input.historyInput!.source.commonDir, source.draft, draftBinding)) as unknown : source.output
     if (['elaboration-rows-v1', 'elaboration-rows-v2'].includes(String((output as { version?: unknown })?.version))) return null
-    if (outputErrors(output, generationSchema).length) throw Object.assign(new TypeError('续审原业务JSON不匹配当前精确schema'), { code: 'review_retry_binding' })
+    if (outputErrors(output, generationSchema).length || source.crossFreezeAuthor && editor && !draftVerificationOwnershipMatches(input, output as GeneratedTargetElaboration)) {
+      throw Object.assign(new TypeError('续审原业务JSON不匹配当前精确schema或验证归属'), { code: 'review_retry_binding' })
+    }
     const generated = bindElaborationTargets(input, output as GeneratedTargetElaboration)
     if (elaborationPatchErrors(input, generated).length || elaborationScopeErrors(input, generated).length) return null
     const candidate = renderElaboration(input, generated, inputDigest)
@@ -1077,6 +1127,22 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
   let retryReview = reviewRetry(runtimeDiagnostics?.round ?? (seed ? { index: 0, ...seed, reviewOutput: seed.review ? Object.fromEntries(Object.entries(seed.review).filter(([key]) => key !== 'inputDigest' && key !== 'candidateDigest')) : null } : undefined),
     !!settledReview && !settledParentBindingFailure && !operatorReview, settledParentBindingFailure, operatorReview)
   if (settledReview && !retryReview) throw Object.assign(new TypeError('独审失败的原Git候选未通过当前机械校验'), { code: 'review_retry_binding' })
+  if (!retryReview && crossFreezeAuthor && crossFreezeSource) {
+    const output: unknown = JSON.parse(crossFreezeSource)
+    if (!outputErrors(output, generationSchema).length && (!editor || draftVerificationOwnershipMatches(input, output as GeneratedTargetElaboration))) {
+      const generated = bindElaborationTargets(input, output as GeneratedTargetElaboration)
+      if (!elaborationPatchErrors(input, generated).length && !elaborationScopeErrors(input, generated).length) {
+        const candidate = renderElaboration(input, generated, inputDigest)
+        const checked = checkCandidate(input, candidate, inputDigest, { partitionSealFiles })
+        const coverage = projectContractCoverage(checked.graph)
+        if (!checked.findings.some(issue => repairRequired(issue, coverage))) {
+          retryReview = { output, errors: [], round: { index: 0, draft: crossFreezeAuthor.draft, crossFreezeAuthor: crossFreezeAuthor.proof,
+            output: crossFreezeAuthor.receipt, candidate, candidateDigest: digest(candidate), findings: [], reviewOutput: null, review: null, traces: [crossFreezeAuthor.trace] } }
+          draftSource = crossFreezeSource
+        }
+      }
+    }
+  }
   for (let index = 0; index <= (input.maxRepairs ?? 2); index++) {
     if (input.signal?.aborted) { result.status = 'cancelled'; result.failure = { code: 'cancelled', message: '细化已取消' }; return result }
     const round: ElaborationRound = { index, output: null, candidate: null, candidateDigest: null, findings: [], reviewOutput: null, review: null, traces: [] }
@@ -1170,6 +1236,10 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
       if (retryReview) {
         round.output = structuredClone(retryReview.round.output)
         round.draft = retryReview.round.draft ? structuredClone(retryReview.round.draft) : undefined
+        if (retryReview.round.crossFreezeAuthor) {
+          round.crossFreezeAuthor = structuredClone(retryReview.round.crossFreezeAuthor)
+          draftSource = crossFreezeSource
+        }
         round.traces = structuredClone(retryReview.round.traces.filter(trace => trace.purpose === 'elaboration_generate'))
         generatedOutput = retryReview.output
       } else {
@@ -1225,7 +1295,14 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
           round.reviewOutput = reviewOutput
           if (input.signal?.aborted) throw Object.assign(new Error('细化已取消，保留当前候选和评审产物'), { code: 'cancelled' })
           round.findings.push(...outputErrors(reviewOutput, ELABORATION_REVIEW_SCHEMA).map(message => finding(input, 'review_schema', message)))
-          if ([...result.rounds.slice(0, -1).flatMap(previous => previous.traces), ...runtimeDiagnostics?.round.traces ?? [], ...gapRepair ? [...gapRepair.reviewTraces, ...gapRepair.aggregate.rounds.flatMap(round => round.traces)] : [], ...(settledReview ? [runtimeDiagnostics!.failure] : [])].some(trace => trace.sessionId === round.traces[1].sessionId || trace.threadId === round.traces[1].threadId) || round.traces[0].sessionId === round.traces[1].sessionId || round.traces[0].threadId === round.traces[1].threadId || prior?.traces.some(trace => trace.sessionId === round.traces[1].sessionId || trace.threadId === round.traces[1].threadId) || input.analysis?.analysis.traces.some(trace => trace.sessionId === round.traces[1].sessionId || trace.threadId === round.traces[1].threadId)) round.findings.push(finding(input, 'review_not_independent', '新审查必须独立于构建、行为分析及种子既有会话/线程'))
+          const reviewer = round.traces[1]
+          const previousTraces = [round.traces[0], ...result.rounds.slice(0, -1).flatMap(previous => previous.traces),
+            ...runtimeDiagnostics?.round.traces ?? [], ...crossFreezeAuthor?.independentOf ?? [], ...prior?.traces ?? [],
+            ...input.analysis?.analysis.traces ?? [], ...(settledReview ? [runtimeDiagnostics!.failure] : []),
+            ...gapRepair ? [...gapRepair.reviewTraces, ...gapRepair.aggregate.rounds.flatMap(round => round.traces)] : []]
+          if (previousTraces.some(trace => trace.sessionId === reviewer.sessionId || trace.threadId === reviewer.threadId)) {
+            round.findings.push(finding(input, 'review_not_independent', '新审查必须独立于构建、行为分析及种子既有会话/线程'))
+          }
           if (!round.findings.some(issue => repairRequired(issue, result.coverage))) {
             round.review = { ...(reviewOutput as Omit<ElaborationReview, 'inputDigest' | 'candidateDigest'>), inputDigest, candidateDigest: round.candidateDigest }
             round.findings.push(...reviewErrors(input, round.review, inputDigest, round.candidateDigest, checked.graph))
@@ -1235,7 +1312,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
             || round.findings.some(issue => issue.code === 'review_implementation_binding'))) {
             result.status = 'failed'
             result.failure = { code: 'p1_challenge_review_invalid', message: '定向独审未产生有效结论，保留同一候选及原输出供续审' }
-            if (round.draft) round.draft.errors = structuredClone(round.findings)
+            if (round.draft && !round.crossFreezeAuthor) round.draft.errors = structuredClone(round.findings)
             return result
           }
           result.deferredImplementationFindings = round.findings.filter(implementationFinding)
@@ -1253,7 +1330,7 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
               result.readyFlowIds = []
               result.blockedFlows = []
             }
-            if (round.draft) round.draft.errors = structuredClone(round.findings)
+            if (round.draft && !round.crossFreezeAuthor) round.draft.errors = structuredClone(round.findings)
             return result
           }
         }
@@ -1262,13 +1339,20 @@ export async function elaborate(input: ElaborationInput, options: { runner?: Ela
       const failure = error as { code?: string; message?: string; sessionId?: string; threadId?: string; turnId?: string }
       if (settledReview && failure.code === 'review_retry_binding') throw error
       result.failure = { code: failure.code ?? 'failed', message: failure.message ?? String(error), ...(failure.sessionId ? { sessionId: failure.sessionId } : {}), ...(failure.threadId ? { threadId: failure.threadId } : {}), ...(failure.turnId ? { turnId: failure.turnId } : {}) }
-      if (round.draft) round.draft.errors = [...structuredClone(round.findings), { code: result.failure.code, message: result.failure.message }]
+      if (round.draft && !round.crossFreezeAuthor) round.draft.errors = [...structuredClone(round.findings), { code: result.failure.code, message: result.failure.message }]
       result.status = failure.code === 'unsupported' || failure.code === 'sync_llm_manager_no_review_successor' || failure.code === 'sync_llm_manager_review_route_unavailable' ? 'unsupported' : failure.code === 'cancelled' ? 'cancelled' : failure.code === 'budget_exhausted' ? 'exhausted' : 'failed'
       return result
     }
-    if (round.draft) round.draft.errors = structuredClone(round.findings)
+    if (round.draft && !round.crossFreezeAuthor) round.draft.errors = structuredClone(round.findings)
     verificationRepairErrors = round.findings
-    retryReview = reviewRetry(round, false, true)
+    const roundBlocking = round.crossFreezeAuthor && round.reviewOutput !== null
+      ? round.findings.filter(issue => repairRequired(issue, result.coverage)) : []
+    const invalidCrossFreezeReview = roundBlocking.length && (round.review && round.candidateDigest && result.graph
+      ? reviewErrors(input, round.review, inputDigest, round.candidateDigest, result.graph, true).length
+        || roundBlocking.every(issue => issue.code === 'review_implementation_binding')
+      : roundBlocking.every(issue => ['review_schema', 'review_not_independent'].includes(issue.code)))
+    retryReview = invalidCrossFreezeReview
+      ? { round, output: JSON.parse(crossFreezeSource!) as unknown, errors: roundBlocking } : reviewRetry(round, false, true)
     repairContext = draftMode ? `在已有草稿上核实并修正具体失败，不改变raw/政策/授权；分类诊断（deferredImplementation仅原写权允许才交P2实现；readonly_implementation_gap保持阻断）：\n${JSON.stringify(repairDiagnostics(round.findings, result.coverage))}\n独立评审：\n${JSON.stringify(round.review)}` : `先对照raw/facts/代码来源重新核实每条发现；误读实现细节的评审必须纠正，不能照单全收或制造GAP。修复确实存在的具体失败，不改变原始目标/范围/AC/验证政策。上轮候选:\n${JSON.stringify(round.output)}\n分类诊断（仅blocking需P1修复；${input.worktree ? 'deferredImplementation仅原写权允许才交P2实现；readonly_implementation_gap保持阻断' : 'deferredImplementation交P2实现'}，blockedByGap保留已有未知闭包，不造GAP或挪绑旧测试）:\n${JSON.stringify(repairDiagnostics(round.findings, result.coverage))}\n独立评审:\n${JSON.stringify(round.review)}`
   }
   result.failure = { code: 'repair_budget_exhausted', message: '细化仍存在具体失败，修复预算已耗尽' }

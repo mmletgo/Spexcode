@@ -76,6 +76,7 @@ export type SyncOperation = {
   retryOf?: string
   p0ReviewChallenges?: P0ReviewChallenge[]
   p1ReviewChallenges?: P1ReviewChallenge[]
+  crossFreezeBinding?: { ref: BlobRef; provenanceRef?: BlobRef }
   /** 模型交接只为原候选续审，保留原预算族和截止时间。 */
   inheritRetryBudget?: true
   /** 固定操作模型；缺省表示历史 gpt-6.1-sol，不随全局配置变化。 */

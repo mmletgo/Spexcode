@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+P0 定向复审的阶段门识别同 attempt 键所绑定的 P0 跨冻结影响复核。其他阶段的影响复核仍表示已进入 P1 或之后，适用原限制。
+
 协调器认证 P1 额度续审时，将已结算的失败和操作的 `repairing` 状态写在同一事务。服务重启可从最近检查点继续，并在下一尝试和新派发各自执行原预算及写权检查。
 
 正式额度重试的首次后继资格与派发及预算在同一事务检查。首次预留沿 Manager 已批准的后继，第二键起回到实时组内选路。请求重放保留原接入及派发绑定。
@@ -159,3 +161,5 @@ SyncCheckpointRef可含typed artifacts，单次checkpoint在事务外校验wrapp
 自动主来源采纳政策只接受可信应用传入的 `canonical-source-v1` 及 initial/spec/code/combined 来源，进入 operation、payload、规范语义及 alias 收据。相同手工请求改变政策拒绝，普通重复不能靠政策变化新建操作或预算；正式 retry 必须保留原值。重复自动观察沿原 operation 政策保存 alias 和精确 payload，不改旧记录、也不把新服务缺省补到旧字段缺席。
 
 `listAutomaticAdoptionCandidates(source, headCommit)` 在既有事务按完整来源和精确父 HEAD 查询有新政策的完整已结算操作。当前 attempt 和其 receipt journal 须已 settled，全部历史 journal 也须 settled，deliveredScope 完整且无 blockedScope/blockedReason。父取冻结 publicationBase.parentCommit，缺席时取原 deliveryPlan.baseCommit；receipt.actualCommit 已等于 HEAD 的无动作交付跳过。按 generation、ID 升序返回，不受展示列表上限影响，不以当前资源 heads 遮蔽仍待采纳的父交付。候选只提供查询，不授予写权；应用仍须在同来源发布锁内复核真实 Git、完整 receipt、授权及资源结算。
+
+跨冻结来源决定由当前首轮正式写入围栏一次保存。绑定同一 operation、input 和 policy，保留已选或无来源的原记录。并发提议返回已保存的决定；清理保活同时包含绑定和完整 Git 差量的 CAS。历史操作原样保留。

@@ -30,7 +30,7 @@ import { captureInputSnapshot, captureContinuityConfiguration, contentHash, iden
 import { readEnabledRecord, registeredSources as enabledSources, sourceRegistrationLock, sourceRegistrationPath, sourceRegistryDirectory, proveSourceContinuity, writeEnabledRecord, writeRegistrationEvidence, readRegistrationEvidence, type EnabledRecord, type PreviousDevices, type SourceContinuityProof } from './source-registration.js'
 import { inspectTrustedRuntime, inspectTrustedRuntimeAsync } from './trusted-hooks.js'
 import type { TrustedRuntimeEntry } from './trusted-hooks.js'
-import { coveredPath, readSyncSettings, SyncApplicationError } from './settings.js'
+import { coveredPath, frozenSyncCanonicalBranch, readSyncSettings, SyncApplicationError } from './settings.js'
 import { SyncInputObserver, type SyncObserverHealth } from './observer.js'
 import { SyncStore, SyncStoreError } from './store.js'
 import { isSyncBlobRef, readManagedQuotaRetryRoute, readSyncCheckpoints } from './checkpoint-evidence.js'
@@ -236,10 +236,8 @@ export class SyncApplication {
     return !!this.observerIdentity && this.store.readObserverHealth(this.physicalScope(this.observerIdentity.source))?.instanceId === this.observerIdentity.instanceId
   }
   private automaticSourceAdoption(snapshot: InputSnapshot): SyncOperation['automaticSourceAdoption'] {
-    const entry = readTree(snapshot.source.commonDir, snapshot.immutableTree).find(file => file.path === '.spec/spexcode.json')
-    const project = JSON.parse(readObject(snapshot.source.commonDir, entry!.oid).toString('utf8')) as { mainBranch?: unknown }
-    const branch = typeof project.mainBranch === 'string' ? project.mainBranch.trim() || 'main' : 'main'
-    return snapshot.source.branch === `refs/heads/${branch}` && branch === (readConfig(this.root).mainBranch?.trim() || 'main') ? 'canonical-source-v1' : undefined
+    const branch = frozenSyncCanonicalBranch(snapshot)
+    return snapshot.source.branch === branch && branch === `refs/heads/${readConfig(this.root).mainBranch?.trim() || 'main'}` ? 'canonical-source-v1' : undefined
   }
   private async adoptReadySource(snapshot: InputSnapshot): Promise<InputSnapshot> {
     if (this.stopped || !this.ownsObservation() || !this.automaticSourceAdoption(snapshot) || this.store.readPhysicalControl(this.physicalScope(snapshot.source)).control !== 'run') return snapshot

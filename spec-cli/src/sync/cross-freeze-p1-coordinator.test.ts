@@ -1,0 +1,551 @@
+import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join, sep } from 'node:path'
+import { test } from 'node:test'
+import { openProtocol } from '@spexcode/session-protocol'
+import { sessionRecordPath } from '@spexcode/spec-core'
+import { parseContract } from '@spexcode/spec-core/contracts'
+import { nativeWorktreePrompt, nativeWorktreeResult } from '../native-worktree-runtime.js'
+import { configuredSessionApplication } from '../session-application.js'
+import { readRecord, writeRecord } from '../session-record.js'
+import { StructuredSessionError, structuredExecutionPolicy } from '../session-structured-policy.js'
+import { sessionIdForCreateKey } from '../sessions.js'
+import { readCodeBehaviorContext } from './code-behavior.js'
+import { prepareP1ReviewChallenge, prepareSyncAdmission, runSyncOperation } from './coordinator.js'
+import type { SyncCoordinatorOptions, SyncCoordinatorPlan } from './coordinator-types.js'
+import { CROSS_FREEZE_IMPACT_PURPOSE, type CrossFreezeImpactEvidence, type CrossFreezeImpactOutput } from './cross-freeze-impact-review.js'
+import { p1ReviewDiagnosticEvidence, p1ReviewDiagnosticMarker } from './elaboration-review-challenge.js'
+import { ELABORATION_BOUNDARIES, type ElaborationResult } from './elaboration-types.js'
+import { outputErrors } from './elaboration-schema.js'
+import type { NativeRunCheckpoint } from './native-run.js'
+import { migrateSyncStore } from './migrations.js'
+import type { BlobRef, P1ReviewChallenge, SyncAttempt } from './operation-types.js'
+import { captureInputSnapshot, contentHash, readEvidence, writeEvidence } from './snapshot.js'
+import { readStageDraft } from './stage-worktree.js'
+import { SyncStore, SyncStoreError } from './store.js'
+
+const fixture = new URL('../../test/fixtures/spec-sync/export-repo/', import.meta.url)
+const targetPath = '.spec/export/export-contract/spec.md'
+const sourcePath = 'src/export.js'
+const stopBeforeGeneration = 'fixture reached P1 whole before generation'
+const oldReviewFailure = 'fixture old read-only reviewer stopped without a verdict'
+const digest = (value: unknown): string => contentHash(JSON.stringify(value))
+
+for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent', 'prior-attempt-reviewer-present', 'prior-attempt-reviewer-absent', 'operator-challenge', 'impact-format-retry', 'impact-format-formal-retry', 'impact-format-formal-retry-missing-native', 'impact-format-formal-retry-missing-sibling-reviewer'] as const) test('跨冻结正式 P1 复用与冷验 ' + mode, async t => {
+  const oldApproved = mode !== 'old-unapproved', operatorChallenge = mode === 'operator-challenge'
+  const formalImpactRetry = mode.startsWith('impact-format-formal-retry')
+  const retryImpactFormat = mode === 'impact-format-retry' || formalImpactRetry
+  const acrossAttempt = mode.startsWith('prior-attempt-') || operatorChallenge || mode === 'impact-format-retry'
+  const testHome = process.env.SPEXCODE_TEST_HOME
+  assert.ok(testHome, '正式会话夹具必须通过 test-home 隔离')
+  assert.equal(process.env.SPEX_SESSION_DATABASE_PATH, join(testHome, 'sessions.sqlite'))
+  const parent = realpathSync(mkdtempSync(join(tmpdir(), 'sync-cross-freeze-p1-coordinator-')))
+  const root = join(parent, 'source'), managedRoot = join(parent, 'managed'), artifactRoot = join(parent, 'artifacts')
+  cpSync(fixture, root, { recursive: true })
+  mkdirSync(managedRoot, { mode: 0o700 })
+  mkdirSync(artifactRoot, { mode: 0o700 })
+  const previousCwd = process.cwd(), dbPath = join(parent, 'sync.sqlite')
+  let protocol = openProtocol(dbPath)
+  t.after(() => {
+    process.chdir(previousCwd)
+    protocol.close()
+    rmSync(parent, { recursive: true, force: true })
+  })
+  await migrateSyncStore(protocol, { backupPath: join(parent, 'sync.backup') })
+  const git = (cwd: string, ...args: string[]) => execFileSync('git', [
+    '-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Native Fixture', '-c', 'user.email=fixture@example.invalid',
+    '-C', cwd, ...args,
+  ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trimEnd()
+  const commit = (message: string) => {
+    git(root, 'add', '-A')
+    git(root, 'commit', '-qm', message)
+    assert.equal(git(root, 'status', '--porcelain'), '')
+  }
+  const siblingTarget = '.spec/export/import-contract/spec.md', siblingSource = 'src/import.js'
+  if (retryImpactFormat) {
+    for (const [from, to] of [[targetPath, siblingTarget], [sourcePath, siblingSource], ['tests/export.test.mjs', 'tests/import.test.mjs']]) {
+      const source = readFileSync(join(root, from), 'utf8').replaceAll('export-job', 'import-job').replaceAll('EXPORT', 'IMPORT')
+        .replaceAll('export-contract', 'import-contract').replaceAll('ExportService', 'ImportService')
+        .replaceAll(sourcePath, siblingSource).replaceAll('tests/export.test.mjs', 'tests/import.test.mjs')
+      mkdirSync(dirname(join(root, to)), { recursive: true })
+      writeFileSync(join(root, to), source, 'utf8')
+    }
+  }
+  writeFileSync(join(root, '.spec/spexcode.json'), JSON.stringify({ mainBranch: 'main', harnesses: [] }), 'utf8')
+  git(root, 'init', '-q', '-b', 'main')
+  commit('old clean committed initial')
+  process.chdir(root)
+  const oldInput = await captureInputSnapshot(root, { committed: true }), commonDir = oldInput.source.commonDir
+  const read = <T>(ref: BlobRef): T => JSON.parse(readEvidence(commonDir, ref).toString('utf8'))
+  let store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) })
+  const reopen = () => {
+    protocol.close()
+    protocol = openProtocol(dbPath)
+    store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) })
+  }
+  const targets = [{ nodeId: 'export-contract', path: targetPath, decision: 'EXPORT-POLICY' },
+    ...(retryImpactFormat ? [{ nodeId: 'import-contract', path: siblingTarget, decision: 'IMPORT-POLICY' }] : [])]
+  const targetSources = new Map(targets.map(({ path }) => [path, readFileSync(join(root, path), 'utf8')]))
+  const environment = { version: 'trusted-test-v1', image: 'node@sha256:' + 'a'.repeat(64), platform: 'linux/arm64',
+    memoryBytes: 10_000_000, cpus: 1, pidsLimit: 64, scratchBytes: 1_000_000, logBytes: 100_000 } as const
+  const verifications = targets.flatMap(({ nodeId, path }) => parseContract({ nodeId, path, source: targetSources.get(path)! }).contract!.items
+    .filter(item => item.kind === 'VERIFY').map(({ id, command, cwd, timeoutMs }) => ({ definition: { id, command, cwd, timeoutMs }, environment })))
+  const sourcePaths = retryImpactFormat ? [sourcePath, siblingSource] : [sourcePath]
+  const plan: SyncCoordinatorPlan = {
+    version: 'sync-coordinator-v2', direction: 'code_to_spec', agentWorkflow: 'native-worktree-v1',
+    intentNodeId: 'export-contract', sourcePaths, readPaths: ['.spec', 'src', 'tests'], writePaths: ['.spec'],
+    targets: targets.map(({ nodeId, path }) => ({ nodeId, path })),
+    facts: targets.map(({ path, decision }) => ({ source: 'decision:' + decision, text: targetSources.get(path)! })), verifications, mandatoryTests: [],
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 32768, maxParallel: 1 },
+  }
+  const admit = async (input: typeof oldInput, name: string) => {
+    const executionScope = { paths: [...targets.map(target => target.path), ...sourcePaths], contractIds: [], flowIds: [] }
+    const selected = operatorChallenge || retryImpactFormat ? store.readBaselineSelection(input.source, executionScope.paths.map(path => ({ kind: 'path' as const, path }))) : undefined
+    if (selected && !('selection' in selected)) assert.fail(selected.failure.message)
+    const next = store.admitAndEnqueue(await prepareSyncAdmission(input, plan, {
+      ingressKey: name, rootCauseId: name, origin: 'initial', budget: { maxAttempts: acrossAttempt ? 2 : 1, maxCalls: 24, maxRepairs: retryImpactFormat ? 1 : 0, timeoutMs: 120_000 },
+      managedRoot, model: 'claude:default', ...(selected ? { baselineSelection: selected.selection, executionScope } : {}),
+    }))
+    assert.equal(next.retryOf, undefined)
+    return store.ackDispatch(input.source.repositoryId, next.dispatchMessageId)
+  }
+  const stages = (attempt: SyncAttempt) => new Map(attempt.checkpointRefs.flatMap(ref => {
+    const wrapper = read<{ stage?: string; resultRef: BlobRef }>(ref)
+    return wrapper.stage ? [[wrapper.stage, wrapper.resultRef] as const] : []
+  }))
+  const calls: { operationId: string; purpose: string; sessionId: string; owner?: string; impact?: 'p0' | 'p1' }[] = []
+  const impactDrafts = new Map<string, Buffer[]>()
+  let firstImpactOwner: string | undefined, failedImpactOwner: string | undefined
+  const old = await admit(oldInput, 'p1-old-initial')
+  let active = old
+  let challenge: P1ReviewChallenge | undefined
+  let rejectedReviewSeed: { baseCommit: string; tree: string; mode: 'read' } | undefined
+  const options: SyncCoordinatorOptions = {
+    plan, readCurrentPlan: () => plan, managedRoot, artifactRoot,
+    tools: { trustedRuntimeRoot: parent, toolEntry: join(parent, 'unused'), canonicalHooksDir: join(parent, 'unused-hooks') },
+    nativeExecution: { pollMs: 2, runtime: {
+      readRecord, cancel: async () => assert.fail('夹具禁止真实会话控制'),
+      run: async request => {
+        const seed = request.worktree!, createKey = request.sessionCreateKey!, sessionId = sessionIdForCreateKey(createKey)
+        const threadId = 'thread-' + sessionId, turnId = 'turn-' + sessionId, branch = 'codex/cross-freeze-p1-fixture-' + sessionId
+        const workspace = join(parent, sessionId)
+        git(root, 'worktree', 'add', '-q', '-b', branch, workspace, seed.baseCommit)
+        let output: unknown, draft: unknown, owner: string | undefined, impact: 'p0' | 'p1' | undefined
+        if (request.purpose === CROSS_FREEZE_IMPACT_PURPOSE) {
+          assert.equal(seed.mode, 'read')
+          const materialPath = git(workspace, 'ls-files', '.spex-sync-drafts').split('\n').find(path => path.endsWith('/review.json'))!
+          const material = JSON.parse(readFileSync(join(workspace, materialPath), 'utf8')) as CrossFreezeImpactEvidence['binding']
+            & { previous: { commit: string }; current: { commit: string }; changes: { path: string }[]; approvalFile: string | null }
+          impact = material.stage; owner = material.owner
+          assert.deepEqual(material.changes.map(change => change.path), sourcePaths)
+          assert.match(readFileSync(join(workspace, dirname(materialPath), 'changes.diff'), 'utf8'), /H2 comment only/)
+          assert.equal(material.previous.commit, oldInput.headCommit)
+          assert.equal(material.current.commit, active.input.headCommit)
+          if (impact === 'p1') {
+            const originalRows = JSON.parse(readFileSync(join(workspace, dirname(materialPath), 'candidate.json'), 'utf8')) as { version: string }
+            assert.equal(originalRows.version, 'elaboration-target-rows-v3')
+            assert.equal(material.approvalFile !== null, oldApproved)
+            if (material.approvalFile) {
+              const originalApproval = JSON.parse(readFileSync(join(workspace, dirname(materialPath), material.approvalFile), 'utf8')) as ElaborationResult
+              assert.equal(originalApproval.structurePassed, true)
+              assert.equal(originalApproval.reviewPassed, true)
+            }
+          }
+          const verdict = { inputDigest: request.inputDigest, verdict: 'reuse',
+            history: { previousCommit: material.previous.commit, currentCommit: material.current.commit, evidence: sourcePath, reason: 'Business behavior is unchanged.' },
+            paths: material.changes.map(({ path }) => ({ path, verdict: 'reuse', evidence: path, reason: 'Only a source comment changed.' })),
+          } satisfies CrossFreezeImpactOutput
+          if (retryImpactFormat && impact === 'p1') {
+            const bytes = readFileSync(join(workspace, dirname(materialPath), 'candidate.json'))
+            const drafts = impactDrafts.get(owner) ?? []
+            drafts.push(bytes)
+            impactDrafts.set(owner, drafts)
+            firstImpactOwner ??= owner
+            if (!failedImpactOwner && firstImpactOwner !== owner) {
+              failedImpactOwner = owner
+              verdict.paths[1] = { ...verdict.paths[0] }
+              assert.deepEqual(outputErrors(verdict, request.schema), [], '业务路径重复但 JSON 结构仍满足正式 Native schema')
+            }
+          }
+          output = verdict
+        } else if (request.purpose.startsWith('code_behavior_')) {
+          const { task, pendingAnalysis } = readCodeBehaviorContext(request, commonDir)
+          const paths = task.requiredChangedPaths as string[]
+          owner = (task.partition as { id: string }).id
+          const rule = paths.includes(siblingSource) ? 'RULE-IMPORT-05' : 'RULE-EXPORT-05'
+          draft = pendingAnalysis ? {
+            inputDigest: request.inputDigest, analysisDigest: pendingAnalysis.analysisDigest, verdict: 'accept',
+            checkedPaths: paths, checkedChangeIds: pendingAnalysis.analysis.changes.map(change => change.id), findings: [],
+          } : { changes: paths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: [rule], ruleIds: [rule],
+            originalIntent: '保留原业务', previousBehavior: '保留权限、异步状态和交付行为', sourceBehavior: '现有重构不变更原业务语义',
+            deliveryBehavior: '保留原交付行为', evidence: path, counterexample: '保留原任务权限和既有状态事件' })),
+          facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+        } else if (request.purpose === 'elaboration_generate') {
+          draft = { version: 'elaboration-target-rows-v3', changes: [],
+            applicability: ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: false, basis: '现有冻结契约逐值保留', affectedIds: [] })) }
+        } else {
+          assert.equal(request.purpose, 'elaboration_review')
+          assert.equal(seed.mode, 'read')
+          const task = JSON.parse(request.prompt.split('\n任务:\n')[1].split('\n')[0]) as { targets: { path: string }[]; partitionBinding: { partitionId: string } }
+          owner = task.partitionBinding.partitionId
+          const reviewedPath = task.targets[0].path
+          assert.equal(readFileSync(join(workspace, reviewedPath), 'utf8'), targetSources.get(reviewedPath))
+          if (active.id !== old.id) assert.match(readFileSync(join(workspace, sourcePath), 'utf8'), /H2 comment only/)
+          if (operatorChallenge && active.id !== old.id && !challenge) {
+            rejectedReviewSeed = { ...seed, mode: 'read' }
+            output = { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{
+              code: 'verify-test-reference', kind: 'repair', affectedIds: ['REQ-EXPORT-01'], message: '复查验收的测试引用',
+              evidence: 'tests/export.test.mjs 与候选契约', decision: '核对原绑定',
+            }] }
+          } else {
+            if (challenge) {
+              assert.match(request.prompt, new RegExp(p1ReviewDiagnosticMarker(challenge.diagnosticRef)))
+              assert.deepEqual(seed, rejectedReviewSeed, '正式复审必须读取原候选的同一 Git 树')
+            }
+            output = { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+          }
+        }
+        if (draft) {
+          assert.equal(seed.mode, 'edit')
+          const draftPath = /草稿文件=([^\s；]+)/.exec(request.prompt)?.[1]
+          assert.ok(draftPath)
+          mkdirSync(dirname(join(workspace, draftPath)), { recursive: true })
+          writeFileSync(join(workspace, draftPath), JSON.stringify(draft, null, 2) + '\n', 'utf8')
+          git(workspace, 'add', draftPath)
+          git(workspace, 'commit', '-qm', 'Native P1 fixture draft')
+          output = { summary: 'Native fixture committed its Git draft' }
+        }
+        calls.push({ operationId: active.id, purpose: request.purpose, sessionId, ...(impact ? { impact } : {}), ...(owner ? { owner } : {}) })
+        const worktree = nativeWorktreeResult(workspace, seed), resultDigest = digest(output)
+        const execution = structuredExecutionPolicy(request)
+        const fails = active.id === old.id && !oldApproved && request.purpose === 'elaboration_review'
+        configuredSessionApplication().createSession({ sessionId, status: 'awaiting' })
+        writeRecord({ session: sessionId, governed: true, worktreePath: workspace, base: seed.baseCommit, forkCommit: seed.baseCommit, branch,
+          title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null,
+          createdAt: Date.now(), harness: 'claude', harnessSessionId: threadId, runtimeStartToken: null, status: 'awaiting',
+          stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: null, launchOwner: null,
+          createRequestId: contentHash(createKey), createPayloadHash: digest({ prompt: nativeWorktreePrompt(request.prompt, seed), parent: null, launcher: null, base: seed.baseCommit, structuredExecution: execution }),
+          structuredExecution: fails ? { ...execution, state: 'failed', threadId, turnId,
+            errorCode: 'native_rpc_timeout', error: oldReviewFailure,
+            cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: true, acknowledged: false, nativeStatus: 'stopped' },
+          } : { ...execution, state: 'completed', threadId, turnId, output, resultDigest, resultWorktree: worktree },
+        })
+        if (fails) throw new StructuredSessionError('native_rpc_timeout', oldReviewFailure, { sessionId, threadId, turnId })
+        return { sessionId, threadId, turnId, output, resultDigest, worktree }
+      },
+    } },
+  }
+  let interruptAfter: string | undefined
+  let omittedBudgetHint: { minimumCalls: number; remainingCalls: number } | undefined
+  const runUntilP1 = async () => {
+    const checkpoint = store.checkpoint.bind(store)
+    store.checkpoint = (fence, ref) => {
+      const { stage, resultRef } = read<{ stage?: string; resultRef: BlobRef }>(ref)
+      if (retryImpactFormat && active.id !== old.id && stage === 'partition-budget' && store.readAttempt(fence.attemptId).number === 2) {
+        store.assertWriteFence(fence)
+        omittedBudgetHint = read(resultRef)
+        return store.readAttempt(fence.attemptId)
+      }
+      const saved = checkpoint(fence, ref)
+      if (stage && stage === interruptAfter) throw new SyncStoreError('SYNC_FENCE_EXPIRED', 'fixture exits after saving ' + stage)
+      if (stage === 'elaboration') throw new StructuredSessionError('unsupported', stopBeforeGeneration)
+      return saved
+    }
+    try { return await runSyncOperation(store, active.id, options) }
+    finally { store.checkpoint = checkpoint }
+  }
+  const first = await runUntilP1()
+  assert.equal(first.failure?.message, stopBeforeGeneration, JSON.stringify({ failure: first.failure, calls, stages: [...stages(store.listAttempts(old.id)[0]).keys()] }))
+  assert.equal(first.operation.phase, 'failed')
+  assert.deepEqual(calls.map(call => call.purpose), [
+    ...targets.flatMap(() => ['code_behavior_analyze', 'code_behavior_review']),
+    ...targets.flatMap(() => ['elaboration_generate', 'elaboration_review']),
+  ])
+  const [oldAttempt] = store.listAttempts(old.id), oldStages = stages(oldAttempt)
+  const oldStage = [...oldStages].find(([key]) => /^partition:[^:]+:elaboration$/.test(key))
+  assert.ok(oldStage)
+  const [localKey, oldRef] = oldStage, original = read<ElaborationResult>(oldRef), oldRound = original.rounds.at(-1)!
+  assert.equal(original.structurePassed, true)
+  assert.equal(original.reviewPassed, oldApproved)
+  assert.ok(oldRound.draft)
+  assert.ok(oldApproved ? oldRound.review?.verdict === 'accept' : oldRound.review === null && oldRound.reviewOutput === null)
+  assert.ok(store.listResources(oldAttempt.id).every(resource => resource.phase === 'removed'))
+  assert.equal(store.readRetryEligibility(old.id).eligible, true)
+  const oldDraft = readStageDraft(commonDir, oldRound.draft, oldRound.draft)
+
+  for (const path of sourcePaths) writeFileSync(join(root, path), readFileSync(join(root, path), 'utf8') + '\n// H2 comment only\n', 'utf8')
+  commit('new clean committed initial')
+  const currentInput = await captureInputSnapshot(root, { committed: true })
+  reopen()
+  active = await admit(currentInput, 'p1-current-initial')
+  const oldBefore = { operation: store.readOperation(old.id), attempts: store.listAttempts(old.id), resources: store.listResources(oldAttempt.id) }
+  assert.equal(oldBefore.operation.phase, 'superseded')
+  const currentCalls = () => calls.filter(call => call.operationId === active.id)
+  if (retryImpactFormat) {
+    let result = await runUntilP1()
+    const originalCurrent = active
+    if (formalImpactRetry) {
+      assert.equal(result.operation.phase, 'budget_exhausted', JSON.stringify(result.failure))
+      assert.equal(store.readRetryEligibility(active.id).eligible, true)
+      assert.equal(store.listAttempts(active.id).length, 1)
+      reopen()
+      const retry = store.admitAndEnqueue(await prepareSyncAdmission(currentInput, plan, {
+        ingressKey: 'p1-formal-impact-retry', rootCauseId: 'p1-formal-impact-retry', retryOf: originalCurrent.id,
+        origin: originalCurrent.origin, budget: originalCurrent.budget, managedRoot, model: 'claude:default',
+        baselineSelection: store.readBusinessBaselineSelection(originalCurrent.id), executionScope: originalCurrent.scope, impactDigest: originalCurrent.impactDigest,
+      }))
+      active = store.ackDispatch(currentInput.source.repositoryId, retry.dispatchMessageId)
+      assert.equal(active.input.id, originalCurrent.input.id)
+      assert.equal(active.crossFreezeBinding, undefined)
+      const missingSiblingReviewer = mode === 'impact-format-formal-retry-missing-sibling-reviewer'
+      if (mode === 'impact-format-formal-retry-missing-native' || missingSiblingReviewer) {
+        const failed = calls.find(call => call.operationId === originalCurrent.id && call.owner === failedImpactOwner && call.impact === 'p1')!
+        const siblingKey = 'partition:' + firstImpactOwner + ':elaboration'
+        const siblingRef = stages(store.listAttempts(originalCurrent.id)[0]).get(siblingKey)!
+        const sibling = read<ElaborationResult>(siblingRef)
+        const siblingReviewer = sibling.rounds.at(-1)?.traces.find(trace => trace.purpose === 'elaboration_review')
+        assert.ok(sibling.structurePassed && sibling.reviewPassed && siblingReviewer)
+        const hiddenId = missingSiblingReviewer ? siblingReviewer.sessionId : failed.sessionId
+        const path = realpathSync(sessionRecordPath(hiddenId)), backup = join(parent, 'missing-review.runtime.json')
+        assert.ok(path.startsWith(realpathSync(testHome) + sep))
+        assert.equal(readRecord(hiddenId)?.structuredExecution?.state, 'completed')
+        const original = readFileSync(path)
+        const savedSiblingBytes = readEvidence(commonDir, siblingRef)
+        renameSync(path, backup)
+        try {
+          assert.equal(readRecord(hiddenId)?.structuredExecution, undefined)
+          if (missingSiblingReviewer) assert.equal(readRecord(failed.sessionId)?.structuredExecution?.state, 'completed')
+          const blocked = await runUntilP1()
+          assert.equal(blocked.failure?.code, missingSiblingReviewer ? 'cross_freeze_p1_approval_binding' : 'cross_freeze_native_binding',
+            JSON.stringify({ failure: blocked.failure, calls: currentCalls().map(call => call.purpose) }))
+          assert.deepEqual(currentCalls(), [])
+          const activeStages = stages(store.listAttempts(active.id)[0])
+          assert.equal(activeStages.has('elaboration'), false)
+          if (missingSiblingReviewer) {
+            assert.deepEqual(blocked.failure?.evidenceRefs, [siblingRef])
+            assert.equal(activeStages.has(siblingKey), false)
+            assert.equal(activeStages.has(siblingKey + ':provenance'), false)
+          }
+          assert.deepEqual(readEvidence(commonDir, siblingRef), savedSiblingBytes)
+        } finally {
+          renameSync(backup, path)
+          assert.deepEqual(readFileSync(path), original)
+        }
+        return
+      }
+      assert.ok(failedImpactOwner)
+      interruptAfter = 'partition:' + failedImpactOwner + ':elaboration'
+      const interruptedFormalRetry = await runUntilP1()
+      assert.equal(interruptedFormalRetry.status, 'recovery_required', JSON.stringify(interruptedFormalRetry.failure))
+      const approvedBeforeRestart = stages(store.listAttempts(active.id)[0]).get(interruptAfter)
+      assert.ok(approvedBeforeRestart)
+      const beforeRestart = currentCalls().map(call => call.sessionId)
+      reopen()
+      const resultKey = interruptAfter
+      interruptAfter = undefined
+      result = await runUntilP1()
+      assert.deepEqual(currentCalls().map(call => call.sessionId), beforeRestart, '正式重试已经产生的当前审核冷验不重派')
+      assert.deepEqual(stages(store.listAttempts(active.id)[0]).get(resultKey), approvedBeforeRestart)
+    }
+    const allCalls = calls.filter(call => [originalCurrent.id, active.id].includes(call.operationId))
+    assert.equal(result.failure?.message, stopBeforeGeneration, JSON.stringify({ failure: result.failure, calls: currentCalls() }))
+    assert.equal(result.operation.id, active.id)
+    assert.equal(result.operation.retryOf, formalImpactRetry ? originalCurrent.id : undefined)
+    assert.ok(firstImpactOwner && failedImpactOwner && firstImpactOwner !== failedImpactOwner)
+    const attempts = formalImpactRetry ? [...store.listAttempts(originalCurrent.id), ...store.listAttempts(active.id)] : store.listAttempts(active.id)
+    assert.equal(attempts.length, 2)
+    const [bad, recovered] = attempts, badStages = stages(bad), recoveredStages = stages(recovered)
+    assert.equal(bad.failure?.code, 'cross_freeze_impact_review_retry')
+    const failedKey = 'partition:' + failedImpactOwner + ':elaboration'
+    const siblingKey = 'partition:' + firstImpactOwner + ':elaboration'
+    const originalRef = oldStages.get(failedKey)!, originalP1 = read<ElaborationResult>(originalRef), originalDraft = originalP1.rounds.at(-1)!
+    assert.equal(originalP1.structurePassed && originalP1.reviewPassed, true)
+    assert.ok(originalDraft.draft)
+    const drafts = impactDrafts.get(failedImpactOwner)!
+    assert.equal(drafts.length, 2)
+    for (const bytes of drafts) assert.equal(bytes.toString(), readStageDraft(commonDir, originalDraft.draft, originalDraft.draft))
+    assert.equal(badStages.has(failedKey), false)
+    assert.ok(badStages.get(siblingKey))
+    assert.deepEqual(recoveredStages.get(siblingKey), badStages.get(siblingKey), '已审兄弟 P1 继续使用同一结果引用')
+    assert.deepEqual(recovered.dispatchPlans.map(dispatch => dispatch.purpose), [CROSS_FREEZE_IMPACT_PURPOSE, 'elaboration_review'])
+    if (!formalImpactRetry) {
+      assert.ok(omittedBudgetHint && omittedBudgetHint.remainingCalls >= omittedBudgetHint.minimumCalls)
+      assert.equal(recoveredStages.has('partition-budget'), false, '已开始的影响复核续审不靠首次复用预算提示')
+    } else assert.equal(store.readBudgetUsage(originalCurrent.id).callsUsed, 7)
+    assert.equal(store.readBudgetUsage(active.id).callsUsed, formalImpactRetry ? 2 : 9, '夹具保留正式预算计账')
+    assert.equal(allCalls.some(call => ['code_behavior_analyze', 'elaboration_generate'].includes(call.purpose)), false)
+    assert.deepEqual(allCalls.filter(call => call.owner === failedImpactOwner).map(call => call.impact ?? call.purpose),
+      ['p0', 'code_behavior_review', 'p1', 'p1', 'elaboration_review'])
+    assert.deepEqual(allCalls.filter(call => call.owner === firstImpactOwner).map(call => call.impact ?? call.purpose),
+      ['p0', 'code_behavior_review', 'p1', 'elaboration_review'])
+    assert.ok(attempts.every(attempt => store.listResources(attempt.id).every(resource => resource.phase === 'removed')))
+    const failedCall = allCalls.find(call => call.owner === failedImpactOwner && call.impact === 'p1')!
+    const failedDispatch = bad.dispatchPlans.find(dispatch => dispatch.session?.sessionId === failedCall.sessionId)!
+    const failedResource = store.findResource(bad.id, failedDispatch.key)!
+    const failedNative = read<NativeRunCheckpoint>(failedResource.checkpointRef)
+    const invalid = failedNative.result!.output as CrossFreezeImpactOutput
+    assert.deepEqual(invalid.paths.map(({ path }) => path), [sourcePath, sourcePath])
+    assert.equal(bad.failure.evidenceRefs[0].sha256, failedResource.checkpointRef.sha256)
+    const final = read<ElaborationResult>(recoveredStages.get(failedKey)!), finalRound = final.rounds.at(-1)!
+    assert.equal(final.reviewPassed, true)
+    assert.deepEqual(read(badStages.get(failedKey + ':cross-freeze-impact-retry')!), {
+      version: 'cross-freeze-impact-retry-v1', sourceRef: store.readOperation(originalCurrent.id).crossFreezeBinding?.ref,
+      authorRef: originalRef, currentInputDigest: final.inputDigest, checkpointRef: failedResource.checkpointRef,
+    })
+    assert.deepEqual(finalRound.crossFreezeAuthor?.oldResultRef, originalRef)
+    assert.deepEqual(finalRound.draft, originalDraft.draft)
+    assert.deepEqual(finalRound.traces[0], originalDraft.traces[0])
+    assert.deepEqual({ operation: store.readOperation(old.id), attempts: store.listAttempts(old.id), resources: store.listResources(oldAttempt.id) }, oldBefore)
+    assert.equal(git(root, 'status', '--porcelain'), '')
+    return
+  }
+  const impactKey = localKey + ':cross-freeze-impact'
+  interruptAfter = impactKey
+  const interrupted = await runUntilP1()
+  assert.equal(interrupted.status, 'recovery_required', JSON.stringify(interrupted.failure))
+  assert.equal(interrupted.failure?.code, 'SYNC_FENCE_EXPIRED')
+  assert.deepEqual(currentCalls().map(call => call.impact ?? call.purpose), ['p0', 'code_behavior_review', 'p1'])
+  assert.ok(stages(store.listAttempts(active.id)[0]).has(impactKey))
+  interruptAfter = localKey
+  reopen()
+
+  const approvalInterrupted = await runUntilP1()
+  assert.equal(approvalInterrupted.status, 'recovery_required', JSON.stringify(approvalInterrupted.failure))
+  assert.equal(approvalInterrupted.failure?.code, 'SYNC_FENCE_EXPIRED')
+  assert.deepEqual(currentCalls().map(call => call.impact ?? call.purpose), ['p0', 'code_behavior_review', 'p1', 'elaboration_review'])
+  const approvedRef = stages(store.listAttempts(active.id)[0]).get(localKey)
+  assert.ok(approvedRef)
+  interruptAfter = undefined
+  if (acrossAttempt) assert.equal(store.requestControl(active.id, 'pause').phase, 'paused')
+  if (acrossAttempt && !operatorChallenge) assert.equal(store.requestControl(active.id, 'run').phase, 'queued')
+  reopen()
+
+  const current = read<ElaborationResult>(approvedRef)
+  const round = current.rounds.at(-1)!
+  if (operatorChallenge) {
+    const paused = store.readOperation(active.id)
+    assert.equal(current.structurePassed, true)
+    assert.equal(current.reviewPassed, false)
+    assert.equal(current.failure?.code, 'repair_budget_exhausted')
+    assert.equal(round.review?.verdict, 'repair')
+    assert.equal(round.crossFreezeAuthor?.oldInputDigest, original.inputDigest)
+    assert.notEqual(current.inputDigest, round.crossFreezeAuthor?.oldInputDigest)
+    assert.deepEqual(round.traces[0], oldRound.traces[0])
+    assert.ok(round.traces[1] && rejectedReviewSeed)
+    const reviewerRecord = readRecord(round.traces[1].sessionId)
+    const reviewed = reviewerRecord?.structuredExecution
+    assert.ok(reviewerRecord && reviewed?.state === 'completed' && reviewed.resultWorktree)
+    const origin = store.listAttempts(active.id)[0]
+    assert.ok(store.listResources(origin.id).every(resource => resource.phase === 'removed'))
+    assert.ok(current.partitionBinding && current.candidateDigest)
+    const request = { operationId: active.id, requestId: 'cross-freeze-p1-operator-fixture',
+      expectedRevision: paused.revision, inputId: currentInput.id, partitionId: current.partitionBinding.partitionId,
+      resultRef: approvedRef, candidateDigest: current.candidateDigest, diagnostic: '追溯冻结测试及原有验收字段',
+      evidencePaths: ['tests/export.test.mjs'],
+    }
+    const previous = readEvidence(commonDir, approvedRef)
+    challenge = await prepareP1ReviewChallenge(store, paused, plan, request)
+    assert.equal(challenge.origin.attemptId, origin.id)
+    assert.deepEqual(challenge.resultRef, approvedRef)
+    await assert.rejects(prepareP1ReviewChallenge(store, paused, plan, { ...request, evidencePaths: ['missing-proof.js'] }), /复审证据须在原独审冻结 Git 树/)
+    try {
+      writeRecord({ ...reviewerRecord, structuredExecution: { ...reviewed, resultWorktree: { ...reviewed.resultWorktree, tree: oldRound.draft.resultTree } } })
+      await assert.rejects(prepareP1ReviewChallenge(store, paused, plan, request), /局部结果缺少合法作者及已完成的独立只读拒绝/)
+    } finally {
+      writeRecord(reviewerRecord)
+    }
+    assert.deepEqual(writeEvidence(commonDir, p1ReviewDiagnosticEvidence(request)), challenge.diagnosticRef)
+    store.authorizeP1ReviewChallenge(active.id, challenge)
+    assert.equal(store.requestControl(active.id, 'run').phase, 'queued')
+    reopen()
+    const resumed = await runUntilP1()
+    assert.equal(resumed.failure?.message, stopBeforeGeneration, JSON.stringify(resumed.failure))
+    assert.deepEqual(currentCalls().map(call => call.impact ?? call.purpose), ['p0', 'code_behavior_review', 'p1', 'elaboration_review', 'elaboration_review'])
+    const [first, next] = store.listAttempts(active.id)
+    assert.ok(next)
+    assert.deepEqual(stages(first).get(localKey), approvedRef)
+    assert.deepEqual(readEvidence(commonDir, approvedRef), previous)
+    assert.ok(store.listResources(next.id).every(resource => resource.phase === 'removed'))
+    const nextResult = read<ElaborationResult>(stages(next).get(localKey)!), nextRound = nextResult.rounds.at(-1)!
+    assert.equal(nextResult.reviewPassed, true)
+    assert.equal(nextResult.candidateDigest, current.candidateDigest)
+    assert.deepEqual(nextRound.draft, round.draft)
+    assert.deepEqual(nextRound.output, round.output)
+    assert.deepEqual(nextRound.traces[0], round.traces[0])
+    assert.deepEqual(nextRound.crossFreezeAuthor, round.crossFreezeAuthor)
+    assert.notEqual(nextRound.traces[1].sessionId, round.traces[1].sessionId)
+    assert.deepEqual({ operation: store.readOperation(old.id), attempts: store.listAttempts(old.id), resources: store.listResources(oldAttempt.id) }, oldBefore)
+    assert.equal(git(root, 'status', '--porcelain'), '')
+    return
+  }
+  if (mode === 'current-reviewer-absent' || mode === 'prior-attempt-reviewer-absent') {
+    const reviewer = round.traces.find(trace => trace.purpose === 'elaboration_review')!
+    assert.ok(reviewer && round.crossFreezeAuthor)
+    const reviewerPath = realpathSync(sessionRecordPath(reviewer.sessionId)), backup = join(parent, 'current-reviewer.runtime.json')
+    assert.ok(reviewerPath.startsWith(realpathSync(testHome) + sep), '只修改此 test-home 内的实际 reviewer 原件')
+    assert.equal(readRecord(reviewer.sessionId)?.structuredExecution?.state, 'completed')
+    const savedBytes = readFileSync(reviewerPath)
+    const before = store.listAttempts(active.id)[0], beforeStages = stages(before)
+    const impactRef = beforeStages.get(impactKey)!
+    const evidenceRefs = [approvedRef, oldRef, impactRef]
+    const evidenceBefore = evidenceRefs.map(ref => readEvidence(commonDir, ref))
+    renameSync(reviewerPath, backup)
+    try {
+      assert.equal(readRecord(reviewer.sessionId)?.structuredExecution, undefined)
+      assert.equal(readRecord(round.traces[0].sessionId)?.structuredExecution?.state, 'completed')
+      const rejected = await runUntilP1()
+      assert.deepEqual(currentCalls().map(call => call.impact ?? call.purpose), ['p0', 'code_behavior_review', 'p1', 'elaboration_review'])
+      const recoveredAttempts = store.listAttempts(active.id)
+      assert.equal(recoveredAttempts.length, acrossAttempt ? 2 : 1, JSON.stringify(rejected.failure))
+      const resumedStages = stages(recoveredAttempts.at(-1)!)
+      assert.equal(resumedStages.has('elaboration'), false, '缺少当前 reviewer 原件时不得进入 P1 全树封口')
+      assert.equal(rejected.failure?.code, 'cross_freeze_p1_approval_binding', JSON.stringify(rejected.failure))
+      if (acrossAttempt) {
+        assert.equal(resumedStages.has(localKey), false, '新 attempt 不得保存缺原件的当前已审候选')
+        assert.equal(resumedStages.has(localKey + ':provenance'), false, '新 attempt 不得登记缺原件的当前审批来源')
+      }
+      const originalStages = stages(recoveredAttempts[0])
+      assert.deepEqual(originalStages.get(localKey), approvedRef)
+      assert.deepEqual(originalStages.get(impactKey), impactRef)
+      assert.deepEqual(evidenceRefs.map(ref => readEvidence(commonDir, ref)), evidenceBefore)
+      assert.deepEqual({ operation: store.readOperation(old.id), attempts: store.listAttempts(old.id), resources: store.listResources(oldAttempt.id) }, oldBefore)
+    } finally {
+      renameSync(backup, reviewerPath)
+      assert.deepEqual(readFileSync(reviewerPath), savedBytes)
+    }
+    return
+  }
+
+  const second = await runUntilP1()
+  assert.equal(second.failure?.message, stopBeforeGeneration, JSON.stringify(second.failure))
+  const attempts = store.listAttempts(active.id)
+  assert.equal(attempts.length, acrossAttempt ? 2 : 1, JSON.stringify(second.failure))
+  const attempt = attempts.at(-1)!, currentStages = stages(attempt)
+  assert.deepEqual(currentCalls().map(call => call.impact ?? call.purpose), ['p0', 'code_behavior_review', 'p1', 'elaboration_review'])
+  assert.ok(attempts.every(item => store.listResources(item.id).every(resource => resource.phase === 'removed')))
+  assert.deepEqual(currentStages.get(localKey), approvedRef, '冷验保持精确当前 P1 审查的 resultRef')
+  const impactRef = stages(attempts[0]).get(impactKey)!
+  const impact = read<{ evidence: CrossFreezeImpactEvidence }>(impactRef).evidence
+  assert.equal(current.structurePassed, true); assert.equal(current.reviewPassed, true)
+  assert.equal(round.crossFreezeAuthor?.oldInputId, old.input.id)
+  assert.equal(round.crossFreezeAuthor?.oldOperationId, old.id)
+  assert.equal(round.crossFreezeAuthor?.oldAttemptId, oldAttempt.id)
+  assert.deepEqual(round.crossFreezeAuthor?.oldResultRef, oldRef)
+  assert.deepEqual(round.crossFreezeAuthor?.impactReviewRef, impactRef)
+  assert.deepEqual(round.draft, oldRound.draft)
+  assert.deepEqual(round.output, oldRound.output)
+  assert.deepEqual(round.traces[0], oldRound.traces[0])
+  assert.equal(impact.verdict, 'reuse')
+  assert.notEqual(current.inputDigest, original.inputDigest)
+  assert.notEqual(round.traces[1].sessionId, oldRound.traces[0].sessionId)
+  assert.notEqual(round.traces[1].sessionId, impact.trace.sessionId)
+  assert.equal(round.review?.inputDigest, current.inputDigest)
+  assert.equal(round.review?.candidateDigest, current.candidateDigest)
+  assert.equal(readStageDraft(commonDir, round.draft!, oldRound.draft), oldDraft)
+  assert.deepEqual(read<ElaborationResult>(oldRef), original)
+  assert.deepEqual({ operation: store.readOperation(old.id), attempts: store.listAttempts(old.id), resources: store.listResources(oldAttempt.id) }, oldBefore)
+  assert.equal(git(root, 'rev-parse', 'HEAD'), currentInput.headCommit)
+  assert.equal(git(root, 'status', '--porcelain'), '')
+})
