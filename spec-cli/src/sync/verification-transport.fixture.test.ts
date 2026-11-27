@@ -18,6 +18,7 @@ export function remoteVerificationFixture(t: test.TestContext, inlineBootstrap =
   const socketPath = join(temporary, 'docker.sock'), socket = createServer()
   socket.listen(socketPath)
   const flock = join(temporary, 'flock'), docker = join(temporary, 'docker'), ssh = join(temporary, 'ssh'), bootstraps = join(temporary, 'bootstraps.jsonl'), sshReady = join(temporary, 'ssh-ready')
+  const sshArguments = join(temporary, 'ssh-arguments.jsonl')
   writeFileSync(flock, `#!/usr/bin/env python3\nimport fcntl,sys\ntry:\n fcntl.flock(3, fcntl.LOCK_EX | fcntl.LOCK_NB)\nexcept BlockingIOError:\n sys.exit(1)\n`, { mode: 0o755 })
   const options: { flockProgram: string; dockerProgram: string; replyWaitMs?: number } = { flockProgram: flock, dockerProgram: docker }
   const fakeDocker = `#!/usr/bin/env node
@@ -78,7 +79,7 @@ else {
  const p=spawn('/bin/sh',['-c',command],{stdio:['inherit','pipe','inherit']});p.stdout.pipe(process.stdout,{end:false});
  p.on('close',code=>{if(settings.holdSshClose){process.stderr.write(settings.sensitiveStderr);writeFileSync(${JSON.stringify(sshReady)},'ready');setInterval(()=>{},1000);}else process.exit(code??1);});
 }
-` : `#!/usr/bin/env node\nimport { spawn } from 'node:child_process';\nconst p=spawn(process.execPath,['--input-type=module','-e',${JSON.stringify(`import(${JSON.stringify(helper)}).then(m=>m.verificationSshMain(${JSON.stringify(options)}))`)}],{stdio:'inherit'});p.on('exit',code=>process.exit(code??1));\n`, { mode: 0o755 })
+` : `#!/usr/bin/env node\nimport { spawn } from 'node:child_process';\nimport { appendFileSync } from 'node:fs';\nappendFileSync(${JSON.stringify(sshArguments)},JSON.stringify(process.argv.slice(2,-1))+'\\n');\nconst p=spawn(process.execPath,['--input-type=module','-e',${JSON.stringify(`import(${JSON.stringify(helper)}).then(m=>m.verificationSshMain(${JSON.stringify(options)}))`)}],{stdio:'inherit'});p.on('exit',code=>process.exit(code??1));\n`, { mode: 0o755 })
   const children: ReturnType<typeof spawn>[] = []
   const start = (request: Record<string, unknown>, frames?: AsyncIterable<string>) => {
     const child = spawn(process.execPath, ['--input-type=module', '-e', `import(${JSON.stringify(helper)}).then(m=>m.verificationSshMain(${JSON.stringify(options)}))`], { stdio: ['pipe', 'pipe', 'pipe'] })
@@ -112,5 +113,5 @@ else {
     await new Promise(resolve => setTimeout(resolve, 50))
     rmSync(temporary, { recursive: true, force: true })
   })
-  return { temporary, root, source, state, settings, bootstraps, sshReady, request, checkpoint, configuration, rpc, start, scoped, events, options }
+  return { temporary, root, source, state, settings, bootstraps, sshReady, sshArguments, request, checkpoint, configuration, rpc, start, scoped, events, options }
 }
