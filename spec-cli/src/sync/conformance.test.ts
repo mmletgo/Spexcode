@@ -276,7 +276,10 @@ test('Manager 大正文缺少逐字读取证明时保留完整冻结输入并阻
 })
 
 const managedFrozenTestRuntime = process.env.SPEX_MANAGER_FROZEN_TEST_RUNTIME
-for (const quota of [false, true]) test(`公开 sync check 由 Manager 持久 Codex 传输完整冻结候选并回收${quota ? '，已结算额度后在同组续审' : ''}`, { skip: !managedFrozenTestRuntime || process.platform !== 'darwin' }, t => {
+for (const mode of ['completed', 'quota', 'metadata-rejected', 'audit-rejected', 'audit-references-unknown']) test(`公开 sync check 的 Manager 持久 Codex 独占资源 ${mode}`, { skip: !managedFrozenTestRuntime || process.platform !== 'darwin' }, t => {
+  const quota = mode === 'quota'
+  const auditRejected = mode.startsWith('audit-')
+
   const repo = fixture(), nativeModel = 'gpt-6.1-sol'
   t.after(() => rmSync(repo.root, { recursive: true, force: true }))
   const cliVersion = 'codex-cli 0.160.0', fixtureBin = String.raw`#!${process.execPath}
@@ -289,6 +292,10 @@ const { execFileSync } = require('node:child_process')
 if (process.argv[2] === '--version') { console.log(${JSON.stringify(cliVersion)}); process.exit(0) }
 const model = ${JSON.stringify(nativeModel)}, identity = '10000000-0000-4000-8000-000000000000', turn = { id: 'turn-frozen-original', status: 'inProgress' }
 const home = process.env.CODEX_HOME, settings = readFileSync(join(home, 'config.toml'), 'utf8')
+writeFileSync(join(home, 'test-runtime.pid'), String(process.pid))
+const runtimeLabel = home.includes('/metadata/') ? 'metadata' : 'review'
+const mode = ${JSON.stringify(mode)}
+const auditRejected = runtimeLabel === 'review' && mode.startsWith('audit-')
 const catalog = settings.match(/^model_catalog_json = (.+)$/m), limit = Number(settings.match(/^tool_output_token_limit = (.+)$/m)?.[1])
 writeFileSync(join(home, 'models_cache.json'), JSON.stringify({ client_version: '0.160.0', models: [{ slug: model, apply_patch_tool_type: 'freeform', experimental_supported_tools: [] }] }))
 const disabled = Object.fromEntries(${JSON.stringify(frozenReaderDisabledFeatures)}.map(feature => [feature, false]))
@@ -303,12 +310,12 @@ const server = createServer(socket => {
     socket.write(Buffer.concat([header, bytes]))
   }
   const methods = {
-    initialize: () => ({}), 'model/list': () => ({ data: [{ id: model, model, slug: model }], nextCursor: null }),
-    'config/read': () => ({ config: { sandbox_mode: 'read-only', approval_policy: 'never', model_catalog_json: JSON.parse(catalog[1]), tool_output_token_limit: limit,
+    initialize: () => ({}), 'model/list': () => ({ data: mode === 'metadata-rejected' ? [] : [{ id: model, model, slug: model }], nextCursor: null }),
+    'config/read': () => ({ config: { sandbox_mode: auditRejected ? 'workspace-write' : 'read-only', approval_policy: 'never', model_catalog_json: JSON.parse(catalog[1]), tool_output_token_limit: limit,
       features: { apps: false, plugins: false, hooks: false, shell_tool: false, code_mode: false, code_mode_host: true, ...disabled }, mcp_servers: {} } }),
     'hooks/list': () => ({ data: [{ hooks: [], errors: [] }] }), 'mcpServerStatus/list': () => ({ data: [], nextCursor: null }),
     'thread/start': p => {
-      writeFileSync(join(home, 'test-runtime.pid'), String(process.pid))
+      assert.equal(auditRejected, false)
       assert.equal(p.model, model); assert.equal(p.ephemeral, false); assert.deepEqual(p.dynamicTools.map(tool => tool.name), ['spex_read_frozen'])
       cwd = p.cwd; path = join(home, 'sessions', 'rollout-2026-11-27T00-00-00-' + identity + '.jsonl'); mkdirSync(dirname(path), { recursive: true })
       return { thread: { id: identity, cwd, path, ephemeral: false }, model }
@@ -317,7 +324,7 @@ const server = createServer(socket => {
     'thread/turns/list': p => { assert.equal(p.threadId, identity); return { data: [{ ...turn }], nextCursor: null } },
     'thread/items/list': p => { assert.equal(p.threadId, identity); assert.equal(p.turnId, turn.id); return { data: items.map(item => ({ turnId: turn.id, item })), nextCursor: null } },
     'thread/list': p => ({ data: cwd && p.archived === archived ? [{ id: identity, cwd }] : [], nextCursor: null }),
-    'thread/loaded/list': () => ({ data: cwd && !archived ? [identity] : [], nextCursor: null }),
+    'thread/loaded/list': () => ({ data: runtimeLabel === 'review' && mode === 'audit-references-unknown' ? ['unowned-thread'] : cwd && !archived ? [identity] : [], nextCursor: null }),
     'thread/archive': p => {
       assert.equal(p.threadId, identity); assert.ok(['completed', 'failed'].includes(turn.status)); assert.equal(archived, false)
       const archive = join(home, 'archived_sessions', basename(path)); mkdirSync(dirname(archive), { recursive: true }); renameSync(path, archive); path = archive; archived = true
@@ -392,6 +399,30 @@ setTimeout(() => process.exit(1), 30_000).unref()
   put(repo.root, 'src/greet.mjs', `${implementation}\n/* ${'x'.repeat(FROZEN_PROMPT_THRESHOLD_BYTES)} candidate-body-ends */\n`)
   const candidate = save(repo.root), original = git(repo.root, ['worktree', 'list', '--porcelain'])
   const { status, result } = publicCheck(t, repo.input(candidate), manager.config)
+  if (mode === 'metadata-rejected' || auditRejected) {
+    const realm = readdirSync(result.evidenceDirectory).find(name => name.startsWith('review-'))!
+    const runtime = join(result.evidenceDirectory, realm, 'runtime', 'projects')
+    const markers = readdirSync(runtime, { recursive: true }).filter(name => String(name).endsWith('/test-runtime.pid'))
+    const endpoint = markers.find(name => String(name).includes(auditRejected ? '/structured-managed-frozen-worktree-v1/' : '/metadata/'))
+    assert.ok(endpoint)
+    const pid = Number(readFileSync(join(runtime, String(endpoint)), 'utf8'))
+    try {
+      assert.equal(status, mode === 'metadata-rejected' ? 2 : 1, JSON.stringify(result.diagnostics))
+      assert.equal(result.review, null)
+      if (mode === 'audit-references-unknown') {
+        assert.deepEqual(result.diagnostics.map(({ code }) => code), ['native_review_recovery_required'])
+        assert.deepEqual(manager.calls().map(call => call.action), ['resolve', 'reserve'])
+        assert.doesNotThrow(() => process.kill(pid, 0))
+      } else {
+        assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, '独占进程须在返回诊断前停止')
+        assert.deepEqual(manager.calls().map(call => call.action), auditRejected ? ['resolve', 'reserve', 'settle'] : ['resolve'])
+      }
+    } finally {
+      // 旧实现或故意不完整的资源证明可能保留本测试自己的进程。
+      try { process.kill(pid, 'SIGTERM') } catch (error) { assert.equal((error as NodeJS.ErrnoException).code, 'ESRCH') }
+    }
+    return
+  }
   assert.equal(result.review?.verdict, 'accept', JSON.stringify(result.diagnostics))
   const accepted = successor ?? route
   assert.deepEqual(result.reviewRoute, accepted)

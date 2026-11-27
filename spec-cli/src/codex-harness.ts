@@ -8,7 +8,7 @@ import { parse as parseToml } from 'smol-toml'
 import { codexSlashCommands } from './slash-commands.js'
 import { runtimeRoot, mainCheckout, harnessIdentity } from '@spexcode/spec-core'
 import { detachedRuntimeGenerationToken, detachedRuntimeIsGone, migrateLegacyDetachedRuntimeReceipt, processStartToken, verifyDetachedRuntime, type VerifiedDetachedRuntime } from '@spexcode/spec-core'
-import { codexGenerationEndpoints, codexGenerationSocketPath, currentCodexGeneration, legacyCodexGenerationEndpoint, readCodexGenerationLedger, prepareCodexGenerationClose, resolveCodexGenerationForClose, resolveCodexGenerationForResume, resolveCodexGenerationForSession, rebindCodexGeneration, type CodexGenerationEndpoint } from './codex-runtime-generations.js'
+import { codexGenerationEndpoints, codexGenerationSocketPath, currentCodexGeneration, legacyCodexGenerationEndpoint, readCodexGenerationLedger, prepareCodexGenerationClose, resolveCodexGenerationForClose, resolveCodexGenerationForResume, resolveCodexGenerationForSession, rebindCodexGeneration, withCodexGenerationMutex, type CodexGenerationEndpoint } from './codex-runtime-generations.js'
 import { spawnDetachedRuntime } from './runtime-ownership.js'
 import { assertFrozenReaderRuntime, frozenReaderDisabledFeatures, structuredExecutionTimer, StructuredSessionError, StructuredSessionTransportError, structuredRealmRoot, type StructuredExecution } from './session-structured-policy.js'
 import { FROZEN_READ_TOOL, frozenReadOutputTokenLimit, frozenReadTool, frozenVisibleOutputs, persistFrozenRead, proveFrozenReads, type FrozenNativeItem, type FrozenReadProof, type FrozenReadReceipt } from './frozen-context.js'
@@ -2668,11 +2668,52 @@ async function managedFrozenColdProof(rec: Parameters<NonNullable<Harness['coldP
   } catch (error) { return { ok: false, reason: error instanceof Error ? error.message : String(error) } }
 }
 
+async function stopExactManagedFrozenProcess(root: string, endpoint: CodexGenerationEndpoint, proof: CodexRuntimeGenerationProof, revision: number): Promise<void> {
+  if (codexRuntimeGeneration(root, endpoint) !== codexRuntimeGenerationToken(proof) || readCodexGenerationLedger(root).revision !== revision)
+    throw new Error('managed frozen detached process or generation identity changed during release')
+  const pid = proof.identity.pid, receipt = endpoint.receiptFile
+  process.kill(pid, 'SIGTERM')
+  for (let retry = 0; retry < 100 && !detachedRuntimeIsGone(pid, receipt); retry++)
+    await new Promise<void>(resolve => setTimeout(resolve, 20))
+  if (!detachedRuntimeIsGone(pid, receipt)) throw new Error('managed frozen detached process group did not exit')
+}
+
+/** 元数据与审计前会话都只有独占 generation。任何已装载或已登记线程阻断无绑定清理。 */
+export async function stopUnboundManagedFrozenRealm(root: string, runtime: () => Promise<ManagedCodexFrozenRuntime>, cwd?: string): Promise<void> {
+  if (!existsSync(root)) return
+  await withCodexGenerationMutex(root, async () => {
+    const ledger = readCodexGenerationLedger(root)
+    if (ledger.pending || Object.keys(ledger.bindings).length) throw new Error('unbound managed frozen realm has pending or bound references')
+    if (!ledger.current) return
+    const endpoint = ledger.generations[ledger.current]?.endpoint
+    if (!endpoint) throw new Error('unbound managed frozen realm lost its exact endpoint')
+    const before = codexRuntimeGenerationProof(root, endpoint)
+    if (!before) {
+      const pid = Number(readFileSync(endpoint.pidFile, 'utf8').trim())
+      if (detachedRuntimeIsGone(pid, endpoint.receiptFile)) return
+      throw new Error('unbound managed frozen realm process identity is unknown')
+    }
+    const hosted = await runtime(), client = new hosted.CodexPersistentAppServer(endpoint.socketPath)
+    try {
+      await client.initialize('spexcode-structured-reclaim', '1')
+      const references = await client.listLoadedThreadIds()
+      if (cwd) references.push(...await client.listThreads(cwd, false), ...await client.listThreads(cwd, true))
+      if (references.length) throw new Error('unbound managed frozen realm has unresolved native references')
+    } finally { client.close() }
+    await stopExactManagedFrozenProcess(root, endpoint, before, ledger.revision)
+  })
+}
+
 /** 公开独审的单次证据库已经归档，复查零装载引用并释放它原先独占的进程。 */
 export async function releaseManagedFrozenReviewRealm(rec: HarnessLivenessRecord & { worktreePath: string }): Promise<void> {
-  const threadId = rec.harnessSessionId, root = codexRuntimeDirForRecord(rec)
-  if (!rec.archived || !threadId || !root || existsSync(rec.worktreePath))
+  const execution = managedFrozenWorktreeExecution(rec.structuredExecution), threadId = rec.harnessSessionId
+  const realm = execution && structuredRealmRoot(execution), reader = managedRoute(execution?.model)?.frozenReader
+  if (!rec.archived || !reader || !realm || existsSync(rec.worktreePath))
     throw new Error('managed frozen realm release requires its archived review and removed worktree')
+  const root = join(realm, 'control')
+  if (!threadId && !execution?.threadId && !execution?.turnStartRequested && !execution?.turnId)
+    return stopUnboundManagedFrozenRealm(root, () => loadManagedCodexFrozenRuntime(reader), rec.worktreePath)
+  if (!threadId || execution?.threadId !== threadId) throw new Error('managed frozen realm lost its exact review thread')
   const ledger = readCodexGenerationLedger(root), bindings = Object.keys(ledger.bindings)
   const binding = resolveCodexGenerationForClose(root, rec.session, threadId)
   if (!binding || bindings.length !== 1 || bindings[0] !== rec.session || ledger.pending || ledger.current !== binding.endpoint.id)
@@ -2681,14 +2722,8 @@ export async function releaseManagedFrozenReviewRealm(rec: HarnessLivenessRecord
   const proof = await managedFrozenColdProof(rec, false)
   if (!proof.ok || !proof.alreadyCold) throw new Error(proof.ok ? 'managed frozen review still has resident references' : proof.reason)
   if (binding.gone) return
-  if (!before || codexRuntimeGeneration(root, binding.endpoint) !== codexRuntimeGenerationToken(before)
-    || readCodexGenerationLedger(root).revision !== ledger.revision)
-    throw new Error('managed frozen detached process or generation identity changed during release')
-  const pid = before.identity.pid, receipt = binding.endpoint.receiptFile
-  process.kill(pid, 'SIGTERM')
-  for (let retry = 0; retry < 100 && !detachedRuntimeIsGone(pid, receipt); retry++)
-    await new Promise<void>(resolve => setTimeout(resolve, 20))
-  if (!detachedRuntimeIsGone(pid, receipt)) throw new Error('managed frozen detached process group did not exit after exact archive')
+  if (!before) throw new Error('managed frozen detached process identity is unknown')
+  await stopExactManagedFrozenProcess(root, binding.endpoint, before, ledger.revision)
 }
 
 function managedFrozenRuntimeDescriptors(runtimeDir: string, rec?: HarnessLivenessRecord): SharedRuntimeDescriptor[] {

@@ -260,35 +260,43 @@ export async function prepareFrozenReaderRuntime(root: string, frozenContext: Fr
     flight = withDeliveryLocks([`frozen-reader-policy-${createHash('sha256').update(policyRoot).digest('hex')}`], async () => {
       if (existsSync(descriptor)) { const runtime = JSON.parse(readFileSync(descriptor, 'utf8')) as FrozenReaderRuntime; assertFrozenReaderRuntime(runtime, hosted?.reader.model, toolOutputTokenLimit, hosted); return runtime }
       mkdirSync(policyRoot, { recursive: true, mode: 0o700 })
-      const metadataRoot = join(policyRoot, 'metadata'), { endpoint } = await structuredGeneration(metadataRoot, undefined, hosted)
-      const { codexLoadedReferenceIds, codexRefreshStructuredModels } = await import('./codex-harness.js')
-      let references: { ok: true; referenceIds: readonly string[] } | { ok: false }
-      if (hosted) {
-        const client = new hosted.CodexPersistentAppServer(endpoint.socketPath)
+      const metadataRoot = join(policyRoot, 'metadata')
+      const { codexLoadedReferenceIds, codexRefreshStructuredModels, stopUnboundManagedFrozenRealm } = await import('./codex-harness.js')
+      const { endpoint, beforeDigest, runtime } = await (async () => {
         try {
-          await client.initialize('spexcode-frozen-metadata', '1')
-          if (!(await client.refreshModels()).includes(hosted.reader.model)) throw new StructuredSessionError('unsupported', 'Manager model is absent from the isolated native catalog')
-          references = { ok: true, referenceIds: await client.listLoadedThreadIds() }
-        } finally { client.close() }
-      } else {
-        await codexRefreshStructuredModels(endpoint.socketPath)
-        references = await codexLoadedReferenceIds(endpoint.socketPath)
-      }
-      const provider = JSON.parse(readFileSync(join(metadataRoot, 'data/codex-home/models_cache.json'), 'utf8')) as { client_version?: string; models?: Array<Record<string, unknown>> }
-      if (provider.client_version !== cliVersion.replace(/^codex-cli /u, '') || !provider.models?.length || provider.models.some(model => typeof model.slug !== 'string'))
-        throw new StructuredSessionError('unsupported', 'clean native provider catalog provenance is unavailable')
-      const catalog = Buffer.from(JSON.stringify({ models: provider.models.map(model => ({ ...model, apply_patch_tool_type: null, experimental_supported_tools: [] })) }))
-      const catalogDigest = createHash('sha256').update(catalog).digest('hex'), catalogPath = join(policyRoot, `${catalogDigest}.json`)
-      if (!existsSync(catalogPath)) writeFileSync(catalogPath, catalog, { mode: 0o400 })
-      const runtime: FrozenReaderRuntime = { version: 2, cliVersion, catalogDigest, catalogPath, toolOutputTokenLimit }
-      assertFrozenReaderRuntime(runtime, hosted?.reader.model, toolOutputTokenLimit, hosted)
-      const pid = Number(readFileSync(endpoint.pidFile, 'utf8').trim()), proof = verifyDetachedRuntime(pid, endpoint.receiptFile)
-      if (!references.ok || references.referenceIds.length || !proof.ok)
-        throw new StructuredSessionError('unsupported', 'isolated metadata realm cannot prove zero threads and its exact process identity')
-      process.kill(pid, 'SIGTERM')
-      for (let retry = 0; retry < 100 && processStartToken(pid) === proof.identity.startToken; retry++) await new Promise<void>(resolve => setTimeout(resolve, 20))
-      if (processStartToken(pid) === proof.identity.startToken) throw new StructuredSessionError('unsupported', 'isolated metadata process did not stop after exact zero-thread cleanup')
-      writeFileSync(join(policyRoot, 'provenance.json'), JSON.stringify({ cliVersion, source: 'isolated native provider model/list + models_cache.models', beforeDigest: createHash('sha256').update(JSON.stringify({ models: provider.models })).digest('hex'), afterDigest: catalogDigest, changedFields: ['apply_patch_tool_type', 'experimental_supported_tools'], metadataEndpoint: endpoint, metadataStopped: true }), { mode: 0o400 })
+          const { endpoint } = await structuredGeneration(metadataRoot, undefined, hosted)
+          if (hosted) {
+            const client = new hosted.CodexPersistentAppServer(endpoint.socketPath)
+            try {
+              await client.initialize('spexcode-frozen-metadata', '1')
+              if (!(await client.refreshModels()).includes(hosted.reader.model)) throw new StructuredSessionError('unsupported', 'Manager model is absent from the isolated native catalog')
+            } finally { client.close() }
+          } else await codexRefreshStructuredModels(endpoint.socketPath)
+          const provider = JSON.parse(readFileSync(join(metadataRoot, 'data/codex-home/models_cache.json'), 'utf8')) as { client_version?: string; models?: Array<Record<string, unknown>> }
+          if (provider.client_version !== cliVersion.replace(/^codex-cli /u, '') || !provider.models?.length || provider.models.some(model => typeof model.slug !== 'string'))
+            throw new StructuredSessionError('unsupported', 'clean native provider catalog provenance is unavailable')
+          const catalog = Buffer.from(JSON.stringify({ models: provider.models.map(model => ({ ...model, apply_patch_tool_type: null, experimental_supported_tools: [] })) }))
+          const catalogDigest = createHash('sha256').update(catalog).digest('hex'), catalogPath = join(policyRoot, `${catalogDigest}.json`)
+          if (!existsSync(catalogPath)) writeFileSync(catalogPath, catalog, { mode: 0o400 })
+          const runtime: FrozenReaderRuntime = { version: 2, cliVersion, catalogDigest, catalogPath, toolOutputTokenLimit }
+          assertFrozenReaderRuntime(runtime, hosted?.reader.model, toolOutputTokenLimit, hosted)
+          if (!hosted) {
+            const references = await codexLoadedReferenceIds(endpoint.socketPath)
+            const pid = Number(readFileSync(endpoint.pidFile, 'utf8').trim()), proof = verifyDetachedRuntime(pid, endpoint.receiptFile)
+            if (!references.ok || references.referenceIds.length || !proof.ok)
+              throw new StructuredSessionError('unsupported', 'isolated metadata realm cannot prove zero threads and its exact process identity')
+            process.kill(pid, 'SIGTERM')
+            for (let retry = 0; retry < 100 && processStartToken(pid) === proof.identity.startToken; retry++) await new Promise<void>(resolve => setTimeout(resolve, 20))
+            if (processStartToken(pid) === proof.identity.startToken) throw new StructuredSessionError('unsupported', 'isolated metadata process did not stop after exact zero-thread cleanup')
+          }
+          return { endpoint, runtime, beforeDigest: createHash('sha256').update(JSON.stringify({ models: provider.models })).digest('hex') }
+        } finally {
+          if (hosted) await stopUnboundManagedFrozenRealm(join(metadataRoot, 'control'), async () => hosted).catch((error: Error) => {
+            throw new StructuredSessionError('cancellation_pending', `Manager metadata realm needs exact recovery: ${error.message}`)
+          })
+        }
+      })()
+      writeFileSync(join(policyRoot, 'provenance.json'), JSON.stringify({ cliVersion, source: 'isolated native provider model/list + models_cache.models', beforeDigest, afterDigest: runtime.catalogDigest, changedFields: ['apply_patch_tool_type', 'experimental_supported_tools'], metadataEndpoint: endpoint, metadataStopped: true }), { mode: 0o400 })
       writeFileSync(descriptor, JSON.stringify(runtime), { mode: 0o400 })
       return runtime
     })

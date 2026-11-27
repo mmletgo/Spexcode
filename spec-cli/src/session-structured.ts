@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { mainRoot, runtimeRoot, sessionArtifactPath } from '@spexcode/spec-core'
 import { readRecord, withRecordLock, writeRecord } from './session-record.js'
-import { codexStructuredTurn, codexStopStructuredTurn } from './codex-harness.js'
+import { codexStructuredTurn, codexStopStructuredTurn, stopUnboundManagedFrozenRealm } from './codex-harness.js'
 import { commitCodexGenerationRegistration, prepareCodexGenerationRegistration, readCodexGenerationLedger, resolveCodexGenerationForClose } from './codex-runtime-generations.js'
 import { assertRejectedOutput, structuredGeneration, prepareStructuredRealm, prepareFrozenReaderRuntime, assertFrozenReaderRuntime, StructuredSessionError, StructuredSessionTransportError, structuredObserverState, structuredExecutionPolicy, structuredRealmRoot, pinNativeConfiguration, pinZCodeToolPolicy, type StructuredExecution, type FrozenReaderRuntime } from './session-structured-policy.js'
 import { assertFrozenBinding, prepareFrozenPrompt, readFrozenManifest, type FrozenContextRef, type FrozenEntryJson, type FrozenReadProof, type FrozenReadReceipt } from './frozen-context.js'
@@ -237,8 +237,19 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
       return 'cancelling'
     }
     if (error instanceof StructuredSessionError) nativeTokenUsage ??= error.nativeTokenUsage
+    if (manager?.frozenReader && !pendingStop?.threadId && !pendingStop?.turnId && !pendingStop?.turnStartRequested) {
+      const reader = manager.frozenReader
+      try {
+        await stopUnboundManagedFrozenRealm(join(requiredRealmRoot(execution), 'control'), () => hostedFrozenRuntime(reader), rec.worktreePath)
+        failedStage = { stop: { nativeStopped: true, acknowledged: false, nativeStatus: 'notStarted' } }
+      } catch (cause) {
+        const note = cause instanceof Error ? cause.message : String(cause)
+        await update({ state: 'cancelling', cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: false, acknowledged: false, error: note }, error: note })
+        return 'cancelling'
+      }
+    }
     let managerQuota = false
-    if (manager && (failedStage?.stop.nativeStopped || !pendingStop?.turnStartRequested && !pendingStop?.turnId)) {
+    if (manager && (failedStage?.stop.nativeStopped || !manager.frozenReader && !pendingStop?.turnStartRequested && !pendingStop?.turnId)) {
       const quota = failedStage?.stop.nativeStopped === true && error instanceof StructuredSessionError && error.code === 'provider_quota_exhausted'
       try { managerQuota = await settleManagedRoute(manager, id, quota ? 'quota' : 'stopped', nativeTokenUsage) === 'quota' && failedStage?.stop.nativeStopped === true }
       catch (cause) {
@@ -472,7 +483,14 @@ export async function cancelStructuredSession(id: string, options: { reason?: 'c
     else if (state.version === 6 && state.policy === 'native-worktree-v1' && state.model?.startsWith('grok:')) stop = await stopGrokStructuredTurn(state, options.timeoutMs ?? 15_000)
     else if (state.version === 6 && state.policy === 'native-worktree-v1' && state.model?.startsWith('cursor:')) stop = await stopCursorStructuredTurn(state, options.timeoutMs ?? 15_000)
     else if (state.version === 6 && state.policy === 'native-worktree-v1' && state.model?.startsWith('codex:')) stop = await stopCodexNativeWorktreeTurn(state, options.timeoutMs ?? 15_000)
-    else if ((!state.threadId || state.turnStartRequested === false) && !state.turnId) stop = { nativeStopped: true, acknowledged: false, nativeStatus: 'notStarted' }
+    else if (manager?.frozenReader && !state.threadId && !state.turnId && !state.turnStartRequested) {
+      const reader = manager.frozenReader
+      try {
+        await stopUnboundManagedFrozenRealm(join(requiredRealmRoot(state), 'control'), () => hostedFrozenRuntime(reader), current.worktreePath)
+        stop = { nativeStopped: true, acknowledged: false, nativeStatus: 'notStarted' }
+      } catch (error) { stop = { nativeStopped: false, acknowledged: false, error: error instanceof Error ? error.message : String(error) } }
+    }
+    else if ((!state.threadId || state.turnStartRequested === false) && !state.turnId && !manager?.frozenReader) stop = { nativeStopped: true, acknowledged: false, nativeStatus: 'notStarted' }
     else {
       const runtimeDir = join(requiredRealmRoot(state), 'control')
       const binding = state.threadId && current.harnessSessionId === state.threadId ? resolveCodexGenerationForClose(runtimeDir, id, state.threadId) : null

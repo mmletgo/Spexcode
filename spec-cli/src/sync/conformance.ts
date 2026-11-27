@@ -131,7 +131,7 @@ async function runNativeReviewWorker(request: NativeReviewRequest, signal: Abort
   catch (error) {
     if (error instanceof StructuredSessionError && error.code === 'provider_quota_exhausted') quota = error
     const cause = error as { code?: string; message?: string }
-    reply = { diagnostic: { code: cause.code ?? 'native_review_failed', message: cause.message ?? String(error) } }
+    reply = { diagnostic: { code: cause.code === 'cancellation_pending' ? 'native_review_recovery_required' : cause.code ?? 'native_review_failed', message: cause.message ?? String(error) } }
   }
   try {
     let record = readRecord(id)
@@ -167,7 +167,7 @@ async function runNativeReviewWorker(request: NativeReviewRequest, signal: Abort
     await withoutSessionApplicationExecutionWake(() => closeSession(id, undefined, { wakeQueue: false, ...(settled ? { settled } : {}) }))
     const closed = readRecord(id)
     if (!closed?.archived || existsSync(record.worktreePath)) throw new Error('独审工作树尚未正式回收')
-    if (route?.frozenReader && closed.structuredExecution?.threadId) {
+    if (route?.frozenReader) {
       const { releaseManagedFrozenReviewRealm } = await import('../codex-harness.js')
       await releaseManagedFrozenReviewRealm(closed)
     }
