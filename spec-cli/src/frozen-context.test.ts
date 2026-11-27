@@ -1,10 +1,11 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { assertFrozenBinding, freezeContext, frozenContextPrompt, frozenReadOutputTokenLimit, frozenReadTool, frozenVisibleOutputs, persistFrozenRead, prepareFrozenPrompt, proveFrozenReads, readFrozenManifest, readFrozenRange, verifyFrozenReadProof, claudeMessageDigest, readClaudePublicHistory, readClaudeApiSourceMetadata, FROZEN_READ_MAX_BYTES, type FrozenContextInput, type FrozenNativeItem, type FrozenVisibleOutput } from './frozen-context.js'
+import { pathToFileURL } from 'node:url'
+import { assertFrozenBinding, freezeContext, frozenContextPrompt, frozenReadOutputTokenLimit, frozenReadTool, frozenVisibleOutputs, persistFrozenRead, prepareFrozenPrompt, prepareManagedFrozenPrompt, proveFrozenReads, proveManagedFrozenReads, readFrozenManifest, readFrozenRange, verifyFrozenReadProof, claudeMessageDigest, readClaudePublicHistory, readClaudeApiSourceMetadata, FROZEN_READ_MAX_BYTES, type FrozenContextInput, type ManagedFrozenPromptInput, type FrozenNativeItem, type FrozenVisibleOutput } from './frozen-context.js'
 
 const binding = { requestKey: 'exact-request', inputDigest: 'exact-input' }
 function fixture(entries: FrozenContextInput[] = [{ id: 'a', label: 'frozen source', kind: 'utf8', bytes: Buffer.from('首abc尾') }]) {
@@ -79,6 +80,61 @@ test('model-visible frozen proof rejects inner-only coverage, cropped or wrapped
     restored.version = undefined
     assert.throws(() => verifyFrozenReadProof(f.ref, restored, identity, limit), /requires.*v2/)
   } finally { f.close() }
+})
+
+test('managed cold evidence requires the original response, native history and visibility files without recreating them', t => {
+  const f = fixture()
+  t.after(f.close)
+  const args = f.args(0, 9), item = f.item(0, 9, 'exact-read')
+  const text = readFrozenRange(f.ref, args).response.contentItems[0].text
+  const limit = frozenReadOutputTokenLimit(f.ref)
+  const visibility = { toolOutputTokenLimit: limit, outputs: [{ callId: 'outer', output: text, historyTokenLimit: Math.ceil(limit * 1.2) }] }
+  const derive = (mode: 'record' | 'verify') => proveManagedFrozenReads(f.ref, identity, [item],
+    [{ callId: 'exact-read', arguments: args, text }], visibility,
+    { codexFrozenToolOutputTokenLimit: () => limit,
+      codexValidateFrozenVisibility: (outputs, _limit, responses) => assert.deepEqual(outputs.map(output => output.output), responses) }, mode)
+  const proof = derive('record')
+  assert.equal(proof.version, 2)
+  assert.deepEqual(derive('verify'), proof)
+  for (const [directory, digest] of [['responses', proof.receipts[0].responseDigest], ['histories', proof.historyDigest], ['histories', proof.visibilityDigest]]) {
+    const path = join(dirname(f.ref.manifestPath), directory, digest), original = readFileSync(path)
+    rmSync(path)
+    assert.throws(() => derive('verify'), { code: 'stale_result' })
+    assert.equal(existsSync(path), false)
+    writeFileSync(path, original, { mode: 0o400 })
+  }
+})
+
+const managerPromptRuntime = process.env.SPEX_MANAGER_FROZEN_TEST_RUNTIME
+test('managed prompt uses only frozen range metadata and keeps exact prompt bytes, including for read-only replay', { skip: !managerPromptRuntime }, async t => {
+  const { loadNativeAdapter } = await import(pathToFileURL(managerPromptRuntime!).href)
+  const adapter = await loadNativeAdapter('codex')
+  for (const prompt of ['keep the inline task', ` ${'字🙂'.repeat(FROZEN_READ_MAX_BYTES)} tail`]) {
+    const f = fixture()
+    t.after(f.close)
+    const request = { root: process.cwd(), ...binding, prompt, frozenEntries: [
+      { id: 'bin', label: 'binary entry', kind: 'binary' as const, base64: 'AAEC/w==' },
+      { id: 'opt', label: 'optional input', kind: 'utf8' as const, text: 'required:false', required: false },
+      { id: 'empty', label: 'empty input', kind: 'absent' as const },
+    ] }
+    const directory = join(f.directory, 'frozen'), expected = prepareFrozenPrompt(request, { directory })
+    const options = { directory, builder: { codexFrozenPrompt(input: ManagedFrozenPromptInput) {
+      if (input.taskIsFrozen) assert.equal(input.prompt, '')
+      assert.ok(!JSON.stringify(input).includes(directory))
+      assert.ok(input.plans.flatMap(plan => plan.ranges).every(range => range.responseBytes <= input.maxResponseBytes))
+      return adapter.codexFrozenPrompt(input)
+    } } }
+    const actual = prepareManagedFrozenPrompt(request, options)
+    assert.equal(actual.prompt, expected.prompt)
+    assert.deepEqual(actual.frozenContext, expected.frozenContext)
+    const pinned = actual.frozenContext!
+    assert.deepEqual(prepareManagedFrozenPrompt(request, { ...options, pinned }), actual)
+    assert.throws(() => prepareManagedFrozenPrompt({ ...request, frozenEntries: [] }, { ...options, pinned }), { code: 'stale_result' })
+    const manifestPath = pinned.manifestPath
+    rmSync(manifestPath)
+    assert.throws(() => prepareManagedFrozenPrompt(request, { ...options, pinned }), { code: 'ENOENT' })
+    assert.equal(existsSync(manifestPath), false)
+  }
 })
 
 test('visible exec and wait history pairs exact call outputs within explicit native turn boundaries', () => {

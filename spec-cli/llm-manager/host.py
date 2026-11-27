@@ -117,12 +117,37 @@ class HostConfig(BaseModel):
 
 Vendor: TypeAlias = Literal["grok", "claude", "zcode", "cursor", "codex"]
 Outcome: TypeAlias = Literal["completed", "quota", "stopped"]
+NativeCapability: TypeAlias = Literal["frozen-reader-v2"]
 VENDORS = frozenset({CliVendor.claude, CliVendor.grok, CliVendor.zcode, CliVendor.cursor, CliVendor.codex})
 TEXT = TypeAdapter(str, config=ConfigDict(strict=True))
 
 
+class FrozenReaderCapability(BaseModel):
+    """
+    Business Logic（为什么需要这个类）:
+        大型冻结独审只使用 Manager 已证实能提供原生读取证明的路线。
+
+    Code Logic（这个类做什么）:
+        校验 Manager 返回的能力、协议、实际模型及 CLI 版本和文件摘要。
+    """
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    capability: NativeCapability
+    protocol: str = Field(min_length=1, pattern=r"^[^\r\n\x00]+$")
+    model: str = Field(min_length=1, pattern=r"^[^\r\n\x00]+$")
+    cliVersion: str = Field(min_length=1, pattern=r"^[^\r\n\x00]+$")
+    cliSha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class ManagedRoute(BaseModel):
-    """宿主 model 只包含公开的路由标识、厂商、模型和运行类型。"""
+    """
+    Business Logic（为什么需要这个类）:
+        调用方凭公开路线发起正式会话并引用原功能组。
+
+    Code Logic（这个类做什么）:
+        保存路由摘要、厂商、公开模型、运行类型和 Manager 签明的可选读取能力。
+    """
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -130,6 +155,7 @@ class ManagedRoute(BaseModel):
     vendor: Vendor
     model: str = Field(min_length=1, pattern=r"^[^\r\n\x00]+$")
     kind: Literal["cli", "anthropic-messages"]
+    frozenReader: FrozenReaderCapability | None = None
 
     @model_validator(mode="after")
     def validate_execution(self) -> Self:
@@ -138,11 +164,13 @@ class ManagedRoute(BaseModel):
             API 路线只可交给 Claude，公开模型需能原样成为原生参数。
 
         Code Logic（这个函数做什么）:
-            验证 API 厂商和模型边界空白，返回原路由。
+            验证 API 厂商、模型边界空白和能力证据模型一致性，返回原路由。
         """
 
         if self.model != self.model.strip() or (self.kind == "anthropic-messages" and self.vendor != "claude"):
             raise ValueError("route execution")
+        if self.frozenReader is not None and self.frozenReader.model != self.model:
+            raise ValueError("frozen route model")
         return self
 
 
@@ -163,7 +191,7 @@ class RouteLookup(BaseModel):
         新会话按原功能组当前排序选路，额度失败后的后继选择可沿用原游标。
 
     Code Logic（这个类做什么）:
-        校验同组锚点、额度后继路由，以及可用于精确绑定的原失败会话。
+        校验同组锚点、额度后继路由、原失败会话及本次必须由 Manager 证明的能力。
     """
 
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -172,6 +200,7 @@ class RouteLookup(BaseModel):
     nextAfter: ManagedRoute | None = None
     sameGroupAs: ManagedRoute | None = None
     failedSessionId: str | None = Field(default=None, min_length=1, max_length=256, pattern=r"^[^\r\n\x00]+$")
+    capability: NativeCapability | None = None
 
 
 class RouteRequest(BaseModel):
@@ -404,13 +433,13 @@ def provider_transport(provider: ProviderView) -> bool:
     return provider.api_format == ApiFormat.anthropic_messages
 
 
-def execution_manager(manager: LlmManager, config: HostConfig, key: bytes | None) -> LlmManager:
+def execution_manager(manager: LlmManager, config: HostConfig, key: bytes | None, native_capability: NativeCapability | None = None) -> LlmManager:
     """
     Business Logic（为什么需要这个函数）:
         Manager 应按原功能组优先级与备用规则选择 SpexCode 实际可派发的成员。
 
     Code Logic（这个函数做什么）:
-        将宿主执行器兼容性与起始组能力并成一条额外门槛，交给同 owner、同事务的 Manager。
+        将宿主执行器兼容性与起始组能力合并，再将请求的原生能力交给同 owner、同事务的 Manager。
     """
 
     capability = "spex-execution-transport-v1"
@@ -424,6 +453,10 @@ def execution_manager(manager: LlmManager, config: HostConfig, key: bytes | None
     }
     gated = requested.model_copy(update={"required_capabilities": (capability,)})
     catalog = tuple(gated if group.id == config.group_id else group for group in manager.catalog)
+    if native_capability is not None:
+        if not hasattr(manager, "attest_native_capability"):
+            raise HostError("llm_manager_native_capability_unavailable")
+        return LlmManager(manager.owner_id, manager.session, key, catalog, provider_capabilities=capable, native_capability=native_capability)
     return LlmManager(manager.owner_id, manager.session, key, catalog, provider_capabilities=capable)
 
 
@@ -456,13 +489,13 @@ def key_digest(manager: LlmManager, choice: RouteChoice) -> str | None:
     return sha256(row.nonce).hexdigest()
 
 
-def bind_choice(manager: LlmManager, group: str, choice: RouteChoice) -> ManagedRoute:
+def bind_choice(manager: LlmManager, group: str, choice: RouteChoice, capability: NativeCapability | None = None) -> ManagedRoute:
     """
     Business Logic（为什么需要这个函数）:
         路由 id 要绑定实际执行的 Provider、版本、模型、思考档、凭据和后继位置。
 
     Code Logic（这个函数做什么）:
-        从 Manager 选择创建可重放的无明文快照，计算 SHA-256 并只新增一次绑定。
+        将 Manager 选项与原生能力证据冻结到无明文快照，计算 SHA-256 并只新增一次绑定。
     """
 
     provider = manager.get_provider(choice.provider_id)
@@ -470,18 +503,30 @@ def bind_choice(manager: LlmManager, group: str, choice: RouteChoice) -> Managed
     vendor = "claude" if choice.kind == ProviderKind.api else choice.cli_vendor
     model = "default" if provider.model_mode in (CliModelMode.auto, CliModelMode.account) else choice.model_name
     kind = "anthropic-messages" if choice.kind == ProviderKind.api else "cli"
+    reader = None
+    if capability is not None:
+        proof = manager.attest_native_capability(choice)
+        if proof is None:
+            raise HostError("llm_manager_native_capability_unavailable")
+        reader = FrozenReaderCapability.model_validate(proof)
+        if reader.capability != capability:
+            raise HostError("llm_manager_native_capability_mismatch")
+        model = reader.model
     snapshot = CHOICE.dump_python(choice, mode="json", exclude={"secret"})
     snapshot["cursor"]["skipped_option_ids"] = sorted(choice.cursor.skipped_option_ids)
     digest = key_digest(manager, choice)
+    identity = [manager.owner_id, group, provider.version, digest, option.thinking_tier_id, snapshot, vendor, model, kind]
+    if reader is not None:
+        identity.append(reader.model_dump(mode="json"))
     payload = json.dumps(
-        [manager.owner_id, group, provider.version, digest, option.thinking_tier_id, snapshot, vendor, model, kind],
+        identity,
         sort_keys=True, separators=(",", ":"),
     )
-    public = ManagedRoute.model_validate({"routeId": sha256(payload.encode()).hexdigest(), "vendor": vendor.value if isinstance(vendor, CliVendor) else vendor, "model": model, "kind": kind})
+    public = ManagedRoute.model_validate({"routeId": sha256(payload.encode()).hexdigest(), "vendor": vendor.value if isinstance(vendor, CliVendor) else vendor, "model": model, "kind": kind, "frozenReader": reader})
     if manager.session.get(RouteBinding, (manager.owner_id, public.routeId)) is None:
         manager.session.add(RouteBinding(
             owner_id=manager.owner_id, route_id=public.routeId, request_group=group, provider_id=provider.id,
-            public_route=public.model_dump_json(), provider_version=provider.version, key_nonce_digest=digest,
+            public_route=public.model_dump_json(exclude_none=True), provider_version=provider.version, key_nonce_digest=digest,
             tier_id=option.thinking_tier_id, snapshot=json.dumps(snapshot, sort_keys=True),
         ))
     return public
@@ -497,7 +542,7 @@ def require_binding(manager: LlmManager, group: str, route: ManagedRoute) -> Rou
     """
 
     binding = manager.session.get(RouteBinding, (manager.owner_id, route.routeId))
-    if binding is None or binding.request_group != group or binding.public_route != route.model_dump_json():
+    if binding is None or binding.request_group != group or binding.public_route != route.model_dump_json(exclude_none=True):
         raise HostError("llm_manager_route_stale")
     return binding
 
@@ -508,7 +553,7 @@ def is_current(manager: LlmManager, binding: RouteBinding, choice: RouteChoice) 
         准入前应核对冻结配置，结算也不能把原调用的熔断写到后来换掉的 Key。
 
     Code Logic（这个函数做什么）:
-        检查 Provider 版本、能力资格、对应组成员和选项档位，以及 Key 版本与状态。
+        检查 Provider、组成员、选项档位、Key 和 Manager 原生能力证据是否仍与冻结绑定一致。
     """
 
     try:
@@ -517,6 +562,9 @@ def is_current(manager: LlmManager, binding: RouteBinding, choice: RouteChoice) 
     except (NotFoundError, HostError):
         return False
     option = manager.session.get(GroupOption, (manager.owner_id, choice.option_id))
+    reader = ManagedRoute.model_validate_json(binding.public_route).frozenReader
+    if reader is not None and manager.attest_native_capability(choice) != reader.model_dump(mode="json"):
+        return False
     return (
         provider.enabled and provider.version == binding.provider_version
         and provider_transport(provider) and provider.id in manager.provider_capabilities
@@ -570,12 +618,15 @@ def resolve(manager: LlmManager, config: HostConfig, request: RouteLookup) -> Ma
         新会话从原功能组选择当前首条可用路线，额度失败后的后继选择承接原游标。
 
     Code Logic（这个函数做什么）:
-        按冻结绑定验证锚点的 owner 和组，再由 Manager 从组首选路。
+        按冻结绑定验证锚点的 owner、组和原生能力，再由 Manager 从组首选路。
         额度游标读取已结算后继；指定失败会话时只读取该会话。后继失效时继续沿游标向下。
     """
 
     if request.sameGroupAs is not None:
         require_binding(manager, config.group_id, request.sameGroupAs)
+    for anchor in (request.sameGroupAs, request.nextAfter):
+        if anchor is not None and (anchor.frozenReader.capability if anchor.frozenReader else None) != request.capability:
+            raise HostError("llm_manager_native_capability_mismatch")
     after = request.nextAfter
     if after is None:
         if request.failedSessionId is not None:
@@ -603,7 +654,7 @@ def resolve(manager: LlmManager, config: HostConfig, request: RouteLookup) -> Ma
                     and is_current(manager, binding, frozen) and current.disposition == RouteDisposition.ready):
                 return ManagedRoute.model_validate_json(binding.public_route)
             choice = ready_choice(manager, manager.skip_option(frozen))
-    return bind_choice(manager, config.group_id, choice) if choice is not None else None
+    return bind_choice(manager, config.group_id, choice, request.capability) if choice is not None else None
 
 
 def reserve(manager: LlmManager, config: HostConfig, request: ReserveRequest) -> None:
@@ -690,7 +741,7 @@ def settle(manager: LlmManager, config: HostConfig, request: SettleRequest) -> d
         successor = manager.report_failure(choice, FailureReport(status_code=429), now=moment) if current else manager.skip_option(choice, now=moment)
         successor = ready_choice(manager, successor)
         if successor is not None:
-            claim.successor_id = bind_choice(manager, config.group_id, successor).routeId
+            claim.successor_id = bind_choice(manager, config.group_id, successor, request.route.frozenReader.capability if request.route.frozenReader else None).routeId
     claim.outcome = outcome
     claim.usage = usage.model_dump_json(exclude_none=True) if usage else None
     claim.settled_at = moment
@@ -881,7 +932,7 @@ def json_public(value: object) -> object:
     if isinstance(value, datetime):
         return (value if value.tzinfo else value.replace(tzinfo=UTC)).isoformat()
     if isinstance(value, ManagedRoute):
-        return value.model_dump(mode="json")
+        return value.model_dump(mode="json", exclude_none=True)
     if isinstance(value, (ProviderView, KeyView, GroupView, UsageReport)):
         return asdict(value)
     raise TypeError("unsupported response type")
@@ -901,7 +952,8 @@ def rpc(config: HostConfig) -> object:
     with transaction(config, key) as manager:
         if isinstance(request, SettingsRequest):
             return settings(manager, request.body)
-        execution = execution_manager(manager, config, key)
+        capability = request.capability if isinstance(request, RouteLookup) else request.route.frozenReader.capability if request.route.frozenReader else None
+        execution = execution_manager(manager, config, key, capability)
         if isinstance(request, RouteLookup):
             return resolve(execution, config, request)
         if isinstance(request, SettleRequest):

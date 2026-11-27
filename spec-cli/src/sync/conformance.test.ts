@@ -1,18 +1,20 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
-import test from 'node:test'
+import { delimiter, dirname, join } from 'node:path'
+import test, { type TestContext } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
 import { runConformance } from './conformance.js'
-import type { ConformanceInput } from './conformance.js'
+import type { ConformanceInput, ConformanceResult } from './conformance.js'
 import type { ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import type { GenerationReview } from './generation-types.js'
 import { INTENT_AUTHORIZATION_PATH } from './intent-authorization.js'
 import type { IntentAuthorization, IntentAuthorizationCheck, RawIntentChange } from './intent-authorization.js'
 import { contentHash } from './snapshot.js'
+import { FROZEN_PROMPT_THRESHOLD_BYTES } from '../frozen-context.js'
+import { frozenReaderDisabledFeatures } from '../session-structured-policy.js'
 
 const specPath = '.spec/product/greeting/spec.md'
 const image = 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392'
@@ -88,6 +90,419 @@ function reviewer(change?: (review: GenerationReview, value: ReviewContext, requ
 }
 const noDocker = async (): Promise<never> => { throw new Error('fixture: Docker unavailable') }
 const evidence = (name: string): Pick<ConformanceInput, 'evidenceDirectory'> => process.env.SPEX_VERIFICATION_EVIDENCE_DIR ? { evidenceDirectory: mkdtempSync(join(process.env.SPEX_VERIFICATION_EVIDENCE_DIR, `${name}-`)) } : {}
+
+function publicCheck(t: TestContext, input: ConformanceInput, config: string): { status: number | null; result: ConformanceResult } {
+  const host = dirname(config), evidenceDirectory = mkdtempSync(join(tmpdir(), 'spex-conformance-public-'))
+  const callerDatabase = join(host, 'caller-sessions.sqlite')
+  t.after(() => {
+    const candidate = join(evidenceDirectory, 'candidate')
+    if (existsSync(candidate)) execFileSync('chmod', ['-R', 'u+w', candidate])
+    rmSync(evidenceDirectory, { recursive: true, force: true, maxRetries: 3 })
+  })
+  const cli = spawnSync(process.execPath, [
+    '--import', fileURLToPath(new URL('../../../scripts/test-home.mjs', import.meta.url)), '--import', import.meta.resolve('tsx'),
+    fileURLToPath(new URL('../cli.ts', import.meta.url)), 'sync', 'check', '--base', input.baseCommit, '--candidate', input.candidateCommit, '--policy', input.policyCommit, '--repository', input.repository, '--evidence-directory', evidenceDirectory,
+  ], { cwd: input.repository, env: { ...process.env, PATH: [host, '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(delimiter), SPEX_SESSION_DATABASE_PATH: callerDatabase, SPEX_LLM_MANAGER_CONFIG: config, SPEX_LLM_MANAGER_PYTHON: join(host, 'bridge'), SPEX_VERIFICATION_SSH_ALIAS: undefined, SPEX_VERIFICATION_SSH_ROOT: undefined, SPEX_VERIFICATION_SSH_DOCKER_ENDPOINT: undefined }, encoding: 'utf8', timeout: 30000 })
+  assert.ifError(cli.error)
+  assert.ok(cli.stdout, cli.stderr)
+  assert.equal(existsSync(callerDatabase), false, '公开命令不接触调用方会话数据库')
+  return { status: cli.status, result: JSON.parse(cli.stdout) as ConformanceResult }
+}
+
+function managerFixture(t: TestContext, selection: ConformanceResult['reviewRoute'] | null, settle = true, successor?: ConformanceResult['reviewRoute'], nativeRuntime = fileURLToPath(new URL('../../llm-manager/native-runtime.mjs', import.meta.url))) {
+  const host = mkdtempSync(join(tmpdir(), 'spex-conformance-manager-fixture-')), config = join(host, 'config.json'), log = join(host, 'calls.jsonl')
+  t.after(() => rmSync(host, { recursive: true, force: true }))
+  writeFileSync(config, JSON.stringify({ selection, successor }))
+  writeFileSync(join(host, 'docker'), '#!/bin/sh\nexit 127\n', { mode: 0o700 })
+  writeFileSync(join(host, 'bridge'), `#!${process.execPath}
+const { appendFileSync, readFileSync } = require('node:fs')
+if (process.argv[3] === '-m' && process.argv[4] === 'llm_manager.native_runtime') {
+  process.stdout.write(JSON.stringify({ version: 1, path: ${JSON.stringify(nativeRuntime)} })); process.exit(0)
+}
+const message = JSON.parse(readFileSync(0, 'utf8'))
+appendFileSync('calls.jsonl', JSON.stringify(message) + '\\n')
+const { selection, successor } = JSON.parse(readFileSync(process.argv[5], 'utf8'))
+if (message.nextAfter) {
+  const calls = readFileSync('calls.jsonl', 'utf8').trim().split('\\n').map(line => JSON.parse(line))
+  const previous = calls.find(call => call.action === 'settle' && call.sessionId === message.failedSessionId && call.outcome === 'quota')
+  if (!${settle} || previous?.route.routeId !== message.nextAfter.routeId || message.sameGroupAs?.routeId !== selection.routeId) {
+    process.stdout.write(JSON.stringify({ ok: false, code: 'llm_manager_quota_required' })); process.exit(0)
+  }
+}
+const selected = message.nextAfter ? successor ?? null : selection
+const value = message.action === 'resolve' ? selected?.frozenReader?.capability === message.capability ? selected : null : message.action === 'reserve' ? {} : { outcome: message.outcome }
+process.stdout.write(JSON.stringify(message.action === 'settle' && !${settle} ? { ok: false, code: 'llm_manager_host_unavailable' } : { ok: true, value }))
+`, { mode: 0o700 })
+  return { host, config, calls: (): { action: string; route?: unknown; sessionId?: string; outcome?: string }[] => readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line)) }
+}
+
+test('公开 sync check 在 Manager 功能组没有就绪路线时拒绝使用旧默认模型', t => {
+  const repo = fixture(), manager = managerFixture(t, null)
+  t.after(() => rmSync(repo.root, { recursive: true, force: true }))
+  put(repo.root, 'src/greet.mjs', `${implementation}\n// reference refactor\n`)
+  const { result, status } = publicCheck(t, repo.input(save(repo.root)), manager.config)
+  assert.equal(status, 2, JSON.stringify(result.diagnostics))
+  assert.equal(result.status, 'unsupported')
+  assert.deepEqual(result.diagnostics.map(({ code }) => code), ['unsupported_llm_manager_no_ready_route'])
+  assert.equal(result.reviewExecution, 'native')
+  assert.equal(result.review, null)
+  assert.deepEqual(result.runs, [])
+  assert.equal(git(repo.root, ['worktree', 'list', '--porcelain']).match(/^worktree /gm)?.length, 1)
+  assert.deepEqual(manager.calls(), [{ action: 'resolve' }])
+})
+
+const cursorRoute = { routeId: 'a'.repeat(64), vendor: 'cursor', model: 'default', kind: 'cli' } as const
+const successorRoute = { ...cursorRoute, routeId: 'b'.repeat(64), model: 'cursor-successor-fixture' } as const
+
+for (const scenario of ['accept', 'accept-unsettled', 'quota', 'quota-unsettled', 'protocol'] as const) test(`公开 sync check 的模拟 Manager 与 Cursor CLI ${scenario}`, t => {
+  const settle = !scenario.endsWith('unsettled'), quota = scenario.startsWith('quota'), protocol = scenario === 'protocol'
+  const repo = fixture(), manager = managerFixture(t, cursorRoute, settle, successorRoute)
+  t.after(() => rmSync(repo.root, { recursive: true, force: true }))
+  const candidateSource = `${implementation}\n/* ${'x'.repeat(400 * 1024)} candidate content */\n`
+  put(repo.root, 'src/greet.mjs', candidateSource)
+  const candidate = save(repo.root)
+  git(repo.root, ['checkout', '-q', '--detach', repo.base])
+  put(repo.root, 'src/greet.mjs', 'uncommitted source must never be read\n')
+  const project = ['worktree list --porcelain', 'show-ref', 'status --porcelain'].map(command => git(repo.root, command.split(' ')))
+  writeFileSync(join(manager.host, 'cursor-agent'), String.raw`#!${process.execPath}
+const assert = require('node:assert/strict')
+const { execFileSync } = require('node:child_process')
+const { readFileSync } = require('node:fs')
+const { createInterface } = require('node:readline')
+if (process.argv[2] === '--version') { console.log('cursor-conformance-fixture'); process.exit(0) }
+const successor = process.argv.includes(${JSON.stringify(successorRoute.model)})
+assert.deepEqual(process.argv.slice(2), ['--workspace', process.cwd(), '--sandbox', 'enabled', '--trust', '--mode', 'ask', ...(successor ? ['--model', ${JSON.stringify(successorRoute.model)}] : []), 'acp'])
+const sessionId = 'cursor-conformance-native' + (successor ? '-successor' : '')
+const send = packet => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...packet }) + '\n')
+createInterface({ input: process.stdin, crlfDelay: Infinity }).on('line', line => {
+  const { id, method, params } = JSON.parse(line)
+  if (method === 'initialize') send({ id, result: { protocolVersion: 1, authMethods: [] } })
+  else if (method === 'session/new') send({ id, result: { sessionId, modes: { currentModeId: 'ask', availableModes: [{ id: 'ask' }] } } })
+  else if (method === 'session/prompt') {
+    assert.equal(params.sessionId, sessionId)
+    const full = params.prompt[0].text.split('\n冻结完整输入:\n')[1].split('\n\nWork in the current Git worktree')[0]
+    const ctx = JSON.parse(full)
+    assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), ctx.identities.candidateCommit)
+    assert.equal(execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).trim(), ctx.identities.candidateTree)
+    assert.equal(ctx.identities.baseCommit, ${JSON.stringify(repo.base)})
+    assert.equal(ctx.identities.policyCommit, ${JSON.stringify(repo.base)})
+    assert.deepEqual(ctx.readSet.find(file => file.path === 'src/greet.mjs'), { path: 'src/greet.mjs', before: ${JSON.stringify(implementation)}, candidate: ${JSON.stringify(candidateSource)} })
+    assert.equal(readFileSync('src/greet.mjs', 'utf8'), ${JSON.stringify(candidateSource)})
+    if (${quota} && !successor) {
+      send({ id, error: { code: 429, message: 'fixture provider quota' } })
+      return
+    }
+    if (${protocol}) {
+      send({ id, error: { code: -32001, message: 'fixture ACP error' } })
+      return
+    }
+    const output = { inputId: ctx.inputId, candidateDigest: ctx.candidateDigest, checkedIds: ctx.scope.itemIds, verdict: 'accept', findings: [] }
+    send({ method: 'session/update', params: { sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: JSON.stringify(output) } } } })
+    send({ id, result: { stopReason: 'end_turn' } })
+  } else assert.fail('unexpected native ACP request ' + method)
+})
+`, { mode: 0o700 })
+  const { status, result } = publicCheck(t, repo.input(candidate), manager.config)
+  assert.equal(result.reviewExecution, 'native')
+  assert.deepEqual(result.reviewRoute, quota && settle ? successorRoute : cursorRoute)
+  const attempts = readdirSync(result.evidenceDirectory).filter(path => path.startsWith('review-')).map(path => {
+    const realm = join(result.evidenceDirectory, path)
+    assert.ok(existsSync(join(realm, 'runtime', 'sessions.sqlite')))
+    return { realm, raw: JSON.parse(readFileSync(join(realm, 'native-result.json'), 'utf8')) }
+  })
+  assert.equal(attempts.length, quota && settle ? 2 : 1)
+  assert.deepEqual(['worktree list --porcelain', 'show-ref', 'status --porcelain'].map(command => git(repo.root, command.split(' '))), project)
+  const calls = manager.calls(), sessionId = calls.find(call => call.action === 'reserve')?.sessionId
+  assert.ok(sessionId)
+  const reserve = { action: 'reserve', route: cursorRoute, sessionId }, complete = { action: 'settle', route: cursorRoute, sessionId, outcome: protocol ? 'stopped' : quota ? 'quota' : 'completed' }
+  if (!settle) {
+    const [{ realm, raw }] = attempts
+    assert.equal(status, 1, JSON.stringify(result.diagnostics))
+    assert.deepEqual(calls, [{ action: 'resolve' }, reserve, complete, { ...complete, outcome: 'stopped' }])
+    assert.equal(result.status, 'recovery_required')
+    assert.deepEqual(result.diagnostics, [raw.diagnostic])
+    assert.equal(raw.diagnostic.code, 'native_review_recovery_required')
+    assert.deepEqual(result.runs, [])
+    assert.equal(git(join(realm, 'source'), ['worktree', 'list', '--porcelain']).match(/^worktree /gm)?.length, 2)
+    return
+  }
+  if (protocol) {
+    assert.equal(status, 1, JSON.stringify(result.diagnostics))
+    assert.deepEqual(calls, [{ action: 'resolve' }, reserve, complete])
+    assert.equal(result.status, 'failed')
+    assert.deepEqual(result.runs, [])
+    assert.equal(attempts[0].raw.stoppedQuota, undefined)
+    return
+  }
+  assert.equal(result.review?.verdict, 'accept', JSON.stringify(result.diagnostics))
+  assert.equal(result.trace?.threadId, quota ? 'cursor-conformance-native-successor' : 'cursor-conformance-native')
+  if (quota) {
+    const first = attempts.find(attempt => attempt.raw.diagnostic?.code === 'provider_quota_exhausted')!
+    assert.equal(first.raw.stoppedQuota.sessionId, sessionId)
+    assert.equal(git(join(first.realm, 'source'), ['worktree', 'list', '--porcelain']).match(/^worktree /gm)?.length, 1)
+    assert.notEqual(result.trace.sessionId, sessionId)
+    const launches = attempts.map(({ realm, raw }) => {
+      const projects = join(realm, 'runtime', 'projects')
+      return readFileSync(join(projects, readdirSync(projects)[0], 'sessions', raw.stoppedQuota?.sessionId ?? raw.result.sessionId, 'launch'), 'utf8')
+    })
+    assert.ok(launches[0] === launches[1], '正式续路保持完整冻结提示原字节')
+    assert.deepEqual(calls, [{ action: 'resolve' }, reserve, complete,
+      { action: 'resolve', nextAfter: cursorRoute, sameGroupAs: cursorRoute, failedSessionId: sessionId },
+      { action: 'reserve', route: successorRoute, sessionId: result.trace.sessionId },
+      { action: 'settle', route: successorRoute, sessionId: result.trace.sessionId, outcome: 'completed' }])
+  } else {
+    assert.equal(result.trace.sessionId, sessionId)
+    assert.deepEqual(calls, [{ action: 'resolve' }, reserve, complete])
+  }
+  const { raw } = attempts.find(attempt => attempt.raw.result)!
+  assert.equal(existsSync(raw.result.worktree.worktreePath), false)
+  assert.equal(raw.result.worktree.headCommit, candidate)
+  assert.equal(status, 2, JSON.stringify(result.diagnostics))
+  assert.deepEqual(result.diagnostics.map(({ code }) => code), ['verification'], '模拟环境明确阻断 Docker 执行')
+})
+
+test('Manager 大正文缺少逐字读取证明时保留完整冻结输入并阻断派发', t => {
+  const repo = fixture(), manager = managerFixture(t, cursorRoute)
+  t.after(() => rmSync(repo.root, { recursive: true, force: true }))
+  const large = `${implementation}\n/* ${'x'.repeat(FROZEN_PROMPT_THRESHOLD_BYTES)} END-FROZEN-CONTEXT */\n`
+  put(repo.root, 'src/greet.mjs', large)
+  const { status, result } = publicCheck(t, repo.input(save(repo.root)), manager.config)
+  assert.equal(status, 2, JSON.stringify(result.diagnostics))
+  assert.deepEqual(result.diagnostics.map(({ code }) => code), ['unsupported_managed_frozen_reader'])
+  const frozen = JSON.parse(readFileSync(join(result.evidenceDirectory, 'input.json'), 'utf8')) as ReviewContext
+  assert.deepEqual(frozen.readSet.find(file => file.path === 'src/greet.mjs'), { path: 'src/greet.mjs', before: implementation, candidate: large })
+  assert.deepEqual(manager.calls(), [{ action: 'resolve', capability: 'frozen-reader-v2' }])
+  assert.deepEqual(result.runs, [])
+})
+
+const managedFrozenTestRuntime = process.env.SPEX_MANAGER_FROZEN_TEST_RUNTIME
+for (const mode of ['completed', 'quota', 'metadata-rejected', 'metadata-stored-reference', 'metadata-rollout-only', 'audit-rejected', 'audit-references-unknown', 'audit-rollout-only', 'cold-carrier-missing', 'cold-carrier-replaced']) test(`公开 sync check 的 Manager 持久 Codex 独占资源 ${mode}`, { skip: !managedFrozenTestRuntime || process.platform !== 'darwin' }, t => {
+  const quota = mode === 'quota'
+  const auditRejected = mode.startsWith('audit-')
+
+  const repo = fixture(), nativeModel = 'gpt-6.1-sol'
+  t.after(() => rmSync(repo.root, { recursive: true, force: true }))
+  const cliVersion = 'codex-cli 0.160.0', fixtureBin = String.raw`#!${process.execPath}
+const assert = require('node:assert/strict')
+const { appendFileSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } = require('node:fs')
+const { createServer } = require('node:net')
+const { createHash } = require('node:crypto')
+const { join, dirname, basename } = require('node:path')
+const { execFileSync } = require('node:child_process')
+if (process.argv[2] === '--version') { console.log(${JSON.stringify(cliVersion)}); process.exit(0) }
+const model = ${JSON.stringify(nativeModel)}, identity = '10000000-0000-4000-8000-000000000000', turn = { id: 'turn-frozen-original', status: 'inProgress' }
+const home = process.env.CODEX_HOME, settings = readFileSync(join(home, 'config.toml'), 'utf8')
+writeFileSync(join(home, 'test-runtime.pid'), String(process.pid))
+const runtimeLabel = home.includes('/metadata/') ? 'metadata' : 'review'
+const mode = ${JSON.stringify(mode)}
+const auditRejected = runtimeLabel === 'review' && mode.startsWith('audit-')
+function seedRollout(directory, rolloutCwd) {
+  const file = join(home, directory, 'rollout-2026-11-27T00-00-00-' + identity + '.jsonl')
+  mkdirSync(dirname(file), { recursive: true })
+  writeFileSync(file, JSON.stringify({ type: 'session_meta', payload: { id: identity, cwd: rolloutCwd } }) + '\n')
+}
+if (runtimeLabel === 'metadata' && mode === 'metadata-rollout-only') seedRollout('archived_sessions', home)
+const catalog = settings.match(/^model_catalog_json = (.+)$/m), limit = Number(settings.match(/^tool_output_token_limit = (.+)$/m)?.[1])
+writeFileSync(join(home, 'models_cache.json'), JSON.stringify({ client_version: '0.160.0', models: [{ slug: model, apply_patch_tool_type: 'freeform', experimental_supported_tools: [] }] }))
+const disabled = Object.fromEntries(${JSON.stringify(frozenReaderDisabledFeatures)}.map(feature => [feature, false]))
+let cwd, path, prompt, archived = false, endpoint = false
+process.on('SIGTERM', () => {
+  if (archived && mode === 'cold-carrier-missing') unlinkSync(path)
+  if (archived && mode === 'cold-carrier-replaced') {
+    writeFileSync(path + '.new', readFileSync(path)); renameSync(path + '.new', path)
+  }
+  process.exit(0)
+})
+const items = [], ranges = new Map(), outputs = new Map()
+const socketPath = process.argv.find(arg => arg.startsWith('unix://')).slice(7)
+const server = createServer(socket => {
+  let buffer = Buffer.alloc(0), ready = false
+  const send = value => {
+    const bytes = Buffer.from(JSON.stringify(value)), header = bytes.length < 126 ? Buffer.from([0x81, bytes.length]) : Buffer.alloc(bytes.length < 65536 ? 4 : 10)
+    if (bytes.length >= 126) { header[0] = 0x81; header[1] = header.length === 4 ? 126 : 127; if (header.length === 4) header.writeUInt16BE(bytes.length, 2); else header.writeBigUInt64BE(BigInt(bytes.length), 2) }
+    socket.write(Buffer.concat([header, bytes]))
+  }
+  const methods = {
+    initialize: () => ({}), 'model/list': () => ({ data: mode.startsWith('metadata-') ? [] : [{ id: model, model, slug: model }], nextCursor: null }),
+    'config/read': p => {
+      if (mode === 'audit-rollout-only') seedRollout('sessions/2026/11/27', p.cwd)
+      return { config: { sandbox_mode: auditRejected ? 'workspace-write' : 'read-only', approval_policy: 'never', model_catalog_json: JSON.parse(catalog[1]), tool_output_token_limit: limit,
+        features: { apps: false, plugins: false, hooks: false, shell_tool: false, code_mode: false, code_mode_host: true, ...disabled }, mcp_servers: {} } }
+    },
+    'hooks/list': () => ({ data: [{ hooks: [], errors: [] }] }), 'mcpServerStatus/list': () => ({ data: [], nextCursor: null }),
+    'thread/start': p => {
+      assert.equal(auditRejected, false)
+      assert.equal(p.model, model); assert.equal(p.ephemeral, false); assert.deepEqual(p.dynamicTools.map(tool => tool.name), ['spex_read_frozen'])
+      cwd = p.cwd; path = join(home, 'sessions', 'rollout-2026-11-27T00-00-00-' + identity + '.jsonl'); mkdirSync(dirname(path), { recursive: true })
+      return { thread: { id: identity, cwd, path, ephemeral: false }, model }
+    },
+    'thread/read': p => { assert.equal(p.threadId, identity); return { thread: { id: identity, cwd, path, turns: p.includeTurns ? [{ ...turn, items }] : [] } } },
+    'thread/turns/list': p => { assert.equal(p.threadId, identity); return { data: [{ ...turn }], nextCursor: null } },
+    'thread/items/list': p => { assert.equal(p.threadId, identity); assert.equal(p.turnId, turn.id); return { data: items.map(item => ({ turnId: turn.id, item })), nextCursor: null } },
+    'thread/list': p => ({ data: runtimeLabel === 'metadata' && mode === 'metadata-stored-reference' && !p.archived
+      ? [{ id: 'stored-native-thread', cwd: p.cwd }] : cwd && p.archived === archived ? [{ id: identity, cwd }] : [], nextCursor: null }),
+    'thread/loaded/list': () => ({ data: runtimeLabel === 'review' && mode === 'audit-references-unknown' ? ['unowned-thread'] : cwd && !archived ? [identity] : [], nextCursor: null }),
+    'thread/archive': p => {
+      assert.equal(p.threadId, identity); assert.ok(['completed', 'failed'].includes(turn.status)); assert.equal(archived, false)
+      const archive = join(home, 'archived_sessions', basename(path)); mkdirSync(dirname(archive), { recursive: true }); renameSync(path, archive); path = archive; archived = true
+      return {}
+    },
+    'turn/start': p => {
+      assert.equal(p.threadId, identity); assert.equal(p.model, model); assert.equal(p.cwd, cwd)
+      appendFileSync(join(home, 'test-turn-starts'), 'start\n')
+      prompt = p.input[0].text
+      const index = JSON.parse(prompt.split('\n').at(-1))
+      assert.equal(prompt.includes('candidate-body-ends'), false); items.push({ type: 'userMessage', content: p.input })
+      if (${quota} && home.includes('c'.repeat(64))) {
+        writeFileSync(path, [{ type: 'session_meta', payload: { id: identity, cwd } }, { type: 'turn_context', payload: { turn_id: turn.id } },
+          { type: 'event_msg', payload: { type: 'user_message', message: prompt } },
+          { type: 'event_msg', payload: { type: 'task_complete', turn_id: turn.id } }].map(row => JSON.stringify(row)).join('\n') + '\n')
+        turn.status = 'failed'; turn.error = { codexErrorInfo: 'usageLimitExceeded' }
+        setImmediate(() => send({ method: 'turn/completed', params: { threadId: identity, turn } }))
+        return { turn: { ...turn } }
+      }
+      let id = 100
+      setImmediate(() => { for (const batch of index.readBatches) for (const range of batch.ranges) {
+        const args = { contextDigest: index.contextDigest, entryId: batch.entryId, ...range }, next = id++
+        ranges.set(next, args); send({ id: next, method: 'item/tool/call', params: { threadId: identity, turnId: turn.id, callId: String(next), tool: 'spex_read_frozen', arguments: args } })
+      } })
+      return { turn: { ...turn } }
+    },
+  }
+  const handle = request => {
+    if (request.method && request.id !== undefined) { assert.ok(methods[request.method], request.method); send({ id: request.id, result: methods[request.method](request.params) }); return }
+    if (!ranges.has(request.id)) return
+    const args = ranges.get(request.id), text = request.result.contentItems[0].text, reply = JSON.parse(text)
+    outputs.set(request.id, { text, bytes: Buffer.from(reply.text).subarray(args.startByte - (reply.decodedStartByte ?? args.startByte), args.endByte - (reply.decodedStartByte ?? args.startByte)) })
+    items.push({ type: 'dynamicToolCall', id: String(request.id), tool: 'spex_read_frozen', status: 'completed', arguments: args, ...request.result })
+    if (outputs.size !== ranges.size || endpoint) return
+    endpoint = true
+    const full = Buffer.concat([...outputs].sort(([a], [b]) => a - b).map(([, output]) => output.bytes)).toString('utf8')
+    const context = JSON.parse(full.split('\n冻结完整输入:\n')[1])
+    const source = context.readSet.find(item => item.path === 'src/greet.mjs')
+    assert.ok(source.candidate.includes('candidate-body-ends')); assert.equal(readFileSync(join(cwd, source.path), 'utf8'), source.candidate)
+    assert.equal(execFileSync('git', ['-C', cwd, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), context.identities.candidateCommit)
+    assert.equal(execFileSync('git', ['-C', cwd, 'rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).trim(), context.identities.candidateTree)
+    const final = JSON.stringify({ inputId: context.inputId, candidateDigest: context.candidateDigest, checkedIds: context.scope.itemIds, verdict: 'accept', findings: [] })
+    writeFileSync(path, [{ type: 'session_meta', payload: { id: identity, cwd } }, { type: 'turn_context', payload: { turn_id: turn.id } },
+      { type: 'event_msg', payload: { type: 'user_message', message: prompt } },
+      ...[...outputs].flatMap(([id, output]) => [{ type: 'response_item', payload: { type: 'custom_tool_call', name: 'exec', call_id: String(id) } },
+        { type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: String(id), output: output.text }, metadata: { fallback_token_limit_override: Math.ceil(limit * 1.2) } }]),
+      { type: 'event_msg', payload: { type: 'task_complete', turn_id: turn.id, last_agent_message: final } }].map(row => JSON.stringify(row)).join('\n') + '\n')
+    items.push({ type: 'agentMessage', phase: 'final_answer', text: final })
+    turn.status = 'completed'; send({ method: 'turn/completed', params: { threadId: identity, turn } })
+  }
+  socket.on('data', chunk => {
+    buffer = Buffer.concat([buffer, chunk])
+    if (!ready) {
+      const end = buffer.indexOf('\r\n\r\n'); if (end < 0) return
+      const key = buffer.subarray(0, end).toString().match(/^Sec-WebSocket-Key: (.+)$/im)?.[1]
+      const accept = createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64')
+      socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: ' + accept + '\r\n\r\n')
+      buffer = buffer.subarray(end + 4); ready = true
+    }
+    while (buffer.length >= 2) {
+      const opcode = buffer[0] & 15, masked = !!(buffer[1] & 128); let length = buffer[1] & 127, offset = 2
+      if (length === 126) { if (buffer.length < 4) return; length = buffer.readUInt16BE(2); offset = 4 }
+      else if (length === 127) { if (buffer.length < 10) return; length = Number(buffer.readBigUInt64BE(2)); offset = 10 }
+      const start = offset + (masked ? 4 : 0); if (buffer.length < start + length) return
+      const data = Buffer.from(buffer.subarray(start, start + length)); if (masked) for (let i = 0; i < length; i++) data[i] ^= buffer[offset + i % 4]
+      buffer = buffer.subarray(start + length); if (opcode === 1) handle(JSON.parse(data.toString()))
+    }
+  })
+})
+server.listen(socketPath)
+setTimeout(() => process.exit(1), 30_000).unref()
+`
+  const route = { routeId: 'c'.repeat(64), vendor: 'codex', model: nativeModel, kind: 'cli', frozenReader: { capability: 'frozen-reader-v2', protocol: 'codex-persistent-v2', model: nativeModel, cliVersion, cliSha256: contentHash(fixtureBin) } } as const
+  const successor = quota ? { ...route, routeId: 'd'.repeat(64) } : undefined
+  const manager = managerFixture(t, route, true, successor, managedFrozenTestRuntime)
+  writeFileSync(join(manager.host, 'codex'), fixtureBin, { mode: 0o700 })
+  put(repo.root, 'src/greet.mjs', `${implementation}\n/* ${'x'.repeat(FROZEN_PROMPT_THRESHOLD_BYTES)} candidate-body-ends */\n`)
+  const candidate = save(repo.root), original = git(repo.root, ['worktree', 'list', '--porcelain'])
+  const { status, result } = publicCheck(t, repo.input(candidate), manager.config)
+  if (mode.startsWith('metadata-') || auditRejected) {
+    const realm = readdirSync(result.evidenceDirectory).find(name => name.startsWith('review-'))!
+    const runtime = join(result.evidenceDirectory, realm, 'runtime', 'projects')
+    const markers = readdirSync(runtime, { recursive: true }).filter(name => String(name).endsWith('/test-runtime.pid'))
+    const endpoint = markers.find(name => String(name).includes(auditRejected ? '/structured-managed-frozen-worktree-v1/' : '/metadata/'))
+    assert.ok(endpoint)
+    const pid = Number(readFileSync(join(runtime, String(endpoint)), 'utf8'))
+    try {
+      assert.equal(status, mode === 'metadata-rejected' ? 2 : 1, JSON.stringify(result.diagnostics))
+      assert.equal(result.review, null)
+      if (mode.endsWith('-rollout-only') || mode === 'audit-references-unknown' || mode === 'metadata-stored-reference') {
+        assert.deepEqual(result.diagnostics.map(({ code }) => code), ['native_review_recovery_required'])
+        if (mode.endsWith('-rollout-only')) {
+          assert.match(result.diagnostics[0].message, /rollout/iu)
+          const home = dirname(join(runtime, String(endpoint)))
+          const rollout = readdirSync(home, { recursive: true }).find(name => String(name).includes('rollout-') && String(name).endsWith('.jsonl'))
+          assert.ok(rollout)
+          const original = JSON.parse(readFileSync(join(home, String(rollout)), 'utf8'))
+          assert.equal(original.type, 'session_meta')
+          assert.equal(original.payload.id, '10000000-0000-4000-8000-000000000000')
+          if (auditRejected) assert.equal(existsSync(original.payload.cwd), true, 'unproven worktree remains for recovery')
+        }
+        assert.deepEqual(manager.calls().map(call => call.action), auditRejected ? ['resolve', 'reserve'] : ['resolve'])
+        assert.doesNotThrow(() => process.kill(pid, 0))
+      } else {
+        assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, '独占进程须在返回诊断前停止')
+        assert.deepEqual(manager.calls().map(call => call.action), auditRejected ? ['resolve', 'reserve', 'settle'] : ['resolve'])
+      }
+    } finally {
+      // 旧实现或故意不完整的资源证明可能保留本测试自己的进程。
+      try { process.kill(pid, 'SIGTERM') } catch (error) { assert.equal((error as NodeJS.ErrnoException).code, 'ESRCH') }
+    }
+    return
+  }
+  if (mode.startsWith('cold-carrier-')) {
+    assert.equal(status, 1, JSON.stringify(result.diagnostics))
+    assert.equal(result.status, 'recovery_required')
+    assert.equal(result.review, null)
+    assert.match(result.diagnostics[0].message, /cold|archive/u)
+    assert.deepEqual(manager.calls().map(call => [call.action, call.outcome]), [['resolve', undefined], ['reserve', undefined], ['settle', 'completed']])
+    const realm = readdirSync(result.evidenceDirectory).find(name => name.startsWith('review-'))!
+    const runtime = join(result.evidenceDirectory, realm, 'runtime')
+    const starts = readdirSync(runtime, { recursive: true }).filter(name => String(name).endsWith('/test-turn-starts'))
+    assert.equal(starts.length, 1)
+    assert.equal(readFileSync(join(runtime, String(starts[0])), 'utf8'), 'start\n')
+    return
+  }
+  assert.equal(result.review?.verdict, 'accept', JSON.stringify(result.diagnostics))
+  const accepted = successor ?? route
+  assert.deepEqual(result.reviewRoute, accepted)
+  const calls = manager.calls(), firstId = calls[1].sessionId
+  assert.ok(firstId)
+  if (quota) assert.notEqual(firstId, result.trace?.sessionId)
+  assert.deepEqual(calls, [{ action: 'resolve', capability: 'frozen-reader-v2' }, { action: 'reserve', route, sessionId: firstId },
+    ...(quota ? [{ action: 'settle', route, sessionId: firstId, outcome: 'quota' },
+      { action: 'resolve', nextAfter: route, sameGroupAs: route, failedSessionId: firstId, capability: 'frozen-reader-v2' },
+      { action: 'reserve', route: accepted, sessionId: result.trace?.sessionId }] : []),
+    { action: 'settle', route: accepted, sessionId: result.trace?.sessionId, outcome: 'completed' }])
+  const realms = readdirSync(result.evidenceDirectory).filter(name => name.startsWith('review-'))
+  assert.equal(realms.length, quota ? 2 : 1)
+  for (const realm of realms.map(name => join(result.evidenceDirectory, name))) {
+    const worker = JSON.parse(readFileSync(join(realm, 'native-result.json'), 'utf8'))
+    if (worker.result) {
+      assert.equal(worker.result.frozenReadProof.version, 2)
+      assert.deepEqual(worker.result.frozenReadProof.coveredEntryIds, ['task'])
+      assert.equal(worker.result.worktree.headCommit, candidate)
+      assert.equal(existsSync(worker.result.worktree.worktreePath), false)
+    } else {
+      assert.equal(worker.diagnostic.code, 'provider_quota_exhausted')
+      assert.equal(worker.stoppedQuota.sessionId, firstId)
+    }
+    const runtime = join(realm, 'runtime', 'projects')
+    const runtimePidPath = readdirSync(runtime, { recursive: true }).find(name => String(name).includes('/structured-managed-frozen-worktree-v1/') && String(name).endsWith('/test-runtime.pid'))
+    assert.ok(runtimePidPath)
+    const pid = Number(readFileSync(join(runtime, String(runtimePidPath)), 'utf8'))
+    assert.equal(readFileSync(join(dirname(join(runtime, String(runtimePidPath))), 'test-turn-starts'), 'utf8'), 'start\n')
+    assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, 'review process has exited before V2 publication')
+  }
+  assert.equal(git(repo.root, ['worktree', 'list', '--porcelain']), original)
+  assert.equal(status, 2, JSON.stringify(result.diagnostics))
+  assert.deepEqual(result.diagnostics.map(({ code }) => code), ['verification'], 'fixture stops at Docker availability')
+})
 
 for (const mode of ['finite', 'unlimited', 'configured'] as const) test(`unlimited CI独审单次timeout ${mode} 保持有限且不依赖总cap`, async () => {
   const repo = fixture()

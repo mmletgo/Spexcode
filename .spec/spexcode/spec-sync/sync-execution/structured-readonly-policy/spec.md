@@ -61,6 +61,8 @@ Codex 原生 readOnly 策略保留，P1 使用提供正文的纯推理，不依�
 
 新readerRuntime版本2的固定tool_output_token_limit按[[frozen-context-reader]]从冻结清单派生，并进入descriptor缓存、realm路径和execution身份；实际config/read必须精确相等，不能只核磁盘配置或修改provider目录声明。新预算能力与旧catalog相同也不能复用旧daemon路径。旧版本1保留原realm/config与已存在thread/turn的历史恢复，不重写旧清单、响应或proof，不把旧证明升格为模型可见全文证明。host的独立exec额度和公开outer完整输出另由版本2读取证明核验；关闭host在当前原生路径不可用，不能把无成功读取的turn接受为完成。
 
+[[sync-conformance]] 的托管大正文采用 version7/codex-managed-frozen-worktree-v1。此策略同时冻结真实只读候选 Git seed、Manager 带版本的执行路线、严格冻结清单与版本2 reader runtime。候选目录和专属只读 realm 保持原隔离，只有唯一冻结 reader 可读取业务输入。v7 的 Codex 配置、工具化目录、原生路径、冻结提示、工具说明、分批、原生 token 预算与回读由 Manager 适配器提供。能力的模型和 CLI 由 Manager 认证，实际启动的可执行文件摘要须匹配路线，metadata 专属 realm 仍验证模型目录、零会话和精确停止。无论目录或模型校验结果，宿主都复核该独占代的零驻留引用、已知启动 cwd 的活动及归档集合。Manager 独立清点该代启动时固定的物理 CODEX_HOME 的活动和归档卷宗目录，只有三组原生查询和卷宗都为空才停止并验证原进程组退出。冷检查的既有 v2 证明、读取额度及只读权限保持，旧策略沿原字段运行。
+
 原生能力探针必须亲读custom exec代码与返回值：registry只有注册reader；process/require/fetch/module不可用，Node/HTTP/data动态import拒绝，constructor不取得宿主process，任意path/live诱饵不可读、任意写入与子进程不可达，网络诱饵0命中。metadata临时daemon只有在零native references且精确PID/start/receipt证实后才停止，停止确认后保存来源/前后目录摘要和changedFields，不能操作既有v1或其他generation。错误工具请求未获回复时沿cancelling保留容量，不能因本地快速失败就声称原生已停止。
 
 native_worktree_result_invalid 仅为原生 Git 结果后置合约的精确失败观测；不改变固定 policy、创建摘要、正常读取能力或旧冻结证明门禁。原 nativeWorktreePrompt 字节与历史创建哈希保持。

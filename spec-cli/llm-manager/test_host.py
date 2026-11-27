@@ -163,6 +163,58 @@ class HostTests(unittest.TestCase):
         self.assertEqual(len(self.settings("list_keys", provider_id="api")["keys"]), 1)
         self.assertNotIn(SYNTHETIC_KEY.encode(), self.database.read_bytes())
 
+    def test_frozen_reader_selection_attestation_and_exact_settlement(self) -> None:
+        model = "gpt-6.1-sol"
+        digest = "a" * 64
+        self.add_native("grok", "account")
+        self.add_provider("codex", kind="cli", cli_vendor="codex", model_mode="fixed",
+                          models=[{"id": "codex-model", "name": model}])
+        self.group("grok", "codex")
+        runner = """
+import runpy, sys
+from unittest.mock import patch
+host, config, digest = sys.argv[1:]
+sys.argv = [host, 'rpc', config]
+with patch('llm_manager.native_capability.codex_frozen_runtime', return_value=digest or None):
+    runpy.run_path(host, run_name='__main__')
+"""
+
+        def call_frozen(proof: str = digest, **message: object) -> dict[str, Any]:
+            result = subprocess.run(
+                [sys.executable, "-IB", "-c", runner, str(HOST), str(self.config), proof],
+                input=json.dumps(message), text=True, capture_output=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return cast(dict[str, Any], json.loads(result.stdout))
+
+        capability = "frozen-reader-v2"
+        default = self.rpc(action="resolve")
+        self.assertEqual(default["vendor"], "grok")
+        self.assertEqual(set(default), {"vendor", "model", "routeId", "kind"})
+        self.assertEqual(call_frozen("", action="resolve", capability=capability), {"ok": True, "value": None})
+        selected = call_frozen(action="resolve", capability=capability)
+        self.assertTrue(selected["ok"], selected)
+        route = selected["value"]
+        self.assertEqual(route["vendor"], "codex")
+        self.assertEqual(route["model"], model)
+        self.assertEqual(route["frozenReader"], {
+            "capability": capability, "protocol": "codex-persistent-v2", "model": model,
+            "cliVersion": "codex-cli 0.160.0", "cliSha256": digest,
+        })
+        wrong_scope = call_frozen(action="resolve", sameGroupAs=route)
+        self.assertEqual(wrong_scope["code"], "llm_manager_native_capability_mismatch")
+        stale = call_frozen("b" * 64, action="reserve", route=route, sessionId="frozen-review")
+        self.assertEqual(stale["code"], "llm_manager_route_stale")
+        self.assertTrue(call_frozen(action="reserve", route=route, sessionId="frozen-review")["ok"])
+        unreported = call_frozen(action="resolve", capability=capability, sameGroupAs=route,
+                                 nextAfter=route, failedSessionId="frozen-review")
+        self.assertEqual(unreported["code"], "llm_manager_quota_required")
+        settled = call_frozen(action="settle", route=route, sessionId="frozen-review", outcome="quota")
+        self.assertEqual(settled, {"ok": True, "value": {"outcome": "quota"}})
+        self.assertEqual(call_frozen(action="resolve", capability=capability, sameGroupAs=route,
+                                     nextAfter=route, failedSessionId="frozen-review"), {"ok": True, "value": None})
+        self.assertEqual(self.rpc(action="resolve"), default)
+
     def test_upgrade_keeps_existing_provider_times_and_persists_global_timezone(self) -> None:
         provider = self.add_provider("grok", kind="cli", cli_vendor="grok", model_mode="account",
                                      timezone="Asia/Singapore")

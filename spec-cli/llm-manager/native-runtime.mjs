@@ -1,4 +1,4 @@
-// Generated from LLM Manager 69a75baa0d641cbb929b55de9d0aa60010ab2e24 by npm run build:native-runtime.
+// Generated from LLM Manager f01031d48bd8637587b11c2b554dc86c6da670d0 by npm run build:native-runtime.
 var __defProp = Object.defineProperty;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __esm = (fn, res, err) => function __init() {
@@ -244,8 +244,8 @@ function isTokenCount(value) {
 }
 function claudeModelUsage(value) {
   if (!isObject(value)) return;
-  const models = Object.values(value);
-  if (!models.length || !models.every(isObject)) return;
+  const models2 = Object.values(value);
+  if (!models2.length || !models2.every(isObject)) return;
   const usage = { source: "claude-model-usage" };
   const fields = (
     /** @type {const} */
@@ -257,7 +257,7 @@ function claudeModelUsage(value) {
     ]
   );
   for (const [field, nativeField] of fields) {
-    const counts = models.map((model) => model[nativeField]);
+    const counts = models2.map((model) => model[nativeField]);
     if (!counts.every(isTokenCount)) continue;
     const total = counts.reduce((sum, count) => sum + count, 0);
     if (Number.isSafeInteger(total)) usage[field] = total;
@@ -333,18 +333,424 @@ var init_claude = __esm({
   }
 });
 
+// src/llm_manager/native/codex-frozen.mjs
+import { createHash as createHash2 } from "node:crypto";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync as readFileSync2, readdirSync, realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, join as join2 } from "node:path";
+function object(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? (
+    /** @type {Packet} */
+    value
+  ) : {};
+}
+function codexPersistentConfig(readerRuntime) {
+  const config = [
+    'approval_policy = "never"',
+    'sandbox_mode = "read-only"',
+    'web_search = "disabled"',
+    "[features]",
+    ...readerRuntime ? codexPersistentDisabledFeatures.map((feature) => `${feature} = false`) : [],
+    "apps = false",
+    "plugins = false",
+    "hooks = false",
+    "multi_agent = false",
+    "shell_tool = false",
+    "code_mode = false",
+    `code_mode_host = ${Boolean(readerRuntime)}`,
+    "unified_exec = false",
+    "[mcp_servers]",
+    ""
+  ];
+  if (readerRuntime) {
+    config.unshift(`model_catalog_json = ${JSON.stringify(readerRuntime.catalogPath)}`);
+    if (readerRuntime.version === 2) config.splice(1, 0, `tool_output_token_limit = ${readerRuntime.toolOutputTokenLimit}`);
+  }
+  return config.join("\n");
+}
+function codexPersistentHomePaths(home) {
+  return { configPath: join2(home, "config.toml"), authPath: join2(home, "auth.json") };
+}
+function assertCodexUnboundRealmHasNoRollouts(home) {
+  const unproven = () => new CodexNativeProtocolError("stale_result", "The scoped Codex realm cannot prove that its native rollout trees are empty");
+  const isReadableDirectory = (stat) => stat !== void 0 && stat.isDirectory() && (stat.mode & 0o444n) !== 0n && (stat.mode & 0o111n) !== 0n;
+  try {
+    if (!isAbsolute(home)) throw unproven();
+    const homeStat = lstatSync(home, { bigint: true });
+    if (!isReadableDirectory(homeStat)) throw unproven();
+    const root = realpathSync(home);
+    const directories = [
+      { path: join2(root, "sessions"), levels: [/^\d{4}$/, /^(0[1-9]|1[0-2])$/, /^(0[1-9]|[12][0-9]|3[01])$/], optional: true },
+      { path: join2(root, "archived_sessions"), levels: [], optional: true }
+    ];
+    const observed = /* @__PURE__ */ new Map([[root, homeStat]]);
+    for (const { path, levels, optional } of directories) {
+      const stat = lstatSync(path, { bigint: true, throwIfNoEntry: false });
+      if (optional && stat === void 0) continue;
+      if (!isReadableDirectory(stat) || realpathSync(path) !== path)
+        throw unproven();
+      observed.set(path, stat);
+      for (const child of readdirSync(path, { withFileTypes: true })) {
+        if (!child.isDirectory() || !levels[0]?.test(child.name)) throw unproven();
+        directories.push({ path: join2(path, child.name), levels: levels.slice(1), optional: false });
+      }
+    }
+    if (realpathSync(home) !== root) throw unproven();
+    for (const [path, before] of observed) {
+      const after = lstatSync(path, { bigint: true });
+      if (after.dev !== before.dev || after.ino !== before.ino || after.mtimeNs !== before.mtimeNs || after.ctimeNs !== before.ctimeNs)
+        throw unproven();
+    }
+  } catch (error) {
+    if (error instanceof CodexNativeProtocolError) throw error;
+    throw unproven();
+  }
+}
+function codexPersistentSocketPaths(socketPath, uid) {
+  const rendezvous = join2(realpathSync(dirname(socketPath)), basename(socketPath));
+  const daemonDirectory = join2("/private/tmp", `codex-daemon-${uid}`);
+  const physicalSocket = join2(daemonDirectory, sha(Buffer.from(rendezvous)));
+  return { rendezvous, daemonDirectory, physicalSocket, lockPath: `${physicalSocket}.lock` };
+}
+function models(value) {
+  if (!Array.isArray(value) || !value.length || value.some((model) => typeof object(model).slug !== "string" || !model.slug))
+    throw new CodexNativeProtocolError("unsupported", "Codex frozen model catalog has no complete native model rows");
+  return value;
+}
+function readCatalogFile(path) {
+  try {
+    return readFileSync2(path);
+  } catch {
+    throw new CodexNativeProtocolError("unsupported", "Codex frozen model catalog source is unreadable");
+  }
+}
+function parseCatalog(bytes) {
+  try {
+    return object(JSON.parse(bytes.toString("utf8")));
+  } catch {
+    throw new CodexNativeProtocolError("unsupported", "Codex frozen model catalog JSON is invalid");
+  }
+}
+function codexBuildFrozenCatalog({ home, cliVersion, model }) {
+  const cache = parseCatalog(readCatalogFile(join2(home, "models_cache.json")));
+  if (`codex-cli ${cache.client_version}` !== cliVersion)
+    throw new CodexNativeProtocolError("unsupported", "Codex frozen provider catalog has a different client version");
+  const source = models(cache.models);
+  if (model && !source.some((row) => row.slug === model))
+    throw new CodexNativeProtocolError("unsupported", "Codex frozen model is absent from its isolated provider catalog");
+  const stripped = source.map((row) => ({ ...row, apply_patch_tool_type: null, experimental_supported_tools: [] }));
+  const bytes = Buffer.from(JSON.stringify({ models: stripped }));
+  return {
+    bytes,
+    beforeDigest: sha(Buffer.from(JSON.stringify({ models: source }))),
+    digest: sha(bytes),
+    changedFields: ["apply_patch_tool_type", "experimental_supported_tools"]
+  };
+}
+function codexAuditFrozenCatalog({ path, digest, model }) {
+  const bytes = readCatalogFile(path);
+  if (sha(bytes) !== digest) throw new CodexNativeProtocolError("unsupported", "Codex frozen model catalog digest differs");
+  const entries = models(parseCatalog(bytes).models);
+  if (entries.some((entry) => entry.apply_patch_tool_type !== null || !Array.isArray(entry.experimental_supported_tools) || entry.experimental_supported_tools.length))
+    throw new CodexNativeProtocolError("unsupported", "Codex frozen model catalog still exposes native tools");
+  if (model && !entries.some((entry) => entry.slug === model))
+    throw new CodexNativeProtocolError("unsupported", "Requested model is absent from the Codex frozen catalog");
+}
+function codexFrozenToolDefinition() {
+  return {
+    type: "function",
+    name: frozenToolName,
+    description: 'Read immutable frozen context only. The index readBatches are a plan, not extra authorization: read every required unique content fully, using one exec per planned batch and at most its two listed adjacent ranges. Set each exec first-line // @exec: {"max_output_tokens": H} with H = execMaxOutputTokens from the index; call each listed read in order and print every returned string verbatim with its own text(await tools.spex_read_frozen(...)) call. If exec returns Script running with cell ID, do not rerun any read or advance the batch; call wait with {cell_id, yield_time_ms: 10000, max_tokens: H}, repeat with the same cell_id if still running, and wait for Script completed before continuing. A running marker is not read content; use the completed wait output, preserving each full text item. Optional entries remain available for reads as needed. Byte ranges are end-exclusive. Continue with startByte equal to the response original endByte; decodedStartByte/decodedEndByte only describe UTF-8 display expansion and are never cursors. No paths, live files, shell, or network are available.',
+    inputSchema: { type: "object", properties: { contextDigest: { type: "string" }, entryId: { type: "string" }, startByte: { type: "integer", minimum: 0 }, endByte: { type: "integer", minimum: 0 } }, required: ["contextDigest", "entryId", "startByte", "endByte"], additionalProperties: false }
+  };
+}
+function codexFrozenToolOutputTokenLimit(maxResponseBytes) {
+  return Math.max(1e4, codexTextTokenCost(maxResponseBytes));
+}
+function codexFrozenPrompt({ prompt, taskIsFrozen, contextDigest, maxReadBytes, maxResponseBytes, entries, plans }) {
+  const toolOutputTokenLimit = codexFrozenToolOutputTokenLimit(maxResponseBytes);
+  const execMaxOutputTokens = codexExecMaxOutputTokens(toolOutputTokenLimit);
+  const readBatches = [];
+  for (const { entryId, ranges } of plans) {
+    for (let index2 = 0; index2 < ranges.length; ) {
+      const first = ranges[index2];
+      const second = ranges[index2 + 1];
+      const batch = [{ startByte: first.startByte, endByte: first.endByte }];
+      if (second && codexTextTokenCost(first.responseBytes) + codexTextTokenCost(second.responseBytes) <= toolOutputTokenLimit)
+        batch.push({ startByte: second.startByte, endByte: second.endByte });
+      readBatches.push({ entryId, ranges: batch });
+      index2 += batch.length;
+    }
+  }
+  const index = JSON.stringify({ tool: frozenToolName, contextDigest, maxReadBytes, toolOutputTokenLimit, execMaxOutputTokens, entries, readBatches });
+  const instructions = taskIsFrozen ? `The complete original task, instructions, and context are frozen without truncation in entry task. Read its entire required content using ${frozenToolName}, then follow that original task and return its requested structured final answer. Byte offsets are end-exclusive; continue from the response's original endByte, never decodedEndByte. No shell, paths or live data are available.` : prompt;
+  return { prompt: `${instructions}
+${index}`, toolOutputTokenLimit };
+}
+function codexFrozenToolResponse(text) {
+  return { contentItems: [{ type: (
+    /** @type {const} */
+    "inputText"
+  ), text }], success: (
+    /** @type {const} */
+    true
+  ) };
+}
+function codexFrozenPromptMatches(items, prompt) {
+  const users = items.map(object).filter((item) => item.type === "userMessage");
+  const content = users[0]?.content;
+  return users.length === 1 && Array.isArray(content) && content.length === 1 && object(content[0]).type === "text" && object(content[0]).text === prompt;
+}
+function codexDecodeFrozenItems(items, toolName) {
+  const final = [];
+  const reads = [];
+  const ids = /* @__PURE__ */ new Set();
+  for (const value of items) {
+    const item = object(value);
+    if (item.type === "agentMessage" && item.phase === "final_answer") final.push(item.text);
+    if (item.type !== "dynamicToolCall") continue;
+    if (typeof item.id !== "string" || !item.id || ids.has(item.id) || item.tool !== toolName || item.namespace != null || item.status !== "completed" || item.success !== true || !Array.isArray(item.contentItems) || item.contentItems.length !== 1)
+      throw new CodexNativeProtocolError("stale_result", "Codex frozen history contains an invalid, pending or foreign dynamic tool call");
+    const body = object(item.contentItems[0]);
+    if (body.type !== "inputText" || typeof body.text !== "string" || JSON.stringify(item.contentItems) !== JSON.stringify(codexFrozenToolResponse(body.text).contentItems))
+      throw new CodexNativeProtocolError("stale_result", "Codex frozen dynamic result does not preserve its exact text body");
+    ids.add(item.id);
+    reads.push({ callId: item.id, arguments: item.arguments, text: body.text });
+  }
+  if (final.length !== 1 || typeof final[0] !== "string" || !final[0])
+    throw new CodexNativeProtocolError("failed", "Codex exact frozen turn did not return one final answer");
+  return { finalText: final[0], reads };
+}
+function readRolloutFile(path) {
+  let fd;
+  try {
+    const physical = realpathSync(path);
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const before = fstatSync(fd, { bigint: true });
+    if (!before.isFile()) throw new CodexNativeProtocolError("stale_result", "Codex frozen rollout is not a regular file");
+    const bytes = readFileSync2(fd);
+    const after = fstatSync(fd, { bigint: true });
+    if (before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs || before.size !== after.size || after.size !== BigInt(bytes.length))
+      throw new CodexNativeProtocolError("not_materialized", "Codex frozen rollout changed during its read");
+    return { bytes, path: physical, dev: String(before.dev), ino: String(before.ino) };
+  } catch (error) {
+    if (error instanceof CodexNativeProtocolError) throw error;
+    if (object(error).code === "ENOENT") throw new CodexNativeProtocolError("not_materialized", "The original Codex frozen rollout is missing");
+    throw new CodexNativeProtocolError("stale_result", "The original Codex frozen rollout is unreadable");
+  } finally {
+    if (fd !== void 0) closeSync(fd);
+  }
+}
+function decodeRolloutLine(line) {
+  try {
+    return object(JSON.parse(line));
+  } catch {
+    throw new CodexNativeProtocolError("stale_result", "Codex frozen rollout contains invalid JSONL");
+  }
+}
+function decodeRollout(bytes, { threadId, turnId, cwd }, requireCompleted) {
+  if (bytes.at(-1) !== 10)
+    throw new CodexNativeProtocolError("not_materialized", "Codex frozen rollout has not flushed its last record");
+  let string;
+  try {
+    string = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new CodexNativeProtocolError("stale_result", "Codex frozen rollout is not UTF-8");
+  }
+  const lines = string.split("\n");
+  const header = decodeRolloutLine(lines[0]);
+  const meta = object(header.payload);
+  if (header.type !== "session_meta" || meta.id !== threadId || meta.cwd !== cwd || meta.parent_thread_id != null)
+    throw new CodexNativeProtocolError("stale_result", "Codex frozen rollout does not identify the exact root thread and workspace");
+  const calls = /* @__PURE__ */ new Map();
+  const returned = /* @__PURE__ */ new Set();
+  const outputs = [];
+  const turns = /* @__PURE__ */ new Set();
+  const prompts = [];
+  const finals = /* @__PURE__ */ new Set();
+  let current;
+  let completed = false;
+  for (const line of lines.slice(1)) {
+    if (!line.trim()) continue;
+    const record = decodeRolloutLine(line);
+    const payload = object(record.payload);
+    if (record.type === "turn_context" || record.type === "event_msg" && payload.type === "task_started") {
+      current = payload.turn_id;
+      if (typeof current === "string") turns.add(current);
+    }
+    if (record.type === "event_msg" && payload.type === "task_complete" && payload.turn_id === turnId) {
+      if (current !== turnId || completed)
+        throw new CodexNativeProtocolError("stale_result", "Codex frozen rollout completion does not belong to one exact turn");
+      if (typeof payload.last_agent_message === "string") finals.add(payload.last_agent_message);
+      completed = true;
+      current = void 0;
+    }
+    if (current !== turnId) continue;
+    if (record.type === "event_msg" && payload.type === "user_message" && typeof payload.message === "string") prompts.push(payload.message);
+    if (record.type === "event_msg" && payload.type === "agent_message" && payload.phase === "final_answer" && typeof payload.message === "string" && payload.message) finals.add(payload.message);
+    if (record.type !== "response_item") continue;
+    if (payload.type === "custom_tool_call" || payload.type === "function_call") {
+      const name2 = payload.type === "custom_tool_call" ? "exec" : "wait";
+      if (payload.name !== name2 || typeof payload.call_id !== "string" || !payload.call_id || calls.has(payload.call_id))
+        throw new CodexNativeProtocolError("stale_result", "Codex frozen rollout contains an invalid or repeated host call");
+      calls.set(payload.call_id, name2);
+      continue;
+    }
+    if (payload.type !== "custom_tool_call_output" && payload.type !== "function_call_output") continue;
+    const name = payload.type === "custom_tool_call_output" ? "exec" : "wait";
+    const { call_id: callId, output } = payload;
+    const limit = object(record.metadata).fallback_token_limit_override;
+    if (typeof callId !== "string" || calls.get(callId) !== name || returned.has(callId) || typeof limit !== "number" || !Number.isSafeInteger(limit) || limit <= 0 || !(typeof output === "string" || Array.isArray(output) && output.every((block) => object(block).type === "input_text" && typeof object(block).text === "string")))
+      throw new CodexNativeProtocolError("stale_result", "Codex frozen rollout output does not match its exact host call and history budget");
+    returned.add(callId);
+    outputs.push({ callId, output, historyTokenLimit: limit });
+  }
+  if (turns.size && !turns.has(turnId))
+    throw new CodexNativeProtocolError("stale_result", "Codex frozen rollout contains a different turn");
+  if (requireCompleted && !completed)
+    throw new CodexNativeProtocolError("not_materialized", "Codex frozen rollout has not persisted its exact completed turn");
+  if (completed && returned.size !== calls.size)
+    throw new CodexNativeProtocolError("stale_result", "Codex frozen rollout contains a completed host call without its output");
+  return { outputs, turns, prompts, finals };
+}
+function codexReadFrozenRollout(options) {
+  const source = readRolloutFile(options.path);
+  const history = decodeRollout(source.bytes, options, options.requireCompleted ?? true);
+  if (!history.turns.has(options.turnId))
+    throw new CodexNativeProtocolError("stale_result", "Codex frozen rollout does not identify the exact turn");
+  return { path: source.path, archived: basename(dirname(source.path)) === "archived_sessions", outputs: history.outputs };
+}
+function codexValidateFrozenVisibility(outputs, toolOutputTokenLimit, expectedResponses) {
+  const budget = codexExecMaxOutputTokens(toolOutputTokenLimit);
+  const callIds = /* @__PURE__ */ new Set();
+  const texts = /* @__PURE__ */ new Set();
+  for (const { callId, output, historyTokenLimit } of outputs) {
+    const bodies = typeof output === "string" ? [output] : output.map((block) => block.text);
+    const cost = bodies.reduce((total, body) => total + codexTextTokenCost(Buffer.byteLength(body, "utf8")), 0);
+    if (!callId || callIds.has(callId) || historyTokenLimit !== budget || cost > budget)
+      throw new CodexNativeProtocolError("stale_result", "Codex frozen model-visible body differs from its fixed history budget");
+    callIds.add(callId);
+    for (const body of bodies) texts.add(body);
+  }
+  if (expectedResponses.some((response) => !texts.has(response)))
+    throw new CodexNativeProtocolError("stale_result", "Codex frozen body was not returned verbatim in the exact model-visible history");
+}
+function readArchive(options, path, turn, items) {
+  if (!options.generation || turn.id !== options.turnId || typeof turn.status !== "string" || !["completed", "failed", "interrupted"].includes(turn.status) || options.prompt !== void 0 && !codexFrozenPromptMatches(items, options.prompt))
+    throw new CodexNativeProtocolError("stale_result", "Codex frozen archive history does not match its exact terminal turn or prompt");
+  const source = readRolloutFile(path);
+  const archiveDirectory = join2(realpathSync(options.home), "archived_sessions");
+  if (dirname(source.path) !== archiveDirectory || !basename(source.path).startsWith("rollout-") || !basename(source.path).endsWith(`-${options.threadId}.jsonl`))
+    throw new CodexNativeProtocolError("stale_result", "Codex frozen archive has no exact carrier in the scoped archive directory");
+  const completed = turn.status === "completed";
+  const history = decodeRollout(source.bytes, options, completed);
+  if (history.turns.size !== 1 || !history.turns.has(options.turnId) || options.prompt !== void 0 && (history.prompts.length !== 1 || history.prompts[0] !== options.prompt))
+    throw new CodexNativeProtocolError("stale_result", "Codex original archive does not identify one exact turn and its pinned prompt");
+  let finalText;
+  if (completed) {
+    if (sha(Buffer.from(JSON.stringify(items))) !== options.expectedHistoryDigest)
+      throw new CodexNativeProtocolError("stale_result", "Codex archived native items differ from their previously accepted complete history");
+    const decoded = codexDecodeFrozenItems(items, options.toolName);
+    finalText = decoded.finalText;
+    const visible = new Set(history.outputs.flatMap((output) => typeof output.output === "string" ? [output.output] : output.output.map((block) => block.text)));
+    if (history.finals.size !== 1 || !history.finals.has(finalText) || decoded.reads.some((read) => !visible.has(read.text)))
+      throw new CodexNativeProtocolError("stale_result", "Codex original archive does not match the native final and every frozen tool response");
+  }
+  const { dev, ino } = source;
+  const carrier = { path: source.path, sha256: sha(source.bytes), size: source.bytes.length, dev, ino };
+  return { carrier, status: turn.status, outputs: history.outputs, finalText };
+}
+function sealCodexFrozenArchive(options, path, turn, items) {
+  const { carrier, status } = readArchive(options, path, turn, items);
+  const historyBytes = Buffer.from(JSON.stringify({ turn, items }));
+  const receipt = {
+    version: 1,
+    generation: options.generation,
+    threadId: options.threadId,
+    turnId: options.turnId,
+    cwd: options.cwd,
+    status,
+    carrier,
+    historySha256: sha(historyBytes)
+  };
+  return { receipt, historyBytes };
+}
+function verifyCodexFrozenArchive(options, receipt, savedHistory) {
+  const historyBytes = Buffer.from(savedHistory);
+  if (receipt.version !== 1 || receipt.generation !== options.generation || receipt.threadId !== options.threadId || receipt.turnId !== options.turnId || receipt.cwd !== options.cwd || sha(historyBytes) !== receipt.historySha256)
+    throw new CodexNativeProtocolError("stale_result", "Codex archive evidence does not match its generation, scope, identity or native history");
+  const history = decodeRolloutLine(historyBytes.toString("utf8"));
+  if (!Array.isArray(history.items)) throw new CodexNativeProtocolError("stale_result", "Codex frozen archive is missing raw native items");
+  let archived;
+  try {
+    archived = readArchive(options, receipt.carrier.path, object(history.turn), history.items);
+  } catch (error) {
+    if (!(error instanceof CodexNativeProtocolError) || error.code !== "not_materialized") throw error;
+    throw new CodexNativeProtocolError("stale_result", "The original Codex archive carrier is missing or incomplete");
+  }
+  if (archived.status !== receipt.status || archived.carrier.path !== receipt.carrier.path || archived.carrier.sha256 !== receipt.carrier.sha256 || archived.carrier.size !== receipt.carrier.size || archived.carrier.dev !== receipt.carrier.dev || archived.carrier.ino !== receipt.carrier.ino)
+    throw new CodexNativeProtocolError("stale_result", "The original Codex archive carrier differs from the saved native evidence");
+  return { status: archived.status, items: history.items, outputs: archived.outputs, finalText: archived.finalText };
+}
+var CodexNativeProtocolError, sha, codexPersistentDisabledFeatures, frozenToolName, codexTextTokenCost, codexExecMaxOutputTokens;
+var init_codex_frozen = __esm({
+  "src/llm_manager/native/codex-frozen.mjs"() {
+    CodexNativeProtocolError = class extends Error {
+      /** @param {ErrorCode} code @param {string} message @param {unknown} [cause] */
+      constructor(code, message, cause) {
+        super(message, { cause });
+        this.name = "CodexNativeProtocolError";
+        this.code = code;
+      }
+    };
+    sha = (bytes) => createHash2("sha256").update(bytes).digest("hex");
+    codexPersistentDisabledFeatures = Object.freeze([
+      "goals",
+      "view_image",
+      "image_generation",
+      "sleep_tool",
+      "tool_suggest",
+      "current_time_reminder",
+      "send_message_to_user_async",
+      "token_budget",
+      "default_mode_request_user_input"
+    ]);
+    frozenToolName = "spex_read_frozen";
+    codexTextTokenCost = (responseBytes) => Math.ceil(responseBytes / 4);
+    codexExecMaxOutputTokens = (toolOutputTokenLimit) => Math.ceil(toolOutputTokenLimit * 1.2);
+  }
+});
+
 // src/llm_manager/native/codex.mjs
 var codex_exports = {};
 __export(codex_exports, {
   CodexNativeAppServer: () => CodexNativeAppServer,
   CodexNativeProtocolError: () => CodexNativeProtocolError,
+  CodexPersistentAppServer: () => CodexPersistentAppServer,
+  assertCodexUnboundRealmHasNoRollouts: () => assertCodexUnboundRealmHasNoRollouts,
+  codexAuditFrozenCatalog: () => codexAuditFrozenCatalog,
+  codexBuildFrozenCatalog: () => codexBuildFrozenCatalog,
+  codexDecodeFrozenItems: () => codexDecodeFrozenItems,
+  codexFrozenPrompt: () => codexFrozenPrompt,
+  codexFrozenToolDefinition: () => codexFrozenToolDefinition,
+  codexFrozenToolOutputTokenLimit: () => codexFrozenToolOutputTokenLimit,
   codexNativeModel: () => codexNativeModel,
   codexNativeTokenUsage: () => codexNativeTokenUsage,
-  codexNativeWorktreeArgs: () => codexNativeWorktreeArgs
+  codexNativeWorktreeArgs: () => codexNativeWorktreeArgs,
+  codexPersistentAppServerArgs: () => codexPersistentAppServerArgs,
+  codexPersistentConfig: () => codexPersistentConfig,
+  codexPersistentDisabledFeatures: () => codexPersistentDisabledFeatures,
+  codexPersistentHomePaths: () => codexPersistentHomePaths,
+  codexPersistentSocketPaths: () => codexPersistentSocketPaths,
+  codexPersistentTerminalError: () => terminalError,
+  codexReadFrozenRollout: () => codexReadFrozenRollout,
+  codexValidateFrozenVisibility: () => codexValidateFrozenVisibility,
+  verifyCodexFrozenArchive: () => verifyCodexFrozenArchive
 });
+import { createHash as createHash3, randomBytes } from "node:crypto";
+import { createConnection } from "node:net";
 import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
-function object(value) {
+function object2(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? (
     /** @type {Packet} */
     value
@@ -393,12 +799,12 @@ function codexNativeTokenUsage(total) {
 function terminalError(turn) {
   if (turn?.status === "interrupted")
     return new CodexNativeProtocolError("cancelled", "Codex exact native turn was interrupted");
-  const info = object(turn?.error).codexErrorInfo;
+  const info = object2(turn?.error).codexErrorInfo;
   if (info === "usageLimitExceeded" || info === "rateLimitExceeded")
     return new CodexNativeProtocolError("provider_quota_exhausted", `Codex exact native turn failed (${info})`);
   if (nonempty(info) && nativeErrorKinds.has(info)) return failed(`Codex exact native turn failed (${info})`);
   for (const kind of nativeHttpErrorKinds) {
-    const status = object(object(info)[kind]).httpStatusCode;
+    const status = object2(object2(info)[kind]).httpStatusCode;
     if (status === 429)
       return new CodexNativeProtocolError("provider_quota_exhausted", `Codex exact native turn failed (${kind}, HTTP 429)`);
     if (typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599)
@@ -406,9 +812,26 @@ function terminalError(turn) {
   }
   return failed("Codex exact native turn did not complete successfully");
 }
-var CONTROL_MS, nativeErrorKinds, nativeHttpErrorKinds, CodexNativeProtocolError, CodexNativeAppServer;
+function codexPersistentAppServerArgs(socketPath) {
+  return ["app-server", "--strict-config", "--listen", `unix://${socketPath}`];
+}
+function encodeClientFrame(opcode, payload) {
+  const length = payload.length;
+  const header = Buffer.alloc(length < 126 ? 2 : length < 65536 ? 4 : 10);
+  header[0] = 128 | opcode;
+  header[1] = 128 | (header.length === 2 ? length : header.length === 4 ? 126 : 127);
+  if (header.length === 4) header.writeUInt16BE(length, 2);
+  if (header.length === 10) header.writeBigUInt64BE(BigInt(length), 2);
+  const mask = randomBytes(4);
+  const masked = Buffer.alloc(length);
+  for (let i = 0; i < length; i++) masked[i] = payload[i] ^ mask[i % 4];
+  return Buffer.concat([header, mask, masked]);
+}
+var CONTROL_MS, nativeErrorKinds, nativeHttpErrorKinds, CodexNativeAppServer, persistentThreadSourceKinds, CodexPersistentAppServer;
 var init_codex = __esm({
   "src/llm_manager/native/codex.mjs"() {
+    init_codex_frozen();
+    init_codex_frozen();
     CONTROL_MS = 1e4;
     nativeErrorKinds = /* @__PURE__ */ new Set([
       "contextWindowExceeded",
@@ -427,14 +850,6 @@ var init_codex = __esm({
       "responseStreamDisconnected",
       "responseTooManyFailedAttempts"
     ];
-    CodexNativeProtocolError = class extends Error {
-      /** @param {ErrorCode} code @param {string} message @param {unknown} [cause] */
-      constructor(code, message, cause) {
-        super(message, { cause });
-        this.name = "CodexNativeProtocolError";
-        this.code = code;
-      }
-    };
     CodexNativeAppServer = class {
       #requestId = 0;
       /** @type {CodexNativeProtocolError | undefined} */
@@ -466,7 +881,7 @@ var init_codex = __esm({
         const lines = createInterface({ input: output });
         lines.on("line", (line) => {
           try {
-            this.#receive(object(JSON.parse(line)));
+            this.#receive(object2(JSON.parse(line)));
           } catch (error) {
             this.#setFailure(failed("Codex app-server returned an invalid native event", error));
           }
@@ -502,31 +917,31 @@ var init_codex = __esm({
           if (packet.id !== void 0) {
             this.#send({ id: packet.id, error: { code: -32601, message: "Worktree execution grants no interactive requests or approvals" } });
           } else {
-            this.#observe(packet.method, object(packet.params));
+            this.#observe(packet.method, object2(packet.params));
           }
         } else if (typeof packet.id === "number") {
           const waiter = this.#pending.get(packet.id);
           this.#pending.delete(packet.id);
           if (waiter && packet.error) waiter.reject(failed(`Codex app-server rejected ${waiter.method}`));
-          else waiter?.resolve(object(packet.result));
+          else waiter?.resolve(object2(packet.result));
         }
       }
       /** @param {string} method @param {Packet} params */
       #observe(method, params) {
         if (!this.#threadId || params.threadId !== this.#threadId) return;
         if (method === "turn/completed") {
-          const turn = object(params.turn);
+          const turn = object2(params.turn);
           if (!nonempty(turn.id)) return;
           if (this.#completions.has(turn.id)) throw failed("Codex repeated its exact terminal event");
           this.#completions.set(turn.id, turn);
           if (turn.id === this.#turnId) this.#wake();
         } else if (nonempty(params.turnId)) {
           if (method === "item/completed") {
-            const item = object(params.item);
+            const item = object2(params.item);
             if (item.type === "agentMessage" && item.phase === "final_answer")
               this.#finals.set(params.turnId, [...this.#finals.get(params.turnId) ?? [], item]);
           } else if (method === "thread/tokenUsage/updated") {
-            this.#usages.set(params.turnId, object(object(params.tokenUsage).total));
+            this.#usages.set(params.turnId, object2(object2(params.tokenUsage).total));
           }
         }
       }
@@ -556,7 +971,7 @@ var init_codex = __esm({
       }
       /** @param {WorktreeOptions & { beforeStart?: () => void }} options @returns {Promise<Thread>} */
       async startThread({ workspace, model, permissions, beforeStart }) {
-        const effective = object((await this.#request("config/read", { cwd: workspace, includeLayers: false })).config);
+        const effective = object2((await this.#request("config/read", { cwd: workspace, includeLayers: false })).config);
         const config = {
           ...permissions?.shellPath ? { "shell_environment_policy.set.PATH": permissions.shellPath, allow_login_shell: false } : {},
           ...permissions ? {
@@ -566,7 +981,7 @@ var init_codex = __esm({
             ]),
             [`permissions.${permissions.name}.network.enabled`]: false
           } : {},
-          mcp_servers: Object.fromEntries(Object.keys(object(effective.mcp_servers)).map((server) => [server, { enabled: false }]))
+          mcp_servers: Object.fromEntries(Object.keys(object2(effective.mcp_servers)).map((server) => [server, { enabled: false }]))
         };
         beforeStart?.();
         const thread = await this.#request("thread/start", {
@@ -579,9 +994,9 @@ var init_codex = __esm({
           allowProviderModelFallback: false,
           ...permissions ? { permissions: permissions.name } : { sandbox: "read-only" }
         });
-        const row = object(thread.thread);
-        const sandbox = object(thread.sandbox);
-        const profile = object(thread.activePermissionProfile);
+        const row = object2(thread.thread);
+        const sandbox = object2(thread.sandbox);
+        const profile = object2(thread.activePermissionProfile);
         if (!nonempty(row.id) || row.cwd !== workspace || row.ephemeral !== true || row.path !== null || !nonempty(row.cliVersion) || thread.cwd !== workspace || thread.approvalPolicy !== "never" || sandbox.networkAccess !== false || !Array.isArray(thread.runtimeWorkspaceRoots) || thread.runtimeWorkspaceRoots.length !== 1 || thread.runtimeWorkspaceRoots[0] !== workspace || !nonempty(thread.model) || model !== void 0 && thread.model !== model || (permissions ? profile.id !== permissions.name || sandbox.type !== "workspaceWrite" || !Array.isArray(sandbox.writableRoots) || sandbox.writableRoots.some((path) => !permissions.writableRoots.includes(path)) : sandbox.type !== "readOnly"))
           throw new CodexNativeProtocolError("unsupported", "Codex did not confirm the exact model, worktree and permission boundary");
         this.#threadId = row.id;
@@ -590,7 +1005,7 @@ var init_codex = __esm({
       /** @param {WorktreeOptions & { prompt: string, schema: Packet, effort?: string }} options @returns {Promise<string>} */
       async startTurn({ workspace, prompt, schema, model, effort, permissions }) {
         if (!this.#threadId) throw failed("Codex has no accepted native thread identity");
-        const accepted = object((await this.#request("turn/start", {
+        const accepted = object2((await this.#request("turn/start", {
           threadId: this.#threadId,
           input: [{ type: "text", text: prompt, text_elements: [] }],
           cwd: workspace,
@@ -648,6 +1063,421 @@ var init_codex = __esm({
         };
       }
     };
+    persistentThreadSourceKinds = [
+      "cli",
+      "vscode",
+      "exec",
+      "appServer",
+      "subAgent",
+      "subAgentReview",
+      "subAgentCompact",
+      "subAgentThreadSpawn",
+      "subAgentOther",
+      "unknown"
+    ];
+    CodexPersistentAppServer = class {
+      /** @type {import('node:net').Socket} */
+      #socket;
+      /** @type {number} */
+      #requestTimeoutMs;
+      #requestId = 0;
+      /** @type {Buffer} */
+      #buffer = Buffer.alloc(0);
+      /** @type {Buffer[]} */
+      #fragments = [];
+      #upgraded = false;
+      /** @type {Promise<void>} */
+      #ready;
+      /** @type {CodexNativeProtocolError | undefined} */
+      #failure;
+      #closed = false;
+      /** @type {Map<number, RpcWaiter>} */
+      #pending = /* @__PURE__ */ new Map();
+      /** @type {((error: CodexNativeProtocolError) => void) | undefined} */
+      #onFailure;
+      /** @type {((threadId: string, turn: PersistentTurn) => void) | undefined} */
+      #onCompleted;
+      /** @type {((call: Packet) => Promise<Packet>) | undefined} */
+      #onToolCall;
+      #toolWork = Promise.resolve();
+      /** @param {string} socketPath @param {number} [requestTimeoutMs] */
+      constructor(socketPath, requestTimeoutMs = 3e4) {
+        this.#requestTimeoutMs = requestTimeoutMs;
+        this.#socket = createConnection(socketPath);
+        const key = randomBytes(16).toString("base64");
+        const accept = createHash3("sha1").update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
+        this.#ready = new Promise((resolve2, reject) => {
+          const timer = setTimeout(() => this.#fail(new CodexNativeProtocolError("transport", "Codex persistent WebSocket upgrade timed out")), requestTimeoutMs);
+          const disconnected = (error) => {
+            clearTimeout(timer);
+            reject(error);
+            this.#fail(error);
+          };
+          this.#socket.once("connect", () => this.#socket.write(
+            `GET /rpc HTTP/1.1\r
+Host: localhost\r
+Connection: Upgrade\r
+Upgrade: websocket\r
+Sec-WebSocket-Version: 13\r
+Sec-WebSocket-Key: ${key}\r
+\r
+`
+          ));
+          this.#socket.on("error", () => disconnected(new CodexNativeProtocolError("transport", "Codex persistent transport disconnected")));
+          this.#socket.on("close", () => disconnected(new CodexNativeProtocolError("transport", "Codex persistent transport closed")));
+          this.#socket.on("data", (chunk) => {
+            try {
+              this.#buffer = Buffer.concat([this.#buffer, chunk]);
+              if (!this.#upgraded) {
+                const end = this.#buffer.indexOf("\r\n\r\n");
+                if (end === -1 && this.#buffer.length <= 65536) return;
+                const headers = this.#buffer.subarray(0, end).toString("utf8");
+                const challenge = /^Sec-WebSocket-Accept:[ \t]*(\S+)/im.exec(headers);
+                if (end === -1 || !/^HTTP\/1\.1 101(?:\s|$)/.test(headers) || challenge && challenge[1] !== accept)
+                  throw new Error("Codex persistent WebSocket upgrade refused");
+                this.#buffer = this.#buffer.subarray(end + 4);
+                this.#upgraded = true;
+                clearTimeout(timer);
+                resolve2();
+              }
+              this.#drainFrames();
+            } catch {
+              disconnected(new CodexNativeProtocolError("transport", "Codex persistent transport returned an invalid WebSocket or RPC packet"));
+            }
+          });
+        });
+        void this.#ready.catch(() => {
+        });
+      }
+      /** @param {CodexNativeProtocolError} error */
+      #fail(error) {
+        if (this.#closed) return;
+        this.#closed = true;
+        this.#failure = error;
+        this.#socket.destroy();
+        for (const waiter of this.#pending.values()) waiter.reject(error);
+        this.#pending.clear();
+        this.#onFailure?.(error);
+      }
+      close() {
+        this.#onFailure = void 0;
+        this.#fail(new CodexNativeProtocolError("transport", "Codex persistent observer detached"));
+      }
+      /** @param {(error: CodexNativeProtocolError) => void} handler */
+      onFailure(handler) {
+        this.#onFailure = handler;
+        if (this.#failure) handler(this.#failure);
+      }
+      /** @param {(threadId: string, turn: PersistentTurn) => void} handler */
+      onCompleted(handler) {
+        this.#onCompleted = handler;
+      }
+      /** @param {(call: Packet) => Promise<Packet>} handler */
+      onToolCall(handler) {
+        this.#onToolCall = handler;
+      }
+      /** @param {string} toolName @param {(call: TurnIdentity & { callId: string, arguments: unknown }) => Promise<string>} handler */
+      onFrozenToolCall(toolName, handler) {
+        this.onToolCall(async (call) => {
+          const { threadId, turnId, callId } = call;
+          if (!nonempty(threadId) || !nonempty(turnId) || !nonempty(callId) || call.tool !== toolName || call.namespace != null)
+            throw new CodexNativeProtocolError("stale_result", "Codex frozen tool call has no exact thread, turn and tool binding");
+          return codexFrozenToolResponse(await handler({ threadId, turnId, callId, arguments: call.arguments }));
+        });
+      }
+      async drainToolCalls() {
+        await this.#toolWork;
+        if (this.#failure) throw this.#failure;
+      }
+      #drainFrames() {
+        while (this.#buffer.length >= 2 && !this.#closed) {
+          const data = this.#buffer;
+          const opcode = data[0] & 15;
+          const final = (data[0] & 128) !== 0;
+          const width = data[1] & 127;
+          const offset = width < 126 ? 2 : width === 126 ? 4 : 10;
+          if (data.length < offset) return;
+          const length = width < 126 ? width : width === 126 ? data.readUInt16BE(2) : Number(data.readBigUInt64BE(2));
+          if (data[0] & 112 || data[1] & 128 || !Number.isSafeInteger(length))
+            throw new Error("Invalid Codex WebSocket frame");
+          if (length > data.length - offset) return;
+          const payload = data.subarray(offset, offset + length);
+          this.#buffer = data.subarray(offset + length);
+          if (opcode >= 8) {
+            if (!final || length > 125 || opcode > 10) throw new Error("Invalid Codex WebSocket control frame");
+            if (opcode === 8) {
+              this.#fail(new CodexNativeProtocolError("transport", "Codex persistent WebSocket closed"));
+              return;
+            }
+            if (opcode === 9) this.#socket.write(encodeClientFrame(10, payload));
+            continue;
+          }
+          if (opcode !== (this.#fragments.length ? 0 : 1)) throw new Error("Invalid Codex WebSocket text continuation");
+          this.#fragments.push(payload);
+          if (final) {
+            const json = Buffer.concat(this.#fragments).toString("utf8");
+            this.#fragments = [];
+            this.#receive(object2(JSON.parse(json)));
+          }
+        }
+      }
+      /** @param {Packet} packet */
+      #send(packet) {
+        if (this.#failure) throw this.#failure;
+        this.#socket.write(encodeClientFrame(1, Buffer.from(JSON.stringify(packet), "utf8")));
+      }
+      /** @param {Packet} packet */
+      #receive(packet) {
+        const { id, method } = packet;
+        if (typeof id === "number" && !method) {
+          const waiter = this.#pending.get(id);
+          if (!waiter) return;
+          this.#pending.delete(id);
+          if (packet.error) {
+            const { message } = object2(packet.error);
+            if (nonempty(message) && (message.includes("rollout at ") && message.includes(" is empty") || message.includes("is not materialized yet"))) {
+              waiter.reject(new CodexNativeProtocolError("not_materialized", "Codex persistent rollout is not materialized yet"));
+            } else {
+              waiter.reject(failed(`Codex persistent ${waiter.method} was refused`));
+            }
+          } else if (packet.result && typeof packet.result === "object" && !Array.isArray(packet.result)) {
+            waiter.resolve(object2(packet.result));
+          } else {
+            waiter.reject(new CodexNativeProtocolError("transport", `Codex persistent ${waiter.method} response has no result object`));
+          }
+          return;
+        }
+        const params = object2(packet.params);
+        if (method === "turn/completed" && nonempty(params.threadId)) {
+          const turn = object2(params.turn);
+          if (nonempty(turn.id) && nonempty(turn.status))
+            this.#onCompleted?.(
+              params.threadId,
+              /** @type {PersistentTurn} */
+              turn
+            );
+        }
+        if (id === void 0 || !method) return;
+        const onToolCall = this.#onToolCall;
+        if (method === "item/tool/call" && onToolCall) {
+          this.#toolWork = this.#toolWork.then(async () => {
+            if (this.#failure) throw this.#failure;
+            const result = await onToolCall(params);
+            this.#send({ id, result });
+          }).catch(() => {
+            this.#fail(new CodexNativeProtocolError("cancellation_pending", "Codex persistent tool request was refused; exact native stop is required"));
+            throw this.#failure;
+          });
+          void this.#toolWork.catch(() => {
+          });
+          return;
+        }
+        this.#send({ id, error: { code: -32601, message: "Codex persistent transport grants no external tools or approvals" } });
+      }
+      /** @param {string} method @param {Packet} params @returns {Promise<Packet>} */
+      async #request(method, params) {
+        await this.#ready;
+        if (this.#failure) throw this.#failure;
+        const id = ++this.#requestId;
+        const timer = setTimeout(() => this.#fail(new CodexNativeProtocolError("transport", `Codex persistent ${method} timed out`)), this.#requestTimeoutMs);
+        try {
+          return await new Promise((resolve2, reject) => {
+            this.#pending.set(id, { method, resolve: resolve2, reject });
+            this.#send({ id, method, params });
+          });
+        } finally {
+          this.#pending.delete(id);
+          clearTimeout(timer);
+        }
+      }
+      /** @param {string} clientName @param {string} version */
+      async initialize(clientName, version) {
+        await this.#request("initialize", { clientInfo: { name: clientName, version }, capabilities: { experimentalApi: true } });
+        this.#send({ method: "initialized", params: {} });
+      }
+      /** @param {{ cwd: string, readerRuntime?: ReaderConfiguration }} options */
+      async auditReadOnly({ cwd, readerRuntime }) {
+        const config = object2((await this.#request("config/read", { cwd, includeLayers: false })).config);
+        const features = object2(config.features);
+        const mcpServers = config.mcp_servers;
+        const disabled = ["apps", "plugins", "hooks", "shell_tool", "code_mode"];
+        if (config.sandbox_mode !== "read-only" || config.approval_policy !== "never" || disabled.some((feature) => features[feature] !== false) || features.code_mode_host !== !!readerRuntime || mcpServers != null && (object2(mcpServers) !== mcpServers || Object.keys(mcpServers).length) || readerRuntime && (config.model_catalog_json !== readerRuntime.catalogPath || codexPersistentDisabledFeatures.some((feature) => features[feature] !== false) || readerRuntime.version === 2 && config.tool_output_token_limit !== readerRuntime.toolOutputTokenLimit))
+          throw new CodexNativeProtocolError("unsupported", "Effective Codex config cannot prove the fixed read-only policy");
+        const hooks = await this.#request("hooks/list", { cwds: [cwd] });
+        if (!Array.isArray(hooks.data) || hooks.data.some((entry) => !Array.isArray(object2(entry).hooks) || entry.hooks.length || entry.errors?.length))
+          throw new CodexNativeProtocolError("unsupported", "Effective Codex hooks are present or could not be audited");
+        const servers = await this.#request("mcpServerStatus/list", {});
+        if (!Array.isArray(servers.data) || servers.data.length || servers.nextCursor)
+          throw new CodexNativeProtocolError("unsupported", "Effective Codex MCP servers are present or could not be audited");
+      }
+      /** @param {{ cwd: string, model?: string, dynamicTools?: Packet[] }} options @returns {Promise<PersistentThread>} */
+      async startThread({ cwd, model, dynamicTools }) {
+        const result = await this.#request("thread/start", {
+          cwd,
+          approvalPolicy: "never",
+          sandbox: "read-only",
+          ephemeral: false,
+          ...model ? { model } : {},
+          ...dynamicTools ? { dynamicTools } : {}
+        });
+        const thread = object2(result.thread);
+        if (!nonempty(thread.id)) throw failed("Codex returned no persistent thread identity");
+        if (thread.ephemeral === true) throw new CodexNativeProtocolError("unsupported", "Codex opened an ephemeral thread for a persistent request");
+        if (model && result.model !== model) throw new CodexNativeProtocolError("unsupported", "Codex did not confirm the requested persistent model");
+        return (
+          /** @type {PersistentThread} */
+          thread
+        );
+      }
+      /** @param {{ threadId: string, cwd: string }} options @returns {Promise<PersistentThread>} */
+      async resumeThread({ threadId, cwd }) {
+        const result = await this.#request("thread/resume", { threadId, cwd, approvalPolicy: "never", sandbox: "read-only", excludeTurns: true });
+        const thread = object2(result.thread);
+        if (thread.id !== threadId) throw new CodexNativeProtocolError("stale_result", "Codex resumed a different persistent thread");
+        if (thread.ephemeral === true) throw new CodexNativeProtocolError("unsupported", "Codex resumed an ephemeral thread for a persistent request");
+        return (
+          /** @type {PersistentThread} */
+          thread
+        );
+      }
+      /** @param {{ threadId: string, cwd: string, prompt: string, schema: Packet, model?: string, effort?: string }} options */
+      async startTurn({ threadId, cwd, prompt, schema, model, effort }) {
+        const result = await this.#request("turn/start", {
+          threadId,
+          cwd,
+          input: [{ type: "text", text: prompt, text_elements: [] }],
+          approvalPolicy: "never",
+          sandboxPolicy: { type: "readOnly" },
+          outputSchema: schema,
+          ...model ? { model } : {},
+          ...effort ? { effort } : {}
+        });
+        const turn = object2(result.turn);
+        if (!nonempty(turn.id)) throw failed("Codex returned no persistent turn identity");
+        return turn.id;
+      }
+      /**
+       * @param {string} method @param {Packet} params
+       * @param {(data: unknown[]) => boolean} [matches]
+       * @returns {Promise<unknown[]>}
+       */
+      async #pages(method, params, matches) {
+        const data = [];
+        const cursors = /* @__PURE__ */ new Set();
+        let cursor;
+        do {
+          const page = await this.#request(method, { ...params, ...cursor ? { cursor } : {} });
+          if (!Array.isArray(page.data)) throw new CodexNativeProtocolError("stale_result", `Codex persistent ${method} returned no page data`);
+          data.push(...page.data);
+          if (matches?.(page.data)) break;
+          cursor = page.nextCursor;
+          if (cursor == null || cursor === "") break;
+          if (!nonempty(cursor) || cursors.has(cursor))
+            throw new CodexNativeProtocolError("stale_result", `Codex persistent ${method} returned an invalid or repeated cursor`);
+          cursors.add(cursor);
+        } while (cursor);
+        return data;
+      }
+      /** @param {string} threadId @param {string} [turnId] @returns {Promise<PersistentTurn[]>} */
+      async readTurns(threadId, turnId) {
+        const rows = await this.#pages(
+          "thread/turns/list",
+          { threadId, limit: 100, itemsView: "notLoaded" },
+          turnId ? (page) => page.some((row) => object2(row).id === turnId) : void 0
+        );
+        return rows.map((row) => {
+          const turn = object2(row);
+          if (!nonempty(turn.id) || !nonempty(turn.status))
+            throw new CodexNativeProtocolError("stale_result", "Codex persistent turn page contains no exact turn identity or status");
+          return (
+            /** @type {PersistentTurn} */
+            turn
+          );
+        });
+      }
+      /** @param {string} threadId @param {string} turnId */
+      async readItems(threadId, turnId) {
+        const rows = await this.#pages("thread/items/list", { threadId, turnId, limit: 16, sortDirection: "asc" });
+        return rows.map((row) => {
+          const { turnId: owner, item } = object2(row);
+          if (owner !== turnId || !nonempty(object2(item).type))
+            throw new CodexNativeProtocolError("stale_result", "Codex persistent item page does not belong to the exact turn");
+          return object2(item);
+        });
+      }
+      /** @param {{ threadId: string, turnId?: string, prompt: string }} options */
+      async readExactTurn({ threadId, turnId, prompt }) {
+        const turns = await this.readTurns(threadId);
+        if (!turnId && !turns.length) throw new CodexNativeProtocolError("no_turn", "Codex durable thread has no accepted turn");
+        const candidates = turnId ? turns.filter((turn2) => turn2.id === turnId) : turns;
+        const turn = candidates[0];
+        if (candidates.length !== 1 || !["inProgress", "completed", "failed", "interrupted"].includes(turn.status) || !turnId && !codexFrozenPromptMatches(await this.readItems(threadId, turn.id), prompt))
+          throw new CodexNativeProtocolError("stale_result", "Codex frozen exact turn or pinned first prompt could not be proven");
+        return turn;
+      }
+      /** @param {string} threadId @param {boolean} [includeTurns] @returns {Promise<PersistentThread>} */
+      async readThread(threadId, includeTurns = false) {
+        const result = await this.#request("thread/read", { threadId, includeTurns });
+        const thread = object2(result.thread);
+        if (thread.id !== threadId) throw new CodexNativeProtocolError("stale_result", "Codex read back a different persistent thread");
+        return (
+          /** @type {PersistentThread} */
+          thread
+        );
+      }
+      /** @param {string} threadId @param {string} turnId */
+      async interrupt(threadId, turnId) {
+        await this.#request("turn/interrupt", { threadId, turnId });
+      }
+      async refreshModels() {
+        const rows = await this.#pages("model/list", { includeHidden: true, limit: 100 });
+        const ids = rows.map((row) => object2(row).id).filter(nonempty);
+        if (!ids.length) throw new CodexNativeProtocolError("unsupported", "Codex persistent provider model catalog is empty");
+        return [...new Set(ids)];
+      }
+      async listLoadedThreadIds() {
+        const rows = await this.#pages("thread/loaded/list", { limit: 100 });
+        const ids = rows.map((row) => typeof row === "string" ? row : object2(row).id ?? object2(row).threadId);
+        if (!ids.every(nonempty)) throw new CodexNativeProtocolError("stale_result", "Codex persistent loaded thread list contains no exact identity");
+        return [...new Set(
+          /** @type {string[]} */
+          ids
+        )];
+      }
+      /** @param {string} cwd @param {boolean} archived @returns {Promise<string[]>} */
+      async listThreads(cwd, archived) {
+        const rows = await this.#pages("thread/list", {
+          cwd,
+          archived,
+          sourceKinds: persistentThreadSourceKinds,
+          useStateDbOnly: true,
+          limit: 100
+        });
+        const ids = rows.map((row) => {
+          const thread = object2(row);
+          if (!nonempty(thread.id) || thread.cwd !== cwd)
+            throw new CodexNativeProtocolError("stale_result", "Codex persistent thread list does not prove the requested working directory scope");
+          return thread.id;
+        });
+        return [...new Set(ids)];
+      }
+      /** @param {string} threadId */
+      async archiveThread(threadId) {
+        if (!nonempty(threadId)) throw new CodexNativeProtocolError("stale_result", "Codex persistent archive requires an exact thread identity");
+        await this.#request("thread/archive", { threadId });
+      }
+      /** @param {import('./codex-frozen.mjs').ArchiveOptions} options */
+      async captureFrozenArchive(options) {
+        const { threadId, turnId } = options;
+        const turns = await this.readTurns(threadId);
+        if (turns.length !== 1 || turns[0].id !== turnId)
+          throw new CodexNativeProtocolError("stale_result", "Codex frozen archive requires precisely its one original turn");
+        const items = await this.readItems(threadId, turnId);
+        const thread = await this.readThread(threadId);
+        if (!nonempty(thread.path)) throw new CodexNativeProtocolError("not_materialized", "Codex frozen archive carrier is not yet materialized");
+        return sealCodexFrozenArchive(options, thread.path, turns[0], items);
+      }
+    };
   }
 });
 
@@ -666,7 +1496,7 @@ __export(cursor_exports, {
   observeCursorAcp: () => observeCursorAcp
 });
 import { randomUUID } from "node:crypto";
-import { isAbsolute, relative, resolve } from "node:path";
+import { isAbsolute as isAbsolute2, relative, resolve } from "node:path";
 import { createInterface as createInterface2 } from "node:readline";
 function cursorModelArgument(value) {
   if (!value.trim() || value.includes("\0")) {
@@ -696,22 +1526,22 @@ function encodeCursorAcpPacket(packet) {
   return JSON.stringify({ jsonrpc: "2.0", ...packet }) + "\n";
 }
 function reportedModel(packet) {
-  const modelConfig = Array.isArray(packet.configOptions) ? packet.configOptions.map(object2).find((option) => option?.category === "model" && option.type === "select") : void 0;
-  const value = modelConfig?.currentValue ?? object2(packet.models)?.currentModelId;
+  const modelConfig = Array.isArray(packet.configOptions) ? packet.configOptions.map(object3).find((option) => option?.category === "model" && option.type === "select") : void 0;
+  const value = modelConfig?.currentValue ?? object3(packet.models)?.currentModelId;
   return nonempty2(value) ? value : void 0;
 }
 function permissionResult(params, plan, sessionId) {
   if (params?.sessionId !== sessionId || !sessionId) return { outcome: { outcome: "cancelled" } };
-  const tool = object2(params?.toolCall);
+  const tool = object3(params?.toolCall);
   const withinWorktree = (location) => {
-    const path = object2(location)?.path;
+    const path = object3(location)?.path;
     if (!nonempty2(path)) return false;
     const fromWorkspace = relative(plan.workspace, resolve(plan.workspace, path));
-    return !isAbsolute(fromWorkspace) && fromWorkspace !== ".." && !fromWorkspace.startsWith("../") && fromWorkspace !== ".git" && !fromWorkspace.startsWith(".git/");
+    return !isAbsolute2(fromWorkspace) && fromWorkspace !== ".." && !fromWorkspace.startsWith("../") && fromWorkspace !== ".git" && !fromWorkspace.startsWith(".git/");
   };
   const editable = plan.mode === "edit" && tool?.kind === "edit" && Array.isArray(tool.locations) && tool.locations.length > 0 && tool.locations.every(withinWorktree);
   const allow = tool?.kind === "read" || tool?.kind === "search" || editable;
-  const option = Array.isArray(params?.options) ? params.options.map(object2).find((entry) => entry?.kind === (allow ? "allow_once" : "reject_once")) : void 0;
+  const option = Array.isArray(params?.options) ? params.options.map(object3).find((entry) => entry?.kind === (allow ? "allow_once" : "reject_once")) : void 0;
   return nonempty2(option?.optionId) ? { outcome: { outcome: "selected", optionId: option.optionId } } : { outcome: { outcome: "cancelled" } };
 }
 async function observeCursorAcp(stdout, plan, prompt, send, hooks) {
@@ -727,14 +1557,14 @@ async function observeCursorAcp(stdout, plan, prompt, send, hooks) {
       if (!line.trim()) continue;
       let packet;
       try {
-        packet = object2(JSON.parse(line));
+        packet = object3(JSON.parse(line));
       } catch (error) {
         if (!(error instanceof SyntaxError)) throw error;
         throw new CursorAcpError("cancellation_pending", "Cursor ACP stream contains invalid JSON");
       }
       if (packet?.jsonrpc !== "2.0") throw new CursorAcpError("cancellation_pending", "Cursor ACP stream contains an invalid envelope");
       if (typeof packet.method === "string") {
-        const params = object2(packet.params);
+        const params = object3(packet.params);
         if (typeof packet.id === "string" || typeof packet.id === "number") {
           if (packet.method === "session/request_permission") {
             if (request && params?.sessionId === sessionId) textOnlyWithoutTools = false;
@@ -744,11 +1574,11 @@ async function observeCursorAcp(stdout, plan, prompt, send, hooks) {
             send({ id: packet.id, error: { code: -32601, message: "Client method unavailable" } });
           }
         } else if (packet.method === "session/update" && request && params?.sessionId === sessionId) {
-          const update = object2(params?.update);
+          const update = object3(params?.update);
           if (terminal) {
             if (update?.sessionUpdate === "available_commands_update" && !Object.hasOwn(packet, "id") && !Object.hasOwn(packet, "result") && !Object.hasOwn(packet, "error") && Array.isArray(update.availableCommands) && update.availableCommands.every((value) => {
-              const command = object2(value);
-              return typeof command?.name === "string" && typeof command.description === "string" && (command.input == null || typeof object2(command.input)?.hint === "string");
+              const command = object3(value);
+              return typeof command?.name === "string" && typeof command.description === "string" && (command.input == null || typeof object3(command.input)?.hint === "string");
             })) continue;
             throw new CursorAcpError("cancellation_pending", "Cursor ACP emitted session updates after its original prompt terminal");
           }
@@ -756,7 +1586,7 @@ async function observeCursorAcp(stdout, plan, prompt, send, hooks) {
             textOnlyWithoutTools = false;
             chunks.length = 0;
           } else if (update?.sessionUpdate === "agent_message_chunk") {
-            const content = object2(update.content);
+            const content = object3(update.content);
             if (content?.type === "text") {
               if (typeof content.text !== "string") throw new CursorAcpError("cancellation_pending", "Cursor ACP assistant text chunk is malformed");
               chunks.push(content.text);
@@ -774,10 +1604,10 @@ async function observeCursorAcp(stdout, plan, prompt, send, hooks) {
       if (terminal || packet.id !== awaiting || Object.hasOwn(packet, "result") === Object.hasOwn(packet, "error")) {
         throw new CursorAcpError("cancellation_pending", "Cursor ACP response differs from its original request");
       }
-      const rpcError = object2(packet.error);
-      const result = object2(packet.result);
+      const rpcError = object3(packet.error);
+      const result = object3(packet.result);
       if (rpcError && request && hooks.onProviderQuota && !hooks.isInterrupted()) {
-        const status = rpcError.code === 429 || object2(rpcError.data)?.statusCode === 429;
+        const status = rpcError.code === 429 || object3(rpcError.data)?.statusCode === 429;
         if (status || cursorUsageLimitNotice(rpcError.message)) {
           hooks.onProviderQuota(request, status ? "http_429" : "usage_limit");
           throw new CursorAcpError("provider_quota_exhausted", "Cursor provider reported quota exhaustion for the original ACP prompt", {
@@ -803,9 +1633,9 @@ async function observeCursorAcp(stdout, plan, prompt, send, hooks) {
         sessionId = result.sessionId;
         await hooks.onSession(sessionId);
         model = reportedModel(result);
-        const modes = object2(result.modes);
+        const modes = object3(result.modes);
         if (plan.mode === "read" && modes?.currentModeId !== "ask") {
-          if (!Array.isArray(modes?.availableModes) || !modes.availableModes.some((mode) => object2(mode)?.id === "ask")) {
+          if (!Array.isArray(modes?.availableModes) || !modes.availableModes.some((mode) => object3(mode)?.id === "ask")) {
             throw new CursorAcpError("unsupported", "Cursor ACP session does not advertise the ask mode");
           }
           if (hooks.isInterrupted()) break;
@@ -838,7 +1668,7 @@ async function observeCursorAcp(stdout, plan, prompt, send, hooks) {
   }
   return { output: terminal, textOnlyWithoutTools };
 }
-var CURSOR_COMMAND, CURSOR_VERSION_ARGS, CursorAcpError, object2, nonempty2, cursorUsageLimitNotice;
+var CURSOR_COMMAND, CURSOR_VERSION_ARGS, CursorAcpError, object3, nonempty2, cursorUsageLimitNotice;
 var init_cursor = __esm({
   "src/llm_manager/native/cursor.mjs"() {
     CURSOR_COMMAND = "cursor-agent";
@@ -856,7 +1686,7 @@ var init_cursor = __esm({
         this.detail = detail;
       }
     };
-    object2 = (value) => value !== null && typeof value === "object" && !Array.isArray(value) ? (
+    object3 = (value) => value !== null && typeof value === "object" && !Array.isArray(value) ? (
       /** @type {RpcObject} */
       value
     ) : void 0;
@@ -882,7 +1712,7 @@ __export(grok_exports, {
   observeGrokNativeStderr: () => observeGrokNativeStderr,
   observeGrokNativeStreaming: () => observeGrokNativeStreaming
 });
-import { createHash as createHash2 } from "node:crypto";
+import { createHash as createHash4 } from "node:crypto";
 import { createInterface as createInterface3 } from "node:readline";
 import { finished } from "node:stream/promises";
 function grokAcpProbeArguments() {
@@ -918,7 +1748,7 @@ function grokInvocationEnvironment(environment) {
 function grokInvocationFlags(args, useAcp) {
   return new Set(useAcp ? [args[0], args[1], args[4]] : args.filter((_, index) => index % 2 === 0));
 }
-function object3(value) {
+function object4(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? (
     /** @type {RpcObject} */
     value
@@ -932,7 +1762,7 @@ async function* acpFrames(stdout) {
       const lines = decoder.decode(chunk, { stream: true }).split("\n");
       for (const line of lines.slice(0, -1)) {
         pieces.push(line);
-        const packet = object3(JSON.parse(pieces.join("")));
+        const packet = object4(JSON.parse(pieces.join("")));
         pieces.length = 0;
         if (packet?.jsonrpc !== "2.0") throw new GrokAcpProtocolError("Grok ACP stream has an invalid JSON-RPC envelope");
         yield packet;
@@ -949,14 +1779,14 @@ async function* acpFrames(stdout) {
   }
 }
 function promptResult(result, identity, chunks) {
-  const meta = object3(result._meta);
+  const meta = object4(result._meta);
   const stopReason = result.stopReason;
   if (meta?.sessionId !== identity.sessionId || meta.requestId !== identity.requestId || meta.promptId !== void 0 && meta.promptId !== identity.requestId || typeof stopReason !== "string" || !stopReasons.has(stopReason))
     throw new GrokAcpProtocolError("Grok ACP terminal differs from its original session or prompt");
-  const usage = object3(meta.usage);
-  const modelUsage = object3(usage?.modelUsage);
+  const usage = object4(meta.usage);
+  const modelUsage = object4(usage?.modelUsage);
   const modelEntries = Object.entries(modelUsage ?? {});
-  if (meta.usage !== void 0 && !usage || usage?.modelUsage !== void 0 && !modelUsage || stopReason === "end_turn" && !modelEntries.length || modelEntries.some(([model, value]) => !/^[a-z\d][a-z\d._:/-]*$/i.test(model) || !object3(value)))
+  if (meta.usage !== void 0 && !usage || usage?.modelUsage !== void 0 && !modelUsage || stopReason === "end_turn" && !modelEntries.length || modelEntries.some(([model, value]) => !/^[a-z\d][a-z\d._:/-]*$/i.test(model) || !object4(value)))
     throw new GrokAcpProtocolError("Grok ACP terminal lacks valid actual model usage");
   const hasStructuredOutput = Object.hasOwn(meta, "structuredOutput");
   return {
@@ -987,7 +1817,7 @@ async function observeGrokNativeAcp(stdout, stdin, request, onTerminal) {
   for await (const packet of acpFrames(stdout)) {
     if (terminal) throw new GrokAcpProtocolError("Grok ACP stream has data after its original prompt terminal");
     const { method, id } = packet;
-    const params = object3(packet.params);
+    const params = object4(packet.params);
     const hasResult = Object.hasOwn(packet, "result"), hasError = Object.hasOwn(packet, "error");
     if (Object.hasOwn(packet, "method")) {
       if (typeof method !== "string" || !method || hasResult || hasError || Object.hasOwn(packet, "params") && !params)
@@ -1001,7 +1831,7 @@ async function observeGrokNativeAcp(stdout, stdin, request, onTerminal) {
           await send({ id, result: { outcome: { outcome: "cancelled" } } });
         } else await send({ id, error: { code: -32601, message: "Client method unavailable" } });
       } else if (method === "session/update") {
-        const update = object3(params?.update), updateMeta = object3(params?._meta);
+        const update = object4(params?.update), updateMeta = object4(params?._meta);
         const kind = update?.sessionUpdate, updateSession = params?.sessionId;
         if (typeof kind !== "string" || !kind || params?._meta !== void 0 && !updateMeta)
           throw new GrokAcpProtocolError("Grok ACP update differs from its original session or prompt");
@@ -1010,7 +1840,7 @@ async function observeGrokNativeAcp(stdout, stdin, request, onTerminal) {
           throw new GrokAcpProtocolError("Grok ACP update differs from its original session or prompt");
         if (kind === "tool_call" || kind === "tool_call_update") chunks.length = 0;
         if (kind === "agent_message_chunk") {
-          const content = object3(update?.content);
+          const content = object4(update?.content);
           if (typeof content?.type !== "string") throw new GrokAcpProtocolError("Grok ACP agent sent an invalid assistant message chunk");
           if (content.type === "text") {
             if (typeof content.text !== "string") throw new GrokAcpProtocolError("Grok ACP agent sent an invalid assistant message chunk");
@@ -1030,16 +1860,16 @@ async function observeGrokNativeAcp(stdout, stdin, request, onTerminal) {
     if (id !== requestIds[awaiting] || hasResult === hasError || Object.hasOwn(packet, "params"))
       throw new GrokAcpProtocolError("Grok ACP response differs from its outstanding request");
     if (hasError) {
-      const error = object3(packet.error);
+      const error = object4(packet.error);
       if (!Number.isSafeInteger(error?.code) || typeof error?.message !== "string")
         throw new GrokAcpProtocolError("Grok ACP agent returned an invalid RPC error");
       if (awaiting !== "session/prompt") throw new GrokAcpProtocolError(`Grok ACP ${awaiting} was rejected`);
       terminal = error.code === -32003 && error.message === "Rate limited" ? { ...identity, kind: "rate_limited", rpcCode: -32003, message: "Rate limited" } : { ...identity, kind: "prompt_error" };
     } else {
-      const result = object3(packet.result);
+      const result = object4(packet.result);
       if (!result) throw new GrokAcpProtocolError("Grok ACP agent returned an invalid RPC result");
       if (awaiting === "initialize") {
-        const offered = Array.isArray(result.authMethods) ? result.authMethods.map((method2) => object3(method2)?.id) : [];
+        const offered = Array.isArray(result.authMethods) ? result.authMethods.map((method2) => object4(method2)?.id) : [];
         const methodId = ["cached_token", "xai.api_key"].find((method2) => offered.includes(method2));
         if (result.protocolVersion !== 1 || !methodId)
           throw new GrokAcpProtocolError("Grok ACP agent did not advertise protocol v1 with local noninteractive authentication");
@@ -1049,7 +1879,7 @@ async function observeGrokNativeAcp(stdout, stdin, request, onTerminal) {
         awaiting = "session/new";
         await sendRequest(awaiting, { cwd, mcpServers: [], _meta: { sessionId, ...model === void 0 ? {} : { modelId: model } } });
       } else if (awaiting === "session/new") {
-        if (result.sessionId !== sessionId || object3(result._meta)?.currentWorkingDirectory !== cwd)
+        if (result.sessionId !== sessionId || object4(result._meta)?.currentWorkingDirectory !== cwd)
           throw new GrokAcpProtocolError("Grok ACP opened a different session or worktree");
         awaiting = "session/prompt";
         await sendRequest(awaiting, { sessionId, prompt: [{ type: "text", text: prompt }], _meta: { promptId, outputSchema: schema } });
@@ -1085,7 +1915,7 @@ async function observeGrokNativeStreaming(stdout, { sessionId, cwd, nativeSchema
     if (!line.trim()) continue;
     let event;
     try {
-      event = object3(JSON.parse(line));
+      event = object4(JSON.parse(line));
     } catch (error) {
       if (!(error instanceof SyntaxError)) throw error;
       throw new GrokAcpProtocolError("Grok native event is not valid JSON");
@@ -1097,10 +1927,10 @@ async function observeGrokNativeStreaming(stdout, { sessionId, cwd, nativeSchema
       chunks.push(event.data);
     } else if (event.type === "end") {
       const { requestId, stopReason } = event;
-      const models = Object.keys(object3(event.modelUsage) ?? {});
-      if (event.sessionId !== sessionId || event.cwd !== cwd || typeof requestId !== "string" || !requestId.trim() || typeof stopReason !== "string" || !stopReason || models.some((model) => !model.trim()) || stopReason === "end_turn" && !models.length)
+      const models2 = Object.keys(object4(event.modelUsage) ?? {});
+      if (event.sessionId !== sessionId || event.cwd !== cwd || typeof requestId !== "string" || !requestId.trim() || typeof stopReason !== "string" || !stopReason || models2.some((model) => !model.trim()) || stopReason === "end_turn" && !models2.length)
         throw new GrokAcpProtocolError("Grok native terminal lacks the original session, worktree, request or actual model identity");
-      terminal = { sessionId, requestId, cwd, stopReason, models };
+      terminal = { sessionId, requestId, cwd, stopReason, models: models2 };
       if (nativeSchema && Object.hasOwn(event, "structuredOutput")) structuredOutput = JSON.stringify(event.structuredOutput);
       onTerminal(terminal);
     }
@@ -1130,7 +1960,7 @@ function nativeHttpStatus(text) {
   return status ? { code: Number(status[0]), message: value.slice(status[0].length) } : null;
 }
 function observeGrokNativeStderr(stderr, flags) {
-  const hash = createHash2("sha256"), line = Buffer.alloc(4096);
+  const hash = createHash4("sha256"), line = Buffer.alloc(4096);
   const httpStatuses = /* @__PURE__ */ new Set();
   const startupErrors = /* @__PURE__ */ new Map();
   let bytes = 0, lineBytes = 0, discardLine = false, oversizedLine = false, usageBalanceExhausted = false, readError = false;
@@ -1244,8 +2074,8 @@ __export(zcode_exports, {
   zcodeWorktreeTurnMatches: () => zcodeWorktreeTurnMatches
 });
 import { randomUUID as randomUUID2 } from "node:crypto";
-import { constants } from "node:os";
-import { join as join2 } from "node:path";
+import { constants as constants2 } from "node:os";
+import { join as join3 } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 function isZCodeProviderRejection(failure) {
   return failure?.code === "unsupported" && failure.message === providerRejection;
@@ -1384,10 +2214,10 @@ function zcodeMessages(history) {
 }
 function zcodeRuntimeFiles(home, hostHome) {
   return {
-    config: join2(home, ".zcode", "cli", "config.json"),
-    credentialSource: join2(hostHome, ".zcode", "v2", "credentials.json"),
-    credentialLink: join2(home, ".zcode", "v2", "credentials.json"),
-    personal: join2(hostHome, ".zcode", "v2", "provider_config.json")
+    config: join3(home, ".zcode", "cli", "config.json"),
+    credentialSource: join3(hostHome, ".zcode", "v2", "credentials.json"),
+    credentialLink: join3(home, ".zcode", "v2", "credentials.json"),
+    personal: join3(hostHome, ".zcode", "v2", "provider_config.json")
   };
 }
 function zcodeRuntimeEnv({ path, home, tmp, personal }) {
@@ -1819,7 +2649,7 @@ var init_zcode = __esm({
     ZCodeNativeTurnFailedError = class extends ZCodeProtocolError {
       /** @param {string} threadId @param {string} turnId @param {unknown} nativeCode @param {boolean} worktree @param {unknown} [nativeAttribution] @param {boolean} [quota] */
       constructor(threadId, turnId, nativeCode, worktree, nativeAttribution, quota = false) {
-        const code = typeof nativeCode === "string" && Object.hasOwn(constants.errno, nativeCode) ? nativeCode : "unavailable";
+        const code = typeof nativeCode === "string" && Object.hasOwn(constants2.errno, nativeCode) ? nativeCode : "unavailable";
         const rejected = worktree && isZCodeProviderPipeFailure(code, nativeAttribution);
         super(
           quota ? "provider_quota_exhausted" : rejected ? "unsupported" : worktree && code === "EPIPE" ? "native_turn_transport_failed" : "failed",
@@ -1838,7 +2668,7 @@ var init_zcode = __esm({
 
 // src/llm_manager/native/index.mjs
 import { spawn, spawnSync } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { realpathSync as realpathSync2 } from "node:fs";
 var nativeRuntimeVersion = 1;
 var commands = Object.freeze({
   claude: "claude",
@@ -1864,7 +2694,7 @@ function loadNativeAdapter(vendor) {
 function findNativeExecutable(vendor) {
   const located = spawnSync("/usr/bin/which", [commands[vendor]], { encoding: "utf8", timeout: 1e4 });
   const executable = located.status === 0 && located.stdout.trim();
-  return executable ? realpathSync(executable) : void 0;
+  return executable ? realpathSync2(executable) : void 0;
 }
 function spawnGatedNativeProcess(command, args, { cwd, env, stderr = "pipe" }) {
   return spawn("/bin/sh", [

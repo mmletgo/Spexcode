@@ -5,14 +5,14 @@ import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { mainRoot, runtimeRoot, sessionArtifactPath } from '@spexcode/spec-core'
 import { readRecord, withRecordLock, writeRecord } from './session-record.js'
-import { codexStructuredTurn, codexStopStructuredTurn } from './codex-harness.js'
+import { codexStructuredTurn, codexStopStructuredTurn, readManagedFrozenArchivedTurn, stopUnboundManagedFrozenRealm } from './codex-harness.js'
 import { commitCodexGenerationRegistration, prepareCodexGenerationRegistration, readCodexGenerationLedger, resolveCodexGenerationForClose } from './codex-runtime-generations.js'
 import { assertRejectedOutput, structuredGeneration, prepareStructuredRealm, prepareFrozenReaderRuntime, assertFrozenReaderRuntime, StructuredSessionError, StructuredSessionTransportError, structuredObserverState, structuredExecutionPolicy, structuredRealmRoot, pinNativeConfiguration, pinZCodeToolPolicy, type StructuredExecution, type FrozenReaderRuntime } from './session-structured-policy.js'
-import { assertFrozenBinding, prepareFrozenPrompt, readFrozenManifest, type FrozenContextRef, type FrozenEntryJson, type FrozenReadProof, type FrozenReadReceipt } from './frozen-context.js'
+import { assertFrozenBinding, prepareFrozenPrompt, prepareManagedFrozenPrompt, readFrozenManifest, type FrozenContextRef, type FrozenEntryJson, type FrozenReadProof, type FrozenReadReceipt } from './frozen-context.js'
 import { verifyStructuredFrozenReadProof as verifyFrozenReadProof } from './structured-frozen-evidence.js'
 import { configuredSessionApplication } from './session-application.js'
 import { withDeliveryLocks } from './delivery-lock.js'
-import { LlmManagerHostError, reserveManagedRoute, settleManagedRoute } from './llm-manager-host.js'
+import { LlmManagerHostError, loadManagedCodexFrozenRuntime, loadManagerPersistentCodex, reserveManagedRoute, settleManagedRoute } from './llm-manager-host.js'
 import { managedRoute, nativeModelValue } from './llm-manager-route.js'
 import { assertCodexRejectedFinalSource, codexNativeWorktreeTurn, stopCodexNativeWorktreeTurn } from './codex-native-worktree-structured.js'
 import { claudeNativeModel, claudeStructuredTurn, stopClaudeStructuredTurn } from './claude-structured.js'
@@ -58,6 +58,10 @@ const requiredRealmRoot = (execution: StructuredExecution): string => {
   if (!root) throw new StructuredSessionError('unsupported', 'structured execution policy cannot select a trusted control realm')
   return root
 }
+const hostedFrozenRuntime = (reader: NonNullable<NonNullable<ReturnType<typeof managedRoute>>['frozenReader']>) => loadManagedCodexFrozenRuntime(reader).catch(error => {
+  if (error instanceof LlmManagerHostError) throw new StructuredSessionError('unsupported', 'Manager frozen reader runtime cannot prove the frozen capability')
+  throw error
+})
 const activeControllers = new Map<string, AbortController>()
 const activeFinished = new Map<string, Promise<void>>()
 const cancellations = new Map<string, Promise<StructuredCancellationResult>>()
@@ -68,7 +72,8 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
   if (rec.structuredExecution.state && rec.structuredExecution.state !== 'running') return rec.structuredExecution.state
   const execution = rec.structuredExecution
   const nativeWorktree = execution.version === 6 && execution.policy === 'native-worktree-v1'
-  const manager = nativeWorktree ? managedRoute(execution.model) : undefined
+  const managedFrozen = execution.version === 7 && execution.policy === 'codex-managed-frozen-worktree-v1'
+  const manager = nativeWorktree || managedFrozen ? managedRoute(execution.model) : undefined
   const claude = nativeWorktree && execution.model?.startsWith('claude:') || execution.version === (execution.timeoutMs === null ? 5 : 3) && execution.policy === 'claude-frozen-read-only-v1'
   const zcode = nativeWorktree && execution.model?.startsWith('zcode:') || execution.version === (execution.timeoutMs === null ? 5 : 4) && execution.policy === 'zcode-frozen-read-only-v1'
   const grok = nativeWorktree && execution.model?.startsWith('grok:')
@@ -108,7 +113,17 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
         throw new StructuredSessionError('cancellation_pending', 'The exact LLM Manager reservation status is unknown')
       }
     }
-    const generation = claude || zcode || grok || cursor || codex ? undefined : await structuredGeneration(requiredRealmRoot(execution), execution.readerRuntime)
+    const hosted = managedFrozen ? await hostedFrozenRuntime(manager!.frozenReader!) : undefined
+    const generation = await (async () => {
+      if (claude || zcode || grok || cursor || codex) return undefined
+      const realm = requiredRealmRoot(execution)
+      if (hosted && execution.threadId) {
+        const runtimeDir = join(realm, 'control'), binding = resolveCodexGenerationForClose(runtimeDir, id, execution.threadId)
+        if (!binding || binding.gone) throw new StructuredSessionError('cancellation_pending', 'original managed frozen generation needs exact stop reconciliation')
+        return { endpoint: binding.endpoint, runtimeDir }
+      }
+      return structuredGeneration(realm, execution.readerRuntime, hosted)
+    })()
     const callbacks = {
       signal: controller.signal,
       onTimeout: async () => { await cancelStructuredSession(id, { reason: 'timeout' }) },
@@ -147,7 +162,7 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
       ? await claudeStructuredTurn(requiredRealmRoot(execution), id, prompt, execution, { ...callbacks, onNative: async native => update({ claudeNative: native }) }, nativeWorktree ? rec.worktreePath : undefined)
       : codex
       ? await codexNativeWorktreeTurn(requiredRealmRoot(execution), id, prompt, execution, { ...callbacks, onNative: async native => update({ codexNative: native }) }, rec.worktreePath, nativeModelValue(execution.model, 'codex'))
-      : await codexStructuredTurn(generation!.endpoint.socketPath, rec.worktreePath, readFileSync(sessionArtifactPath(id, 'launch'), 'utf8'), execution, callbacks)
+      : await codexStructuredTurn(generation!.endpoint.socketPath, rec.worktreePath, prompt, execution, callbacks, hosted)
     } catch (error) {
       if (nativeWorktree && error instanceof ZCodeNativeTurnFailedError) {
         const current = readRecord(id)!.structuredExecution!
@@ -157,6 +172,11 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
       if (grok && error instanceof StructuredSessionError && (error.code === 'failed' || error.code === 'provider_quota_exhausted')) failedStage = { stop: await stopGrokStructuredTurn(readRecord(id)!.structuredExecution!) }
       if (cursor && error instanceof StructuredSessionError && (error.code === 'failed' || error.code === 'provider_quota_exhausted')) failedStage = { stop: await stopCursorStructuredTurn(readRecord(id)!.structuredExecution!) }
       if (codex && error instanceof StructuredSessionError && (error.code === 'failed' || error.code === 'provider_quota_exhausted')) failedStage = { stop: await stopCodexNativeWorktreeTurn(readRecord(id)!.structuredExecution!) }
+      if (hosted && error instanceof StructuredSessionError && error.code === 'provider_quota_exhausted') {
+        const pinned = readRecord(id)!.structuredExecution!
+        if (pinned.threadId && pinned.turnId)
+          failedStage = { stop: await codexStopStructuredTurn(generation!.runtimeDir, generation!.endpoint, pinned.threadId, pinned.turnId, prompt, undefined, hosted) }
+      }
       if (nativeWorktree && claude && error instanceof StructuredSessionError && (error.code === 'failed' || error.code === 'provider_quota_exhausted')) {
         const current = readRecord(id)!.structuredExecution!
         if (current.threadId && current.turnId && current.threadId === current.claudeNative?.sessionId && current.turnId === current.claudeNative.userUuid)
@@ -199,7 +219,7 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
     const output: unknown = JSON.parse(result.text)
     const validate = new Ajv({ allErrors: true }).compile(execution.schema)
     if (!validate(output)) throw new StructuredSessionError('failed', `structured output does not match JSON schema: ${JSON.stringify(validate.errors)}`)
-    const resultWorktree = nativeWorktree ? nativeWorktreeResult(rec.worktreePath, execution.worktree!) : undefined
+    const resultWorktree = execution.worktree ? nativeWorktreeResult(rec.worktreePath, execution.worktree) : undefined
     await update({ state: 'completed', ...(nativeTokenUsage ? { nativeTokenUsage } : {}), ...(resultWorktree ? { resultWorktree } : {}), threadId: result.threadId, turnId: result.turnId, output, resultDigest: digest(output), ...(result.frozenReadProof ? { frozenReadProof: result.frozenReadProof } : {}) })
     return 'completed'
   } catch (error) {
@@ -217,8 +237,18 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
       return 'cancelling'
     }
     if (error instanceof StructuredSessionError) nativeTokenUsage ??= error.nativeTokenUsage
+    if (manager?.frozenReader && !pendingStop?.threadId && !pendingStop?.turnId && !pendingStop?.turnStartRequested) {
+      try {
+        await stopUnboundManagedFrozenRealm(requiredRealmRoot(execution), loadManagerPersistentCodex, { cwd: rec.worktreePath })
+        failedStage = { stop: { nativeStopped: true, acknowledged: false, nativeStatus: 'notStarted' } }
+      } catch (cause) {
+        const note = cause instanceof Error ? cause.message : String(cause)
+        await update({ state: 'cancelling', cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: false, acknowledged: false, error: note }, error: note })
+        return 'cancelling'
+      }
+    }
     let managerQuota = false
-    if (manager && (failedStage?.stop.nativeStopped || !pendingStop?.turnStartRequested && !pendingStop?.turnId)) {
+    if (manager && (failedStage?.stop.nativeStopped || !manager.frozenReader && !pendingStop?.turnStartRequested && !pendingStop?.turnId)) {
       const quota = failedStage?.stop.nativeStopped === true && error instanceof StructuredSessionError && error.code === 'provider_quota_exhausted'
       try { managerQuota = await settleManagedRoute(manager, id, quota ? 'quota' : 'stopped', nativeTokenUsage) === 'quota' && failedStage?.stop.nativeStopped === true }
       catch (cause) {
@@ -250,29 +280,39 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
   const zcode = request.model?.startsWith('zcode:') === true
   const grok = request.model?.startsWith('grok:') === true
   const cursor = request.model?.startsWith('cursor:') === true
-  const codex = request.model?.startsWith('codex:') === true
+  const managedReader = managedRoute(request.model)?.frozenReader
+  const codex = !managedReader && request.model?.startsWith('codex:') === true
   const { sessionCreateRequest, sessionCreateTimeoutMs, requestQueueDrain, queueStructuredRecovery, refreshQueueCandidate, sessionIdForCreateKey } = await import('./sessions.js')
-  const saved = (claude || zcode || grok || cursor || codex) && request.worktree ? readRecord(sessionIdForCreateKey(request.sessionCreateKey ?? request.requestKey))?.structuredExecution : undefined
+  const existing = (claude || zcode || grok || cursor || codex || managedReader) && request.worktree ? readRecord(sessionIdForCreateKey(request.sessionCreateKey ?? request.requestKey)) : null
+  const saved = existing?.structuredExecution
+  const coldAdapter = managedReader && existing?.archived && saved?.state === 'completed' ? await loadManagerPersistentCodex() : undefined
+  if (coldAdapter && (!saved?.frozenContext || !saved.readerRuntime))
+    throw new StructuredSessionError('stale_result', 'managed frozen cold replay is missing the original input or runtime identity')
+  const hosted = managedReader && !coldAdapter ? await hostedFrozenRuntime(managedReader) : undefined
   const original = saved ?? (request.sessionCreateKey ? request : null)
-  const nativeConfiguration = pinNativeConfiguration(request, original)
+  const nativeConfiguration = managedReader ? undefined : pinNativeConfiguration(request, original)
   if (nativeConfiguration) request = { ...request, nativeConfiguration }
   if (!nativeConfiguration && claude) claudeNativeModel(request.model)
   if (!nativeConfiguration && zcode) zcodeNativeModel(request.model)
   if (request.worktree) {
     assertNativeWorktreeSeed(request.root, request.worktree)
     if (request.base && request.base !== request.worktree.baseCommit) throw new StructuredSessionError('failed', 'native worktree base differs from immutable seed')
-    request = { ...request, base: request.worktree.baseCommit, prompt: nativeWorktreePrompt(request.prompt, request.worktree) }
+    request = { ...request, base: request.worktree.baseCommit, prompt: managedReader ? request.prompt : nativeWorktreePrompt(request.prompt, request.worktree) }
   }
-  if (!request.worktree && !request.frozenContext) request = prepareFrozenPrompt(request, { directory: join(runtimeRoot(), 'frozen-context-v2') })
+  const frozenDirectory = join(runtimeRoot(), 'frozen-context-v2')
+  const builder = coldAdapter ?? hosted
+  if (builder) request = prepareManagedFrozenPrompt(request, { directory: frozenDirectory, builder, ...(coldAdapter ? { pinned: saved!.frozenContext } : {}) })
+  else if (!request.worktree && !request.frozenContext) request = prepareFrozenPrompt(request, { directory: frozenDirectory })
   const deadline = request.timeoutMs === null ? null : Date.now() + request.timeoutMs
   if (request.frozenContext) assertFrozenBinding(request.frozenContext, { ...readFrozenManifest(request.frozenContext).binding, requestKey: request.requestKey, inputDigest: request.inputDigest })
   const validate = new Ajv().compile(request.schema)
-  if (!claude && !zcode && !grok && !cursor && request.frozenContext && !request.readerRuntime) request = { ...request, readerRuntime: await prepareFrozenReaderRuntime(join(runtimeRoot(), 'structured-frozen-read-only-v2'), request.frozenContext) }
-  if (request.readerRuntime) assertFrozenReaderRuntime(request.readerRuntime, request.model)
+  if (!claude && !zcode && !grok && !cursor && request.frozenContext && !request.readerRuntime)
+    request = { ...request, readerRuntime: saved?.readerRuntime ?? await prepareFrozenReaderRuntime(join(runtimeRoot(), 'structured-frozen-read-only-v2'), request.frozenContext, hosted) }
+  if (request.readerRuntime) assertFrozenReaderRuntime(request.readerRuntime, managedReader?.model ?? request.model, undefined, coldAdapter && managedReader ? { reader: managedReader, codexAuditFrozenCatalog: coldAdapter.codexAuditFrozenCatalog } : hosted)
   const zcodeToolPolicy = pinZCodeToolPolicy(request, original)
   if (zcodeToolPolicy) request = { ...request, zcodeToolPolicy }
   const execution = structuredExecutionPolicy(request)
-  if (!claude && !zcode && !grok && !cursor && !codex) prepareStructuredRealm(requiredRealmRoot(execution), request.readerRuntime)
+  if (!claude && !zcode && !grok && !cursor && !codex && !coldAdapter) prepareStructuredRealm(requiredRealmRoot(execution), request.readerRuntime, hosted)
   const created = await sessionCreateRequest({ prompt: request.prompt, ...(request.base ? { base: request.base } : {}) }, {
     requestKey: request.sessionCreateKey ?? request.requestKey, signal: request.signal, timeoutMs: request.timeoutMs === null ? sessionCreateTimeoutMs() : Math.min(sessionCreateTimeoutMs(), request.timeoutMs), structuredExecution: execution,
   })
@@ -307,8 +347,10 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
         if (!state.threadId || !state.turnId || !state.resultDigest || state.resultDigest !== digest(state.output) || !validate(state.output))
           throw new StructuredSessionError('stale_result', 'structured result identity or digest is invalid')
         if (state.worktree) {
-          if (!state.resultWorktree || state.frozenReadProof || rec.base !== state.worktree.baseCommit || rec.forkCommit !== state.worktree.baseCommit || state.resultWorktree.worktreePath !== rec.worktreePath) throw new StructuredSessionError('stale_result', 'native worktree completion lost its Git identity')
+          if (!state.resultWorktree || !managedReader && state.frozenReadProof || rec.base !== state.worktree.baseCommit || rec.forkCommit !== state.worktree.baseCommit || state.resultWorktree.worktreePath !== rec.worktreePath) throw new StructuredSessionError('stale_result', 'native worktree completion lost its Git identity')
           assertNativeWorktreeResult(request.root, state.worktree, state.resultWorktree)
+        }
+        if (state.worktree && !managedReader) {
           const rejectReplay = async (): Promise<never> => { throw new StructuredSessionError('stale_result', 'completed native worktree replay cannot dispatch') }
           const callbacks = { onThread: rejectReplay, onTurn: rejectReplay, onNative: rejectReplay }
           const recovered = state.model?.startsWith('cursor:')
@@ -325,8 +367,12 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
         if (state.frozenContext && (!state.frozenReadProof || state.frozenReadProof.contextDigest !== state.frozenContext.contextDigest || state.frozenReadProof.threadId !== state.threadId || state.frozenReadProof.turnId !== state.turnId))
           throw new StructuredSessionError('stale_result', 'structured frozen result lacks exact native history coverage evidence')
         if (state.frozenContext) {
-          verifyFrozenReadProof(state.frozenContext, state.frozenReadProof!, { threadId: state.threadId, turnId: state.turnId }, state.readerRuntime?.version === 2 ? state.readerRuntime.toolOutputTokenLimit : undefined, { output: state.output })
-          if (state.version === (state.timeoutMs === null ? 5 : 4) && state.policy === 'zcode-frozen-read-only-v1') {
+          if (!managedReader) verifyFrozenReadProof(state.frozenContext, state.frozenReadProof!, { threadId: state.threadId, turnId: state.turnId }, state.readerRuntime?.version === 2 ? state.readerRuntime.toolOutputTokenLimit : undefined, { output: state.output })
+          if (coldAdapter) {
+            const recovered = await readManagedFrozenArchivedTurn(rec, request.prompt, coldAdapter)
+            if (digest(JSON.parse(recovered.text)) !== state.resultDigest || digest(recovered.frozenReadProof) !== digest(state.frozenReadProof))
+              throw new StructuredSessionError('stale_result', 'managed frozen result differs from the original archived evidence')
+          } else if (state.version === (state.timeoutMs === null ? 5 : 4) && state.policy === 'zcode-frozen-read-only-v1') {
             const rejectReplay = async (): Promise<never> => { throw new StructuredSessionError('stale_result', 'completed ZCode replay cannot dispatch') }
             const recovered = await zcodeStructuredTurn(requiredRealmRoot(state), id, request.prompt, state as Parameters<typeof zcodeStructuredTurn>[3], { onThread: rejectReplay, onTurn: rejectReplay, onNative: rejectReplay })
             if (digest(JSON.parse(recovered.text)) !== state.resultDigest || digest(recovered.frozenReadProof) !== digest(state.frozenReadProof)) throw new StructuredSessionError('stale_result', 'completed ZCode result differs from original native witness')
@@ -342,7 +388,7 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
               signal: request.signal, onThread: async () => { throw new StructuredSessionError('stale_result', 'completed recovery cannot create a new thread') },
               onTurn: async (turnId) => { if (turnId !== state.turnId) throw new StructuredSessionError('stale_result', 'completed recovery cannot replace its exact turn') },
               onFrozenRead: async () => { throw new StructuredSessionError('stale_result', 'completed recovery cannot reply to a new dynamic call') },
-            })
+            }, hosted)
             if (digest(JSON.parse(recovered.text)) !== state.resultDigest || digest(recovered.frozenReadProof) !== digest(state.frozenReadProof))
               throw new StructuredSessionError('stale_result', 'completed frozen result differs from exact native history')
           }
@@ -439,7 +485,7 @@ export async function cancelStructuredSession(id: string, options: { reason?: 'c
     }
     activeControllers.get(id)?.abort()
     const finished = activeFinished.get(id)
-    const manager = execution.version === 6 && execution.policy === 'native-worktree-v1' ? managedRoute(execution.model) : undefined
+    const manager = execution.version === 6 && execution.policy === 'native-worktree-v1' || execution.version === 7 && execution.policy === 'codex-managed-frozen-worktree-v1' ? managedRoute(execution.model) : undefined
     if (finished && (manager || execution.turnStartRequested || execution.turnId)) await finished
     const current = readRecord(id)!, state = current.structuredExecution!
     let stop: { nativeStopped: boolean; acknowledged: boolean; turnId?: string; nativeStatus?: string; error?: string }
@@ -448,7 +494,13 @@ export async function cancelStructuredSession(id: string, options: { reason?: 'c
     else if (state.version === 6 && state.policy === 'native-worktree-v1' && state.model?.startsWith('grok:')) stop = await stopGrokStructuredTurn(state, options.timeoutMs ?? 15_000)
     else if (state.version === 6 && state.policy === 'native-worktree-v1' && state.model?.startsWith('cursor:')) stop = await stopCursorStructuredTurn(state, options.timeoutMs ?? 15_000)
     else if (state.version === 6 && state.policy === 'native-worktree-v1' && state.model?.startsWith('codex:')) stop = await stopCodexNativeWorktreeTurn(state, options.timeoutMs ?? 15_000)
-    else if ((!state.threadId || state.turnStartRequested === false) && !state.turnId) stop = { nativeStopped: true, acknowledged: false, nativeStatus: 'notStarted' }
+    else if (manager?.frozenReader && !state.threadId && !state.turnId && !state.turnStartRequested) {
+      try {
+        await stopUnboundManagedFrozenRealm(requiredRealmRoot(state), loadManagerPersistentCodex, { cwd: current.worktreePath })
+        stop = { nativeStopped: true, acknowledged: false, nativeStatus: 'notStarted' }
+      } catch (error) { stop = { nativeStopped: false, acknowledged: false, error: error instanceof Error ? error.message : String(error) } }
+    }
+    else if ((!state.threadId || state.turnStartRequested === false) && !state.turnId && !manager?.frozenReader) stop = { nativeStopped: true, acknowledged: false, nativeStatus: 'notStarted' }
     else {
       const runtimeDir = join(requiredRealmRoot(state), 'control')
       const binding = state.threadId && current.harnessSessionId === state.threadId ? resolveCodexGenerationForClose(runtimeDir, id, state.threadId) : null
@@ -456,7 +508,7 @@ export async function cancelStructuredSession(id: string, options: { reason?: 'c
         stop = { nativeStopped: false, acknowledged: false, error: 'exact structured generation/thread binding is unavailable; native stop is unproven' }
       else if (binding.gone) stop = { nativeStopped: true, acknowledged: false, nativeStatus: 'generationGone' }
       else stop = await codexStopStructuredTurn(runtimeDir, binding.endpoint, state.threadId!, state.turnId,
-        readFileSync(sessionArtifactPath(id, 'launch'), 'utf8'), options.timeoutMs ?? 15_000)
+        readFileSync(sessionArtifactPath(id, 'launch'), 'utf8'), options.timeoutMs ?? 15_000, manager?.frozenReader ? await loadManagerPersistentCodex() : undefined)
     }
     if (manager && stop.nativeStopped) await settleManagedRoute(manager, id, 'stopped')
     const result = await withRecordLock(id, async (): Promise<StructuredCancellationResult> => {
