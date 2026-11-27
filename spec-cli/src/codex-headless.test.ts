@@ -28,7 +28,6 @@ test('codex-headless composes Codex materialization and shared-runtime ownership
   assert.equal(typeof codexHeadlessHarness.launchReady, 'function')
   assert.equal(codexHeadlessHarness.deliver, codexHarness.deliver)
   assert.equal(codexHeadlessHarness.observeTurnFailures, codexHarness.observeTurnFailures)
-  assert.equal(codexHeadlessHarness.sharedRuntimes, codexHarness.sharedRuntimes)
   const headlessRuntime = codexHeadlessHarness.sharedRuntimes?.('/tmp/runtime') ?? []
   const interactiveRuntime = codexHarness.sharedRuntimes?.('/tmp/runtime') ?? []
   const descriptorContract = (descriptor: (typeof headlessRuntime)[number]) => ({
@@ -43,6 +42,11 @@ test('codex-headless composes Codex materialization and shared-runtime ownership
     },
   })
   assert.deepEqual(headlessRuntime.map(descriptorContract), interactiveRuntime.map(descriptorContract))
+  const ordinaryRecord = { session: 'abc', harnessSessionId: 'thread-1' }
+  assert.deepEqual(
+    codexHeadlessHarness.sharedRuntimes?.('/tmp/runtime', ordinaryRecord).map(descriptorContract),
+    codexHarness.sharedRuntimes?.('/tmp/runtime', ordinaryRecord).map(descriptorContract),
+  )
   assert.deepEqual(headlessRuntime.map(descriptorContract), [{
     key: 'codex-app-server',
     label: 'Codex app-server',
