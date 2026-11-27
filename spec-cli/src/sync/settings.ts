@@ -48,15 +48,27 @@ function settingsPath(path: string): string {
   catch (error) { throw new SyncApplicationError('sync_configuration_invalid', error instanceof Error ? error.message : String(error)) }
 }
 
-/** 只读取不可变输入内的版本化授权；不猜宿主命令，也不合入本机凭据配置。 */
-export function readSyncSettings(snapshot: InputSnapshot): { settings: SyncSettings; configDigest: string } {
+function readFrozenProjectConfig(snapshot: InputSnapshot) {
   const entry = verifySnapshot(snapshot).find(file => file.path === '.spec/spexcode.json')
-  if (!entry || entry.mode === '120000') throw new SyncApplicationError('sync_configuration_missing', '请在 .spec/spexcode.json 登记 sync 的授权目录、Docker 验证命令与预算后启用')
+  if (!entry || entry.mode === '120000') return null
   let parsed: unknown
   try { parsed = JSON.parse(readObject(snapshot.source.commonDir, entry.oid).toString('utf8')) as unknown }
   catch { throw new SyncApplicationError('sync_configuration_invalid', '项目配置 JSON 无法解析，请检查格式') }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new SyncApplicationError('sync_configuration_invalid', '项目配置须为 JSON 对象')
-  const config = parsed as { sync?: unknown }
+  return { config: parsed as { sync?: unknown; mainBranch?: unknown }, configDigest: entry.digest }
+}
+
+/** 主分支授权由冻结项目配置声明，独立于实际来源分支。 */
+export function frozenSyncCanonicalBranch(snapshot: InputSnapshot): string {
+  const branch = readFrozenProjectConfig(snapshot)?.config.mainBranch
+  return `refs/heads/${typeof branch === 'string' ? branch.trim() || 'main' : 'main'}`
+}
+
+/** 只读取不可变输入内的版本化授权；不猜宿主命令，也不合入本机凭据配置。 */
+export function readSyncSettings(snapshot: InputSnapshot): { settings: SyncSettings; configDigest: string } {
+  const frozen = readFrozenProjectConfig(snapshot)
+  if (!frozen) throw new SyncApplicationError('sync_configuration_missing', '请在 .spec/spexcode.json 登记 sync 的授权目录、Docker 验证命令与预算后启用')
+  const { config, configDigest } = frozen
   if (!validate(config.sync)) throw new SyncApplicationError('sync_configuration_invalid', `sync 配置缺口：${new Ajv().errorsText(validate.errors)}`)
   const settings = config.sync as SyncSettings
   if (settings.model !== undefined && settings.model !== settings.model.trim()) throw new SyncApplicationError('sync_configuration_invalid', 'sync.model 需要非空精确 ID')
@@ -81,5 +93,5 @@ export function readSyncSettings(snapshot: InputSnapshot): { settings: SyncSetti
     settingsPath(item.testPath)
     if (!settings.verifications.some(verification => verification.definition.id === item.verificationId) || coveredPath(item.testPath, [...settings.sourcePaths, ...settings.testPaths])) throw new SyncApplicationError('sync_configuration_invalid', '保护测试须引用已登记验证，且不能位于模型可写范围')
   }
-  return { settings, configDigest: entry.digest }
+  return { settings, configDigest }
 }

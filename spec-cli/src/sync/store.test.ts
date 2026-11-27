@@ -81,6 +81,28 @@ async function fixture() {
   return { root, path, protocol, store, options, put, input, admit, claim, ready, receipt, controlled, blobs, tick: (ms: number) => { time += ms }, cleanup: () => { protocol.close(); rmSync(root, { recursive: true, force: true }) } }
 }
 
+test('跨冻结只固定当前 initial 的首个来源决定并保活全部原件', async () => {
+  const f = await fixture()
+  try {
+    const admission = f.admit()
+    const { operation, fence } = f.claim({ ...admission, origin: 'initial', input: { ...admission.input, captureKind: 'commit' } })
+    const { id: operationId, policyDigest } = operation, inputId = operation.input.id, canonicalBranch = operation.input.source.branch
+    const basis = { version: 'cross-freeze-binding-v1', operationId, inputId, policyDigest, canonicalBranch, requestedOldOperationId: null }
+    const difference = f.put({ paths: ['src/shared.ts'] })
+    const selected = f.put({ ...basis, kind: 'selected', provenanceRef: difference, oldOperationId: 'historical', attemptIds: ['historical-attempt'], provenanceDigest: 'a'.repeat(64) })
+    const missing = f.put({ ...basis, kind: 'no-source', reason: 'source_not_found' })
+    assert.throws(() => f.store.lockCrossFreezeBinding(fence, f.put({ ...basis, kind: 'selected', inputId: 'other', provenanceRef: difference })), /SYNC_CROSS_FREEZE_BINDING_INVALID/)
+    assert.deepEqual(f.store.lockCrossFreezeBinding(fence, selected), selected)
+    assert.deepEqual(f.store.lockCrossFreezeBinding(fence, missing), selected)
+    assert.deepEqual(f.store.readOperation(operationId).crossFreezeBinding, { ref: selected, provenanceRef: difference })
+    const pins = f.store.pinnedBlobRefs()
+    assert.ok([selected, difference].every(ref => pins.some(pin => pin.sha256 === ref.sha256)))
+    assert.ok(!pins.some(pin => pin.sha256 === missing.sha256))
+    f.tick(2000)
+    assert.throws(() => f.store.lockCrossFreezeBinding(fence, missing), /SYNC_FENCE_EXPIRED/)
+  } finally { f.cleanup() }
+})
+
 function freezeP1ChallengeSource(f: Awaited<ReturnType<typeof fixture>>, { operation, attempt, fence }: ClaimedAttempt) {
   const partitionId = 'order-leaf', planDigest = 'partition-digest'
   const candidate = { inputDigest: 'p1-input', changes: [], applicability: [] }

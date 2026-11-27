@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+跨冻结影响复核的原 Git 文本稿通过同一 evidence CAS 保留完整 UTF-8 原字节与 SHA-256，供当前证据阶段引用。JSON 证据继续使用原序列化方式和校验。
+
 候选恢复也可按一次同步或异步冷验短暂共享这个读树视图，保持同一物理仓库与完整 tree OID 的核验。结束、错误及后继尝试重新读取。
 
 [[sync-source-registration]] 的显式见证在公共identify/fingerprint接缝投影logical repositoryId及本root已证明的physicalFingerprint；actual路径、Git登记与branch仍真实读取，snapshot/source字段和顺序不增加wrapper。commonDir共享仓库ID，新managed root保真实新physical；未证明linked旧权限不能借repo共享继续。失效v2正常读取fail closed，不fallback新namespace。仅正式continuity配置核验与resource-only清理可用具名raw探针，normal capture/currentness/V4/准入不采用raw旁路。

@@ -3,6 +3,7 @@ import { invalidFrozenFactAnchors } from './frozen-anchors.js'
 import { requiredBehaviorReviewPaths, type P0ReviewDiagnostic } from './behavior-review-challenge.js'
 import { captureStageDraft, DRAFT_RECEIPT_INSTRUCTIONS, DRAFT_RECEIPT_SCHEMA, overlayStageTree, readStageDraft, StageDraftCommitMissingError, stageWorktree, STAGE_READING_INSTRUCTIONS, type StageDraftBinding } from './stage-worktree.js'
 import { posix } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 import { parseCodeEntry, parseRelation, relationClaimsPath } from '@spexcode/spec-core'
 import { syncModel } from './model-selection.js'
 import { dependencyClosure, parseContract, parseFrontmatter, parseParts, type ContractFinding, type ContractItem } from '@spexcode/spec-core/contracts'
@@ -22,7 +23,7 @@ import type { SyncCoordinatorPlan } from './coordinator-types.js'
 import { StructuredSessionError, assertRejectedOutput } from '../session-structured-policy.js'
 import { nativeWorktreePrompt } from '../native-worktree-runtime.js'
 import type { FrozenEntryJson, FrozenReadProof } from '../frozen-context.js'
-import type { AcceptanceChangeProposal, ContractChangeProposal, CodeBehaviorAnalysis, CodeBehaviorChange, CodeBehaviorEvidence, CodeBehaviorFinding, ContractNodeProposal, SyncDecisionAuthority, SyncDecisionInput } from './writeback-types.js'
+import type { AcceptanceChangeProposal, ContractChangeProposal, CodeBehaviorAnalysis, CodeBehaviorChange, CodeBehaviorCrossFreezeAuthorProof, CodeBehaviorEvidence, CodeBehaviorFinding, ContractNodeProposal, SyncDecisionAuthority, SyncDecisionInput } from './writeback-types.js'
 
 const string = { type: 'string', minLength: 1 }, strings = { type: 'array', items: string }
 const object = (properties: Record<string, unknown>): Record<string, unknown> => ({ type: 'object', additionalProperties: false, properties, required: Object.keys(properties) })
@@ -48,6 +49,10 @@ export const CODE_BEHAVIOR_REVIEW_COVERAGE_MISSING = 'behavior_review_coverage_m
 
 export class CodeBehaviorAuthorEvidenceError extends Error {
   readonly code = 'behavior_author_evidence_invalid'
+}
+
+export class CodeBehaviorCrossFreezeAuthorRejectedError extends Error {
+  readonly code = 'behavior_cross_freeze_author_rejected'
 }
 
 export class CodeBehaviorReviewRepairError extends Error {
@@ -77,6 +82,8 @@ export type CodeBehaviorContinuation = {
   reviewDiagnosticRef?: BlobRef
   challengedAnalysisDigest?: string
   reviewResult?: CompletedBehaviorDraft
+  crossFreezeAuthor?: CodeBehaviorCrossFreezeAuthorProof
+  crossFreezeAuthorReviewRepair?: true
 }
 const behaviorStatusErrors = (errors: readonly { code: string }[]) => errors.map(({ code }) => ({ code, message: CODE_BEHAVIOR_FAILURE_STATUS }))
 
@@ -97,8 +104,15 @@ export function codeBehaviorContinuationStatus(continuation: CodeBehaviorContinu
 
 export type CodeBehaviorReviewReference = { commit: string; path: string }
 export type CodeBehaviorMaterialRequest = Pick<ElaborationSessionRequest, 'prompt' | 'worktree'> & { previousInstructions?: string }
+export type CodeBehaviorCrossFreezeAuthor = {
+  draft: ElaborationDraft
+  trace: ElaborationTrace
+  proof: CodeBehaviorCrossFreezeAuthorProof
+  independentOf?: readonly ElaborationTrace[]
+}
 export type CodeBehaviorCheckpoints = {
   replayDraft?(requestKey: string, purpose: BehaviorPurpose): { request: ElaborationSessionRequest; result: ElaborationSessionResult } | null
+  loadCrossFreezeAuthor?(inputDigest: string, binding: CodeBehaviorApprovalBinding, existing?: CodeBehaviorCrossFreezeAuthorProof): CodeBehaviorCrossFreezeAuthor | null | Promise<CodeBehaviorCrossFreezeAuthor | null>
   loadReviewFeedback?(inputDigest: string): CodeBehaviorReviewReference | null
   loadMaterial?(purpose: BehaviorPurpose, schemaDigest: string, inputDigest: string, request: CodeBehaviorMaterialRequest, existingDraft?: ElaborationDraft): ElaborationDraftMaterial | null | Promise<ElaborationDraftMaterial | null>
   load(inputDigest: string, analysisSchemaDigest: string): CodeBehaviorContinuation | null
@@ -329,17 +343,22 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   const { signal, ...data } = supplied, input: CodeBehaviorInput = { ...structuredClone(data), signal }
   const statusOnly = input.contextTransport !== undefined && input.contextTransport !== 'git-json-v1'
   let continuation: CodeBehaviorContinuation | undefined
+  let validatingCrossFreezeAuthor = false
   const persist = (): void => { if (continuation) checkpoints?.save(statusOnly ? codeBehaviorContinuationStatus(continuation) : structuredClone(continuation)) }
   const diagnostic: { proposal?: unknown; analysis?: CodeBehaviorAnalysis; review?: unknown } = {}
   function reject(message: string, details: Record<string, unknown> = {}, code = 'behavior_analysis_invalid', reviewOnly = false): never {
     const formatFailure = ['behavior_output_json', 'behavior_output_schema'].includes(code)
     const failure = statusOnly ? CODE_BEHAVIOR_FAILURE_STATUS : JSON.stringify({ approved: false, message, details, ...(formatFailure ? { drafts: continuation?.drafts } : diagnostic) })
+    if (validatingCrossFreezeAuthor) throw new CodeBehaviorCrossFreezeAuthorRejectedError(failure)
     if (continuation && !formatFailure) {
       if (reviewOnly) {
         const errors = [{ code, message: failure }]
         continuation.drafts.code_behavior_review!.errors = errors
         continuation.errors = { ...continuation.errors, code_behavior_review: errors }
-      } else delete continuation.readyAnalysis
+      } else {
+        delete continuation.readyAnalysis
+        if (continuation.crossFreezeAuthor && code === 'behavior_review_failed') continuation.crossFreezeAuthorReviewRepair = true
+      }
       persist()
     }
     if (code === 'behavior_review_failed' && !reviewOnly) throw new CodeBehaviorReviewRepairError(failure)
@@ -679,6 +698,23 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     continuation = checkpoints?.load(inputDigest, analysisSchemaDigest) ?? { version: 'code-behavior-draft-v1', inputDigest, drafts: {}, ...(input.operatorReviewDiagnostic ? { reviewDiagnosticRef: input.operatorReviewDiagnostic.ref } : {}) }
     if (continuation.version !== input.draftProtocol || continuation.inputDigest !== inputDigest) throw new Error('P0草稿续修完整输入绑定不匹配')
   }
+  const savedCrossFreezeAuthor = continuation?.crossFreezeAuthor
+  const canLoadCrossFreezeAuthor = input.origin === 'initial' && input.contextTransport === 'git-json-v6' && input.partition
+    && (savedCrossFreezeAuthor || !input.operatorReviewDiagnostic) && !input.postGateReview?.length && !input.decision
+    && !continuation?.readyAnalysis && !continuation?.drafts.code_behavior_analyze && !continuation?.errors?.code_behavior_analyze
+    && (savedCrossFreezeAuthor || !continuation?.drafts.code_behavior_review && !continuation?.reviewResult && !continuation?.errors?.code_behavior_review)
+  let crossFreezeAuthor: CodeBehaviorCrossFreezeAuthor | null = null
+  if (canLoadCrossFreezeAuthor && checkpoints?.loadCrossFreezeAuthor) {
+    if (signal?.aborted) throw Object.assign(new Error('行为分析已停止'), { code: 'cancelled' })
+    crossFreezeAuthor = await checkpoints.loadCrossFreezeAuthor(inputDigest, binding, savedCrossFreezeAuthor)
+  }
+  if (savedCrossFreezeAuthor && !isDeepStrictEqual(savedCrossFreezeAuthor, crossFreezeAuthor?.proof)) {
+    throw Object.assign(new Error('P0跨冻结续审缺少同一已认证的原作者及影响复核证明'), { code: 'behavior_continuation_binding' })
+  }
+  const stageDraftBinding = (purpose: BehaviorPurpose, schemaDigest: string, sourceInputId = input.snapshot.id, partitionId = input.partition?.id ?? null): StageDraftBinding => {
+    const ownerDigest = contentHash(JSON.stringify({ version: input.draftProtocol, source: canonicalSnapshotSource(input.snapshot.source), partitionId, purpose }))
+    return { ownerDigest, sourceInputId, schemaDigest, path: `.spex-sync-drafts/${ownerDigest}.json` }
+  }
   const inspectAuthorEvidence = async (proposal: Proposal) => {
     const issues = checkAuthorEvidence(proposal, input.plan)
     const facts = proposal.facts.filter(fact => fact.source.startsWith('code:') && !input.plan.facts.some(item => item.source === fact.source && item.text === fact.text))
@@ -699,10 +735,11 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   const dispatch = async (purpose: BehaviorPurpose, prompt: string, schema: Record<string, unknown>, pendingAnalysis?: CodeBehaviorContext['pendingAnalysis'], previousInstructions?: string): Promise<unknown> => {
     if (signal?.aborted) throw Object.assign(new Error('行为分析已停止'), { code: 'cancelled' })
     const base = purpose === 'code_behavior_review' ? reviewWorktree : worktree
-    const ownerDigest = contentHash(JSON.stringify({ version: input.draftProtocol, source: canonicalSnapshotSource(input.snapshot.source), partitionId: input.partition?.id ?? null, purpose }))
-    const binding: StageDraftBinding = { ownerDigest, sourceInputId: input.snapshot.id, schemaDigest: contentHash(JSON.stringify(schema)), path: `.spex-sync-drafts/${ownerDigest}.json` }
+    const binding = stageDraftBinding(purpose, contentHash(JSON.stringify(schema)))
+    const { ownerDigest } = binding
     const prior = continuation?.drafts[purpose]
-    if (prior && (prior.ownerDigest !== ownerDigest || prior.path !== binding.path || prior.schemaDigest !== binding.schemaDigest)) throw new Error('P0草稿owner/schema与当前阶段不匹配')
+    if (prior && (prior.ownerDigest !== ownerDigest || prior.path !== binding.path || prior.schemaDigest !== binding.schemaDigest
+      || crossFreezeAuthor && prior.sourceInputId !== input.snapshot.id)) throw new Error('P0草稿owner/schema与当前阶段不匹配')
     if (purpose === 'code_behavior_analyze' && continuation?.readyAnalysis) {
       const ready = continuation.readyAnalysis, trace = ready.trace
       if (!prior || ready.draftOid !== prior.oid || ready.resultCommit !== prior.resultCommit || prior.errors.length || trace.purpose !== purpose || trace.inputDigest !== inputDigest || !trace.sessionId || !trace.threadId || !trace.turnId) throw new Error('P0已校验分析缺少原草稿及真实trace')
@@ -923,7 +960,30 @@ SPEX_P0_REVIEW_PATHS`
       factSourceInstructions.replace(factSourceRule, '本区owned冻结文件；同一source'),
     )
     : undefined
-  const proposal = await dispatch('code_behavior_analyze', analysisPrompt, analysisSchema, undefined, previousInstructions) as Proposal
+  let proposal: Proposal
+  if (crossFreezeAuthor) {
+    if (signal?.aborted) throw Object.assign(new Error('行为分析已停止'), { code: 'cancelled' })
+    validatingCrossFreezeAuthor = true
+    const { draft, proof, trace } = crossFreezeAuthor
+    if (draft.sourceInputId !== proof.oldInputId || draft.sourceInputId === input.snapshot.id || draft.errors.length
+      || trace.purpose !== 'code_behavior_analyze' || trace.inputDigest !== proof.oldInputDigest || trace.inputDigest === inputDigest
+      || !trace.sessionId || !trace.threadId || !trace.turnId) reject('跨冻结分析缺少原Git草稿及真实作者trace')
+    const authorBinding = stageDraftBinding('code_behavior_analyze', draft.schemaDigest, proof.oldInputId, proof.oldPartitionId)
+    const source = readStageDraft(commonDir, draft, authorBinding)
+    let output: unknown
+    try { output = JSON.parse(source) }
+    catch (error) {
+      if (!(error instanceof SyntaxError)) throw error
+      reject(error.message, {}, 'behavior_output_json')
+    }
+    const errors = outputErrors(output, analysisSchema)
+    if (errors.length) reject(errors.join('; '), {}, 'behavior_output_schema')
+    diagnostic.proposal = output
+    traces.push(trace)
+    proposal = output as Proposal
+  } else {
+    proposal = await dispatch('code_behavior_analyze', analysisPrompt, analysisSchema, undefined, previousInstructions) as Proposal
+  }
   if (input.authorEvidencePreflight) {
     const issues = await inspectAuthorEvidence(proposal)
     if (issues.length) reject('作者草稿的冻结证据预检未通过', { issues }, 'behavior_author_evidence_invalid')
@@ -1103,7 +1163,16 @@ SPEX_P0_REVIEW_PATHS`
   })
   const analysis: CodeBehaviorAnalysis = { version: 'code-behavior-v1', ...(input.contextTransport === 'git-json-v6' ? { guidanceContractVersion: CODE_BEHAVIOR_GUIDANCE_VERSION } : {}), inputId: input.snapshot.id, baselinePairId: input.baseline?.id ?? null, ...(input.baselineSelection ? { baselineSelectionDigest: input.baselineSelection.digest } : {}), composedDigest: input.composed.contentDigest, readSetDigest: input.readSetDigest, policyDigest: input.policyDigest, inputDigest, decisionAuthorities, ...(input.decision && input.composed.requestBlob ? { decision: { requestRef: input.composed.requestBlob, analysisRef: input.decision.previous.ref, findingIds: input.decision.request.findingIds } } : {}), authorChanges, rawIntegrations, changes, findings, facts: proposal.facts, authorizedChanges, nodeChanges, newNodes, resolutions: proposal.resolutions, traces: [], reviewPassed: false }
   diagnostic.analysis = analysis
-  if (continuation) { continuation.readyAnalysis = { ...analysisRequest!, trace: traces[0], draftOid: continuation.drafts.code_behavior_analyze!.oid, resultCommit: continuation.drafts.code_behavior_analyze!.resultCommit }; persist() }
+  validatingCrossFreezeAuthor = false
+  if (crossFreezeAuthor) {
+    const proof = savedCrossFreezeAuthor ?? crossFreezeAuthor.proof
+    analysis.crossFreezeAuthor = proof
+    continuation!.crossFreezeAuthor = proof
+    persist()
+  } else if (continuation) {
+    continuation.readyAnalysis = { ...analysisRequest!, trace: traces[0], draftOid: continuation.drafts.code_behavior_analyze!.oid, resultCommit: continuation.drafts.code_behavior_analyze!.resultCommit }
+    persist()
+  }
   const analysisDigest = contentHash(JSON.stringify(analysis))
   if (continuation?.challengedAnalysisDigest && continuation.challengedAnalysisDigest !== analysisDigest) throw Object.assign(new Error('操作员复审的待审分析与原批准候选不一致'), { code: 'sync_p0_challenge_binding' })
   const reviewSchema = codeBehaviorReviewSchema(inputDigest, analysisDigest, challengeEvidencePaths ? requiredCheckedPaths : undefined)
@@ -1117,6 +1186,8 @@ SPEX_P0_REVIEW_PATHS`
     identityMismatch: [...review.inputDigest !== inputDigest ? ['inputDigest'] : [], ...review.analysisDigest !== analysisDigest ? ['analysisDigest'] : [], ...traces[0].sessionId === traces[1].sessionId ? ['sessionId'] : [], ...traces[0].threadId === traces[1].threadId ? ['threadId'] : []],
     verdict: review.verdict, findings: review.findings,
   }
+  if (crossFreezeAuthor?.independentOf?.some(trace => trace.sessionId === traces[1].sessionId || trace.threadId === traces[1].threadId || trace.turnId === traces[1].turnId))
+    reject('当前行为独审必须独立于原独审及影响复核', reviewDetails, 'behavior_analysis_invalid', true)
   if (traces[0].sessionId === traces[1].sessionId || traces[0].threadId === traces[1].threadId) reject('行为分析与审查必须使用独立会话及线程', reviewDetails, 'behavior_analysis_invalid', true)
   validatePaths(review.checkedPaths, reviewDetails)
   const referencedPaths = [...proposal.changes.flatMap(item => item.paths), ...proposal.facts.filter(fact => fact.source.startsWith('code:')).map(fact => anchorPath(fact.source.slice(5))), ...proposal.newNodes.map(item => item.codePath), ...proposal.resolutions.map(item => item.path)]
