@@ -1,2 +1,2 @@
-llm-manager @ git+ssh://git@github.com/mmletgo/llm_manager.git@c34e923d9128d1f8cddbb5ac15ac6f33d95f8e2f
+llm-manager @ git+ssh://git@github.com/mmletgo/llm_manager.git@b3071f640e2576a00c46f8761e795a0ed74e636c
 sqlalchemy>=2.0.22
