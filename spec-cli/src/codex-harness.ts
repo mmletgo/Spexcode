@@ -10,7 +10,7 @@ import { runtimeRoot, mainCheckout, harnessIdentity, sessionArtifactPath } from 
 import { detachedRuntimeGenerationToken, detachedRuntimeIsGone, migrateLegacyDetachedRuntimeReceipt, processStartToken, verifyDetachedRuntime, type VerifiedDetachedRuntime } from '@spexcode/spec-core'
 import { codexGenerationEndpoints, codexGenerationSocketPath, currentCodexGeneration, legacyCodexGenerationEndpoint, readCodexGenerationLedger, prepareCodexGenerationClose, resolveCodexGenerationForClose, resolveCodexGenerationForResume, resolveCodexGenerationForSession, rebindCodexGeneration, withCodexGenerationMutex, type CodexGenerationEndpoint } from './codex-runtime-generations.js'
 import { spawnDetachedRuntime } from './runtime-ownership.js'
-import { assertFrozenReaderRuntime, frozenReaderDisabledFeatures, structuredExecutionTimer, StructuredSessionError, StructuredSessionTransportError, structuredRealmRoot, type StructuredExecution } from './session-structured-policy.js'
+import { assertFrozenReaderRuntime, frozenReaderDisabledFeatures, managedFrozenGenerationHome, structuredExecutionTimer, StructuredSessionError, StructuredSessionTransportError, structuredRealmRoot, type StructuredExecution } from './session-structured-policy.js'
 import { FROZEN_READ_TOOL, frozenReadMaximumResponseBytes, frozenReadOutputTokenLimit, frozenReadTool, frozenVisibleOutputs, persistFrozenRead, proveFrozenReads, proveManagedFrozenReads, type FrozenNativeItem, type FrozenReadProof, type FrozenReadReceipt } from './frozen-context.js'
 import { codexRolloutMetadata, codexRolloutPath, codexTranscript, exactCodexTranscript } from '@spexcode/transcript'
 import { shQuote } from './sh.js'
@@ -2734,8 +2734,9 @@ async function stopExactManagedFrozenProcess(root: string, endpoint: CodexGenera
   if (!detachedRuntimeIsGone(pid, receipt)) throw new Error('managed frozen detached process group did not exit')
 }
 
-/** 元数据与审计前会话都只有独占 generation。任何已装载或已登记线程阻断无绑定清理。 */
-export async function stopUnboundManagedFrozenRealm(root: string, runtime: () => Promise<Pick<ManagerPersistentCodexModule, 'CodexPersistentAppServer'>>, cwd?: string): Promise<void> {
+/** 未绑定的独占 generation 只有在原驻留、登记和卷宗集合均为空时才可停止。 */
+export async function stopUnboundManagedFrozenRealm(realm: string, runtime: () => Promise<Pick<ManagerPersistentCodexModule, 'CodexPersistentAppServer' | 'assertCodexUnboundRealmHasNoRollouts'>>, scope: { cwd: string } | 'metadata'): Promise<void> {
+  const root = join(realm, 'control')
   if (!existsSync(root)) return
   await withCodexGenerationMutex(root, async () => {
     const ledger = readCodexGenerationLedger(root)
@@ -2743,19 +2744,24 @@ export async function stopUnboundManagedFrozenRealm(root: string, runtime: () =>
     if (!ledger.current) return
     const endpoint = ledger.generations[ledger.current]?.endpoint
     if (!endpoint) throw new Error('unbound managed frozen realm lost its exact endpoint')
-    const before = codexRuntimeGenerationProof(root, endpoint)
+    const before = codexRuntimeGenerationProof(root, endpoint), hosted = await runtime()
+    const home = managedFrozenGenerationHome(realm, endpoint)
+    const assertEmptyRollouts = (): void => {
+      hosted.assertCodexUnboundRealmHasNoRollouts(home)
+      managedFrozenGenerationHome(realm, endpoint)
+    }
     if (!before) {
       const pid = Number(readFileSync(endpoint.pidFile, 'utf8').trim())
-      if (detachedRuntimeIsGone(pid, endpoint.receiptFile)) return
+      if (detachedRuntimeIsGone(pid, endpoint.receiptFile)) return assertEmptyRollouts()
       throw new Error('unbound managed frozen realm process identity is unknown')
     }
-    const hosted = await runtime(), client = new hosted.CodexPersistentAppServer(endpoint.socketPath)
+    const cwd = scope === 'metadata' ? home : scope.cwd, client = new hosted.CodexPersistentAppServer(endpoint.socketPath)
     try {
       await client.initialize('spexcode-structured-reclaim', '1')
-      const references = await client.listLoadedThreadIds()
-      if (cwd) references.push(...await client.listThreads(cwd, false), ...await client.listThreads(cwd, true))
-      if (references.length) throw new Error('unbound managed frozen realm has unresolved native references')
+      const [loaded, active, archived] = await Promise.all([client.listLoadedThreadIds(), client.listThreads(cwd, false), client.listThreads(cwd, true)])
+      if (loaded.length || active.length || archived.length) throw new Error('unbound managed frozen realm has unresolved native references')
     } finally { client.close() }
+    assertEmptyRollouts()
     await stopExactManagedFrozenProcess(root, endpoint, before, ledger.revision)
   })
 }
@@ -2768,7 +2774,7 @@ export async function releaseManagedFrozenReviewRealm(rec: HarnessLivenessRecord
     throw new Error('managed frozen realm release requires its archived review and removed worktree')
   const root = join(realm, 'control')
   if (!threadId && !execution?.threadId && !execution?.turnStartRequested && !execution?.turnId)
-    return stopUnboundManagedFrozenRealm(root, loadManagerPersistentCodex, rec.worktreePath)
+    return stopUnboundManagedFrozenRealm(realm, loadManagerPersistentCodex, { cwd: rec.worktreePath })
   if (!threadId || execution?.threadId !== threadId) throw new Error('managed frozen realm lost its exact review thread')
   const ledger = readCodexGenerationLedger(root), bindings = Object.keys(ledger.bindings)
   const binding = resolveCodexGenerationForClose(root, rec.session, threadId)

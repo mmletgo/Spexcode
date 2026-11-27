@@ -276,7 +276,7 @@ test('Manager 大正文缺少逐字读取证明时保留完整冻结输入并阻
 })
 
 const managedFrozenTestRuntime = process.env.SPEX_MANAGER_FROZEN_TEST_RUNTIME
-for (const mode of ['completed', 'quota', 'metadata-rejected', 'metadata-stored-reference', 'audit-rejected', 'audit-references-unknown', 'cold-carrier-missing', 'cold-carrier-replaced']) test(`公开 sync check 的 Manager 持久 Codex 独占资源 ${mode}`, { skip: !managedFrozenTestRuntime || process.platform !== 'darwin' }, t => {
+for (const mode of ['completed', 'quota', 'metadata-rejected', 'metadata-stored-reference', 'metadata-rollout-only', 'audit-rejected', 'audit-references-unknown', 'audit-rollout-only', 'cold-carrier-missing', 'cold-carrier-replaced']) test(`公开 sync check 的 Manager 持久 Codex 独占资源 ${mode}`, { skip: !managedFrozenTestRuntime || process.platform !== 'darwin' }, t => {
   const quota = mode === 'quota'
   const auditRejected = mode.startsWith('audit-')
 
@@ -296,6 +296,12 @@ writeFileSync(join(home, 'test-runtime.pid'), String(process.pid))
 const runtimeLabel = home.includes('/metadata/') ? 'metadata' : 'review'
 const mode = ${JSON.stringify(mode)}
 const auditRejected = runtimeLabel === 'review' && mode.startsWith('audit-')
+function seedRollout(directory, rolloutCwd) {
+  const file = join(home, directory, 'rollout-2026-11-27T00-00-00-' + identity + '.jsonl')
+  mkdirSync(dirname(file), { recursive: true })
+  writeFileSync(file, JSON.stringify({ type: 'session_meta', payload: { id: identity, cwd: rolloutCwd } }) + '\n')
+}
+if (runtimeLabel === 'metadata' && mode === 'metadata-rollout-only') seedRollout('archived_sessions', home)
 const catalog = settings.match(/^model_catalog_json = (.+)$/m), limit = Number(settings.match(/^tool_output_token_limit = (.+)$/m)?.[1])
 writeFileSync(join(home, 'models_cache.json'), JSON.stringify({ client_version: '0.160.0', models: [{ slug: model, apply_patch_tool_type: 'freeform', experimental_supported_tools: [] }] }))
 const disabled = Object.fromEntries(${JSON.stringify(frozenReaderDisabledFeatures)}.map(feature => [feature, false]))
@@ -318,8 +324,11 @@ const server = createServer(socket => {
   }
   const methods = {
     initialize: () => ({}), 'model/list': () => ({ data: mode.startsWith('metadata-') ? [] : [{ id: model, model, slug: model }], nextCursor: null }),
-    'config/read': () => ({ config: { sandbox_mode: auditRejected ? 'workspace-write' : 'read-only', approval_policy: 'never', model_catalog_json: JSON.parse(catalog[1]), tool_output_token_limit: limit,
-      features: { apps: false, plugins: false, hooks: false, shell_tool: false, code_mode: false, code_mode_host: true, ...disabled }, mcp_servers: {} } }),
+    'config/read': p => {
+      if (mode === 'audit-rollout-only') seedRollout('sessions/2026/11/27', p.cwd)
+      return { config: { sandbox_mode: auditRejected ? 'workspace-write' : 'read-only', approval_policy: 'never', model_catalog_json: JSON.parse(catalog[1]), tool_output_token_limit: limit,
+        features: { apps: false, plugins: false, hooks: false, shell_tool: false, code_mode: false, code_mode_host: true, ...disabled }, mcp_servers: {} } }
+    },
     'hooks/list': () => ({ data: [{ hooks: [], errors: [] }] }), 'mcpServerStatus/list': () => ({ data: [], nextCursor: null }),
     'thread/start': p => {
       assert.equal(auditRejected, false)
@@ -422,8 +431,18 @@ setTimeout(() => process.exit(1), 30_000).unref()
     try {
       assert.equal(status, mode === 'metadata-rejected' ? 2 : 1, JSON.stringify(result.diagnostics))
       assert.equal(result.review, null)
-      if (mode === 'audit-references-unknown' || mode === 'metadata-stored-reference') {
+      if (mode.endsWith('-rollout-only') || mode === 'audit-references-unknown' || mode === 'metadata-stored-reference') {
         assert.deepEqual(result.diagnostics.map(({ code }) => code), ['native_review_recovery_required'])
+        if (mode.endsWith('-rollout-only')) {
+          assert.match(result.diagnostics[0].message, /rollout/iu)
+          const home = dirname(join(runtime, String(endpoint)))
+          const rollout = readdirSync(home, { recursive: true }).find(name => String(name).includes('rollout-') && String(name).endsWith('.jsonl'))
+          assert.ok(rollout)
+          const original = JSON.parse(readFileSync(join(home, String(rollout)), 'utf8'))
+          assert.equal(original.type, 'session_meta')
+          assert.equal(original.payload.id, '10000000-0000-4000-8000-000000000000')
+          if (auditRejected) assert.equal(existsSync(original.payload.cwd), true, 'unproven worktree remains for recovery')
+        }
         assert.deepEqual(manager.calls().map(call => call.action), auditRejected ? ['resolve', 'reserve'] : ['resolve'])
         assert.doesNotThrow(() => process.kill(pid, 0))
       } else {

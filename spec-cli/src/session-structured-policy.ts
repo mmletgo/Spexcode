@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
@@ -298,7 +298,7 @@ export async function prepareFrozenReaderRuntime(root: string, frozenContext: Fr
           }
           return { endpoint, runtime, beforeDigest: catalog.beforeDigest, changedFields: catalog.changedFields }
         } finally {
-          if (hosted) await stopUnboundManagedFrozenRealm(join(metadataRoot, 'control'), async () => hosted, join(metadataRoot, 'data/codex-home')).catch((error: Error) => {
+          if (hosted) await stopUnboundManagedFrozenRealm(metadataRoot, async () => hosted, 'metadata').catch((error: Error) => {
             throw new StructuredSessionError('cancellation_pending', `Manager metadata realm needs exact recovery: ${error.message}`)
           })
         }
@@ -317,6 +317,22 @@ export async function prepareFrozenReaderRuntime(root: string, frozenContext: Fr
 // the secure auth reference remain outside that writable subtree. No launcher or user config is inherited.
 export function structuredSeatbeltProfile(writableRoot: string): string {
   return `(version 1)\n(allow default)\n(deny file-write*)\n(allow file-write* (subpath ${JSON.stringify(writableRoot)}) (literal "/dev/null"))\n`
+}
+
+function managedFrozenHomeIdentity(realm: string, endpoint: CodexGenerationEndpoint): { home: string; receipt: string; identity: string } {
+  const home = join(realpathSync(realm), 'data/codex-home')
+  if (realpathSync(home) !== home) throw new Error('managed frozen CODEX_HOME escaped its original realm')
+  const stat = statSync(home, { bigint: true })
+  if (!stat.isDirectory()) throw new Error('managed frozen CODEX_HOME is not the original directory')
+  return { home, receipt: `${endpoint.receiptFile}.home`,
+    identity: JSON.stringify({ generation: endpoint.id, home, device: String(stat.dev), inode: String(stat.ino) }) }
+}
+
+/** 使用原 generation 启动时记录的私有 CODEX_HOME，拒绝路径或目录替换。 */
+export function managedFrozenGenerationHome(realm: string, endpoint: CodexGenerationEndpoint): string {
+  const { home, receipt, identity } = managedFrozenHomeIdentity(realm, endpoint)
+  if (readFileSync(receipt, 'utf8') !== identity) throw new Error('managed frozen CODEX_HOME differs from the generation launch receipt')
+  return home
 }
 
 export function prepareStructuredRealm(root: string, readerRuntime?: FrozenReaderRuntime, hosted?: ManagedCodexFrozenRuntime): { runtimeDir: string; start: (endpoint: CodexGenerationEndpoint) => Promise<void> } {
@@ -358,7 +374,10 @@ export function prepareStructuredRealm(root: string, readerRuntime?: FrozenReade
   const start = async (endpoint: CodexGenerationEndpoint): Promise<void> => {
     // Explicit allowlist avoids inherited wrappers, server overrides, tools, credentials in logs and
     // foreign session identity. The auth reference is consumed by Codex's normal authentication mechanism.
-    const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: homedir(), TMPDIR: join(writable, 'tmp'), CODEX_HOME: runtimeHome }
+    const managedHome = hosted ? managedFrozenHomeIdentity(root, endpoint) : undefined
+    if (managedHome) writeFileSync(managedHome.receipt, managedHome.identity, { mode: 0o600, flag: 'wx' })
+    const runtimeCwd = managedHome?.home ?? runtimeHome
+    const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: homedir(), TMPDIR: join(writable, 'tmp'), CODEX_HOME: runtimeCwd }
     mkdirSync(env.TMPDIR!, { recursive: true, mode: 0o700 })
     const endpointProfile = join(root, `${endpoint.id}.sb`)
     const { rendezvous, daemonDirectory, physicalSocket, lockPath } = hosted ? hosted.codexPersistentSocketPaths(endpoint.socketPath, process.getuid!()) : (() => {
@@ -371,7 +390,7 @@ export function prepareStructuredRealm(root: string, readerRuntime?: FrozenReade
       + `(allow file-write-create (literal ${JSON.stringify(daemonDirectory)}) (literal ${JSON.stringify(dirname(rendezvous))}))\n`
       + `(allow file-write* (literal ${JSON.stringify(rendezvous)}) (literal ${JSON.stringify(physicalSocket)}) (literal ${JSON.stringify(lockPath)}) (literal ${JSON.stringify(join(realpathSync(dirname(endpoint.logFile)), basename(endpoint.logFile)))}))\n`, { mode: 0o600 })
     const command = hosted ? [hosted.executable, ...hosted.codexPersistentAppServerArgs(endpoint.socketPath)] : ['codex', 'app-server', '--strict-config', '--listen', `unix://${endpoint.socketPath}`]
-    spawnDetachedRuntime({ cwd: runtimeHome, logFile: endpoint.logFile, pidFile: endpoint.pidFile,
+    spawnDetachedRuntime({ cwd: runtimeCwd, logFile: endpoint.logFile, pidFile: endpoint.pidFile,
       receiptFile: endpoint.receiptFile, command: '/usr/bin/sandbox-exec',
       args: ['-f', endpointProfile, ...command], env })
   }

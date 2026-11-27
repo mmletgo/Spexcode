@@ -148,6 +148,7 @@ export type ManagerPersistentCodexModule = {
   codexPersistentAppServerArgs(socketPath: string): string[]
   codexPersistentTerminalError(turn: ManagedPersistentCodexTurn): Error & { code?: string }
   codexPersistentConfig(readerRuntime?: FrozenReaderRuntime): string
+  assertCodexUnboundRealmHasNoRollouts(home: string): void
   codexPersistentHomePaths(home: string): { configPath: string; authPath: string }
   codexPersistentSocketPaths(socketPath: string, uid: number): { rendezvous: string; daemonDirectory: string; physicalSocket: string; lockPath: string }
   codexBuildFrozenCatalog(options: { home: string; cliVersion: string; model?: string }): { bytes: Buffer; beforeDigest: string; digest: string; changedFields: string[] }
@@ -168,7 +169,7 @@ export async function loadManagerPersistentCodex(): Promise<ManagerPersistentCod
   if (!llmManagerRequested()) throw new LlmManagerHostError('llm_manager_native_capability_unavailable')
   const manager = await loadManagerNativeRuntime(), adapter = await manager.loadNativeAdapter('codex') as Partial<ManagerPersistentCodexModule>
   const exports: readonly (keyof ManagerPersistentCodexModule)[] = ['CodexPersistentAppServer', 'codexPersistentAppServerArgs', 'codexPersistentTerminalError',
-    'codexPersistentConfig', 'codexPersistentHomePaths', 'codexPersistentSocketPaths', 'codexBuildFrozenCatalog', 'codexAuditFrozenCatalog',
+    'codexPersistentConfig', 'codexPersistentHomePaths', 'assertCodexUnboundRealmHasNoRollouts', 'codexPersistentSocketPaths', 'codexBuildFrozenCatalog', 'codexAuditFrozenCatalog',
     'codexFrozenPrompt', 'codexFrozenToolOutputTokenLimit', 'codexFrozenToolDefinition', 'codexDecodeFrozenItems', 'codexValidateFrozenVisibility', 'codexReadFrozenRollout', 'verifyCodexFrozenArchive']
   if (exports.some(name => typeof adapter[name] !== 'function')) throw new LlmManagerHostError('llm_manager_native_capability_unavailable')
   return adapter as ManagerPersistentCodexModule

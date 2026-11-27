@@ -239,7 +239,7 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
     if (error instanceof StructuredSessionError) nativeTokenUsage ??= error.nativeTokenUsage
     if (manager?.frozenReader && !pendingStop?.threadId && !pendingStop?.turnId && !pendingStop?.turnStartRequested) {
       try {
-        await stopUnboundManagedFrozenRealm(join(requiredRealmRoot(execution), 'control'), loadManagerPersistentCodex, rec.worktreePath)
+        await stopUnboundManagedFrozenRealm(requiredRealmRoot(execution), loadManagerPersistentCodex, { cwd: rec.worktreePath })
         failedStage = { stop: { nativeStopped: true, acknowledged: false, nativeStatus: 'notStarted' } }
       } catch (cause) {
         const note = cause instanceof Error ? cause.message : String(cause)
@@ -496,7 +496,7 @@ export async function cancelStructuredSession(id: string, options: { reason?: 'c
     else if (state.version === 6 && state.policy === 'native-worktree-v1' && state.model?.startsWith('codex:')) stop = await stopCodexNativeWorktreeTurn(state, options.timeoutMs ?? 15_000)
     else if (manager?.frozenReader && !state.threadId && !state.turnId && !state.turnStartRequested) {
       try {
-        await stopUnboundManagedFrozenRealm(join(requiredRealmRoot(state), 'control'), loadManagerPersistentCodex, current.worktreePath)
+        await stopUnboundManagedFrozenRealm(requiredRealmRoot(state), loadManagerPersistentCodex, { cwd: current.worktreePath })
         stop = { nativeStopped: true, acknowledged: false, nativeStatus: 'notStarted' }
       } catch (error) { stop = { nativeStopped: false, acknowledged: false, error: error instanceof Error ? error.message : String(error) } }
     }
