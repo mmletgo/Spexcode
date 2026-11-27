@@ -15,7 +15,7 @@ const schema = { type: 'object', properties: { marker: { type: 'string' } }, req
 const finalText = '{"marker":"终态"}'
 const sha256 = (text: string): string => createHash('sha256').update(text).digest('hex')
 
-type Scenario = 'startup-error' | 'success' | 'wrong-session' | 'wrong-cwd' | 'missing-request' | 'duplicate-terminal' | 'missing-terminal' | 'wrong-format' | 'bad-schema' | 'hang' | 'read' | 'periodic' | 'split-settlement-window' | 'cancel-during-settlement' | 'inherited-stdout' | 'inherited-stdout-trailing' | 'parent-awaits-owned-child' | 'parent-restarts-owned-child' | 'natural-child-shutdown' | 'short-lived-terminal-parent' | 'unowned-stdout' | 'terminal-exit-timeout' | 'terminal-timeout-unowned-stdout'
+type Scenario = 'startup-error' | 'success' | 'wrong-session' | 'wrong-cwd' | 'missing-request' | 'duplicate-terminal' | 'missing-terminal' | 'wrong-format' | 'bad-schema' | 'hang' | 'read' | 'periodic' | 'split-settlement-window' | 'cancel-during-settlement' | 'inherited-stdout' | 'inherited-stdout-trailing' | 'parent-awaits-owned-child' | 'parent-restarts-owned-child' | 'mcp-transport-reconnect' | 'natural-child-shutdown' | 'short-lived-terminal-parent' | 'unowned-stdout' | 'terminal-exit-timeout' | 'terminal-timeout-unowned-stdout'
 
 function fixture(t: TestContext, scenario: Scenario, model = 'grok:default', purpose = 'grok-fixture', stderrChunks: readonly string[] = []) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'spex-grok-fixture-')))
@@ -119,13 +119,19 @@ if (scenario === 'split-settlement-window' || scenario === 'cancel-during-settle
     clearInterval(poll)
     finish()
   }, 20)
-} else if (scenario === 'parent-awaits-owned-child' || scenario === 'parent-restarts-owned-child') {
+} else if (scenario === 'parent-awaits-owned-child' || scenario === 'parent-restarts-owned-child' || scenario === 'mcp-transport-reconnect') {
   const ready = join(dirname(promptFile), 'descendant-ready')
   const childCode = "const {writeFileSync}=require('node:fs');const keep=setTimeout(()=>{},21000);process.on('SIGTERM',()=>clearTimeout(keep));writeFileSync(process.argv[1],String(process.pid))"
   const descendant = spawn(process.execPath, ['-e', childCode, ready], { stdio: ['ignore', 'inherit', 'ignore'] })
   if (scenario === 'parent-restarts-owned-child') descendant.once('exit', () => {
     spawn(process.execPath, ['-e', childCode, join(dirname(promptFile), 'late-descendant-ready')], { detached: true, stdio: ['ignore', 'inherit', 'ignore'] })
   })
+  if (scenario === 'mcp-transport-reconnect' && process.env.GROK_MCP_AUTO_RESTART !== '0') {
+    const reconnect = () => {
+      spawn(process.execPath, ['-e', childCode, join(dirname(promptFile), 'mcp-reconnected')], { stdio: ['ignore', 'inherit', 'ignore'] }).once('exit', reconnect)
+    }
+    descendant.once('exit', reconnect)
+  }
   const poll = setInterval(() => {
     if (!existsSync(ready)) return
     clearInterval(poll)
@@ -358,6 +364,23 @@ test('Grok settles when the original CLI starts another owned child during termi
   const owned = JSON.parse(readFileSync(join(f.sessionRoot, 'owned-processes.json'), 'utf8')) as { pid: number }[]
   assert.ok(owned.some(identity => identity.pid === latePid))
   assert.throws(() => process.kill(latePid, 0), { code: 'ESRCH' })
+})
+
+test('Grok settles the owned MCP transport without reconnecting during terminal shutdown', { timeout: 35_000 }, async t => {
+  const previous = process.env.GROK_MCP_AUTO_RESTART
+  process.env.GROK_MCP_AUTO_RESTART = '1'
+  t.after(() => {
+    if (previous === undefined) delete process.env.GROK_MCP_AUTO_RESTART
+    else process.env.GROK_MCP_AUTO_RESTART = previous
+  })
+  const f = fixture(t, 'mcp-transport-reconnect')
+  const result = await f.run()
+  assert.equal(result.turnId, f.requestId)
+  assert.equal(result.text, finalText)
+  assert.equal(existsSync(join(f.sessionRoot, 'mcp-reconnected')), false)
+  assert.equal(process.env.GROK_MCP_AUTO_RESTART, '1')
+  const settlement = JSON.parse(readFileSync(join(f.sessionRoot, 'settlement.json'), 'utf8'))
+  assert.deepEqual(settlement.exit, { code: 0, signal: null })
 })
 
 for (const externallyCancelled of [false, true]) {
