@@ -11,7 +11,7 @@ import { isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createInterface } from 'node:readline'
 import { detachedRuntimeIsGone, processStartToken, verifyDetachedRuntime, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
-import { checkClaudeHistoryChain, claudeRecoveryCompanion, claudeApiRequestHashes, claudeApiSourceDigest, claudeApiToolResultIds, claudeMessageBlocks, claudeMessageDigest, claudeOutputLimitCompanions, matchingClaudeRecoveries, recordClaudeRecoveryRequest, consumeClaudeRecoveryRequest, proveClaudeFrozenReads, readClaudeApiMessageBlobs, readClaudeApiSourceMetadata, readClaudeMcpToolNames, readClaudePublicHistory, verifyFrozenReadProof, type ClaudeRecovery, type ClaudeHistoryDecoder, type ClaudeFrozenWitness, type ClaudePublicMessage, type ClaudePublicRecord, type FrozenReadProof } from './frozen-context.js'
+import { checkClaudeHistoryChain, claudeRecoveryCompanion, claudeApiRequestHashes, claudeApiToolResultIds, claudeMessageBlocks, claudeMessageDigest, claudeOutputLimitCompanions, matchingClaudeRecoveries, recordClaudeRecoveryRequest, consumeClaudeRecoveryRequest, proveClaudeFrozenReads, readClaudeApiMessageBlobs, readClaudeApiSourceMetadata, readClaudeMcpToolNames, readClaudePublicHistory, verifyFrozenReadProof, type ClaudeRecovery, type ClaudeHistoryDecoder, type ClaudeFrozenWitness, type ClaudePublicMessage, type ClaudePublicRecord, type FrozenReadProof } from './frozen-context.js'
 import { rejectedFinalOutput, structuredExecutionTimer, StructuredSessionError, StructuredSessionTransportError, structuredExecutionPolicy, structuredSeatbeltProfile, type NativeTokenUsage, type StructuredExecution } from './session-structured-policy.js'
 import { sessionIdentityEnvVars } from './harness-shim.js'
 
@@ -428,7 +428,7 @@ function settleClaudeResult(plan: NativePlan, prompt: string, execution: Structu
       || new Set(history.filter(row => row.uuid).map(row => row.uuid)).size !== history.filter(row => row.uuid).length
       || unknownUser || history.some(row => row.sessionId !== plan.sessionId || row.type === 'assistant' && Array.isArray(row.message?.content) && row.message.content.some(block => !block.name || !toolNames.includes(block.name))))
       throw new StructuredSessionError('stale_result', 'Claude schema retry exhaustion lost its exact terminal, API, original user or isolated capability identity')
-    const blobs = readClaudeApiMessageBlobs(history), metadata = readClaudeApiSourceMetadata(historyPath, plan.sessionId, model), api = new Map<string, string[]>(), observedShapes = new Set<string>(), assistants = new Set<string>()
+    const blobs = readClaudeApiMessageBlobs(history), metadata = readClaudeApiSourceMetadata(historyPath, plan.sessionId, model, adapter), api = new Map<string, string[]>(), observedShapes = new Set<string>(), assistants = new Set<string>()
     const users = new Map<string, ClaudePublicMessage>(), calls = new Map<string, ClaudePublicRecord>(), responses = new Map<string, Exclude<ClaudePublicMessage['content'], string>[number]>()
     const originalHash = claudeMessageDigest(original.message)
     for (const row of history) {
@@ -461,7 +461,7 @@ function settleClaudeResult(plan: NativePlan, prompt: string, execution: Structu
         users.set(row.uuid!, row.message!)
       }
       if (row.type === 'api-request') {
-        const hashes = claudeApiRequestHashes(row, api, observedShapes, model)
+        const hashes = claudeApiRequestHashes(row, api, observedShapes, model, adapter)
         const requestSources = metadata.get(row.id!)
         for (const digest of hashes) {
           const source = requestSources?.messages.get(digest)
@@ -480,7 +480,7 @@ function settleClaudeResult(plan: NativePlan, prompt: string, execution: Structu
           if (source.kind === 'transcript-prefix' && userSources.some((message, index) => !message || !Array.isArray(message.content) && source.sourceUuids[index] !== plan.userUuid && !companions.has(source.sourceUuids[index]))) throw new StructuredSessionError('stale_result', 'Claude user source UUID has no preceding authenticated public content')
           const content = source.kind === 'transcript-prefix' ? userSources.flatMap(message => claudeMessageBlocks(message!)) : blob?.content
           if (!users.has(plan.userUuid) || !Array.isArray(content) || !content.length
-            || claudeApiSourceDigest({ role: 'user', content }) !== digest || source.kind === 'cas' && blob && (!blob.canonical || blob.summaries.size)) throw new StructuredSessionError('stale_result', 'Claude actual API user message has no observed original prompt or exact tool reply source')
+            || adapter.claudeApiSourceDigest({ role: 'user', content }) !== digest || source.kind === 'cas' && blob && (!blob.canonical || blob.summaries.size)) throw new StructuredSessionError('stale_result', 'Claude actual API user message has no observed original prompt or exact tool reply source')
           const matching = matchingClaudeRecoveries(recoveries, content, prompt)
           if (content.some(block => block.type === 'text') && digest !== originalHash && digest !== claudeMessageDigest({ role: 'user', content: claudeMessageBlocks(original.message!) }) && !matching.length) throw new StructuredSessionError('stale_result', 'Claude actual API user message contains unobserved recovery text')
           for (const recovery of matching) recovery.hashes.add(digest)

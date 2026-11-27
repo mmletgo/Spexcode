@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url'
 import { isDeepStrictEqual } from 'node:util'
 import { detachedRuntimeIsGone, processStartToken, verifyDetachedRuntime, writeDetachedRuntimeReceipt, type ProcessIdentity } from '@spexcode/spec-core'
 import { rejectedFinalOutput, structuredExecutionTimer, StructuredSessionError, structuredExecutionPolicy, structuredRealmRoot, structuredSeatbeltProfile, type NativeTokenUsage, type StructuredExecution } from './session-structured-policy.js'
-import type { ZCodeFrozenReadProof, ZCodeFrozenWitness } from './zcode-frozen-evidence.js'
+import type { ZCodeFrozenNativeAdapter, ZCodeFrozenReadProof, ZCodeFrozenWitness } from './zcode-frozen-evidence.js'
 
 type ZCodeCapability = Readonly<{
   cliVersion: string; cliSha256: string; builtinSha256: string; builtinPath: string; tool: string
@@ -42,7 +42,7 @@ type Completed = { plan: NativePlan; witness: ZCodeFrozenWitness; result: Native
 type NativeServerSession = { sessionId: string; model?: NativeModel }
 type NativeSend = { sessionId: string; inputId: string; content: string; modelSelection: NativeModel; toolDenylist?: readonly string[] }
 type ManagerZCodeError = Error & { threadId?: string; turnId?: string; code: ConstructorParameters<typeof StructuredSessionError>[0]; detail: { threadId?: string; turnId?: string } }
-type ManagerZCodeAdapter = {
+type ManagerZCodeAdapter = Pick<ZCodeFrozenNativeAdapter, 'observeZCodeFrozenReadTurn' | 'decodeZCodeJsonText'> & {
   ZCodeProtocolError: abstract new (...args: never[]) => ManagerZCodeError
   ZCodeNativeTurnFailedError: new (sessionId: string, turnId: string, code: unknown, worktree: boolean, attribution?: unknown) => ManagerZCodeError
   zcodeCapability: ZCodeCapability
@@ -434,7 +434,7 @@ async function settleResult(plan: NativePlan, prompt: string, execution: ZCodeSt
     mcpHistory: { records, digest: digest(records) } } as ZCodeFrozenWitness
   if (!events.some(event => digest(event) === digest(terminal))) throw new StructuredSessionError('stale_result', 'ZCode terminal differs from its original native events')
   const { proveZCodeFrozenReads } = await import('./zcode-frozen-evidence.js')
-  const frozenReadProof = proveZCodeFrozenReads(execution.frozenContext!, witness)
+  const frozenReadProof = proveZCodeFrozenReads(execution.frozenContext!, witness, adapter)
   const output = zcodeAdapterValue(provider, () => provider.decodeZCodeStructuredText(response))
   const validate = new Ajv({ allErrors: true }).compile(execution.schema)
   if (!validate(output)) throw new StructuredSessionError('failed', 'ZCode terminal JSON does not match the pinned JSON schema')

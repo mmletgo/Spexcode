@@ -63,6 +63,7 @@ function managerCall(message: Record<string, unknown>): Promise<unknown> {
 type NativeVendor = 'claude' | 'codex' | 'cursor' | 'grok' | 'zcode'
 type ManagerNativeRuntime = {
   nativeRuntimeVersion: 1
+  nativeAdapterContract: 2
   findNativeExecutable(vendor: NativeVendor): string | undefined
   spawnGatedNativeProcess(command: string, args: readonly string[], options: {
     cwd: string
@@ -101,6 +102,7 @@ export function loadManagerNativeRuntime(): Promise<ManagerNativeRuntime> {
         || typeof loaded.spawnGatedNativeProcess !== 'function' || typeof loaded.spawnNativeProcess !== 'function'
         || typeof loaded.loadNativeAdapter !== 'function')
       throw new LlmManagerHostError('llm_manager_native_invalid_response')
+    if (loaded.nativeAdapterContract !== 2) throw new LlmManagerHostError('llm_manager_native_incompatible')
     return loaded as ManagerNativeRuntime
   }).catch(error => {
     nativeRuntimes.delete(key)
@@ -189,6 +191,7 @@ export function applyLlmManagerSettings(body: Record<string, unknown>): Promise<
 }
 
 export async function resolveManagedRoute(nextAfter?: ManagedRoute, sameGroupAs?: ManagedRoute, failedSessionId?: string, capability?: typeof managedFrozenCapability): Promise<ManagedRoute | null> {
+  await loadManagerNativeRuntime()
   const route = await managerCall({
     action: 'resolve',
     ...(nextAfter ? { nextAfter } : {}),
@@ -205,6 +208,8 @@ export async function resolveManagedRoute(nextAfter?: ManagedRoute, sameGroupAs?
 }
 
 export async function reserveManagedRoute(route: ManagedRoute, sessionId: string, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted()
+  await loadManagerNativeRuntime()
   for (;;) {
     signal.throwIfAborted()
     try {

@@ -38,6 +38,7 @@ type CursorAdapter = {
   cursorAcpInitialize(): RpcObject
   cursorAcpCancel(sessionId: string): RpcObject
   encodeCursorAcpPacket(packet: RpcObject): string
+  cursorTerminalCompleted(output: NativeOutput | undefined): output is NativeOutput
   cursorUsageLimitNotice(value: unknown): boolean
   observeCursorAcp(stdout: Readable, plan: Pick<NativePlan, 'workspace' | 'mode'> & { planDigest: string }, prompt: string, send: (packet: RpcObject) => void, hooks: {
     onSession(id: string): Promise<void>
@@ -49,7 +50,7 @@ type CursorAdapter = {
   }): Promise<{ output: NativeOutput; textOnlyWithoutTools: boolean }>
 }
 
-const cursorReplay = bundledCursor as Pick<CursorAdapter, 'CursorAcpError' | 'cursorLaunchArgs' | 'cursorModelArgument' | 'cursorUsageLimitNotice'>
+const cursorReplay = bundledCursor as Pick<CursorAdapter, 'CursorAcpError' | 'cursorLaunchArgs' | 'cursorModelArgument' | 'cursorTerminalCompleted' | 'cursorUsageLimitNotice'>
 
 function cursorHostError(provider: CursorAdapter, error: unknown): unknown {
   return error instanceof provider.CursorAcpError ? new StructuredSessionError(error.code, error.message, error.detail) : error
@@ -156,7 +157,7 @@ function readSettledOutput(root: string, prompt: string, execution: CursorStruct
   if (settlement?.launchDigest !== digest(launch) || settlement.outputDigest !== digest(output) || !nonempty(settlement.stopDigest)
     || !closeMatches(settlement.exit, settlement.closeDigest !== undefined) || existsSync(join(root, 'cancel.json'))
     || existsSync(join(root, 'close.json')) !== (settlement.closeDigest !== undefined)
-    || output?.requestDigest !== digest(request) || output.stopReason !== 'end_turn' || typeof output.text !== 'string'
+    || output?.requestDigest !== digest(request) || !cursorReplay.cursorTerminalCompleted(output) || typeof output.text !== 'string'
     || output.reportedModel !== undefined && !nonempty(output.reportedModel))
     throw stale('Cursor settled native terminal or stopped process evidence differs')
   if (settlement.closeDigest !== undefined) {
@@ -446,7 +447,7 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
     const output = observation?.output
     if (interrupted && cancelSent && boundRequest && output?.stopReason === 'cancelled')
       writeEvidence(root, 'cancel-ack.json', { launchDigest: digest(binding), requestDigest: digest(boundRequest), stopReason: output.stopReason })
-    const success = !failure && output?.stopReason === 'end_turn' && closeMatches(exit, normalClose !== undefined) && !interrupted
+    const success = !failure && provider.cursorTerminalCompleted(output) && closeMatches(exit, normalClose !== undefined) && !interrupted
     stopped = await waitForStop(owned, success ? Date.now() + STOP_MS : deadline!, !success || normalClose !== undefined)
     if (!stopped) throw pending('Cursor native close and process-group stop remain unproven')
     if (interrupted || callbacks.signal?.aborted || existsSync(cancelPath)) {

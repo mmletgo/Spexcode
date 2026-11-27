@@ -35,6 +35,8 @@ __export(claude_exports, {
   CLAUDE_VERSION_ARGS: () => CLAUDE_VERSION_ARGS,
   ClaudeNativeProtocolError: () => ClaudeNativeProtocolError,
   assertClaudeLegacyConfiguration: () => assertClaudeLegacyConfiguration,
+  claudeApiRequestHashes: () => claudeApiRequestHashes,
+  claudeApiSourceDigest: () => claudeApiSourceDigest,
   claudeAuthenticationArgs: () => claudeAuthenticationArgs,
   claudeNativeModel: () => claudeNativeModel,
   claudeProcessEnvironment: () => claudeProcessEnvironment,
@@ -50,6 +52,7 @@ __export(claude_exports, {
   interpretClaudeStreamEvent: () => interpretClaudeStreamEvent,
   isClaudeRateLimitTerminal: () => isClaudeRateLimitTerminal,
   prepareClaudeAuthenticationEnvironment: () => prepareClaudeAuthenticationEnvironment,
+  projectClaudeApiSourceMetadata: () => projectClaudeApiSourceMetadata,
   projectClaudePublicHistory: () => projectClaudePublicHistory,
   readClaudeStreamEvent: () => readClaudeStreamEvent
 });
@@ -258,6 +261,25 @@ function sortHistoryKeys(value) {
 function historyMessageBlocks(message) {
   return typeof message.content === "string" ? [{ type: "text", text: message.content }] : message.content;
 }
+function withoutHistoryCacheControl(value) {
+  if (Array.isArray(value)) return value.map(withoutHistoryCacheControl);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).filter(([key, item]) => key !== "cache_control" && item !== void 0).map(([key, item]) => [key, withoutHistoryCacheControl(item)]));
+}
+function claudeApiSourceDigest(message) {
+  return jsonDigest(sortHistoryKeys(withoutHistoryCacheControl({ ...message, content: historyMessageBlocks(message) })));
+}
+function claudeApiRequestHashes(row, requests, shapes, model) {
+  const base = row.base ? requests.get(row.base) : [];
+  const keep = (
+    /** @type {number} */
+    row.keep
+  );
+  if (!row.id || requests.has(row.id) || !row.shapeHash || !shapes.has(row.shapeHash) || !base || !Number.isSafeInteger(keep) || keep < 0 || keep > base.length || !Array.isArray(row.tail) || row.model !== model) {
+    throw new ClaudeNativeProtocolError("stale_result", "Claude API model, tools shape or request history boundary differs");
+  }
+  return [...base.slice(0, keep), ...row.tail];
+}
 function projectClaudeRequestRetry(row) {
   const error = (
     /** @type {Record<string, unknown> | undefined} */
@@ -293,7 +315,7 @@ function projectClaudePublicHistory(source, sessionId) {
     const row = JSON.parse(line);
     const compact = row.type === "system" && row.subtype === "compact_boundary";
     const retry = row.type === "system" && row.subtype === "api_error";
-    if (!compact && !retry && !["user", "assistant", "attachment", "api-request", "api-request-shape", "api-request-blob"].includes(String(row.type))) continue;
+    if (!compact && !retry && !historyRowTypes.includes(String(row.type))) continue;
     if (row.type === "api-request-blob" && row.message?.role !== "user") continue;
     if (row.sessionId !== sessionId || row.isSidechain === true) {
       throw new ClaudeNativeProtocolError("stale_result", "Claude history contains a foreign session or sidechain");
@@ -301,17 +323,17 @@ function projectClaudePublicHistory(source, sessionId) {
     if (row.type === "user" && row.isMeta === true && row.turnCompanion === true && row.message?.role === "user" && row.message.content === outputLimitRecoveryText && (!row.parentUuid || row.parentUuid !== latestAssistant?.uuid || latestAssistant.stopReason !== "max_tokens")) {
       throw new ClaudeNativeProtocolError("stale_result", "Claude output-limit companion has no exact preceding max_tokens assistant");
     }
-    const record = (
+    const record2 = (
       /** @type {ClaudePublicRecord} */
       Object.fromEntries(historyRecordKeys.filter((key) => key in row).map((key) => [key, row[key]]))
     );
-    if (retry) Object.assign(record, { subtype: "api_error", requestRetry: projectClaudeRequestRetry(row) });
+    if (retry) Object.assign(record2, { subtype: "api_error", requestRetry: projectClaudeRequestRetry(row) });
     if (compact) {
       const metadata = (
         /** @type {HistoryCompaction | undefined} */
         row.compactMetadata
       );
-      Object.assign(record, {
+      Object.assign(record2, {
         subtype: row.subtype,
         logicalParentUuid: row.logicalParentUuid,
         compactMetadata: metadata && {
@@ -324,7 +346,7 @@ function projectClaudePublicHistory(source, sessionId) {
     if (row.type === "user") {
       if (row.isCompactSummary === true) {
         const content = row.message?.content;
-        record.compactSummary = {
+        record2.compactSummary = {
           transcriptOnly: row.isVisibleInTranscriptOnly === true,
           promptUuids: (
             /** @type {string[] | undefined} */
@@ -333,7 +355,7 @@ function projectClaudePublicHistory(source, sessionId) {
           messageDigest: jsonDigest(sortHistoryKeys(row.message)),
           textOnly: row.message?.role === "user" && (typeof content === "string" ? content.length > 0 : Array.isArray(content) && content.length > 0 && content.every((block) => block?.type === "text" && typeof block.text === "string"))
         };
-      } else record.message = row.message;
+      } else record2.message = row.message;
     }
     if (row.type === "api-request-blob") {
       const message = (
@@ -341,16 +363,16 @@ function projectClaudePublicHistory(source, sessionId) {
         row.message
       );
       const compactSummary = typeof message.content === "string";
-      record.message = compactSummary ? { ...message, content: historyMessageBlocks(message) } : message;
-      if (compactSummary) record.compactSummaryDigest = jsonDigest(sortHistoryKeys(message));
-      record.hash = String(row.hash);
+      record2.message = compactSummary ? { ...message, content: historyMessageBlocks(message) } : message;
+      if (compactSummary) record2.compactSummaryDigest = jsonDigest(sortHistoryKeys(message));
+      record2.hash = String(row.hash);
     }
     if (row.type === "assistant") {
       const message = (
         /** @type {HistoryMessage} */
         row.message
       );
-      record.message = { role: "assistant", content: historyMessageBlocks(message).filter((block) => block.type === "tool_use") };
+      record2.message = { role: "assistant", content: historyMessageBlocks(message).filter((block) => block.type === "tool_use") };
       latestAssistant = { uuid: row.uuid, stopReason: row.message?.stop_reason };
     }
     if (row.type === "api-request") {
@@ -358,10 +380,10 @@ function projectClaudePublicHistory(source, sessionId) {
         /** @type {{model: string}} */
         row.params
       );
-      Object.assign(record, { id: row.id, shapeHash: row.shapeHash, base: row.base, keep: row.keep, tail: row.tail, model: params.model });
+      Object.assign(record2, { id: row.id, shapeHash: row.shapeHash, base: row.base, keep: row.keep, tail: row.tail, model: params.model });
       paramsDigests.set(
         /** @type {string} */
-        record.id,
+        record2.id,
         jsonDigest(sortHistoryKeys(params))
       );
     }
@@ -370,13 +392,89 @@ function projectClaudePublicHistory(source, sessionId) {
         /** @type {NonNullable<typeof row.shape>} */
         row.shape
       );
-      record.shapeHash = String(row.shapeHash);
-      record.toolNames = shape.tools.map((tool) => tool.name);
-      record.placeholderValid = shape.tools.filter((tool) => tool.name === "DeferredToolPlaceholder").every((tool) => tool.description === "Reserved placeholder that keeps deferred tool loading active; never call this tool." && tool.defer_loading === true && jsonDigest(sortHistoryKeys(tool.input_schema)) === jsonDigest(sortHistoryKeys({ type: "object", properties: {} })));
+      record2.shapeHash = String(row.shapeHash);
+      record2.toolNames = shape.tools.map((tool) => tool.name);
+      record2.placeholderValid = shape.tools.filter((tool) => tool.name === "DeferredToolPlaceholder").every((tool) => tool.description === "Reserved placeholder that keeps deferred tool loading active; never call this tool." && tool.defer_loading === true && jsonDigest(sortHistoryKeys(tool.input_schema)) === jsonDigest(sortHistoryKeys({ type: "object", properties: {} })));
     }
-    records.push(record);
+    records.push(record2);
   }
   return { records, paramsDigests };
+}
+function projectClaudeApiSourceMetadata(source, sessionId, model, companionIds) {
+  if (!source.endsWith("\n")) {
+    throw new ClaudeNativeProtocolError("history_pending", "Claude native source history has not flushed its final record");
+  }
+  const sources = /* @__PURE__ */ new Map();
+  const snapshots = /* @__PURE__ */ new Map();
+  const requests = /* @__PURE__ */ new Map();
+  const shapes = /* @__PURE__ */ new Set();
+  let run;
+  for (const [ordinal, line] of source.split("\n").filter(Boolean).entries()) {
+    const row = JSON.parse(line);
+    if (row.type === "fork-context-ref" || row.turnCompanion && !companionIds.has(String(row.uuid))) {
+      throw new ClaudeNativeProtocolError("stale_result", "Claude failed source index cannot interpret fork or recovery inputs");
+    }
+    const compact = row.type === "system" && row.subtype === "compact_boundary";
+    const retry = row.type === "system" && row.subtype === "api_error";
+    if (!compact && !retry && !historyRowTypes.includes(String(row.type))) continue;
+    if (row.sessionId !== sessionId || row.isSidechain === true || row.agentId !== void 0) {
+      throw new ClaudeNativeProtocolError("stale_result", "Claude failed source index contains a foreign session or sidechain");
+    }
+    if (compact) {
+      run = void 0;
+      continue;
+    }
+    if (row.type === "api-request-shape") {
+      if (typeof row.shapeHash !== "string") {
+        throw new ClaudeNativeProtocolError("stale_result", "Claude failed source index has no shape identity");
+      }
+      shapes.add(row.shapeHash);
+    }
+    if (row.type === "api-request-blob") {
+      const message = row.message;
+      if (!message || message.role !== "user" && message.role !== "assistant" && message.role !== "system" || typeof message.content !== "string" && !Array.isArray(message.content)) {
+        throw new ClaudeNativeProtocolError("stale_result", "Claude failed source CAS has an unknown message role or shape");
+      }
+      const digest = claudeApiSourceDigest(message);
+      if (row.hash !== digest) {
+        throw new ClaudeNativeProtocolError("stale_result", "Claude failed source CAS differs from its canonical digest");
+      }
+      if (sources.get(digest)?.kind !== "transcript-prefix") {
+        sources.set(digest, { digest, role: message.role, kind: "cas", sourceUuids: [], ordinal });
+      }
+    }
+    if (row.type === "user" || row.type === "assistant") {
+      const message = row.message;
+      if (!message || message.role !== row.type || typeof row.uuid !== "string" || typeof message.content !== "string" && !Array.isArray(message.content)) {
+        throw new ClaudeNativeProtocolError("stale_result", "Claude failed source transcript has a mismatched role or message identity");
+      }
+      if (!run || run.role !== message.role || message.role !== "user" && !(typeof message.id === "string" && run.messageId === message.id)) {
+        run = { role: row.type, ...typeof message.id === "string" ? { messageId: message.id } : {}, blocks: [], uuids: [] };
+      }
+      run.blocks.push(...historyMessageBlocks(message));
+      run.uuids.push(row.uuid);
+      const digest = claudeApiSourceDigest({ role: run.role, content: run.blocks });
+      sources.set(digest, { digest, role: run.role, kind: "transcript-prefix", sourceUuids: [...run.uuids], ordinal });
+    }
+    if (row.type === "api-request") {
+      if (typeof row.id !== "string") {
+        throw new ClaudeNativeProtocolError("stale_result", "Claude failed source request has no exact identity");
+      }
+      const request = (
+        /** @type {Pick<ClaudePublicRecord, 'id' | 'shapeHash' | 'base' | 'keep' | 'tail' | 'model'>} */
+        { ...row, model: row.params?.model }
+      );
+      const hashes = claudeApiRequestHashes(request, requests, shapes, model);
+      const messages = /* @__PURE__ */ new Map();
+      for (const digest of hashes) {
+        const observed = sources.get(digest);
+        if (observed) messages.set(digest, observed);
+      }
+      snapshots.set(row.id, { ordinal, messages });
+      requests.set(row.id, hashes);
+    }
+  }
+  return snapshots;
 }
 function claudeStructuredOutputError(callName, reply) {
   if (callName !== "StructuredOutput" || reply.is_error !== true || typeof reply.content !== "string" || !reply.content.startsWith(structuredOutputErrorPrefix)) return void 0;
@@ -480,7 +578,7 @@ function interpretClaudeStreamEvent(event, options) {
 function isClaudeRateLimitTerminal(result, exit) {
   return result.type === "result" && result.subtype === "success" && result.is_error === true && result.apiErrorStatus === 429 && exit.code === 1 && exit.signal === null;
 }
-var CLAUDE_LEGACY_CLI_VERSION, CLAUDE_VERSION_ARGS, authenticationKeys, isolatedSettings, streamArgs, ClaudeNativeProtocolError, outputLimitRecoveryText, historyRecordKeys, structuredOutputErrorPrefix;
+var CLAUDE_LEGACY_CLI_VERSION, CLAUDE_VERSION_ARGS, authenticationKeys, isolatedSettings, streamArgs, ClaudeNativeProtocolError, outputLimitRecoveryText, historyRecordKeys, historyRowTypes, structuredOutputErrorPrefix;
 var init_claude = __esm({
   "src/llm_manager/native/claude.mjs"() {
     init_cli_probe();
@@ -505,6 +603,7 @@ var init_claude = __esm({
     };
     outputLimitRecoveryText = "Output token limit hit. Resume directly \u2014 no apology, no recap of what you were doing. Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.";
     historyRecordKeys = ["type", "sessionId", "uuid", "parentUuid", "promptId", "requestRef", "sourceToolAssistantUUID", "isMeta", "turnCompanion"];
+    historyRowTypes = ["user", "assistant", "attachment", "api-request", "api-request-shape", "api-request-blob"];
     structuredOutputErrorPrefix = "Output does not match required schema: ";
   }
 });
@@ -662,11 +761,11 @@ function codexFrozenPrompt({ prompt, taskIsFrozen, contextDigest, maxReadBytes, 
   return { prompt: `${instructions}
 ${index}`, toolOutputTokenLimit };
 }
-function codexFrozenToolResponse(text) {
+function codexFrozenToolResponse(text2) {
   return { contentItems: [{ type: (
     /** @type {const} */
     "inputText"
-  ), text }], success: (
+  ), text: text2 }], success: (
     /** @type {const} */
     true
   ) };
@@ -747,13 +846,13 @@ function decodeRollout(bytes, { threadId, turnId, cwd }, requireCompleted) {
   let completed = false;
   for (const line of lines.slice(1)) {
     if (!line.trim()) continue;
-    const record = decodeRolloutLine(line);
-    const payload = object(record.payload);
-    if (record.type === "turn_context" || record.type === "event_msg" && payload.type === "task_started") {
+    const record2 = decodeRolloutLine(line);
+    const payload = object(record2.payload);
+    if (record2.type === "turn_context" || record2.type === "event_msg" && payload.type === "task_started") {
       current = payload.turn_id;
       if (typeof current === "string") turns.add(current);
     }
-    if (record.type === "event_msg" && payload.type === "task_complete" && payload.turn_id === turnId) {
+    if (record2.type === "event_msg" && payload.type === "task_complete" && payload.turn_id === turnId) {
       if (current !== turnId || completed)
         throw new CodexNativeProtocolError("stale_result", "Codex frozen rollout completion does not belong to one exact turn");
       if (typeof payload.last_agent_message === "string") finals.add(payload.last_agent_message);
@@ -761,9 +860,9 @@ function decodeRollout(bytes, { threadId, turnId, cwd }, requireCompleted) {
       current = void 0;
     }
     if (current !== turnId) continue;
-    if (record.type === "event_msg" && payload.type === "user_message" && typeof payload.message === "string") prompts.push(payload.message);
-    if (record.type === "event_msg" && payload.type === "agent_message" && payload.phase === "final_answer" && typeof payload.message === "string" && payload.message) finals.add(payload.message);
-    if (record.type !== "response_item") continue;
+    if (record2.type === "event_msg" && payload.type === "user_message" && typeof payload.message === "string") prompts.push(payload.message);
+    if (record2.type === "event_msg" && payload.type === "agent_message" && payload.phase === "final_answer" && typeof payload.message === "string" && payload.message) finals.add(payload.message);
+    if (record2.type !== "response_item") continue;
     if (payload.type === "custom_tool_call" || payload.type === "function_call") {
       const name2 = payload.type === "custom_tool_call" ? "exec" : "wait";
       if (payload.name !== name2 || typeof payload.call_id !== "string" || !payload.call_id || calls.has(payload.call_id))
@@ -774,7 +873,7 @@ function decodeRollout(bytes, { threadId, turnId, cwd }, requireCompleted) {
     if (payload.type !== "custom_tool_call_output" && payload.type !== "function_call_output") continue;
     const name = payload.type === "custom_tool_call_output" ? "exec" : "wait";
     const { call_id: callId, output } = payload;
-    const limit = object(record.metadata).fallback_token_limit_override;
+    const limit = object(record2.metadata).fallback_token_limit_override;
     if (typeof callId !== "string" || calls.get(callId) !== name || returned.has(callId) || typeof limit !== "number" || !Number.isSafeInteger(limit) || limit <= 0 || !(typeof output === "string" || Array.isArray(output) && output.every((block) => object(block).type === "input_text" && typeof object(block).text === "string")))
       throw new CodexNativeProtocolError("stale_result", "Codex frozen rollout output does not match its exact host call and history budget");
     returned.add(callId);
@@ -1667,6 +1766,7 @@ __export(cursor_exports, {
   cursorAcpInitialize: () => cursorAcpInitialize,
   cursorLaunchArgs: () => cursorLaunchArgs,
   cursorModelArgument: () => cursorModelArgument,
+  cursorTerminalCompleted: () => cursorTerminalCompleted,
   cursorUsageLimitNotice: () => cursorUsageLimitNotice,
   encodeCursorAcpPacket: () => encodeCursorAcpPacket,
   inspectCursorCliVersion: () => inspectCursorCliVersion,
@@ -1682,6 +1782,9 @@ function inspectCursorCliVersion(launch) {
     throw new CursorAcpError("unsupported", "Cursor CLI did not report a version");
   }
   return cliVersion;
+}
+function cursorTerminalCompleted(output) {
+  return output?.stopReason === "end_turn";
 }
 function cursorModelArgument(value) {
   if (!value.trim() || value.includes("\0")) {
@@ -1881,6 +1984,403 @@ var init_cursor = __esm({
   }
 });
 
+// src/llm_manager/native/grok.mjs
+var grok_exports = {};
+__export(grok_exports, {
+  GROK_MAX_SCHEMA_ARGUMENT_BYTES: () => GROK_MAX_SCHEMA_ARGUMENT_BYTES,
+  GrokAcpProtocolError: () => GrokAcpProtocolError,
+  describeGrokStructuredError: () => describeGrokStructuredError,
+  grokAcpArguments: () => grokAcpArguments,
+  grokAcpProbeArguments: () => grokAcpProbeArguments,
+  grokCompletedTerminalEvidence: () => grokCompletedTerminalEvidence,
+  grokInvocationEnvironment: () => grokInvocationEnvironment,
+  grokInvocationFlags: () => grokInvocationFlags,
+  grokNativeModel: () => grokNativeModel,
+  grokStderrHasQuotaExhaustion: () => grokStderrHasQuotaExhaustion,
+  grokStreamingArguments: () => grokStreamingArguments,
+  grokSupportsAcp: () => grokSupportsAcp,
+  grokSupportsStreamingSchema: () => grokSupportsStreamingSchema,
+  grokTerminalCompleted: () => grokTerminalCompleted,
+  inspectGrokStructuredCli: () => inspectGrokStructuredCli,
+  observeGrokNativeAcp: () => observeGrokNativeAcp,
+  observeGrokNativeStderr: () => observeGrokNativeStderr,
+  observeGrokNativeStreaming: () => observeGrokNativeStreaming,
+  observeGrokStructured: () => observeGrokStructured
+});
+import { createHash as createHash4 } from "node:crypto";
+import { createInterface as createInterface3 } from "node:readline";
+import { finished } from "node:stream/promises";
+function grokNativeModel(value) {
+  if (!value.trim() || value.includes("\0"))
+    throw Object.assign(new Error("Grok Build requires grok:<model> or grok:default"), { code: "unsupported" });
+  return value === "default" ? void 0 : value;
+}
+function grokTerminalCompleted(terminal) {
+  return terminal?.stopReason === "end_turn";
+}
+function grokCompletedTerminalEvidence(terminal) {
+  return grokTerminalCompleted(terminal) && Array.isArray(terminal.models) && terminal.models.length > 0 && terminal.models.every((model) => typeof model === "string" && !!model.trim());
+}
+function describeGrokStructuredError(error, useAcp) {
+  if (!(error instanceof GrokAcpProtocolError)) return void 0;
+  const finishInput = error.code === "missing_startup_terminal";
+  const missingTerminal = finishInput || !useAcp && error.code === "missing_terminal";
+  return {
+    message: missingTerminal ? "Grok native stream closed without its original terminal" : error.message,
+    missingTerminal,
+    finishInput
+  };
+}
+function grokAcpProbeArguments() {
+  return ["--no-auto-update", "agent", "--help"];
+}
+function grokSupportsAcp(help) {
+  return /^[\t ]+stdio[\t ]/m.test(help) && /^[\t ]+--no-leader(?:[\t ]|\r?$)/m.test(help);
+}
+function grokSupportsStreamingSchema(help) {
+  return /^[\t ]*--json-schema(?:[\t ]|\r?$)/m.test(help);
+}
+function inspectGrokStructuredCli({ command, args, cwd }, mode, schemaArgument) {
+  const launch = { command, args, cwd };
+  const probe = (flags) => runNativeCliProbe(launch, flags);
+  const version = probe(["--version"]);
+  const cliVersion = version.stdout?.trim();
+  if (version.status !== 0 || !cliVersion) return void 0;
+  const schemaHelp = Buffer.byteLength(schemaArgument) <= GROK_MAX_SCHEMA_ARGUMENT_BYTES ? probe(["--help"]) : void 0;
+  const acpHelp = mode === "edit" ? probe(grokAcpProbeArguments()) : void 0;
+  const useAcp = acpHelp?.status === 0 && grokSupportsAcp(acpHelp.stdout);
+  return {
+    cliVersion,
+    useAcp,
+    nativeSchema: useAcp || schemaHelp?.status === 0 && grokSupportsStreamingSchema(schemaHelp.stdout)
+  };
+}
+function grokAcpArguments() {
+  return ["--no-auto-update", "--permission-mode", "bypassPermissions", "agent", "--no-leader", "stdio"];
+}
+function grokStreamingArguments({ cwd, sessionId, promptFile, mode, model, schemaArgument }) {
+  return [
+    "--cwd",
+    cwd,
+    "--session-id",
+    sessionId,
+    "--prompt-file",
+    promptFile,
+    "--output-format",
+    "streaming-json",
+    ...mode === "read" ? ["--permission-mode", "plan", "--disallowed-tools", "enter_plan_mode,exit_plan_mode"] : ["--permission-mode", "bypassPermissions"],
+    ...model === void 0 ? [] : ["--model", model],
+    ...schemaArgument === void 0 ? [] : ["--json-schema", schemaArgument]
+  ];
+}
+function grokInvocationEnvironment(environment, useAcp) {
+  return {
+    ...environment,
+    GROK_MCP_AUTO_RESTART: "0",
+    ...useAcp ? {} : { GROK_TELEMETRY_TRACE_UPLOAD: "false" }
+  };
+}
+function grokInvocationFlags(args, useAcp) {
+  return new Set(useAcp ? [args[0], args[1], args[4]] : args.filter((_, index) => index % 2 === 0));
+}
+function object4(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? (
+    /** @type {RpcObject} */
+    value
+  ) : void 0;
+}
+async function* acpFrames(stdout) {
+  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+  const pieces = [];
+  try {
+    for await (const chunk of stdout.iterator({ destroyOnReturn: false })) {
+      const lines = decoder.decode(chunk, { stream: true }).split("\n");
+      for (const line of lines.slice(0, -1)) {
+        pieces.push(line);
+        const packet = object4(JSON.parse(pieces.join("")));
+        pieces.length = 0;
+        if (packet?.jsonrpc !== "2.0") throw new GrokAcpProtocolError("Grok ACP stream has an invalid JSON-RPC envelope");
+        yield packet;
+      }
+      const tail = lines.at(-1);
+      if (tail) pieces.push(tail);
+    }
+    if (decoder.decode() || pieces.length) throw new GrokAcpProtocolError("Grok ACP stream has an incomplete frame");
+  } catch (error) {
+    if (error instanceof GrokAcpProtocolError) throw error;
+    if (error instanceof SyntaxError || error instanceof TypeError)
+      throw new GrokAcpProtocolError("Grok ACP stream has an invalid JSON frame");
+    throw new GrokAcpProtocolError("Grok ACP stdout could not be read", "transport_error");
+  }
+}
+function promptResult(result, identity, chunks) {
+  const meta = object4(result._meta);
+  const stopReason = result.stopReason;
+  if (meta?.sessionId !== identity.sessionId || meta.requestId !== identity.requestId || meta.promptId !== void 0 && meta.promptId !== identity.requestId || typeof stopReason !== "string" || !stopReasons.has(stopReason))
+    throw new GrokAcpProtocolError("Grok ACP terminal differs from its original session or prompt");
+  const usage = object4(meta.usage);
+  const modelUsage = object4(usage?.modelUsage);
+  const modelEntries = Object.entries(modelUsage ?? {});
+  if (meta.usage !== void 0 && !usage || usage?.modelUsage !== void 0 && !modelUsage || grokTerminalCompleted({ stopReason }) && !modelEntries.length || modelEntries.some(([model, value]) => !/^[a-z\d][a-z\d._:/-]*$/i.test(model) || !object4(value)))
+    throw new GrokAcpProtocolError("Grok ACP terminal lacks valid actual model usage");
+  const hasStructuredOutput = Object.hasOwn(meta, "structuredOutput");
+  return {
+    ...identity,
+    kind: "result",
+    stopReason,
+    models: modelEntries.map(([model]) => model),
+    text: hasStructuredOutput ? "" : chunks.join(""),
+    ...hasStructuredOutput ? { structuredOutput: meta.structuredOutput } : {}
+  };
+}
+async function observeGrokNativeAcp(stdout, stdin, request, onTerminal) {
+  const { sessionId, promptId, cwd, prompt, schema, model } = request;
+  const identity = { sessionId, requestId: promptId, cwd };
+  const chunks = [];
+  const nestedQueueSessions = /* @__PURE__ */ new Set();
+  let terminal;
+  let awaiting = "initialize";
+  const send = (packet) => new Promise((resolve2, reject) => {
+    stdin.write(JSON.stringify({ jsonrpc: "2.0", ...packet }) + "\n", (error) => {
+      if (error) reject(new GrokAcpProtocolError("Grok ACP stdin could not be written", "transport_error"));
+      else resolve2();
+    });
+  });
+  const sendRequest = (method, params) => send({ id: requestIds[method], method, params });
+  const inputClosed = finished(stdin, { readable: false, cleanup: true }).then(() => true, () => false);
+  await sendRequest("initialize", { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false } });
+  for await (const packet of acpFrames(stdout)) {
+    if (terminal) throw new GrokAcpProtocolError("Grok ACP stream has data after its original prompt terminal");
+    const { method, id } = packet;
+    const params = object4(packet.params);
+    const hasResult = Object.hasOwn(packet, "result"), hasError = Object.hasOwn(packet, "error");
+    if (Object.hasOwn(packet, "method")) {
+      if (typeof method !== "string" || !method || hasResult || hasError || Object.hasOwn(packet, "params") && !params)
+        throw new GrokAcpProtocolError("Grok ACP agent sent an invalid request or notification");
+      if (Object.hasOwn(packet, "id")) {
+        if (method === "session/update" || typeof id !== "string" && !Number.isSafeInteger(id))
+          throw new GrokAcpProtocolError("Grok ACP agent sent an invalid request ID");
+        if (method === "session/request_permission") {
+          if (awaiting !== "session/prompt" || params?.sessionId !== sessionId)
+            throw new GrokAcpProtocolError("Grok ACP permission request differs from its original session");
+          await send({ id, result: { outcome: { outcome: "cancelled" } } });
+        } else await send({ id, error: { code: -32601, message: "Client method unavailable" } });
+      } else if (method === "session/update") {
+        const update = object4(params?.update), updateMeta = object4(params?._meta);
+        const kind = update?.sessionUpdate, updateSession = params?.sessionId;
+        if (typeof kind !== "string" || !kind || params?._meta !== void 0 && !updateMeta)
+          throw new GrokAcpProtocolError("Grok ACP update differs from its original session or prompt");
+        if (awaiting === "session/prompt" && typeof updateSession === "string" && nestedQueueSessions.has(updateSession)) continue;
+        if (updateSession !== sessionId || updateMeta?.promptId !== void 0 && updateMeta.promptId !== promptId || awaiting !== "session/prompt" && (awaiting !== "session/new" || kind !== "available_commands_update"))
+          throw new GrokAcpProtocolError("Grok ACP update differs from its original session or prompt");
+        if (kind === "tool_call" || kind === "tool_call_update") chunks.length = 0;
+        if (kind === "agent_message_chunk") {
+          const content = object4(update?.content);
+          if (typeof content?.type !== "string") throw new GrokAcpProtocolError("Grok ACP agent sent an invalid assistant message chunk");
+          if (content.type === "text") {
+            if (typeof content.text !== "string") throw new GrokAcpProtocolError("Grok ACP agent sent an invalid assistant message chunk");
+            chunks.push(content.text);
+          }
+        }
+      } else {
+        const notificationSession = params?.sessionId;
+        if (method === "_x.ai/queue/changed" && awaiting === "session/prompt" && typeof notificationSession === "string" && notificationSession && Array.isArray(params?.entries)) {
+          if (notificationSession !== sessionId) nestedQueueSessions.add(notificationSession);
+        } else if (!method.startsWith("_x.ai/") || notificationSession != null && notificationSession !== sessionId && !(typeof notificationSession === "string" && nestedQueueSessions.has(notificationSession))) {
+          throw new GrokAcpProtocolError("Grok ACP agent sent an unexpected notification");
+        }
+      }
+      continue;
+    }
+    if (id !== requestIds[awaiting] || hasResult === hasError || Object.hasOwn(packet, "params"))
+      throw new GrokAcpProtocolError("Grok ACP response differs from its outstanding request");
+    if (hasError) {
+      const error = object4(packet.error);
+      if (!Number.isSafeInteger(error?.code) || typeof error?.message !== "string")
+        throw new GrokAcpProtocolError("Grok ACP agent returned an invalid RPC error");
+      if (awaiting !== "session/prompt") throw new GrokAcpProtocolError(`Grok ACP ${awaiting} was rejected`);
+      terminal = error.code === -32003 && error.message === "Rate limited" ? { ...identity, kind: "rate_limited", rpcCode: -32003, message: "Rate limited" } : { ...identity, kind: "prompt_error" };
+    } else {
+      const result = object4(packet.result);
+      if (!result) throw new GrokAcpProtocolError("Grok ACP agent returned an invalid RPC result");
+      if (awaiting === "initialize") {
+        const offered = Array.isArray(result.authMethods) ? result.authMethods.map((method2) => object4(method2)?.id) : [];
+        const methodId = ["cached_token", "xai.api_key"].find((method2) => offered.includes(method2));
+        if (result.protocolVersion !== 1 || !methodId)
+          throw new GrokAcpProtocolError("Grok ACP agent did not advertise protocol v1 with local noninteractive authentication");
+        awaiting = "authenticate";
+        await sendRequest(awaiting, { methodId, _meta: { headless: true } });
+      } else if (awaiting === "authenticate") {
+        awaiting = "session/new";
+        await sendRequest(awaiting, { cwd, mcpServers: [], _meta: { sessionId, ...model === void 0 ? {} : { modelId: model } } });
+      } else if (awaiting === "session/new") {
+        if (result.sessionId !== sessionId || object4(result._meta)?.currentWorkingDirectory !== cwd)
+          throw new GrokAcpProtocolError("Grok ACP opened a different session or worktree");
+        awaiting = "session/prompt";
+        await sendRequest(awaiting, { sessionId, prompt: [{ type: "text", text: prompt }], _meta: { promptId, outputSchema: schema } });
+      } else terminal = promptResult(result, identity, chunks);
+    }
+    if (terminal) {
+      stdin.end();
+      onTerminal(terminal);
+    }
+  }
+  if (!terminal) throw new GrokAcpProtocolError("Grok ACP stream closed without its original terminal", awaiting === "initialize" ? "missing_startup_terminal" : "missing_terminal");
+  if (!stdout.readableEnded || !await inputClosed) throw new GrokAcpProtocolError("Grok ACP transport did not finish cleanly", "transport_error");
+  return terminal;
+}
+async function* streamingLines(stdout) {
+  const lines = createInterface3({ input: stdout, crlfDelay: Infinity });
+  const close = () => lines.close();
+  stdout.once("close", close);
+  try {
+    yield* lines;
+  } catch {
+    throw new GrokAcpProtocolError("Grok native stdout could not be read", "transport_error");
+  } finally {
+    stdout.off("close", close);
+    lines.close();
+  }
+}
+async function observeGrokNativeStreaming(stdout, { sessionId, cwd, nativeSchema }, onTerminal) {
+  const chunks = [];
+  let terminal;
+  let structuredOutput;
+  for await (const line of streamingLines(stdout)) {
+    if (!line.trim()) continue;
+    let event;
+    try {
+      event = object4(JSON.parse(line));
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
+      throw new GrokAcpProtocolError("Grok native event is not valid JSON");
+    }
+    if (terminal || typeof event?.type !== "string") throw new GrokAcpProtocolError("Grok native stream has an invalid event or data after its terminal");
+    if (event.type === "tool_call" || event.type === "tool_call_update") chunks.length = 0;
+    else if (event.type === "text") {
+      if (typeof event.data !== "string") throw new GrokAcpProtocolError("Grok native text event has an invalid shape");
+      chunks.push(event.data);
+    } else if (event.type === "end") {
+      const { requestId, stopReason } = event;
+      const models2 = Object.keys(object4(event.modelUsage) ?? {});
+      if (event.sessionId !== sessionId || event.cwd !== cwd || typeof requestId !== "string" || !requestId.trim() || typeof stopReason !== "string" || !stopReason || models2.some((model) => !model.trim()) || grokTerminalCompleted({ stopReason }) && !models2.length)
+        throw new GrokAcpProtocolError("Grok native terminal lacks the original session, worktree, request or actual model identity");
+      terminal = { sessionId, requestId, cwd, stopReason, models: models2 };
+      if (nativeSchema && Object.hasOwn(event, "structuredOutput")) structuredOutput = JSON.stringify(event.structuredOutput);
+      onTerminal(terminal);
+    }
+  }
+  if (!stdout.readableEnded) throw new GrokAcpProtocolError("Grok native stdout did not reach EOF", "transport_error");
+  if (!terminal) throw new GrokAcpProtocolError("Grok native stream closed without its original terminal", "missing_terminal");
+  return {
+    terminal,
+    text: structuredOutput ?? chunks.join(""),
+    ...nativeSchema ? { structuredOutput: structuredOutput === void 0 ? "missing" : "present" } : {}
+  };
+}
+async function observeGrokStructured({ stdout, stdin, sessionId, cwd, nativeSchema, acp }, onTerminal) {
+  if (!acp) {
+    const output = await observeGrokNativeStreaming(stdout, { sessionId, cwd, nativeSchema }, onTerminal);
+    return { output };
+  }
+  const native = await observeGrokNativeAcp(stdout, stdin, { ...acp, sessionId, cwd }, (value) => onTerminal(value.kind === "result" ? value : void 0));
+  if (native.kind !== "result") return { failure: native };
+  const { requestId, stopReason, models: models2 } = native;
+  const terminal = { sessionId, requestId, cwd, stopReason, models: models2 };
+  const hasNativeOutput = Object.hasOwn(native, "structuredOutput");
+  return {
+    output: {
+      terminal,
+      text: hasNativeOutput ? JSON.stringify(native.structuredOutput) : native.text,
+      structuredOutput: hasNativeOutput ? "present" : "missing"
+    }
+  };
+}
+function nativeHttpStatus(text2) {
+  const prefix = /^(?:error:[ \t]*)?HTTP(?:\/[1-3](?:\.[01])?)?[ \t]+/i.exec(text2);
+  if (!prefix) return null;
+  let value = text2.slice(prefix[0].length);
+  const label = /^(?:status(?: code)?|error)([ \t]*)([:=]?)/i.exec(value);
+  if (label) {
+    value = value.slice(label[0].length);
+    if (label[2]) {
+      const gap = /^[ \t]+/.exec(value);
+      if (!gap) return null;
+      value = value.slice(gap[0].length);
+    } else if (!label[1]) return null;
+  }
+  const status = /^[45]\d{2}(?=[ \t:]|$)/.exec(value);
+  return status ? { code: Number(status[0]), message: value.slice(status[0].length) } : null;
+}
+function observeGrokNativeStderr(stderr, flags) {
+  const hash = createHash4("sha256"), line = Buffer.alloc(4096);
+  const httpStatuses = /* @__PURE__ */ new Set();
+  const startupErrors = /* @__PURE__ */ new Map();
+  let bytes = 0, lineBytes = 0, discardLine = false, oversizedLine = false, usageBalanceExhausted = false, readError = false;
+  const finishLine = () => {
+    if (!discardLine) {
+      const startupLine = line.toString("utf8", 0, lineBytes).replace(/\r$/, ""), text2 = startupLine.trim();
+      const argument = /^error: unexpected argument '(--[a-z][a-z-]*)' found$/.exec(startupLine);
+      if (argument && argument[0] === startupLine && flags.has(argument[1])) startupErrors.set(argument[1], { kind: "unexpected_argument", flag: argument[1] });
+      const errno = startupLine === "Error: No such file or directory (os error 2)" ? "ENOENT" : startupLine === "Error: Permission denied (os error 13)" ? "EACCES" : void 0;
+      if (errno) startupErrors.set(errno, { kind: "os_error", errno });
+      const status = nativeHttpStatus(text2);
+      if (status) httpStatuses.add(status.code);
+      const body = (status?.message ?? text2.replace(/^error:[ \t]*/i, "")).trimStart();
+      const message = body.startsWith(":") ? body.slice(1).trimStart() : body;
+      if (/^(?:usage balance exhausted|you hit your weekly limit)[.!]?$/i.test(message)) usageBalanceExhausted = true;
+    }
+    lineBytes = 0;
+    discardLine = false;
+  };
+  stderr.on("data", (chunk) => {
+    bytes += chunk.length;
+    hash.update(chunk);
+    let start = 0;
+    while (start < chunk.length) {
+      const newline = chunk.indexOf(10, start), end = newline < 0 ? chunk.length : newline;
+      if (end - start > line.length - lineBytes) discardLine = oversizedLine = true;
+      if (!discardLine) lineBytes += chunk.copy(line, lineBytes, start, end);
+      if (newline < 0) break;
+      finishLine();
+      start = newline + 1;
+    }
+  });
+  stderr.once("end", finishLine);
+  stderr.once("error", () => {
+    readError = true;
+  });
+  return () => ({
+    bytes,
+    sha256: hash.copy().digest("hex"),
+    ended: stderr.readableEnded,
+    oversizedLine,
+    readError,
+    httpStatuses: [...httpStatuses].sort((a, b) => a - b),
+    usageBalanceExhausted,
+    ...startupErrors.size ? { startupErrors: [...startupErrors.values()] } : {}
+  });
+}
+function grokStderrHasQuotaExhaustion({ ended, readError, oversizedLine, usageBalanceExhausted, httpStatuses }) {
+  return ended && !readError && !oversizedLine && (usageBalanceExhausted || httpStatuses.includes(429));
+}
+var GROK_MAX_SCHEMA_ARGUMENT_BYTES, GrokAcpProtocolError, requestIds, stopReasons;
+var init_grok = __esm({
+  "src/llm_manager/native/grok.mjs"() {
+    init_cli_probe();
+    GROK_MAX_SCHEMA_ARGUMENT_BYTES = 64 * 1024;
+    GrokAcpProtocolError = class extends Error {
+      /** @param {string} message @param {GrokProtocolErrorCode} code */
+      constructor(message, code = "invalid_protocol") {
+        super(message);
+        this.code = code;
+      }
+    };
+    requestIds = Object.freeze({ initialize: 1, authenticate: 2, "session/new": 3, "session/prompt": 4 });
+    stopReasons = /* @__PURE__ */ new Set(["end_turn", "max_tokens", "max_turn_requests", "refusal", "cancelled"]);
+  }
+});
+
 // src/llm_manager/native/zcode.mjs
 var zcode_exports = {};
 __export(zcode_exports, {
@@ -1896,6 +2396,7 @@ __export(zcode_exports, {
   isZCodeProviderRejection: () => isZCodeProviderRejection,
   isZCodePublicHttp429: () => isZCodePublicHttp429,
   nativeRpcTimeoutMessage: () => nativeRpcTimeoutMessage,
+  observeZCodeFrozenReadTurn: () => observeZCodeFrozenReadTurn,
   zcodeAppServerArgs: () => zcodeAppServerArgs,
   zcodeAssertSendAck: () => zcodeAssertSendAck,
   zcodeCapability: () => zcodeCapability,
@@ -2405,13 +2906,13 @@ function zcodeEventCollector({ sessionId, inputId, queryId, initialTurnId, workt
   };
 }
 function decodeZCodeJsonText(rawText) {
-  const text = rawText.trim();
-  const fenced = /^```json\r?\n([\s\S]*)\r?\n```$/.exec(text);
-  return fenced ? fenced[1] : text;
+  const text2 = rawText.trim();
+  const fenced = /^```json\r?\n([\s\S]*)\r?\n```$/.exec(text2);
+  return fenced ? fenced[1] : text2;
 }
-function decodeZCodeStructuredText(text) {
+function decodeZCodeStructuredText(text2) {
   try {
-    return JSON.parse(decodeZCodeJsonText(text));
+    return JSON.parse(decodeZCodeJsonText(text2));
   } catch (error) {
     if (!(error instanceof SyntaxError)) throw error;
     const location = / at position (\d+)(?: \(line (\d+) column (\d+)\))?$/.exec(error.message);
@@ -2442,12 +2943,12 @@ function zcodeWorktreeResponse({ identity, model, prompt, terminal, events, mess
   if (response === void 0 || starts.length !== 1 || starts[0].payload.inputId !== identity.inputId || starts[0].payload.queryId !== identity.queryId || starts[0].turnId !== identity.turnId || !events.some((event) => JSON.stringify(event) === JSON.stringify(terminal)) || events.some((event) => event.sessionId !== identity.sessionId || event.turnId !== identity.turnId) || !requests.length || requests.some((event) => event.payload.providerId !== model.providerId || event.payload.modelId !== model.modelId)) {
     throw new ZCodeProtocolError("stale_result", "ZCode worktree exact native model/terminal/process evidence differs");
   }
-  const text = (message) => message.parts?.filter((part) => part.type === "text").map((part) => part.text).join("");
+  const text2 = (message) => message.parts?.filter((part) => part.type === "text").map((part) => part.text).join("");
   const users = messages.filter((message) => message.info?.role === "user" && /** @type {NativeRecord | undefined} */
   message.info.semantics?.kind === "user_prompt");
   const user = users[0];
   const userId = starts[0].payload.messageId;
-  if (users.length !== 1 || !user.info || typeof userId !== "string" || !userId || text(user) !== prompt) {
+  if (users.length !== 1 || !user.info || typeof userId !== "string" || !userId || text2(user) !== prompt) {
     throw new ZCodeProtocolError("stale_result", "ZCode worktree original native user/input differs");
   }
   const assistants = messages.filter((message) => message.info?.role === "assistant" && /** @type {NativeRecord | undefined} */
@@ -2469,7 +2970,7 @@ function zcodeWorktreeResponse({ identity, model, prompt, terminal, events, mess
       /** @type {NativeModel | undefined} */
       final?.info?.model
     );
-    if (!final || assistants.some((message) => message.info?.parentMessageId !== userId || !bindMessage(message)) || finalModel?.providerId !== model.providerId || finalModel?.modelId !== model.modelId || text(final) !== response) {
+    if (!final || assistants.some((message) => message.info?.parentMessageId !== userId || !bindMessage(message)) || finalModel?.providerId !== model.providerId || finalModel?.modelId !== model.modelId || text2(final) !== response) {
       throw new ZCodeProtocolError("stale_result", "ZCode worktree final assistant identity/response differs");
     }
   } else {
@@ -2481,11 +2982,207 @@ function zcodeWorktreeResponse({ identity, model, prompt, terminal, events, mess
       throw new ZCodeProtocolError("stale_result", "ZCode worktree original native user/input differs");
     }
     const final = assistants.filter((message) => turn(message) === identity.turnId).at(-1);
-    if (!final || final.info?.providerId !== model.providerId || final.info?.modelId !== model.modelId || text(final) !== response) {
+    if (!final || final.info?.providerId !== model.providerId || final.info?.modelId !== model.modelId || text2(final) !== response) {
       throw new ZCodeProtocolError("stale_result", "ZCode worktree final assistant identity/response differs");
     }
   }
   return { text: response, nativeTokenUsage: terminal.nativeTokenUsage };
+}
+function stale(message) {
+  throw new ZCodeProtocolError("stale_result", `ZCode ${message}`);
+}
+function record(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) stale("native evidence requires an object");
+  return (
+    /** @type {NativeRecord} */
+    value
+  );
+}
+function text(value) {
+  if (typeof value !== "string" || !value) stale("native evidence requires a nonempty identity");
+  return value;
+}
+function complete(value) {
+  for (const key of ["truncated", "omitted", "inputOmitted", "outputOmitted"])
+    if (value[key] !== void 0 && value[key] !== false) stale("native evidence is truncated or omitted");
+}
+function observeZCodeFrozenReadTurn({ sessionId, turnId, inputId, prompt, providerId, modelId, send: rawSend, messages: rawMessages, events: rawEvents, expectedTool }) {
+  text(expectedTool);
+  const send = record(rawSend);
+  if (send.sessionId !== sessionId || send.content !== prompt || send.inputId !== inputId) stale("send differs from the exact frozen prompt/input");
+  if (!Array.isArray(rawMessages) || !Array.isArray(rawEvents)) stale("witness lacks raw native messages/events");
+  const messages = /* @__PURE__ */ new Map();
+  const calls = /* @__PURE__ */ new Map();
+  const partIds = /* @__PURE__ */ new Set(), rawMessageIds = /* @__PURE__ */ new Set();
+  let user;
+  const runtimeSources = /* @__PURE__ */ new Set();
+  const requestPrefixCounts = [];
+  let assistantCount = 0;
+  let modelChangeTime;
+  for (const message of rawMessages) {
+    record(message);
+    const info = record(message.info), id = text(info.id);
+    if (rawMessageIds.has(id) || info.sessionID !== sessionId || !["user", "assistant"].includes(String(info.role)) || !Array.isArray(message.parts)) stale("raw message identity or role differs");
+    rawMessageIds.add(id);
+    for (const raw of message.parts) {
+      const part = record(raw), partId = text(part.id);
+      if (partIds.has(partId) || part.sessionID !== sessionId || part.messageID !== id) stale("raw part is not bound to its exact message/session");
+      partIds.add(partId);
+      complete(part);
+    }
+    const semantics = record(info.semantics);
+    if (semantics.providerVisibility === "hidden") {
+      const part = record(message.parts[0]), time = record(info.time), tokens = record(info.tokens), cache = record(tokens.cache), location = record(info.path);
+      if (rawMessageIds.size !== 1 || info.role !== "assistant" || info.anchor !== void 0 || info.parentID !== id || info.modelId !== modelId || info.providerId !== providerId || typeof info.mode !== "string" || typeof info.planEnabled !== "boolean" || typeof info.agent !== "string" || typeof location.cwd !== "string" || typeof location.root !== "string" || Object.keys(location).some((key) => !["cwd", "root"].includes(key)) || info.cost !== 0 || info.finish !== "completed" || !Number.isSafeInteger(time.created) || Number(time.created) < 0 || !isDeepStrictEqual(time, { created: time.created, completed: time.created }) || !isDeepStrictEqual(semantics, { origin: "system", kind: "timeline_event", uiVisibility: "visible", providerVisibility: "hidden", transcriptVisibility: "visible" }) || Object.keys(info).some((key) => !["id", "sessionID", "role", "time", "parentID", "modelId", "providerId", "mode", "planEnabled", "agent", "path", "cost", "tokens", "finish", "semantics"].includes(key)) || tokens.input !== 0 || tokens.output !== 0 || tokens.reasoning !== 0 || tokens.total !== void 0 && tokens.total !== 0 || !isDeepStrictEqual(cache, { read: 0, write: 0 }) || Object.keys(tokens).some((key) => !["input", "output", "reasoning", "cache", "total"].includes(key)) || message.parts.length !== 1 || part.type !== "timeline" || part.timelineType !== "model_change" || part.display !== "separator" || part.status !== "completed" || !isDeepStrictEqual(part.time, { start: time.created, end: time.created }) || Object.keys(part).some((key) => !["id", "sessionID", "messageID", "type", "timelineType", "display", "status", "time", "fromModel", "toModel"].includes(key))) stale("hidden message is not a pre-turn display-only native model change");
+      for (const value of [part.fromModel, part.toModel].filter((value2) => value2 !== void 0)) {
+        const model = record(value);
+        if (!text(model.providerId).trim() || !text(model.modelId).trim() || model.label !== void 0 && typeof model.label !== "string" || Object.keys(model).some((key) => !["providerId", "modelId", "options", "label"].includes(key))) stale("model change contains an unknown model selection payload");
+        if (model.options !== void 0) {
+          const options = record(model.options);
+          if (Object.keys(options).some((key) => key !== "reasoningLevel") || options.reasoningLevel !== void 0 && (typeof options.reasoningLevel !== "string" || !options.reasoningLevel.trim())) stale("model change contains invalid model options");
+        }
+      }
+      const target = record(part.toModel);
+      if (target.providerId !== providerId || target.modelId !== modelId) stale("model change target differs from the fixed model");
+      modelChangeTime = Number(time.created);
+      continue;
+    }
+    messages.set(id, info);
+    const anchor = record(info.anchor);
+    if (anchor.turnId !== turnId || semantics.providerVisibility !== "visible") stale("message is outside the exact model-visible native turn");
+    if (info.role === "user") {
+      const model = record(info.modelSelection);
+      if (model.providerId !== providerId || model.modelId !== modelId) stale("user input has a foreign native model selection");
+      if (info.synthetic === true) {
+        const source = text(semantics.source), metadata = record(info.metadata);
+        const silentReminder = source === "silent_turn_reminder";
+        if (!["environment", "model", "runtime_mode", "date", "silent_turn_reminder"].includes(source) || !silentReminder && (runtimeSources.has(source) || assistantCount > 0) || anchor.origin !== "synthetic" || info.visibility !== "model-only" || semantics.origin !== "agent_runtime" || semantics.kind !== "system_reminder" || semantics.uiVisibility !== "hidden" || semantics.transcriptVisibility !== "hidden" || metadata.source !== source || metadata.visibility !== "model-only" || record(metadata.runtimeMessage).source !== source || message.parts.length !== 1) stale("synthetic user is not a known same-turn native runtime reminder");
+        if (silentReminder && (assistantCount === 0 || message.parts[0].text !== "The user hasn't heard from you in a while. As you continue, keep them updated when there's something to tell \u2014 a finding, a change of plan.")) stale("silent reminder differs from its known native body or mid-turn position");
+        runtimeSources.add(source);
+      } else {
+        if (user || anchor.origin !== "realUser" || semantics.origin !== "real_user" || semantics.kind !== "user_prompt" || semantics.uiVisibility !== "visible" || semantics.transcriptVisibility !== "visible") stale("history contains another or unrecognized real user input");
+        if (modelChangeTime !== void 0 && (!Number.isSafeInteger(record(info.time).created) || Number(record(info.time).created) < modelChangeTime)) stale("display-only model change was inserted after the real user input");
+        text(anchor.sourceCommandId);
+        user = message;
+      }
+    } else {
+      requestPrefixCounts.push(messages.size - 1);
+      assistantCount++;
+      if (info.providerId !== providerId || info.modelId !== modelId || info.error !== void 0 || semantics.origin !== "agent_runtime" || semantics.kind !== "assistant_response" || semantics.uiVisibility !== "visible" || semantics.transcriptVisibility !== "visible") stale("assistant has a foreign model, origin or native error");
+    }
+    for (const raw of message.parts) {
+      const part = record(raw);
+      if (part.type !== "tool") {
+        if (["text", "reasoning"].includes(String(part.type)) && typeof part.text !== "string") stale("native text part lacks its original text");
+        if (!["text", "reasoning", "step-start", "step-finish"].includes(String(part.type)) || info.role === "user" && (part.type !== "text" || part.synthetic === true !== (info.synthetic === true) || info.synthetic === true && !isDeepStrictEqual(part.metadata, info.metadata))) stale("native message contains unsupported input or part");
+        continue;
+      }
+      const callId = text(part.callID), state = record(part.state);
+      complete(state);
+      const metadata = record(state.metadata), serialization = record(metadata.serialization);
+      complete(metadata);
+      complete(serialization);
+      const bytes = typeof state.output === "string" ? Buffer.byteLength(state.output, "utf8") : -1;
+      if (serialization.truncated !== false || serialization.originalBytes !== bytes || serialization.returnedBytes !== bytes) stale("raw tool part serialization is incomplete or truncated");
+      if (info.role !== "assistant" || calls.has(callId) || part.tool !== expectedTool || state.status !== "completed" || typeof state.output !== "string") stale("tool part is foreign, repeated, pending or incomplete");
+      record(state.input);
+      calls.set(callId, { messageId: id, state });
+    }
+  }
+  if (!user || user.parts.map((part) => part.text).join("") !== prompt) stale("original native user message differs from the exact prompt");
+  if (send.modelSelection !== void 0 && !isDeepStrictEqual(send.modelSelection, user.info.modelSelection)) stale("explicit native send model selection differs from the original real user");
+  const userId = text(user.info.id);
+  for (const [id, info] of messages) {
+    if (info.role !== "assistant") continue;
+    const seen = /* @__PURE__ */ new Set([id]);
+    let parent = text(info.parentID);
+    while (parent !== userId) {
+      if (seen.has(parent) || !messages.has(parent)) stale("assistant parent chain is outside the original user input");
+      seen.add(parent);
+      parent = text(
+        /** @type {NativeRecord} */
+        messages.get(parent).parentID
+      );
+    }
+  }
+  const finalMessage = rawMessages.at(-1), finalAnchor = record(finalMessage.info.anchor);
+  if (finalMessage.info.role !== "assistant" || finalAnchor.boundaryMessageId !== finalMessage.info.id || !isDeepStrictEqual(finalAnchor.orderedMessageIds, [...messages.keys()]) || finalAnchor.historyRoundCount !== assistantCount) stale("final native boundary does not close its exact ordered message history");
+  const assistants = [...messages].filter(([, info]) => info.role === "assistant"), assistantIndices = new Map(assistants.map(([id], index) => [id, index]));
+  const eventIds = /* @__PURE__ */ new Set(), started = /* @__PURE__ */ new Set();
+  const scheduled = /* @__PURE__ */ new Map(), results = /* @__PURE__ */ new Map();
+  const requests = [];
+  let previousSeq = -1, began = false, ended = false;
+  let response;
+  for (const raw of rawEvents) {
+    const event = record(raw), payload = record(event.payload);
+    if (event.sessionId !== sessionId || event.turnId !== turnId || !Number.isSafeInteger(event.seq) || Number(event.seq) <= previousSeq || eventIds.has(text(event.eventId)) || ended) stale("event identity, order or terminal boundary differs");
+    const seq = Number(event.seq);
+    previousSeq = seq;
+    eventIds.add(String(event.eventId));
+    if (event.type === "turn.started") {
+      if (began || payload.input !== prompt || payload.inputId !== inputId || payload.messageId !== userId || payload.turnNumber !== 0 || payload.attachments !== void 0 && (!Array.isArray(payload.attachments) || payload.attachments.length > 0)) stale("turn start differs from the unique original user/input");
+      began = true;
+      continue;
+    }
+    if (!began) stale("evidence precedes its original native turn start");
+    if (event.type === "turn.completed") {
+      if (payload.resultType !== "success" || payload.inputId !== inputId || typeof payload.response !== "string" || payload.error !== void 0 || payload.toolCallCount !== calls.size) stale("turn has no exact successful native completion");
+      response = payload.response;
+      ended = true;
+      continue;
+    }
+    if (event.type === "session.updated") {
+      if (payload.providerId !== providerId || payload.modelId !== modelId || payload.toolCount !== 1 || payload.iteration !== Math.ceil(results.size / 10) || payload.messageCount !== requestPrefixCounts[requests.length] + results.size) stale("actual ModelRequest has a foreign model, tool surface or iteration");
+      requests.push(seq);
+      continue;
+    }
+    if (event.type !== "tool.updated") stale("evidence contains a foreign turn, user input or unsupported event");
+    if (payload.toolName !== void 0 && payload.toolName !== expectedTool || ["source", "agentId", "childSessionId", "parentToolCallId"].some((key) => payload[key] !== void 0)) stale("tool event exposes a foreign tool or subagent");
+    if (payload.kind === "batch") {
+      if (!Array.isArray(payload.toolCallIds) || new Set(payload.toolCallIds).size !== payload.toolCallIds.length || payload.toolCallIds.some((id) => typeof id !== "string" || !results.has(id)) || payload.errorCount !== 0 || payload.successCount !== payload.toolCallIds.length) stale("tool batch differs from completed native calls");
+      continue;
+    }
+    const callId = text(payload.toolCallId), call = calls.get(callId);
+    if (!call) stale("tool event is outside the exact native reader call");
+    if (payload.kind === "scheduled") {
+      if (scheduled.has(callId) || payload.toolName !== expectedTool || payload.assistantMessageId !== call.messageId || !requests.length || payload.input !== void 0 && !isDeepStrictEqual(payload.input, call.state.input)) stale("scheduled tool differs from its original message/input");
+      scheduled.set(callId, seq);
+    } else if (payload.kind === "started") {
+      if (!scheduled.has(callId) || started.has(callId)) stale("tool start has no unique original schedule");
+      started.add(callId);
+    } else if (payload.kind === "result") {
+      const result = record(payload.result), bytes = Buffer.byteLength(String(call.state.output), "utf8");
+      complete(result);
+      if (!started.has(callId) || results.has(callId) || result.success !== true || result.truncated !== false || result.content !== call.state.output || result.originalBytes !== bytes || result.returnedBytes !== bytes) stale("native tool result is incomplete, substituted or truncated");
+      results.set(callId, seq);
+    } else if (payload.kind !== "progress" || !started.has(callId) || results.has(callId)) stale("tool event is not a supported successful lifecycle");
+  }
+  if (!ended || !requests.length || requests.length !== assistantCount || response === void 0 || scheduled.size !== calls.size || results.size !== calls.size) stale("turn or native call evidence is unfinished");
+  if (finalMessage.parts.filter((part) => part.type === "text").map((part) => part.text).join("") !== response) stale("terminal response differs from its final native boundary message");
+  const reads = [];
+  for (const [callId, scheduleSeq] of scheduled) {
+    const call = (
+      /** @type {NonNullable<ReturnType<typeof calls.get>>} */
+      calls.get(callId)
+    );
+    const index = (
+      /** @type {number} */
+      assistantIndices.get(call.messageId)
+    ), consumer = requests[index + 1];
+    const resultSeq = (
+      /** @type {number} */
+      results.get(callId)
+    );
+    if (scheduleSeq <= requests[index] || consumer === void 0 || resultSeq >= consumer) stale("reader lifecycle differs from its assistant generation and next ModelRequest consumer");
+    reads.push({ callId, input: (
+      /** @type {NativeRecord} */
+      call.state.input
+    ), output: (
+      /** @type {string} */
+      call.state.output
+    ) });
+  }
+  return { calls, reads, response, realUserModelSelection: record(user.info.modelSelection) };
 }
 var zcodeCapability, ZCodeProtocolError, providerRejection, ZCodeNativeTurnFailedError, nativeRpcTimeoutMessage, zcodeVersionArgs, zcodeNativeIdentity, zcodeAppServerArgs, terminalTypes;
 var init_zcode = __esm({
@@ -2530,407 +3227,16 @@ var init_zcode = __esm({
   }
 });
 
-// src/llm_manager/native/grok.mjs
-var grok_exports = {};
-__export(grok_exports, {
-  GROK_MAX_SCHEMA_ARGUMENT_BYTES: () => GROK_MAX_SCHEMA_ARGUMENT_BYTES,
-  GrokAcpProtocolError: () => GrokAcpProtocolError,
-  describeGrokStructuredError: () => describeGrokStructuredError,
-  grokAcpArguments: () => grokAcpArguments,
-  grokAcpProbeArguments: () => grokAcpProbeArguments,
-  grokInvocationEnvironment: () => grokInvocationEnvironment,
-  grokInvocationFlags: () => grokInvocationFlags,
-  grokNativeModel: () => grokNativeModel,
-  grokStderrHasQuotaExhaustion: () => grokStderrHasQuotaExhaustion,
-  grokStreamingArguments: () => grokStreamingArguments,
-  grokSupportsAcp: () => grokSupportsAcp,
-  grokSupportsStreamingSchema: () => grokSupportsStreamingSchema,
-  grokTerminalCompleted: () => grokTerminalCompleted,
-  inspectGrokStructuredCli: () => inspectGrokStructuredCli,
-  observeGrokNativeAcp: () => observeGrokNativeAcp,
-  observeGrokNativeStderr: () => observeGrokNativeStderr,
-  observeGrokNativeStreaming: () => observeGrokNativeStreaming,
-  observeGrokStructured: () => observeGrokStructured
-});
-import { createHash as createHash4 } from "node:crypto";
-import { createInterface as createInterface3 } from "node:readline";
-import { finished } from "node:stream/promises";
-function grokNativeModel(value) {
-  if (!value.trim() || value.includes("\0"))
-    throw Object.assign(new Error("Grok Build requires grok:<model> or grok:default"), { code: "unsupported" });
-  return value === "default" ? void 0 : value;
-}
-function grokTerminalCompleted(terminal) {
-  return terminal?.stopReason === "end_turn";
-}
-function describeGrokStructuredError(error, useAcp) {
-  if (!(error instanceof GrokAcpProtocolError)) return void 0;
-  const finishInput = error.code === "missing_startup_terminal";
-  const missingTerminal = finishInput || !useAcp && error.code === "missing_terminal";
-  return {
-    message: missingTerminal ? "Grok native stream closed without its original terminal" : error.message,
-    missingTerminal,
-    finishInput
-  };
-}
-function grokAcpProbeArguments() {
-  return ["--no-auto-update", "agent", "--help"];
-}
-function grokSupportsAcp(help) {
-  return /^[\t ]+stdio[\t ]/m.test(help) && /^[\t ]+--no-leader(?:[\t ]|\r?$)/m.test(help);
-}
-function grokSupportsStreamingSchema(help) {
-  return /^[\t ]*--json-schema(?:[\t ]|\r?$)/m.test(help);
-}
-function inspectGrokStructuredCli({ command, args, cwd }, mode, schemaArgument) {
-  const launch = { command, args, cwd };
-  const probe = (flags) => runNativeCliProbe(launch, flags);
-  const version = probe(["--version"]);
-  const cliVersion = version.stdout?.trim();
-  if (version.status !== 0 || !cliVersion) return void 0;
-  const schemaHelp = Buffer.byteLength(schemaArgument) <= GROK_MAX_SCHEMA_ARGUMENT_BYTES ? probe(["--help"]) : void 0;
-  const acpHelp = mode === "edit" ? probe(grokAcpProbeArguments()) : void 0;
-  const useAcp = acpHelp?.status === 0 && grokSupportsAcp(acpHelp.stdout);
-  return {
-    cliVersion,
-    useAcp,
-    nativeSchema: useAcp || schemaHelp?.status === 0 && grokSupportsStreamingSchema(schemaHelp.stdout)
-  };
-}
-function grokAcpArguments() {
-  return ["--no-auto-update", "--permission-mode", "bypassPermissions", "agent", "--no-leader", "stdio"];
-}
-function grokStreamingArguments({ cwd, sessionId, promptFile, mode, model, schemaArgument }) {
-  return [
-    "--cwd",
-    cwd,
-    "--session-id",
-    sessionId,
-    "--prompt-file",
-    promptFile,
-    "--output-format",
-    "streaming-json",
-    ...mode === "read" ? ["--permission-mode", "plan", "--disallowed-tools", "enter_plan_mode,exit_plan_mode"] : ["--permission-mode", "bypassPermissions"],
-    ...model === void 0 ? [] : ["--model", model],
-    ...schemaArgument === void 0 ? [] : ["--json-schema", schemaArgument]
-  ];
-}
-function grokInvocationEnvironment(environment, useAcp) {
-  return {
-    ...environment,
-    GROK_MCP_AUTO_RESTART: "0",
-    ...useAcp ? {} : { GROK_TELEMETRY_TRACE_UPLOAD: "false" }
-  };
-}
-function grokInvocationFlags(args, useAcp) {
-  return new Set(useAcp ? [args[0], args[1], args[4]] : args.filter((_, index) => index % 2 === 0));
-}
-function object4(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value) ? (
-    /** @type {RpcObject} */
-    value
-  ) : void 0;
-}
-async function* acpFrames(stdout) {
-  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-  const pieces = [];
-  try {
-    for await (const chunk of stdout.iterator({ destroyOnReturn: false })) {
-      const lines = decoder.decode(chunk, { stream: true }).split("\n");
-      for (const line of lines.slice(0, -1)) {
-        pieces.push(line);
-        const packet = object4(JSON.parse(pieces.join("")));
-        pieces.length = 0;
-        if (packet?.jsonrpc !== "2.0") throw new GrokAcpProtocolError("Grok ACP stream has an invalid JSON-RPC envelope");
-        yield packet;
-      }
-      const tail = lines.at(-1);
-      if (tail) pieces.push(tail);
-    }
-    if (decoder.decode() || pieces.length) throw new GrokAcpProtocolError("Grok ACP stream has an incomplete frame");
-  } catch (error) {
-    if (error instanceof GrokAcpProtocolError) throw error;
-    if (error instanceof SyntaxError || error instanceof TypeError)
-      throw new GrokAcpProtocolError("Grok ACP stream has an invalid JSON frame");
-    throw new GrokAcpProtocolError("Grok ACP stdout could not be read", "transport_error");
-  }
-}
-function promptResult(result, identity, chunks) {
-  const meta = object4(result._meta);
-  const stopReason = result.stopReason;
-  if (meta?.sessionId !== identity.sessionId || meta.requestId !== identity.requestId || meta.promptId !== void 0 && meta.promptId !== identity.requestId || typeof stopReason !== "string" || !stopReasons.has(stopReason))
-    throw new GrokAcpProtocolError("Grok ACP terminal differs from its original session or prompt");
-  const usage = object4(meta.usage);
-  const modelUsage = object4(usage?.modelUsage);
-  const modelEntries = Object.entries(modelUsage ?? {});
-  if (meta.usage !== void 0 && !usage || usage?.modelUsage !== void 0 && !modelUsage || grokTerminalCompleted({ stopReason }) && !modelEntries.length || modelEntries.some(([model, value]) => !/^[a-z\d][a-z\d._:/-]*$/i.test(model) || !object4(value)))
-    throw new GrokAcpProtocolError("Grok ACP terminal lacks valid actual model usage");
-  const hasStructuredOutput = Object.hasOwn(meta, "structuredOutput");
-  return {
-    ...identity,
-    kind: "result",
-    stopReason,
-    models: modelEntries.map(([model]) => model),
-    text: hasStructuredOutput ? "" : chunks.join(""),
-    ...hasStructuredOutput ? { structuredOutput: meta.structuredOutput } : {}
-  };
-}
-async function observeGrokNativeAcp(stdout, stdin, request, onTerminal) {
-  const { sessionId, promptId, cwd, prompt, schema, model } = request;
-  const identity = { sessionId, requestId: promptId, cwd };
-  const chunks = [];
-  const nestedQueueSessions = /* @__PURE__ */ new Set();
-  let terminal;
-  let awaiting = "initialize";
-  const send = (packet) => new Promise((resolve2, reject) => {
-    stdin.write(JSON.stringify({ jsonrpc: "2.0", ...packet }) + "\n", (error) => {
-      if (error) reject(new GrokAcpProtocolError("Grok ACP stdin could not be written", "transport_error"));
-      else resolve2();
-    });
-  });
-  const sendRequest = (method, params) => send({ id: requestIds[method], method, params });
-  const inputClosed = finished(stdin, { readable: false, cleanup: true }).then(() => true, () => false);
-  await sendRequest("initialize", { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false } });
-  for await (const packet of acpFrames(stdout)) {
-    if (terminal) throw new GrokAcpProtocolError("Grok ACP stream has data after its original prompt terminal");
-    const { method, id } = packet;
-    const params = object4(packet.params);
-    const hasResult = Object.hasOwn(packet, "result"), hasError = Object.hasOwn(packet, "error");
-    if (Object.hasOwn(packet, "method")) {
-      if (typeof method !== "string" || !method || hasResult || hasError || Object.hasOwn(packet, "params") && !params)
-        throw new GrokAcpProtocolError("Grok ACP agent sent an invalid request or notification");
-      if (Object.hasOwn(packet, "id")) {
-        if (method === "session/update" || typeof id !== "string" && !Number.isSafeInteger(id))
-          throw new GrokAcpProtocolError("Grok ACP agent sent an invalid request ID");
-        if (method === "session/request_permission") {
-          if (awaiting !== "session/prompt" || params?.sessionId !== sessionId)
-            throw new GrokAcpProtocolError("Grok ACP permission request differs from its original session");
-          await send({ id, result: { outcome: { outcome: "cancelled" } } });
-        } else await send({ id, error: { code: -32601, message: "Client method unavailable" } });
-      } else if (method === "session/update") {
-        const update = object4(params?.update), updateMeta = object4(params?._meta);
-        const kind = update?.sessionUpdate, updateSession = params?.sessionId;
-        if (typeof kind !== "string" || !kind || params?._meta !== void 0 && !updateMeta)
-          throw new GrokAcpProtocolError("Grok ACP update differs from its original session or prompt");
-        if (awaiting === "session/prompt" && typeof updateSession === "string" && nestedQueueSessions.has(updateSession)) continue;
-        if (updateSession !== sessionId || updateMeta?.promptId !== void 0 && updateMeta.promptId !== promptId || awaiting !== "session/prompt" && (awaiting !== "session/new" || kind !== "available_commands_update"))
-          throw new GrokAcpProtocolError("Grok ACP update differs from its original session or prompt");
-        if (kind === "tool_call" || kind === "tool_call_update") chunks.length = 0;
-        if (kind === "agent_message_chunk") {
-          const content = object4(update?.content);
-          if (typeof content?.type !== "string") throw new GrokAcpProtocolError("Grok ACP agent sent an invalid assistant message chunk");
-          if (content.type === "text") {
-            if (typeof content.text !== "string") throw new GrokAcpProtocolError("Grok ACP agent sent an invalid assistant message chunk");
-            chunks.push(content.text);
-          }
-        }
-      } else {
-        const notificationSession = params?.sessionId;
-        if (method === "_x.ai/queue/changed" && awaiting === "session/prompt" && typeof notificationSession === "string" && notificationSession && Array.isArray(params?.entries)) {
-          if (notificationSession !== sessionId) nestedQueueSessions.add(notificationSession);
-        } else if (!method.startsWith("_x.ai/") || notificationSession != null && notificationSession !== sessionId && !(typeof notificationSession === "string" && nestedQueueSessions.has(notificationSession))) {
-          throw new GrokAcpProtocolError("Grok ACP agent sent an unexpected notification");
-        }
-      }
-      continue;
-    }
-    if (id !== requestIds[awaiting] || hasResult === hasError || Object.hasOwn(packet, "params"))
-      throw new GrokAcpProtocolError("Grok ACP response differs from its outstanding request");
-    if (hasError) {
-      const error = object4(packet.error);
-      if (!Number.isSafeInteger(error?.code) || typeof error?.message !== "string")
-        throw new GrokAcpProtocolError("Grok ACP agent returned an invalid RPC error");
-      if (awaiting !== "session/prompt") throw new GrokAcpProtocolError(`Grok ACP ${awaiting} was rejected`);
-      terminal = error.code === -32003 && error.message === "Rate limited" ? { ...identity, kind: "rate_limited", rpcCode: -32003, message: "Rate limited" } : { ...identity, kind: "prompt_error" };
-    } else {
-      const result = object4(packet.result);
-      if (!result) throw new GrokAcpProtocolError("Grok ACP agent returned an invalid RPC result");
-      if (awaiting === "initialize") {
-        const offered = Array.isArray(result.authMethods) ? result.authMethods.map((method2) => object4(method2)?.id) : [];
-        const methodId = ["cached_token", "xai.api_key"].find((method2) => offered.includes(method2));
-        if (result.protocolVersion !== 1 || !methodId)
-          throw new GrokAcpProtocolError("Grok ACP agent did not advertise protocol v1 with local noninteractive authentication");
-        awaiting = "authenticate";
-        await sendRequest(awaiting, { methodId, _meta: { headless: true } });
-      } else if (awaiting === "authenticate") {
-        awaiting = "session/new";
-        await sendRequest(awaiting, { cwd, mcpServers: [], _meta: { sessionId, ...model === void 0 ? {} : { modelId: model } } });
-      } else if (awaiting === "session/new") {
-        if (result.sessionId !== sessionId || object4(result._meta)?.currentWorkingDirectory !== cwd)
-          throw new GrokAcpProtocolError("Grok ACP opened a different session or worktree");
-        awaiting = "session/prompt";
-        await sendRequest(awaiting, { sessionId, prompt: [{ type: "text", text: prompt }], _meta: { promptId, outputSchema: schema } });
-      } else terminal = promptResult(result, identity, chunks);
-    }
-    if (terminal) {
-      stdin.end();
-      onTerminal(terminal);
-    }
-  }
-  if (!terminal) throw new GrokAcpProtocolError("Grok ACP stream closed without its original terminal", awaiting === "initialize" ? "missing_startup_terminal" : "missing_terminal");
-  if (!stdout.readableEnded || !await inputClosed) throw new GrokAcpProtocolError("Grok ACP transport did not finish cleanly", "transport_error");
-  return terminal;
-}
-async function* streamingLines(stdout) {
-  const lines = createInterface3({ input: stdout, crlfDelay: Infinity });
-  const close = () => lines.close();
-  stdout.once("close", close);
-  try {
-    yield* lines;
-  } catch {
-    throw new GrokAcpProtocolError("Grok native stdout could not be read", "transport_error");
-  } finally {
-    stdout.off("close", close);
-    lines.close();
-  }
-}
-async function observeGrokNativeStreaming(stdout, { sessionId, cwd, nativeSchema }, onTerminal) {
-  const chunks = [];
-  let terminal;
-  let structuredOutput;
-  for await (const line of streamingLines(stdout)) {
-    if (!line.trim()) continue;
-    let event;
-    try {
-      event = object4(JSON.parse(line));
-    } catch (error) {
-      if (!(error instanceof SyntaxError)) throw error;
-      throw new GrokAcpProtocolError("Grok native event is not valid JSON");
-    }
-    if (terminal || typeof event?.type !== "string") throw new GrokAcpProtocolError("Grok native stream has an invalid event or data after its terminal");
-    if (event.type === "tool_call" || event.type === "tool_call_update") chunks.length = 0;
-    else if (event.type === "text") {
-      if (typeof event.data !== "string") throw new GrokAcpProtocolError("Grok native text event has an invalid shape");
-      chunks.push(event.data);
-    } else if (event.type === "end") {
-      const { requestId, stopReason } = event;
-      const models2 = Object.keys(object4(event.modelUsage) ?? {});
-      if (event.sessionId !== sessionId || event.cwd !== cwd || typeof requestId !== "string" || !requestId.trim() || typeof stopReason !== "string" || !stopReason || models2.some((model) => !model.trim()) || grokTerminalCompleted({ stopReason }) && !models2.length)
-        throw new GrokAcpProtocolError("Grok native terminal lacks the original session, worktree, request or actual model identity");
-      terminal = { sessionId, requestId, cwd, stopReason, models: models2 };
-      if (nativeSchema && Object.hasOwn(event, "structuredOutput")) structuredOutput = JSON.stringify(event.structuredOutput);
-      onTerminal(terminal);
-    }
-  }
-  if (!stdout.readableEnded) throw new GrokAcpProtocolError("Grok native stdout did not reach EOF", "transport_error");
-  if (!terminal) throw new GrokAcpProtocolError("Grok native stream closed without its original terminal", "missing_terminal");
-  return {
-    terminal,
-    text: structuredOutput ?? chunks.join(""),
-    ...nativeSchema ? { structuredOutput: structuredOutput === void 0 ? "missing" : "present" } : {}
-  };
-}
-async function observeGrokStructured({ stdout, stdin, sessionId, cwd, nativeSchema, acp }, onTerminal) {
-  if (!acp) {
-    const output = await observeGrokNativeStreaming(stdout, { sessionId, cwd, nativeSchema }, onTerminal);
-    return { output };
-  }
-  const native = await observeGrokNativeAcp(stdout, stdin, { ...acp, sessionId, cwd }, (value) => onTerminal(value.kind === "result" ? value : void 0));
-  if (native.kind !== "result") return { failure: native };
-  const { requestId, stopReason, models: models2 } = native;
-  const terminal = { sessionId, requestId, cwd, stopReason, models: models2 };
-  const hasNativeOutput = Object.hasOwn(native, "structuredOutput");
-  return {
-    output: {
-      terminal,
-      text: hasNativeOutput ? JSON.stringify(native.structuredOutput) : native.text,
-      structuredOutput: hasNativeOutput ? "present" : "missing"
-    }
-  };
-}
-function nativeHttpStatus(text) {
-  const prefix = /^(?:error:[ \t]*)?HTTP(?:\/[1-3](?:\.[01])?)?[ \t]+/i.exec(text);
-  if (!prefix) return null;
-  let value = text.slice(prefix[0].length);
-  const label = /^(?:status(?: code)?|error)([ \t]*)([:=]?)/i.exec(value);
-  if (label) {
-    value = value.slice(label[0].length);
-    if (label[2]) {
-      const gap = /^[ \t]+/.exec(value);
-      if (!gap) return null;
-      value = value.slice(gap[0].length);
-    } else if (!label[1]) return null;
-  }
-  const status = /^[45]\d{2}(?=[ \t:]|$)/.exec(value);
-  return status ? { code: Number(status[0]), message: value.slice(status[0].length) } : null;
-}
-function observeGrokNativeStderr(stderr, flags) {
-  const hash = createHash4("sha256"), line = Buffer.alloc(4096);
-  const httpStatuses = /* @__PURE__ */ new Set();
-  const startupErrors = /* @__PURE__ */ new Map();
-  let bytes = 0, lineBytes = 0, discardLine = false, oversizedLine = false, usageBalanceExhausted = false, readError = false;
-  const finishLine = () => {
-    if (!discardLine) {
-      const startupLine = line.toString("utf8", 0, lineBytes).replace(/\r$/, ""), text = startupLine.trim();
-      const argument = /^error: unexpected argument '(--[a-z][a-z-]*)' found$/.exec(startupLine);
-      if (argument && argument[0] === startupLine && flags.has(argument[1])) startupErrors.set(argument[1], { kind: "unexpected_argument", flag: argument[1] });
-      const errno = startupLine === "Error: No such file or directory (os error 2)" ? "ENOENT" : startupLine === "Error: Permission denied (os error 13)" ? "EACCES" : void 0;
-      if (errno) startupErrors.set(errno, { kind: "os_error", errno });
-      const status = nativeHttpStatus(text);
-      if (status) httpStatuses.add(status.code);
-      const body = (status?.message ?? text.replace(/^error:[ \t]*/i, "")).trimStart();
-      const message = body.startsWith(":") ? body.slice(1).trimStart() : body;
-      if (/^(?:usage balance exhausted|you hit your weekly limit)[.!]?$/i.test(message)) usageBalanceExhausted = true;
-    }
-    lineBytes = 0;
-    discardLine = false;
-  };
-  stderr.on("data", (chunk) => {
-    bytes += chunk.length;
-    hash.update(chunk);
-    let start = 0;
-    while (start < chunk.length) {
-      const newline = chunk.indexOf(10, start), end = newline < 0 ? chunk.length : newline;
-      if (end - start > line.length - lineBytes) discardLine = oversizedLine = true;
-      if (!discardLine) lineBytes += chunk.copy(line, lineBytes, start, end);
-      if (newline < 0) break;
-      finishLine();
-      start = newline + 1;
-    }
-  });
-  stderr.once("end", finishLine);
-  stderr.once("error", () => {
-    readError = true;
-  });
-  return () => ({
-    bytes,
-    sha256: hash.copy().digest("hex"),
-    ended: stderr.readableEnded,
-    oversizedLine,
-    readError,
-    httpStatuses: [...httpStatuses].sort((a, b) => a - b),
-    usageBalanceExhausted,
-    ...startupErrors.size ? { startupErrors: [...startupErrors.values()] } : {}
-  });
-}
-function grokStderrHasQuotaExhaustion({ ended, readError, oversizedLine, usageBalanceExhausted, httpStatuses }) {
-  return ended && !readError && !oversizedLine && (usageBalanceExhausted || httpStatuses.includes(429));
-}
-var GROK_MAX_SCHEMA_ARGUMENT_BYTES, GrokAcpProtocolError, requestIds, stopReasons;
-var init_grok = __esm({
-  "src/llm_manager/native/grok.mjs"() {
-    init_cli_probe();
-    GROK_MAX_SCHEMA_ARGUMENT_BYTES = 64 * 1024;
-    GrokAcpProtocolError = class extends Error {
-      /** @param {string} message @param {GrokProtocolErrorCode} code */
-      constructor(message, code = "invalid_protocol") {
-        super(message);
-        this.code = code;
-      }
-    };
-    requestIds = Object.freeze({ initialize: 1, authenticate: 2, "session/new": 3, "session/prompt": 4 });
-    stopReasons = /* @__PURE__ */ new Set(["end_turn", "max_tokens", "max_turn_requests", "refusal", "cancelled"]);
-  }
-});
-
 // src/llm_manager/native/index.mjs
 init_claude();
 init_codex();
 init_cursor();
+init_grok();
 init_zcode();
 import { spawn, spawnSync as spawnSync2 } from "node:child_process";
 import { realpathSync as realpathSync2 } from "node:fs";
 var nativeRuntimeVersion = 1;
+var nativeAdapterContract = 2;
 var commands = Object.freeze({
   claude: "claude",
   codex: "codex",
@@ -2974,7 +3280,9 @@ export {
   codex_exports as codexReplay,
   cursor_exports as cursorReplay,
   findNativeExecutable,
+  grok_exports as grokReplay,
   loadNativeAdapter,
+  nativeAdapterContract,
   nativeRuntimeVersion,
   spawnGatedNativeProcess,
   spawnNativeProcess,

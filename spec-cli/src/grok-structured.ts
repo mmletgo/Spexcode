@@ -1,4 +1,5 @@
 import { managedRoute, nativeModelValue } from './llm-manager-route.js'
+import { grokReplay } from '../llm-manager/native-runtime.mjs'
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
@@ -54,6 +55,7 @@ type NativeSettlement = { launchDigest: string; outputDigest: string; stopDigest
 type StopResult = { nativeStopped: boolean; acknowledged: false; nativeStatus?: string; error?: string }
 
 const STOP_MS = 15_000
+const { grokCompletedTerminalEvidence } = grokReplay as { grokCompletedTerminalEvidence(terminal: Terminal): boolean }
 const NATIVE_SHUTDOWN_GRACE_MS = 5_000
 export const GROK_NATIVE_EXIT_DEADLINE_FAILURE = 'Grok native exit was not observed before the settlement deadline'
 export const isGrokNativeExitFailure = ({ code, message }: { code: string; message: string }): boolean =>
@@ -122,8 +124,6 @@ function assertLaunch(plan: NativePlan, launch: NativeLaunch, execution: GrokStr
 function terminalMatches(terminal: Terminal, plan: NativePlan): boolean {
   return terminal.sessionId === plan.sessionId && terminal.cwd === plan.workspace && typeof terminal.requestId === 'string' && !!terminal.requestId.trim()
     && (plan.acp === undefined || terminal.requestId === plan.acp.promptId)
-    && typeof terminal.stopReason === 'string' && !!terminal.stopReason && Array.isArray(terminal.models)
-    && terminal.models.every(model => typeof model === 'string' && !!model.trim())
 }
 
 function verifyFinal(native: NativeOutput, prompt: string, execution: GrokStructuredExecution): NativeResult {
@@ -156,7 +156,7 @@ function readSettledOutput(root: string, prompt: string, execution: GrokStructur
   const output = read<NativeOutput>(root, 'result.json'), settlement = read<NativeSettlement>(root, 'settlement.json')
   if (settlement?.launchDigest !== digest(launch) || settlement.outputDigest !== digest(output) || typeof settlement.stopDigest !== 'string'
     || settlement.exit?.code !== 0 || settlement.exit.signal !== null || existsSync(join(root, 'cancel.json'))
-    || !output?.terminal || !terminalMatches(output.terminal, plan) || output.terminal.stopReason !== 'end_turn' || !output.terminal.models.length
+    || !output?.terminal || !terminalMatches(output.terminal, plan) || !grokCompletedTerminalEvidence(output.terminal)
     || output.terminal.requestId !== execution.turnId || output.terminal.requestId !== execution.grokNative?.turnId
     || output.terminal.sessionId !== execution.threadId || typeof output.text !== 'string'
     || (plan.structuredOutput === 'native-schema-v1'

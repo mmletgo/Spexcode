@@ -476,7 +476,7 @@ function checkClaudeRequestRetry(retry: ClaudeRequestRetry | undefined): void {
 }
 
 /** 连接重试须重发原完整输入，并由其后真实assistant消费；不增加公开投影字段。 */
-function checkClaudeConnectionRetries(history: readonly ClaudePublicRecord[], paramsDigests: ReadonlyMap<string, string>): void {
+function checkClaudeConnectionRetries(history: readonly ClaudePublicRecord[], paramsDigests: ReadonlyMap<string, string>, decoder: ClaudeHistoryDecoder): void {
   if (!history.some(row => row.requestRetry?.source === 'connection_retry')) return
   const model = history.find(row => row.type === 'api-request')?.model
   if (!model) stale('Claude connection retry has no preceding actual API model')
@@ -487,7 +487,7 @@ function checkClaudeConnectionRetries(history: readonly ClaudePublicRecord[], pa
   for (const row of history) {
     if (row.type === 'api-request-shape') shapes.add(row.shapeHash!)
     if (row.type === 'api-request') {
-      const hashes = claudeApiRequestHashes(row, requests, shapes, model)
+      const hashes = claudeApiRequestHashes(row, requests, shapes, model, decoder)
       requests.set(row.id!, hashes)
       current = { id: row.id!, shapeHash: row.shapeHash!, paramsDigest: paramsDigests.get(row.id!)!, hashes }
       if (pending) {
@@ -512,80 +512,47 @@ function checkClaudeConnectionRetries(history: readonly ClaudePublicRecord[], pa
 export type ClaudeHistoryDecoder = {
   ClaudeNativeProtocolError: new (...args: never[]) => Error & { code: 'unsupported' | 'stale_result' | 'history_pending' }
   projectClaudePublicHistory(source: string, sessionId: string): { records: ClaudePublicRecord[]; paramsDigests: Map<string, string> }
+  projectClaudeApiSourceMetadata(source: string, sessionId: string, model: string, companionIds: ReadonlySet<string>): Map<string, ClaudeApiRequestSourceMetadata>
+  claudeApiSourceDigest(message: ClaudePublicMessage): string
+  claudeApiRequestHashes(row: ClaudePublicRecord, requests: ReadonlyMap<string, string[]>, shapes: ReadonlySet<string>, model: string): string[]
+}
+const claudeHistoryReplay = claudeReplay as ClaudeHistoryDecoder
+
+function claudeHistoryError(decoder: ClaudeHistoryDecoder, error: unknown, pendingMessage?: string): never {
+  if (error instanceof decoder.ClaudeNativeProtocolError) {
+    if (error.code === 'history_pending') throw new StructuredSessionTransportError(pendingMessage ?? error.message)
+    if (error.code === 'stale_result') stale(error.message)
+  }
+  throw error
+}
+
+function projectClaudeHistory(source: string, sessionId: string, decoder: ClaudeHistoryDecoder): ClaudePublicRecord[] {
+  const { records, paramsDigests } = decoder.projectClaudePublicHistory(source, sessionId)
+  checkClaudeConnectionRetries(records, paramsDigests, decoder)
+  return records
 }
 
 /** 从宿主已绑定的历史文件读取原字节，逐条核对 Manager 投影后的请求链。 */
-export function readClaudePublicHistory(path: string, sessionId: string, decoder = claudeReplay as ClaudeHistoryDecoder): ClaudePublicRecord[] {
+export function readClaudePublicHistory(path: string, sessionId: string, decoder = claudeHistoryReplay): ClaudePublicRecord[] {
   const source = readFileSync(path, 'utf8')
-  try {
-    const { records, paramsDigests } = decoder.projectClaudePublicHistory(source, sessionId)
-    checkClaudeConnectionRetries(records, paramsDigests)
-    return records
-  } catch (error) {
-    if (!(error instanceof decoder.ClaudeNativeProtocolError)) throw error
-    if (error.code === 'history_pending') throw new StructuredSessionTransportError(error.message)
-    if (error.code === 'stale_result') stale(error.message)
-    throw error
-  }
+  try { return projectClaudeHistory(source, sessionId, decoder) }
+  catch (error) { claudeHistoryError(decoder, error) }
 }
 
 export type ClaudeApiSourceMetadata = { digest: string; role: 'user' | 'assistant' | 'system'; kind: 'cas' | 'transcript-prefix'; sourceUuids: string[]; ordinal: number }
 export type ClaudeApiRequestSourceMetadata = { ordinal: number; messages: ReadonlyMap<string, ClaudeApiSourceMetadata> }
 
-/** 固定原生 producer 的消息摘要：string 转 text 块，递归省略 cache_control；不改成功 proof 的摘要。 */
-export function claudeApiSourceDigest(message: ClaudePublicMessage): string {
-  const withoutCacheControl = (value: unknown): unknown => Array.isArray(value) ? value.map(withoutCacheControl) : value !== null && typeof value === 'object'
-    ? Object.fromEntries(Object.entries(value).filter(([key, item]) => key !== 'cache_control' && item !== undefined).map(([key, item]) => [key, withoutCacheControl(item)])) : value
-  return claudeMessageDigest(withoutCacheControl({ ...message, content: claudeMessageBlocks(message) }))
-}
-
-/** 只为已停失败分类重建 U5 来源；返回消费点角色/UUID/顺序，不返回或持久化正文与私密块。 */
-export function readClaudeApiSourceMetadata(path: string, sessionId: string, model: string): Map<string, ClaudeApiRequestSourceMetadata> {
-  const bytes = readFileSync(path, 'utf8')
-  if (!bytes.endsWith('\n')) throw new StructuredSessionTransportError('Claude native source history has not flushed its final record')
-  const sources = new Map<string, ClaudeApiSourceMetadata>(), snapshots = new Map<string, ClaudeApiRequestSourceMetadata>()
-  const requests = new Map<string, string[]>(), shapes = new Set<string>()
-  const history = readClaudePublicHistory(path, sessionId), original = history.find(row => row.type === 'user' && row.parentUuid === null)
-  if (!original) stale('Claude failed source index has no original user')
-  Array.from(checkClaudeHistoryChain(history, original))
-  const companions = claudeOutputLimitCompanions(history, original)
-  let run: { role: 'user' | 'assistant'; messageId?: string; blocks: ClaudePublicContentBlock[]; uuids: string[] } | undefined
-  for (const [ordinal, line] of bytes.split('\n').filter(Boolean).entries()) {
-    const row = JSON.parse(line) as Record<string, unknown> & { message?: ClaudePublicMessage & { id?: string }; params?: { model?: string } }
-    if (row.type === 'fork-context-ref' || row.turnCompanion && !companions.has(String(row.uuid)))
-      stale('Claude failed source index cannot interpret fork or recovery inputs')
-    const compact = row.type === 'system' && row.subtype === 'compact_boundary'
-    const retry = row.type === 'system' && row.subtype === 'api_error'
-    if (!compact && !retry && !['user', 'assistant', 'attachment', 'api-request-blob', 'api-request', 'api-request-shape'].includes(String(row.type))) continue // dead-words-ok: Claude CLI 原生公开事件类型，外部协议名称必须逐字匹配。
-    if (row.sessionId !== sessionId || row.isSidechain === true || row.agentId !== undefined) stale('Claude failed source index contains a foreign session or sidechain')
-    if (compact) { run = undefined; continue }
-    if (row.type === 'api-request-shape') {
-      if (typeof row.shapeHash !== 'string') stale('Claude failed source index has no shape identity')
-      shapes.add(row.shapeHash)
-    }
-    if (row.type === 'api-request-blob') { // dead-words-ok: Claude CLI 原生公开事件类型，外部协议名称必须逐字匹配。
-      if (!row.message || !['user', 'assistant', 'system'].includes(row.message.role) || typeof row.message.content !== 'string' && !Array.isArray(row.message.content)) stale('Claude failed source CAS has an unknown message role or shape')
-      const digest = claudeApiSourceDigest(row.message)
-      if (row.hash !== digest) stale('Claude failed source CAS differs from its canonical digest')
-      if (sources.get(digest)?.kind !== 'transcript-prefix') sources.set(digest, { digest, role: row.message.role as ClaudeApiSourceMetadata['role'], kind: 'cas', sourceUuids: [], ordinal })
-    }
-    if (row.type === 'user' || row.type === 'assistant') {
-      const message = row.message
-      if (!message || message.role !== row.type || typeof row.uuid !== 'string' || typeof message.content !== 'string' && !Array.isArray(message.content)) stale('Claude failed source transcript has a mismatched role or message identity')
-      if (!run || run.role !== message.role || message.role !== 'user' && !(typeof message.id === 'string' && run.messageId === message.id))
-        run = { role: row.type, ...(typeof message.id === 'string' ? { messageId: message.id } : {}), blocks: [], uuids: [] }
-      run.blocks.push(...claudeMessageBlocks(message)); run.uuids.push(row.uuid)
-      const digest = claudeApiSourceDigest({ role: run.role, content: run.blocks })
-      sources.set(digest, { digest, role: run.role, kind: 'transcript-prefix', sourceUuids: [...run.uuids], ordinal })
-    }
-    if (row.type === 'api-request') {
-      if (typeof row.id !== 'string') stale('Claude failed source request has no exact identity')
-      const hashes = claudeApiRequestHashes({ ...row, model: row.params?.model } as ClaudePublicRecord, requests, shapes, model)
-      snapshots.set(row.id, { ordinal, messages: new Map(hashes.flatMap(digest => sources.has(digest) ? [[digest, sources.get(digest)!] as const] : [])) })
-      requests.set(row.id, hashes)
-    }
-  }
-  return snapshots
+/** 在已绑定的原始历史上核对任务链和允许的续行，再读取实际模型消费来源。 */
+export function readClaudeApiSourceMetadata(path: string, sessionId: string, model: string, decoder = claudeHistoryReplay): Map<string, ClaudeApiRequestSourceMetadata> {
+  const source = readFileSync(path, 'utf8')
+  try {
+    const history = projectClaudeHistory(source, sessionId, decoder)
+    const original = history.find(row => row.type === 'user' && row.parentUuid === null)
+    if (!original) stale('Claude failed source index has no original user')
+    Array.from(checkClaudeHistoryChain(history, original))
+    const companions = claudeOutputLimitCompanions(history, original)
+    return decoder.projectClaudeApiSourceMetadata(source, sessionId, model, new Set(companions.keys()))
+  } catch (error) { claudeHistoryError(decoder, error, 'Claude native source history has not flushed its final record') }
 }
 
 /** 只读取专属 MCP 的实际派发名；原生不可用工具回复不能掩盖服务端派发的矛盾证据。 */
@@ -611,10 +578,9 @@ export function readClaudeApiMessageBlobs(history: readonly ClaudePublicRecord[]
 }
 
 /** 按已观察请求重建完整实际 API 输入，不以 tail 片段或未知 base 代替。 */
-export function claudeApiRequestHashes(row: ClaudePublicRecord, requests: ReadonlyMap<string, string[]>, shapes: ReadonlySet<string>, model: string): string[] {
-  const base = row.base ? requests.get(row.base) : []
-  if (!row.id || requests.has(row.id) || !row.shapeHash || !shapes.has(row.shapeHash) || !base || !Number.isSafeInteger(row.keep) || row.keep! < 0 || row.keep! > base.length || !Array.isArray(row.tail) || row.model !== model) stale('Claude API model, tools shape or request history boundary differs')
-  return [...base.slice(0, row.keep), ...row.tail]
+export function claudeApiRequestHashes(row: ClaudePublicRecord, requests: ReadonlyMap<string, string[]>, shapes: ReadonlySet<string>, model: string, decoder = claudeHistoryReplay): string[] {
+  try { return decoder.claudeApiRequestHashes(row, requests, shapes, model) }
+  catch (error) { claudeHistoryError(decoder, error) }
 }
 
 /** actual API 的每个工具回复只能引用此前已配对观察到的原公开回复。 */
