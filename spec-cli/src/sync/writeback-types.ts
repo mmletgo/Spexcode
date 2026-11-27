@@ -25,6 +25,11 @@ export type CodeBehaviorFinding = {
   originalIntent: string; sourceBehavior: string; deliveryBehavior: string; evidence: string
   counterexample: string; decision: string
 }
+export type CodeBehaviorCrossFreezeAuthorProof = {
+  version: 'code-behavior-cross-freeze-author-v1'
+  oldOperationId: string; oldAttemptId: string; oldPartitionId: string; oldResultRef: BlobRef
+  oldInputId: string; oldInputDigest: string; bindingRef: BlobRef; impactReviewRef: BlobRef
+}
 export type CodeBehaviorAnalysis = {
   version: 'code-behavior-v1'; inputId: string; baselinePairId: string | null; baselineSelectionDigest?: string
   guidanceContractVersion?: 'code-behavior-guidance-v8' | 'code-behavior-guidance-v9'
@@ -38,6 +43,7 @@ export type CodeBehaviorAnalysis = {
   newNodes: { nodeId: string; path: string; rawSource: string; codePath: string }[]
   resolutions: { path: string; content: string | null; mode: '100644' | '100755' | '120000' | null }[]
   reviewDiagnosticRef?: BlobRef
+  crossFreezeAuthor?: CodeBehaviorCrossFreezeAuthorProof
   partitionCoverage?: { planDigest: string; partitionIds: string[]; changedPaths: string[] }
   partitionEvidence?: { partitionId: string; changedPaths: string[]; analysisRef: BlobRef; analysis: CodeBehaviorAnalysis }[]
   traces: ElaborationTrace[]; reviewPassed: boolean

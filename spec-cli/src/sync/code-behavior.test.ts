@@ -8,8 +8,8 @@ import { join, posix } from 'node:path'
 import test from 'node:test'
 import { isHostPrivatePath } from './candidate.js'
 import { isUtf8Text } from './composition.js'
-import { analyzeCodeBehavior, CODE_BEHAVIOR_REVIEW_SCHEMA, CODE_BEHAVIOR_SCHEMA, deriveBehaviorAuthorization, packBehaviorBodies, readCodeBehaviorContext, referenceCodeBehaviorMetadata, type FrozenBehaviorBody } from './code-behavior.js'
-import type { CodeBehaviorInput, CodeBehaviorContinuation } from './code-behavior.js'
+import { analyzeCodeBehavior, CODE_BEHAVIOR_REVIEW_SCHEMA, CODE_BEHAVIOR_SCHEMA, CodeBehaviorReviewRepairError, deriveBehaviorAuthorization, packBehaviorBodies, readCodeBehaviorContext, referenceCodeBehaviorMetadata, type FrozenBehaviorBody } from './code-behavior.js'
+import type { CodeBehaviorInput, CodeBehaviorContinuation, CodeBehaviorCrossFreezeAuthor } from './code-behavior.js'
 import { behaviorMaterialTaskMatches, syncPlanDigest } from './coordinator.js'
 import { nativeWorktreeResult } from '../native-worktree-runtime.js'
 import { readStageDraft } from './stage-worktree.js'
@@ -3639,4 +3639,120 @@ test('P0 作者证据拒绝后沿原 Git 草稿修复，先验完再派独审', 
   const accepted = await analyzeCodeBehavior({ ...input, requestKey: 'author-evidence-retry' }, run, undefined, checkpoints)
   assert.equal(accepted.reviewPassed, true)
   assert.deepEqual(calls, ['code_behavior_analyze', 'code_behavior_analyze', 'code_behavior_review'])
+})
+
+test('P0 跨冻结重校验旧 Git 作者并独审当前输入，续审按真实失败原因推进', async t => {
+  const f = await fixture(t), sourcePath = 'src/export.js', testPath = 'tests/export.test.mjs'
+  writeFileSync(join(f.root, sourcePath), f.source + '\nexport function verifiedBoundary() { return true }\n')
+  git(f.root, 'add', sourcePath); git(f.root, 'commit', '-m', 'old freeze')
+  const initialInput = async (requestKey: string): Promise<CodeBehaviorInput> => {
+    const prepared = await f.input(), snapshot = await captureInputSnapshot(f.root, { committed: true })
+    return {
+      ...prepared, snapshot, baseline: null, composed: composeInputSnapshots(snapshot, null).composed!, origin: 'initial', requestKey,
+      contextTransport: 'git-json-v6', draftProtocol: 'code-behavior-draft-v1', authorEvidencePreflight: true,
+      partition: { id: 'cross-freeze-p0', changedPaths: [sourcePath], factSourcePaths: [sourcePath] },
+      plan: { ...prepared.plan, agentWorkflow: 'native-worktree-v1' },
+    }
+  }
+  const oldInput = await initialInput('old-attempt'), commonDir = oldInput.snapshot.source.commonDir
+  const fact = { source: `code:${sourcePath}#verifiedBoundary`, text: '已冻结的边界返回导出许可' }
+  const calls: ElaborationSessionRequest[] = []
+  const results = new Map<string, { request: ElaborationSessionRequest; result: Awaited<ReturnType<ElaborationRunner>> }>()
+  let outcome: 'accept' | 'coverage' | 'identity' | 'repair' = 'accept'
+  const run: ElaborationRunner = async request => {
+    calls.push(request)
+    const { task, pendingAnalysis } = readCodeBehaviorContext(request, commonDir), paths = task.requiredChangedPaths as string[]
+    const seed = request.worktree!, path = /草稿文件=([^\s；]+)/.exec(request.prompt)![1], workspace = join(f.root, '..', `cross-freeze-p0-${calls.length}`)
+    git(f.root, 'worktree', 'add', '--detach', workspace, seed.baseCommit)
+    const output = pendingAnalysis
+      ? { inputDigest: request.inputDigest, analysisDigest: pendingAnalysis.analysisDigest,
+        checkedPaths: outcome === 'coverage' ? [] : paths, checkedChangeIds: pendingAnalysis.analysis.changes.map(change => change.id),
+        verdict: outcome === 'repair' ? 'repair' : 'accept',
+        findings: outcome === 'repair' ? [{ message: '需明确导出边界', evidence: sourcePath, counterexample: '重复导出' }] : [] }
+      : { changes: paths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: ['RULE-EXPORT-05'], ruleIds: ['RULE-EXPORT-05'],
+        originalIntent: '保留原导出行为', previousBehavior: '原导出结果', sourceBehavior: '原导出结果', deliveryBehavior: '原导出结果',
+        evidence: `冻结事实 [[fact:${fact.source}]]`, counterexample: '不得重复发布' })), facts: [fact], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    mkdirSync(join(workspace, path, '..'), { recursive: true }); writeFileSync(join(workspace, path), JSON.stringify(output))
+    git(workspace, 'add', path); git(workspace, 'commit', '-m', 'P0 fixture draft')
+    const receipt = { summary: '已提交草稿' }
+    const repeatedAuthor = outcome === 'identity' ? results.get('old-attempt:code_behavior_analyze')!.result : undefined
+    const result = { sessionId: repeatedAuthor?.sessionId ?? `session-${calls.length}`, threadId: repeatedAuthor?.threadId ?? `thread-${calls.length}`,
+      turnId: 'turn', output: receipt, resultDigest: contentHash(JSON.stringify(receipt)), worktree: nativeWorktreeResult(workspace, seed) }
+    results.set(request.requestKey, { request, result })
+    return result
+  }
+  let checkpoint: CodeBehaviorContinuation | null = null
+  const checkpoints = {
+    load: (): CodeBehaviorContinuation | null => checkpoint,
+    save: (value: CodeBehaviorContinuation) => { checkpoint = structuredClone(value) },
+    replayDraft: (key: string) => results.get(key) ?? null,
+  }
+  const old = await analyzeCodeBehavior(oldInput, run, undefined, checkpoints), original = checkpoints.load()!
+  const draft = original.drafts.code_behavior_analyze!, oldBytes = readStageDraft(commonDir, draft, draft)
+  const prior: CodeBehaviorCrossFreezeAuthor = {
+    draft, trace: original.readyAnalysis!.trace,
+    proof: { version: 'code-behavior-cross-freeze-author-v1', oldOperationId: 'old-op', oldAttemptId: 'old-attempt', oldPartitionId: oldInput.partition!.id,
+      oldResultRef: writeEvidence(commonDir, old), oldInputId: old.inputId, oldInputDigest: old.inputDigest,
+      bindingRef: writeEvidence(commonDir, { fixture: 'binding' }), impactReviewRef: writeEvidence(commonDir, { fixture: 'impact' }) },
+  }
+  writeFileSync(join(f.root, testPath), readFileSync(join(f.root, testPath), 'utf8') + '\n// later frozen commit\n')
+  git(f.root, 'add', testPath); git(f.root, 'commit', '-m', 'current freeze')
+  const current = await initialInput('current-attempt'), preflight = await analyzeCodeBehavior(current, null)
+  const reuse = { ...checkpoints, loadCrossFreezeAuthor: async () => structuredClone(prior) }
+  assert.notEqual(preflight.inputDigest, old.inputDigest)
+  checkpoint = null
+  const narrowedSchema = { ...current, plan: { ...current.plan, readPaths: [sourcePath, testPath] } }
+  assert.notEqual((await analyzeCodeBehavior(narrowedSchema, null)).binding.analysisSchemaDigest, draft.schemaDigest)
+  await assert.rejects(analyzeCodeBehavior(narrowedSchema, run, undefined, reuse), { code: 'behavior_cross_freeze_author_rejected' })
+  for (const changedPartition of [
+    { ...current.partition!, changedPaths: [sourcePath, testPath] },
+    { ...current.partition!, changedPaths: [testPath] },
+    { ...current.partition!, factSourcePaths: [] },
+  ]) {
+    await assert.rejects(analyzeCodeBehavior({ ...current, partition: changedPartition }, run, undefined, reuse), { code: 'behavior_cross_freeze_author_rejected' })
+    assert.equal(checkpoints.load(), null)
+  }
+  assert.deepEqual(calls.map(call => call.purpose), ['code_behavior_analyze', 'code_behavior_review'])
+  outcome = 'coverage'
+  await assert.rejects(analyzeCodeBehavior(current, run, undefined, reuse), { code: 'behavior_review_failed' })
+  assert.deepEqual(checkpoints.load()?.crossFreezeAuthor, prior.proof)
+  assert.equal(checkpoints.load()?.crossFreezeAuthorReviewRepair, undefined)
+  assert.equal(checkpoints.load()?.drafts.code_behavior_analyze, undefined)
+  assert.equal(checkpoints.load()?.readyAnalysis, undefined)
+  const rejected = checkpoints.load()!
+  checkpoint = { ...rejected, crossFreezeAuthor: { ...prior.proof, oldAttemptId: 'forged-attempt' } }
+  await assert.rejects(analyzeCodeBehavior(current, run, undefined, reuse), { code: 'behavior_continuation_binding' })
+  checkpoint = rejected
+  await assert.rejects(analyzeCodeBehavior(current, run, undefined, reuse), { code: 'behavior_review_failed' })
+  assert.equal(calls.length, 3)
+  outcome = 'accept'
+  const approved = await analyzeCodeBehavior({ ...current, requestKey: 'current-review-retry' }, run, undefined, {
+    ...reuse,
+    async loadCrossFreezeAuthor(inputDigest, binding) {
+      assert.deepEqual({ inputDigest, binding }, preflight)
+      return structuredClone(prior)
+    },
+  })
+  assert.equal(approved.reviewPassed, true)
+  assert.deepEqual(approved.crossFreezeAuthor, prior.proof)
+  assert.deepEqual(approved.traces[0], old.traces[0])
+  assert.equal(approved.traces[1].inputDigest, preflight.inputDigest)
+  assert.notEqual(approved.traces[1].sessionId, old.traces[0].sessionId)
+  assert.notEqual(approved.traces[1].threadId, old.traces[0].threadId)
+  assert.deepEqual(readCodeBehaviorContext(calls[3], commonDir).pendingAnalysis, readCodeBehaviorContext(calls[2], commonDir).pendingAnalysis)
+  assert.equal(readStageDraft(commonDir, draft, draft), oldBytes)
+  assert.deepEqual(original.readyAnalysis?.trace, prior.trace)
+
+  checkpoint = null
+  outcome = 'identity'
+  await assert.rejects(analyzeCodeBehavior({ ...current, requestKey: 'current-repeated-identity' }, run, undefined, reuse), { code: 'behavior_analysis_invalid' })
+  assert.equal(checkpoints.load()?.crossFreezeAuthorReviewRepair, undefined)
+
+  checkpoint = null
+  outcome = 'repair'
+  const businessRepair = { ...current, requestKey: 'current-business-repair' }
+  await assert.rejects(analyzeCodeBehavior(businessRepair, run, undefined, reuse), CodeBehaviorReviewRepairError)
+  assert.equal(checkpoints.load()?.crossFreezeAuthorReviewRepair, true)
+  await assert.rejects(analyzeCodeBehavior(businessRepair, run, undefined, reuse), CodeBehaviorReviewRepairError)
+  assert.deepEqual(calls.map(call => call.purpose), ['code_behavior_analyze', ...Array(5).fill('code_behavior_review')])
 })

@@ -19,6 +19,10 @@ related:
 
 原生 P0 的已校验分析经协调器认证可在正式重试中作为待审材料承接。分析阶段用本轮同一 schema 与程序门重校原作者 Git 稿，保留原 trace，按同一待审分析生成新的独审请求。新独审与原作者的会话及线程须独立。合法业务 repair 清除已校验资格，对同一稿件继续分析及独审。只有经过身份、覆盖、变更 ID 及裁决一致性校验后返回的业务 repair 才通知 [[sync-partition-execution]] 继续其他分区。保留原失败代码和诊断，审查绑定错误没有此调度资格。
 
+正式 initial 的 Native P0 分区经 [[cross-freeze-binding]] 固定来源并取得 [[cross-freeze-impact-review]] 的复用结论后，可从协调器读取认证的旧 Git 作者稿。原稿以旧输入、分区、schema 和 Git 对象读取，再通过当前冻结输入的 schema、精确变化路径、事实证据、归属和业务授权校验。当前程序从原提案和当前冻结证据推导待审分析，保持旧提案、授权及作者 trace 原件。原提案不适用时，调用方可据明确类别启动当前作者。通过程序门后跳过作者派发，仍用当前输入摘要、完整范围、待审分析和独立会话派发正式 P0 独审。
+
+当前续审每次重新认证同一跨冻结证明，独审仍绑同一待审摘要。当前 attempt 的已完成独审沿原 Native 请求和 Git 回执重放。格式、身份或覆盖拒绝沿同稿继续独审，只有已通过上述门禁的业务 repair 标记后续正式 attempt 转入当前作者返修。保留真实独审失败及原再派发规则。
+
 P0 的唯一模型计划投影排除仅供全图封口的 contextVerifications 和 [[sync-historical-coverage]] 证明；局部分析和独审仍只接收本轮原 verifications 与 mandatoryTests，不取得历史未执行许可。完整可信计划继续参与 policyDigest，不删改 planBlob 或从实时配置补写旧缺席。
 
 loadMaterial可返回异步材料，派发前await既有停止材料认证与正式归档checkout的临时恢复/观察/回收；恢复不启动Native。空材料按原逻辑继续，原Git/JSON字节与errors/repairDiagnostics不变，不能把关闭目录变成清空原稿的理由；原真实性、schema、保护面和批准门保持。
