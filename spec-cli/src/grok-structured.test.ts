@@ -92,7 +92,7 @@ if (acp) {
       const requestId = params._meta.promptId
       assert.match(requestId, /^[0-9a-f-]{36}$/)
       assert.deepEqual(params._meta.outputSchema, ${JSON.stringify(schema)})
-      writeFileSync(join(process.env.TMPDIR, '..', 'fixture-started.json'), JSON.stringify({ args, requestId, prompt: params.prompt[0].text }), { flag: 'wx' })
+      writeFileSync(join(process.env.TMPDIR, '..', 'fixture-started.json'), JSON.stringify({ args, requestId, prompt: params.prompt[0].text, traceUpload: process.env.GROK_TELEMETRY_TRACE_UPLOAD }), { flag: 'wx' })
       if (scenario === 'acp-quota') {
         quota()
         return
@@ -115,7 +115,10 @@ const option = key => args[args.indexOf(key) + 1]
 const cwd = option('--cwd'), sessionId = option('--session-id'), promptFile = option('--prompt-file')
 assert.equal(option('--output-format'), 'streaming-json')
 assert.equal(option('--permission-mode'), scenario === 'read' ? 'plan' : 'bypassPermissions')
-if (scenario === 'read') assert.equal(option('--disallowed-tools'), 'enter_plan_mode,exit_plan_mode')
+if (scenario === 'read') {
+  assert.equal(option('--disallowed-tools'), 'enter_plan_mode,exit_plan_mode')
+  assert.equal(process.env.GROK_TELEMETRY_TRACE_UPLOAD, 'false')
+}
 assert.equal(cwd, process.cwd())
 assert.match(sessionId, /^[0-9a-f-]{36}$/)
 assert.equal(process.env.TMPDIR, join(dirname(promptFile), 'tmp'))
@@ -391,6 +394,7 @@ test('Grok ACP edits bind the original Git result and replay after natural zero 
   const plan = JSON.parse(readFileSync(join(f.sessionRoot, 'plan.json'), 'utf8'))
   const start = JSON.parse(readFileSync(f.started, 'utf8'))
   assert.equal(start.prompt, readFileSync(join(f.sessionRoot, 'prompt.txt'), 'utf8'))
+  assert.equal(start.traceUpload, process.env.GROK_TELEMETRY_TRACE_UPLOAD)
   assert.deepEqual(plan.acp, { version: 1, promptId: start.requestId })
   assert.equal(result.threadId, plan.sessionId)
   assert.equal(result.turnId, plan.acp.promptId)
