@@ -42,7 +42,7 @@ import { freezeDeliveryRuntime } from './runtime-freeze.js'
 import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence } from './snapshot.js'
 import { readCodeBehaviorContext } from './code-behavior.js'
 import { createAttemptRunner, type NativeRunCheckpoint, type NativeRunPlan, type NativeRunRecord } from './native-run.js'
-import { SyncStore } from './store.js'
+import { SyncStore, SyncStoreError } from './store.js'
 import { recoverSessionCreateTermination, readSessionCreateTermination, sessionIdForCreateKey, closeSession } from '../sessions.js'
 import { configuredSessionApplication, withoutSessionApplicationExecutionWake } from '../session-application.js'
 import { readRecord, writeRecord } from '../session-record.js'
@@ -11298,6 +11298,130 @@ for (const mode of ['analysis', 'review-execution', 'review-format', 'review-the
   }
   assert.equal(store.listRecoverableResources().length, 0)
   assert.deepEqual(JSON.parse(readEvidence(commonDir, carried.find(stage => stage.stage === `${key}:provenance`)!.resultRef).toString()), { fromOperationId: old.id, fromAttemptId: prior.id, resultRef: accepted.resultRef })
+})
+
+test('Native P0同次尝试冷重进回放结算作者稿并保留独立批准', async t => {
+  const importPath = '.spec/project/import-contract/spec.md'
+  const importSpec = original.replaceAll('export-job', 'import-job').replaceAll('EXPORT', 'IMPORT').replaceAll('export-contract', 'import-contract').replaceAll('src/export.js', 'src/import.js').replaceAll('tests/export.test.mjs', 'tests/import.test.mjs')
+  const f = await fixture(t, { maxAttempts: 2, maxCalls: 12, maxRepairs: 1, timeoutMs: 120_000 }, false, original, 'project', original, {
+    version: 'sync-coordinator-v2', direction: 'code_to_spec', agentWorkflow: 'native-worktree-v1', sourcePaths: ['src'], writePaths: ['.spec'],
+    targets: [{ nodeId: 'export-contract', path: contractPath }, { nodeId: 'import-contract', path: importPath }],
+    partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 32768, maxParallel: 1 }, commitTrigger: { before: null, paths: ['src/export.js', 'src/import.js'] },
+  }, undefined, 'code', 'claude:default', true, { [importPath]: importSpec, 'src/import.js': 'export class ImportService {}\n', 'tests/import.test.mjs': 'import assert from "node:assert/strict"\n' })
+  const commonDir = f.input.source.commonDir, operationId = f.operation.id
+  const cwd = process.cwd()
+  process.chdir(f.root)
+  t.after(() => process.chdir(cwd))
+  const nativeCalls: { key: string; purpose: string }[] = []
+  const canonicalReads = new Set<string>()
+  let rejectedBytes: Buffer | undefined
+  f.options.runner = undefined
+  f.options.nativeExecution = { pollMs: 2, runtime: { readRecord: id => { canonicalReads.add(id); return readRecord(id) }, cancel: async () => assert.fail('夹具禁止真实代理控制'), run: async request => {
+    nativeCalls.push({ key: request.requestKey, purpose: request.purpose })
+    const { task, pendingAnalysis } = readCodeBehaviorContext(request, commonDir)
+    const changedPaths = task.requiredChangedPaths as string[]
+    if (nativeCalls.length === 4) {
+      assert.equal(request.purpose, 'code_behavior_analyze')
+      const path = /草稿文件=([^\s；]+)/.exec(request.prompt)![1]
+      const seedDraft = readTree(commonDir, request.worktree!.tree).find(entry => entry.path === path)!
+      assert.deepEqual(readObject(commonDir, seedDraft.oid), rejectedBytes)
+      assert.match(request.prompt, /原草稿的证据预检问题.*导入异常与首个失败位置.*\/changes\/0\/counterexample/)
+    }
+    const workspace = join(f.parent, 'native-p0-' + nativeCalls.length)
+    const draft = pendingAnalysis ? { inputDigest: request.inputDigest, analysisDigest: pendingAnalysis.analysisDigest, verdict: 'accept',
+      checkedPaths: changedPaths, checkedChangeIds: pendingAnalysis.analysis.changes.map(change => change.id), findings: [] }
+      : { changes: changedPaths.map(path => {
+        const rule = path === 'src/import.js' ? 'RULE-IMPORT-05' : 'RULE-EXPORT-05'
+        return { kind: 'refactor', paths: [path], affectedIds: [rule], ruleIds: [rule], originalIntent: '保留原业务', previousBehavior: '原行为',
+          sourceBehavior: '原行为', deliveryBehavior: '原行为', evidence: path,
+          counterexample: nativeCalls.length === 3 ? 'import example.route 首个失败点是 route.py:7，抛 ImportError' : '保留原权限' }
+      }), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    const worktree = committedDraftFixture(f, request, draft, workspace)
+    const seed = request.worktree!, createKey = request.sessionCreateKey!, session = sessionIdForCreateKey(createKey)
+    const identity = { threadId: 'fixture-' + session, turnId: 'turn' }
+    const branch = 'codex/fixture-same-p0-' + session, execution = structuredExecutionPolicy(request)
+    f.git('-C', workspace, 'switch', '-c', branch)
+    const prompt = nativeWorktreePrompt(request.prompt, seed), output = { summary: '作者或独审已提交' }, resultDigest = contentHash(JSON.stringify(output))
+    configuredSessionApplication().createSession({ sessionId: session, status: 'awaiting' })
+    writeRecord({ session, governed: true, worktreePath: workspace, base: seed.baseCommit, forkCommit: seed.baseCommit, branch, title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(), harness: 'claude', harnessSessionId: identity.threadId, runtimeStartToken: null, status: 'awaiting', stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: null, launchOwner: null,
+      createRequestId: contentHash(createKey), createPayloadHash: contentHash(JSON.stringify({ prompt, parent: null, launcher: null, base: seed.baseCommit, structuredExecution: execution })),
+      structuredExecution: { ...execution, ...identity, state: 'completed', output, resultDigest, resultWorktree: worktree },
+    })
+    return { sessionId: session, ...identity, output, resultDigest, worktree }
+  } } }
+  const failures: string[] = []
+  const interrupted = new SyncStoreError('SYNC_FENCE_EXPIRED', '夹具在作者拒绝已持久化、尝试失败未结算处模拟协调器退出')
+  const interruptBeforeSettlement = (store: SyncStore) => {
+    store.recordFailure = (_fence, issue) => {
+      failures.push(issue.code)
+      throw interrupted
+    }
+  }
+  interruptBeforeSettlement(f.store)
+  const first = await runSyncOperation(f.store, operationId, f.options)
+  assert.equal(first.status, 'recovery_required', JSON.stringify(first.failure))
+  assert.deepEqual(failures, ['behavior_author_evidence_invalid'])
+  const [attempt] = f.store.listAttempts(operationId)
+  assert.equal(attempt.status, 'running')
+  assert.deepEqual(nativeCalls.map(call => call.purpose), ['code_behavior_analyze', 'code_behavior_review', 'code_behavior_analyze'])
+  const originalResources = f.store.listResources(attempt.id)
+  assert.equal(originalResources.length, 3)
+  assert.ok(originalResources.every(resource => resource.phase === 'removed'))
+  const stages = (store: SyncStore) => readSyncCheckpointStageIndex(store, store.readOperation(operationId), store.readAttempt(attempt.id)).json.map(item => item.value as { stage: string; resultRef: BlobRef })
+  const originalStages = stages(f.store), approved = originalStages.find(stage => /^partition:[^:]+:analysis$/.test(stage.stage))!
+  const rejected = originalStages.find(stage => stage.stage === 'partition:analysis-failures')!
+  assert.ok(approved)
+  assert.ok(rejected)
+  const rejectedResource = originalResources.find(resource => resource.plan.key === nativeCalls[2].key)!
+  const originalRequest = JSON.parse(readEvidence(commonDir, rejectedResource.plan.planBlob).toString()) as NativeRunPlan
+  const originalResult = JSON.parse(readEvidence(commonDir, rejectedResource.checkpointRef).toString()) as NativeRunCheckpoint
+  const draftPath = /草稿文件=([^\s；]+)/.exec(originalRequest.request.prompt)![1]
+  assert.equal(readTree(commonDir, originalRequest.request.worktree!.tree).some(entry => entry.path === draftPath), false)
+  rejectedBytes = readObject(commonDir, readTree(commonDir, originalResult.result!.worktree!.tree).find(entry => entry.path === draftPath)!.oid)
+  assert.equal(readRecord(originalRequest.expectedSessionId)?.archived, true)
+  f.closeForRestart()
+  const statuses: string[] = []
+  for (let ordinal = 1; ordinal <= 2; ordinal++) {
+    const protocol = openProtocol(join(f.parent, 'sync.sqlite'))
+    try {
+      const store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) })
+      interruptBeforeSettlement(store)
+      canonicalReads.clear()
+      const outcome = await runSyncOperation(store, operationId, f.options).catch((error: unknown) => {
+        assert.equal(error, interrupted)
+        return null
+      })
+      t.diagnostic(JSON.stringify({ reentry: ordinal, failure: failures.at(-1), nativeCalls: nativeCalls.length, attemptId: attempt.id }))
+      statuses.push(outcome?.status ?? 'uncaught')
+      assert.ok(canonicalReads.has(originalRequest.expectedSessionId))
+      assert.deepEqual(store.readAttempt(attempt.id).dispatchPlans, attempt.dispatchPlans)
+      assert.deepEqual(store.listResources(attempt.id), originalResources)
+      assert.equal(store.readOperation(operationId).callsUsed, 3)
+      assert.equal(store.listAttempts(operationId).length, 1)
+      assert.deepEqual(stages(store).filter(stage => stage.stage === approved.stage).at(-1), approved)
+      assert.deepEqual(stages(store).filter(stage => stage.stage === rejected.stage).at(-1)?.resultRef, rejected.resultRef)
+    } finally { protocol.close() }
+  }
+  assert.deepEqual(failures, Array(3).fill('behavior_author_evidence_invalid'))
+  assert.deepEqual(statuses, Array(2).fill('recovery_required'))
+  assert.equal(nativeCalls.length, 3)
+  const protocol = openProtocol(join(f.parent, 'sync.sqlite'))
+  t.after(() => protocol.close())
+  const store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) })
+  assert.equal(store.requestControl(operationId, 'pause').phase, 'paused')
+  assert.equal(store.requestControl(operationId, 'run').phase, 'queued')
+  store.startElaboration = () => { throw new StructuredSessionError('unsupported', '已完成 P0，夹具停止于 P1 入口') }
+  const repaired = await runSyncOperation(store, operationId, f.options)
+  assert.equal(repaired.failure?.message, '已完成 P0，夹具停止于 P1 入口', JSON.stringify(repaired.failure))
+  const [, next] = store.listAttempts(operationId)
+  assert.deepEqual(nativeCalls.slice(3), [
+    { key: nativeCalls[2].key.replace(attempt.id, next.id), purpose: 'code_behavior_analyze' },
+    { key: nativeCalls[2].key.replace(attempt.id, next.id).replace('code_behavior_analyze', 'code_behavior_review'), purpose: 'code_behavior_review' },
+  ])
+  assert.equal(store.readOperation(operationId).callsUsed, 5)
+  assert.deepEqual(store.listResources(attempt.id), originalResources)
+  assert.equal(store.listJournals(operationId).length, 0)
+  t.diagnostic(JSON.stringify({ newAttempt: next.id, nativeCalls: nativeCalls.slice(3).map(call => call.purpose), originalResourcesUnchanged: true }))
 })
 
 // A1格式拒绝、A2局部accept但兄弟再失败、A3只续失败兄弟；不能把跨attempt的原analyze trace丢掉。

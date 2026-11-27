@@ -6,7 +6,7 @@ import { posix } from 'node:path'
 import { parseCodeEntry, parseRelation, relationClaimsPath } from '@spexcode/spec-core'
 import { syncModel } from './model-selection.js'
 import { dependencyClosure, parseContract, parseFrontmatter, parseParts, type ContractFinding, type ContractItem } from '@spexcode/spec-core/contracts'
-import type { AuthorizedContractChange, ElaborationDraft, ElaborationDraftMaterial, ElaborationSessionRequest, ElaborationRunner, ElaborationTrace } from './elaboration-types.js'
+import type { AuthorizedContractChange, ElaborationDraft, ElaborationDraftMaterial, ElaborationSessionRequest, ElaborationSessionResult, ElaborationRunner, ElaborationTrace } from './elaboration-types.js'
 import { outputErrors } from './elaboration-schema.js'
 import { actualTreeDiff, isHostPrivatePath } from './candidate.js'
 import { adoptedDeliveryPaths, isUtf8Text, mergeText, readCompositionEvidence, type IntentObject, type IntentResidual, type SelectedCompositionEvidence } from './composition.js'
@@ -97,7 +97,13 @@ export function codeBehaviorContinuationStatus(continuation: CodeBehaviorContinu
 
 export type CodeBehaviorReviewReference = { commit: string; path: string }
 export type CodeBehaviorMaterialRequest = Pick<ElaborationSessionRequest, 'prompt' | 'worktree'> & { previousInstructions?: string }
-export type CodeBehaviorCheckpoints = { loadReviewFeedback?(inputDigest: string): CodeBehaviorReviewReference | null; loadMaterial?(purpose: BehaviorPurpose, schemaDigest: string, inputDigest: string, request: CodeBehaviorMaterialRequest, existingDraft?: ElaborationDraft): ElaborationDraftMaterial | null | Promise<ElaborationDraftMaterial | null>; load(inputDigest: string, analysisSchemaDigest: string): CodeBehaviorContinuation | null; save(value: CodeBehaviorContinuation): void }
+export type CodeBehaviorCheckpoints = {
+  replayDraft?(requestKey: string, purpose: BehaviorPurpose, draft: ElaborationDraft): { request: ElaborationSessionRequest; result: ElaborationSessionResult } | null
+  loadReviewFeedback?(inputDigest: string): CodeBehaviorReviewReference | null
+  loadMaterial?(purpose: BehaviorPurpose, schemaDigest: string, inputDigest: string, request: CodeBehaviorMaterialRequest, existingDraft?: ElaborationDraft): ElaborationDraftMaterial | null | Promise<ElaborationDraftMaterial | null>
+  load(inputDigest: string, analysisSchemaDigest: string): CodeBehaviorContinuation | null
+  save(value: CodeBehaviorContinuation): void
+}
 type Proposal = { changes: Omit<CodeBehaviorChange, 'id'>[]; facts: CodeBehaviorAnalysis['facts']; acceptanceChanges: Omit<AcceptanceChangeProposal, 'action'>[]; newNodes: { codePath: string; parentNodeId: string; basis: string }[]; resolutions: CodeBehaviorAnalysis['resolutions'] }
 export type CodeBehaviorContext = {
   task: Record<string, unknown>
@@ -697,24 +703,24 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     const binding: StageDraftBinding = { ownerDigest, sourceInputId: input.snapshot.id, schemaDigest: contentHash(JSON.stringify(schema)), path: `.spex-sync-drafts/${ownerDigest}.json` }
     const prior = continuation?.drafts[purpose]
     if (prior && (prior.ownerDigest !== ownerDigest || prior.path !== binding.path || prior.schemaDigest !== binding.schemaDigest)) throw new Error('P0草稿owner/schema与当前阶段不匹配')
-    const material = draftMode && (purpose !== 'code_behavior_analyze' || !continuation?.readyAnalysis) ? await checkpoints?.loadMaterial?.(purpose, binding.schemaDigest, inputDigest, { prompt, worktree: base, previousInstructions }, prior) : undefined
-    const source = material?.source ?? (prior ? readStageDraft(commonDir, prior, binding) : undefined)
     if (purpose === 'code_behavior_analyze' && continuation?.readyAnalysis) {
       const ready = continuation.readyAnalysis, trace = ready.trace
-      if (!prior || source === undefined || ready.draftOid !== prior.oid || ready.resultCommit !== prior.resultCommit || prior.errors.length || trace.purpose !== purpose || trace.inputDigest !== inputDigest || !trace.sessionId || !trace.threadId || !trace.turnId) throw new Error('P0已校验分析缺少原草稿及真实trace')
-      const output: unknown = JSON.parse(source)
+      if (!prior || ready.draftOid !== prior.oid || ready.resultCommit !== prior.resultCommit || prior.errors.length || trace.purpose !== purpose || trace.inputDigest !== inputDigest || !trace.sessionId || !trace.threadId || !trace.turnId) throw new Error('P0已校验分析缺少原草稿及真实trace')
+      const output: unknown = JSON.parse(readStageDraft(commonDir, prior, binding))
       if (outputErrors(output, schema).length) throw new Error('P0已校验分析草稿不符合当前schema')
       analysisRequest = { requestRef: ready.requestRef, receipt: ready.receipt }
       diagnostic.proposal = output; traces.push(trace)
       return output
     }
-    const reviewFeedback = statusOnly && purpose === 'code_behavior_analyze' ? checkpoints?.loadReviewFeedback?.(inputDigest) : undefined
     if (continuation && purpose === 'code_behavior_analyze') {
       delete continuation.drafts.code_behavior_review
       delete continuation.reviewResult
       delete continuation.readyAnalysis
       delete continuation.challengedAnalysisDigest
     }
+    const requestKey = `${input.requestKey}:${purpose}`
+    const material = draftMode ? await checkpoints?.loadMaterial?.(purpose, binding.schemaDigest, inputDigest, { prompt, worktree: base, previousInstructions }, prior) : undefined
+    const replay = input.contextTransport === 'git-json-v6' && prior?.sourceInputId === input.snapshot.id ? checkpoints?.replayDraft?.(requestKey, purpose, prior) : null
     const repairErrors = statusOnly ? [] : material?.errors ?? prior?.errors ?? continuation?.errors?.[purpose] ?? []
     const repairDiagnostics = statusOnly ? [] : material?.repairDiagnostics ? [...new Map([...material.repairDiagnostics, ...input.repairDiagnostics ?? []].map(item => [JSON.stringify(item), item])).values()] : input.repairDiagnostics ?? []
     const contextPath = binding.path.replace(/\.json$/, '.context.json')
@@ -728,9 +734,65 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
       repairDiagnostics, errors: repairErrors,
       ...(acceptancePreflight ? { readonlyUnchangedAcceptanceSources: [...validRuleIds].flatMap(id => unchangedReadonlyAcceptanceBasis(id)) } : {}),
     }) : undefined
+    const contextPointer = contextSource === undefined ? undefined : JSON.stringify({ contextTransport: input.contextTransport, path: contextPath, sha256: contentHash(contextSource), inputDigest })
+    const consumeResult = (request: ElaborationSessionRequest, result: ElaborationSessionResult): unknown => {
+      if (signal?.aborted) throw Object.assign(new Error('行为分析结果已停止'), { code: 'cancelled' })
+      if (!result.sessionId || !result.threadId || !result.turnId || result.resultDigest !== contentHash(JSON.stringify(result.output))) reject('行为分析native身份/输出摘要不匹配')
+      let output: unknown = structuredClone(result.output)
+      if (draftMode) {
+        let draft: ElaborationDraft
+        try { draft = captureStageDraft(commonDir, request.worktree!, result, binding) }
+        catch (error) {
+          if (purpose !== 'code_behavior_analyze' || !(error instanceof StageDraftCommitMissingError) || outputErrors(result.output, DRAFT_RECEIPT_SCHEMA).length) throw error
+          throw Object.assign(error, { code: CODE_BEHAVIOR_DRAFT_COMMIT_MISSING, message: 'P0 分析没有在冻结 seed 之后新增草稿提交' })
+        }
+        continuation!.drafts[purpose] = draft; delete continuation!.errors?.[purpose]; persist()
+        if (outputErrors(result.output, DRAFT_RECEIPT_SCHEMA).length) reject('Native草稿summary回执不符合schema')
+        try { output = JSON.parse(readStageDraft(commonDir, draft, binding)) as unknown }
+        catch (error) {
+          if (!(error instanceof SyntaxError)) throw error
+          draft.errors = [{ code: 'behavior_output_json', message: error.message }]; persist(); reject(error.message, {}, 'behavior_output_json')
+        }
+      }
+      if (purpose === 'code_behavior_review') diagnostic.review = output
+      else diagnostic.proposal = output
+      const errors = outputErrors(output, !draftMode && purpose === 'code_behavior_review' ? CODE_BEHAVIOR_REVIEW_SCHEMA : schema)
+      if (errors.length) {
+        if (draftMode) { continuation!.drafts[purpose]!.errors = errors.map(message => ({ code: 'behavior_output_schema', message })); persist() }
+        reject(errors.join('; '), {}, draftMode ? 'behavior_output_schema' : 'behavior_analysis_invalid')
+      }
+      if (draftMode && purpose === 'code_behavior_analyze') { const { signal: _signal, ...payload } = request; analysisRequest = { requestRef: writeEvidence(commonDir, payload), receipt: result.output } }
+      const trace = { purpose, sessionId: result.sessionId, threadId: result.threadId, turnId: result.turnId, inputDigest, resultDigest: result.resultDigest }
+      traces.push(trace)
+      if (draftMode && purpose === 'code_behavior_review') {
+        const { signal: _signal, ...payload } = request, draft = continuation!.drafts[purpose]!
+        continuation!.reviewResult = { trace, draftOid: draft.oid, resultCommit: draft.resultCommit, requestRef: writeEvidence(commonDir, payload), receipt: result.output }; persist()
+      }
+      turns.set(purpose, { threadId: result.threadId, turnId: result.turnId, proof: result.frozenReadProof })
+      return output
+    }
+    if (replay) {
+      const original = replay.request, seed = original.worktree!
+      const originalPointer = original.prompt.split('\n任务:\n')[1]?.split('\n草稿文件=', 1)[0]
+      const overlayPaths = [binding.path, contextPath, binding.path.replace(/\.json$/, '.schema.json')]
+      const seedEntries = readTree(commonDir, seed.tree, undefined, trees)
+      if (original.root !== input.snapshot.source.canonicalRoot || original.base !== seed.baseCommit || original.inputDigest !== inputDigest
+        || originalPointer !== contextPointer || JSON.stringify(original.schema) !== JSON.stringify(DRAFT_RECEIPT_SCHEMA)
+        || material && !seedEntries.some(entry => entry.path === binding.path && entry.mode === '100644' && entry.digest === contentHash(material.source))
+        || objectGit(commonDir, ['rev-parse', `${seed.baseCommit}^@`]).toString().trim() !== input.snapshot.headCommit
+        || actualTreeDiff(readTree(commonDir, base!.tree, undefined, trees), seedEntries).some(change => !overlayPaths.includes(change.path))) {
+        throw Object.assign(new Error('P0 回放原请求与当前冻结任务、schema 或 Git seed 不匹配'), { code: 'behavior_continuation_binding' })
+      }
+      readCodeBehaviorContext(original, commonDir)
+      readStageDraft(commonDir, prior!, binding)
+      return consumeResult({ root: original.root, base: original.base, worktree: seed, requestKey, inputDigest, purpose, prompt: original.prompt,
+        schema: original.schema, timeoutMs: original.timeoutMs, signal, model: syncModel(input), effort: 'high' }, replay.result)
+    }
+    const source = material?.source ?? (prior ? readStageDraft(commonDir, prior, binding) : undefined)
+    const reviewFeedback = statusOnly && purpose === 'code_behavior_analyze' ? checkpoints?.loadReviewFeedback?.(inputDigest) : undefined
     const seed = draftMode ? stageWorktree(commonDir, input.snapshot.headCommit, overlayStageTree(commonDir, base!.tree, [{ path: binding.path.replace(/\.json$/, '.schema.json'), source: JSON.stringify(schema) }, ...(source === undefined ? [] : [{ path: binding.path, source }]), ...(contextSource === undefined ? [] : [{ path: contextPath, source: contextSource }])]), 'edit') : base
-    if (contextSource !== undefined) {
-      prompt = prompt.replace(`\n任务:\n${context}`, `\n任务:\n${JSON.stringify({ contextTransport: input.contextTransport, path: contextPath, sha256: contentHash(contextSource), inputDigest })}`)
+    if (contextPointer !== undefined) {
+      prompt = prompt.replace(`\n任务:\n${context}`, `\n任务:\n${contextPointer}`)
       if (pendingAnalysis) prompt = prompt.replace(`\n待审分析:\n${JSON.stringify(pendingAnalysis)}`, '')
     }
     if (draftMode) prompt += `\n草稿文件=${binding.path}；${material ? material.sourceKind === 'physical_draft' ? '已认证停止的旧工作树中明确未批准的物理草稿已按原字节复制到当前seed；它未提交，不是历史Git稿、Native final或批准；仅续修此文件，正常提交后重新独审。' : material.sourceKind === 'git_draft' ? '认证的原Git分析草稿已按原字节复制到当前seed；沿该原文件核实分类并续修，旧批准不继承。' : material.sourceKind === 'native_output' ? '认证的旧只读Native成功结构化输出已序列化为本轮临时材料；它不是历史Git草稿或新批准，在该文件核实分类并续修。' : '旧Native原输出材料已按认证CAS原字节复制为本轮临时输入，不是既有Git草稿；在该原文件继续修复。' : source === undefined ? '首次实际创建该文件。' : '已有原草稿已复制到当前seed，在原文件继续修改，不从零重答。'}本段只把上文直接返回业务JSON的交付方式改为草稿文件；业务文件仍只读，唯一可写例外为此草稿。结构化业务JSON写入此临时文件，Spec、源码、全部测试、其他owner文件保持不变。只允许正常git add和git commit该草稿并保持clean；无需改正文时可正常commit --allow-empty，保留hooks。${DRAFT_RECEIPT_INSTRUCTIONS} 草稿仅为非权威诊断材料，不是raw、事实、批准或新授权。\n草稿业务schema只读文件=${binding.path.replace(/\.json$/, '.schema.json')}；先读取精确schema并自检，禁止修改schema。${contextSource === undefined ? `原具体错误：${JSON.stringify(repairErrors)}；本轮修复诊断：${JSON.stringify(repairDiagnostics)}` : statusOnly ? '读取任务指针指定的只读context JSON。task为原任务，review的pendingAnalysis为本轮完整待审分析。按原JSON草稿与精确schema继续自检和修复。context、schema等临时协议文件不属于业务checkedPaths。保持这些文件只读，仓库仍可自由读取。' : `读取任务指针指定的完整只读context JSON：task为原任务，repairDiagnostics/errors仅为非权威修复诊断，review的pendingAnalysis为本轮完整待审分析，均须保留各项具体拒因；按原JSON草稿继续修复。context、schema等临时协议文件不属于业务checkedPaths，不修改这些只读文件；仓库仍可自由读取。`}`
@@ -815,7 +877,7 @@ const duplicateChangeIds = duplicateValues(checkedChangeIds)
 if (invalidCheckedPaths.length${reviewCoverage ? ' || missingCheckedPaths.length || missingChangeIds.length || unknownChangeIds.length' : ''}${reviewDuplicates ? ' || duplicateCheckedPaths.length || duplicateChangeIds.length' : ''}) process.exitCode = 1
 SPEX_P0_REVIEW_PATHS`
     const nativeSchema = draftMode ? DRAFT_RECEIPT_SCHEMA : schema
-    const request = { root: input.snapshot.source.canonicalRoot, base: seed?.baseCommit ?? input.snapshot.headCommit, ...(seed ? { worktree: seed } : {}), requestKey: `${input.requestKey}:${purpose}`, inputDigest, purpose, prompt, schema: nativeSchema, timeoutMs: input.timeoutMs, signal, model: syncModel(input), effort: 'high' as const, ...(frozenEntries?.length ? { frozenEntries } : {}) }
+    const request = { root: input.snapshot.source.canonicalRoot, base: seed?.baseCommit ?? input.snapshot.headCommit, ...(seed ? { worktree: seed } : {}), requestKey, inputDigest, purpose, prompt, schema: nativeSchema, timeoutMs: input.timeoutMs, signal, model: syncModel(input), effort: 'high' as const, ...(frozenEntries?.length ? { frozenEntries } : {}) }
     let result: Awaited<ReturnType<ElaborationRunner>>
     try { result = await runner(request) }
     catch (error) {
@@ -832,40 +894,7 @@ SPEX_P0_REVIEW_PATHS`
       }
       throw error
     }
-    if (signal?.aborted) throw Object.assign(new Error('行为分析结果已停止'), { code: 'cancelled' })
-    if (!result.sessionId || !result.threadId || !result.turnId || result.resultDigest !== contentHash(JSON.stringify(result.output))) reject('行为分析native身份/输出摘要不匹配')
-    let output: unknown = structuredClone(result.output)
-    if (draftMode) {
-      let draft: ElaborationDraft
-      try { draft = captureStageDraft(commonDir, seed!, result, binding) }
-      catch (error) {
-        if (purpose !== 'code_behavior_analyze' || !(error instanceof StageDraftCommitMissingError) || outputErrors(result.output, DRAFT_RECEIPT_SCHEMA).length) throw error
-        throw Object.assign(error, { code: CODE_BEHAVIOR_DRAFT_COMMIT_MISSING, message: 'P0 分析没有在冻结 seed 之后新增草稿提交' })
-      }
-      continuation!.drafts[purpose] = draft; delete continuation!.errors?.[purpose]; persist()
-      if (outputErrors(result.output, DRAFT_RECEIPT_SCHEMA).length) reject('Native草稿summary回执不符合schema')
-      try { output = JSON.parse(readStageDraft(commonDir, draft, binding)) as unknown }
-      catch (error) {
-        if (!(error instanceof SyntaxError)) throw error
-        draft.errors = [{ code: 'behavior_output_json', message: error.message }]; persist(); reject(error.message, {}, 'behavior_output_json')
-      }
-    }
-    if (purpose === 'code_behavior_review') diagnostic.review = output
-    else diagnostic.proposal = output
-    const errors = outputErrors(output, !draftMode && purpose === 'code_behavior_review' ? CODE_BEHAVIOR_REVIEW_SCHEMA : schema)
-    if (errors.length) {
-      if (draftMode) { continuation!.drafts[purpose]!.errors = errors.map(message => ({ code: 'behavior_output_schema', message })); persist() }
-      reject(errors.join('; '), {}, draftMode ? 'behavior_output_schema' : 'behavior_analysis_invalid')
-    }
-    if (draftMode && purpose === 'code_behavior_analyze') { const { signal: _signal, ...payload } = request; analysisRequest = { requestRef: writeEvidence(commonDir, payload), receipt: result.output } }
-    const trace = { purpose, sessionId: result.sessionId, threadId: result.threadId, turnId: result.turnId, inputDigest, resultDigest: result.resultDigest }
-    traces.push(trace)
-    if (draftMode && purpose === 'code_behavior_review') {
-      const { signal: _signal, ...payload } = request, draft = continuation!.drafts[purpose]!
-      continuation!.reviewResult = { trace, draftOid: draft.oid, resultCommit: draft.resultCommit, requestRef: writeEvidence(commonDir, payload), receipt: result.output }; persist()
-    }
-    turns.set(purpose, { threadId: result.threadId, turnId: result.turnId, proof: result.frozenReadProof })
-    return output
+    return consumeResult(request, result)
   }
   const partitionFactPaths = input.partition?.factSourcePaths
   const linkedFactPaths = worktree && partitionFactPaths
