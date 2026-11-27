@@ -13,7 +13,7 @@ related:
 
 ## raw source
 
-用户要求由 LLM Manager 完全接管执行器管理。Claude Code 的 API 地址、Key 和模型，以及 Grok Build、Claude Code、ZCode、Cursor 和 Codex 原生 CLI 的功能组优先级，在同一份管理配置里维护。SpexCode 通过所登记的功能组调用实际执行器。
+用户要求由 LLM Manager 完全接管执行器管理。Claude Code 的 API 地址、Key 和模型，以及 Grok Build、Claude Code、ZCode、Cursor 和 Codex 原生 CLI 的功能组优先级，在同一份管理配置里维护。同一 LLM Manager 发布版持有供应商启动方式、原生协议、认证和正式额度分类。SpexCode 通过所登记的功能组调用 Manager 提供的执行器。
 
 ## expanded spec
 
@@ -21,7 +21,7 @@ related:
 
 宿主通过同一设置端点读写当前 owner 的全局调度时区。Manager 验证 IANA 时区，并用保存值判断所有 Provider 的周时段与节假日。首次选择前由历史 Provider 时区继续决定可用时段，保存 Provider 表单时保留该历史值。已有宿主在升级 Manager 依赖后、恢复服务前执行 `host.py upgrade <绝对配置路径>`。该命令通过 Manager 加入调度时区表，可重复执行。初始化新库时直接创建该表。
 
-Manager 按功能组挑选已就绪路线。Claude Code 的 API 路线通过会话专属 loopback 转发连接兼容 Anthropic Messages 的 Provider，并由官方 Claude CLI 完成原有结构化工具执行。供应商 Key 仅留在 Manager 受控进程内，Claude 获得同轮临时地址和授权。其余受支持路线使用真实原生 CLI 及原生登录。模型缺省沿用原生 CLI，固定模型原样交给对应执行器。
+Manager 按功能组挑选已就绪路线。SpexCode 使用本机已安装 Manager 的[[llm-manager-native-entry]]，并在运行前登记可精确核验的进程身份。SpexCode 持有工作树、固定请求、原件校验和交付门禁。Claude Code 的 API 路线通过会话专属 loopback 转发连接兼容 Anthropic Messages 的 Provider，并由官方 Claude CLI 完成原有结构化工具执行。Manager 只解密该轮选定的 Key，SpexCode 宿主交付已核验的路线身份，Claude 获得同轮临时地址和授权。其余受支持路线使用真实原生 CLI 及原生登录。模型缺省沿用原生 CLI，固定模型原样交给对应执行器。
 
 API 冷却到期时，宿主用 Manager 当前候选路线的模型，以及同次试探请求的端点、协议和凭据发起探测。Manager 根据真实探测结果恢复该路线或继续组选路。现有操作新建托管会话时，宿主认证原准入路线与当前 owner 和功能组一致，再从该组首位选路。原准入路线的供应商配置发生变化时，只要其原归属仍能认证，就可为新会话选择同组当前健康路线。既有会话继续按所登记的路线执行。
 

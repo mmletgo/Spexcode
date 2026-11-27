@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { loadManagerNativeRuntime } from '../llm-manager-host.js'
 import { managedModel, managedRoute, nativeModelValue } from '../llm-manager-route.js'
 import { configuredSyncModel, readSyncModelSettings, resolveSyncModel } from './model-selection.js'
 
@@ -13,7 +14,11 @@ test('settings and operation selection share the authoritative Manager bridge', 
   delete process.env.SPEX_LLM_MANAGER_PYTHON
   delete process.env.SPEX_LLM_MANAGER_CONFIG
   delete process.env.SPEX_LLM_MANAGER_SETTINGS_HTML
+  process.env.SPEX_LLM_MANAGER_PYTHON = '/usr/bin/false'
   const unmanaged = await readSyncModelSettings()
+  const runtime = await loadManagerNativeRuntime()
+  assert.equal(runtime.nativeRuntimeVersion, 1)
+  assert.equal(typeof (await runtime.loadNativeAdapter('grok') as { grokAcpArguments: unknown }).grokAcpArguments, 'function')
   assert.deepEqual(unmanaged.llmManager, { configured: false })
   assert.deepEqual(unmanaged.nativeVendors.map(({ id }) => id).sort(), ['claude', 'codex', 'cursor', 'grok', 'zcode'])
 

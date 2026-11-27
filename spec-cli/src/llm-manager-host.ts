@@ -1,13 +1,14 @@
-import { execFile } from 'node:child_process'
+import { execFile, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { statSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { setTimeout as wait } from 'node:timers/promises'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { readManagedRoute, type ManagedRoute } from './llm-manager-route.js'
 import type { NativeTokenUsage } from './session-structured-policy.js'
 
 const bridge = fileURLToPath(new URL('../llm-manager/host.py', import.meta.url))
 const installedSettingsPath = '/llm-manager/'
+const bundledNativeRuntime = new URL('../llm-manager/native-runtime.mjs', import.meta.url).href
 
 export class LlmManagerHostError extends Error {
   constructor(readonly code: string) {
@@ -55,6 +56,57 @@ function managerCall(message: Record<string, unknown>): Promise<unknown> {
     child.stdin!.once('error', () => reject(new LlmManagerHostError('llm_manager_host_unavailable')))
     child.stdin!.end(JSON.stringify(message))
   })
+}
+
+type NativeVendor = 'claude' | 'codex' | 'cursor' | 'grok' | 'zcode'
+type ManagerNativeRuntime = {
+  nativeRuntimeVersion: 1
+  findNativeExecutable(vendor: NativeVendor): string | undefined
+  spawnGatedNativeProcess(command: string, args: readonly string[], options: {
+    cwd: string
+    env: NodeJS.ProcessEnv
+    stderr?: 'pipe' | 'ignore'
+  }): ChildProcess
+  spawnNativeProcess(command: string, args: readonly string[], options: { cwd: string; env: NodeJS.ProcessEnv }): ChildProcessWithoutNullStreams
+  loadNativeAdapter(vendor: NativeVendor): Promise<unknown>
+}
+
+const nativeRuntimes = new Map<string, Promise<ManagerNativeRuntime>>()
+
+/** Locate the execution component in the same installed Manager that owns the provider route. */
+export function loadManagerNativeRuntime(): Promise<ManagerNativeRuntime> {
+  const python = llmManagerRequested() ? llmManagerHost().python : undefined
+  const key = python ?? bundledNativeRuntime
+  const previous = nativeRuntimes.get(key)
+  if (previous) return previous
+  const source = python ? new Promise<string>((accept, reject) => {
+    execFile(python, ['-I', '-m', 'llm_manager.native_runtime'], {
+      encoding: 'utf8', timeout: 15000, maxBuffer: 16384,
+      env: { PATH: process.env.PATH, HOME: process.env.HOME, LANG: process.env.LANG },
+    }, (error, stdout) => {
+      if (error) return reject(new LlmManagerHostError('llm_manager_native_unavailable'))
+      let result: { version?: unknown; path?: unknown } | null
+      try { result = JSON.parse(stdout) as typeof result }
+      catch { return reject(new LlmManagerHostError('llm_manager_native_invalid_response')) }
+      if (result?.version !== 1 || typeof result.path !== 'string' || !isAbsolute(result.path))
+        return reject(new LlmManagerHostError('llm_manager_native_invalid_response'))
+      accept(pathToFileURL(result.path).href)
+    })
+  }) : Promise.resolve(bundledNativeRuntime)
+  const runtime = source.then(async path => {
+    const loaded = await import(path) as Partial<ManagerNativeRuntime>
+    if (loaded.nativeRuntimeVersion !== 1 || typeof loaded.findNativeExecutable !== 'function'
+        || typeof loaded.spawnGatedNativeProcess !== 'function' || typeof loaded.spawnNativeProcess !== 'function'
+        || typeof loaded.loadNativeAdapter !== 'function')
+      throw new LlmManagerHostError('llm_manager_native_invalid_response')
+    return loaded as ManagerNativeRuntime
+  }).catch(error => {
+    nativeRuntimes.delete(key)
+    if (error instanceof LlmManagerHostError) throw error
+    throw new LlmManagerHostError('llm_manager_native_unavailable')
+  })
+  nativeRuntimes.set(key, runtime)
+  return runtime
 }
 
 export function applyLlmManagerSettings(body: Record<string, unknown>): Promise<unknown> {

@@ -18,6 +18,7 @@
     "templates",
     "hooks",
     "llm-manager/host.py",
+    "llm-manager/native-runtime.mjs",
     "llm-manager/requirements.txt"
   ],
   "bundledDependencies": [

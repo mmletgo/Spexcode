@@ -317,6 +317,16 @@ class HostTests(unittest.TestCase):
 
     def test_claude_exec_keeps_real_key_only_in_manager_and_follows_last_message(self) -> None:
         self.add_api_with_fixture()
+        self.settings("save_key", input={
+            "action": "add", "provider_id": "api", "id": "unselected-key", "label": "Unused fixture",
+            "secret": "synthetic-unselected-key", "enabled": False,
+        })
+        with sqlite3.connect(self.database) as database:
+            invalid = database.execute(
+                "UPDATE llm_key SET ciphertext = ? WHERE owner_id = ? AND id = ?",
+                (b"fixture-invalid-ciphertext", "fixture-owner", "unselected-key"),
+            )
+            self.assertEqual(invalid.rowcount, 1)
         self.add_native("grok", "account")
         self.group("api", "grok")
         self.assertTrue(self.settings("test", request={"provider_id": "api", "model_id": "api-model"})["ok"])

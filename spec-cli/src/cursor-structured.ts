@@ -1,9 +1,9 @@
+import { loadManagerNativeRuntime } from './llm-manager-host.js'
 import { managedRoute, nativeModelValue } from './llm-manager-route.js'
-import { spawn, spawnSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
-import { isAbsolute, join, relative, resolve } from 'node:path'
-import { createInterface } from 'node:readline'
+import { join } from 'node:path'
 import type { Readable, Writable } from 'node:stream'
 import { setTimeout as delay } from 'node:timers/promises'
 import { Ajv } from 'ajv'
@@ -26,6 +26,28 @@ type NativeClose = { launchDigest: string; outputDigest: string; signal: 'SIGTER
 type NativeSettlement = { launchDigest: string; outputDigest: string; stopDigest: string; exit: Exit; closeDigest?: string; quotaDigest?: string }
 type StopResult = { nativeStopped: boolean; acknowledged: boolean; nativeStatus?: string; error?: string }
 type RpcObject = Record<string, unknown>
+
+type CursorAdapter = {
+  CURSOR_VERSION_ARGS: readonly string[]
+  CursorAcpError: new (...args: never[]) => Error & {
+    code: 'failed' | 'unsupported' | 'cancellation_pending' | 'provider_quota_exhausted'
+    detail?: { threadId: string; turnId: string }
+  }
+  cursorModelArgument(value: string): string | undefined
+  cursorLaunchArgs(workspace: string, mode: NativePlan['mode'], model?: string): string[]
+  cursorAcpInitialize(): RpcObject
+  cursorAcpCancel(sessionId: string): RpcObject
+  encodeCursorAcpPacket(packet: RpcObject): string
+  cursorUsageLimitNotice(value: unknown): boolean
+  observeCursorAcp(stdout: Readable, plan: Pick<NativePlan, 'workspace' | 'mode'> & { planDigest: string }, prompt: string, send: (packet: RpcObject) => void, hooks: {
+    onSession(id: string): Promise<void>
+    startPrompt(request: NativeRequest): Promise<boolean>
+    onTerminal(output: NativeOutput): void
+    onProviderQuota?(request: NativeRequest, evidence: 'http_429' | 'usage_limit'): void
+    isInterrupted(): boolean
+    digestRequest(request: NativeRequest): string
+  }): Promise<{ output: NativeOutput; textOnlyWithoutTools: boolean }>
+}
 
 const STOP_MS = 15_000
 const CANCEL_GRACE_MS = 1_000
@@ -67,7 +89,7 @@ function cursorNativeModel(model: string | undefined): string | undefined {
   return value === 'default' ? undefined : value
 }
 
-function launchArgs(workspace: string, mode: NativePlan['mode'], model: string | undefined): string[] {
+function recordedLaunchArgs(workspace: string, mode: NativePlan['mode'], model: string | undefined): string[] {
   return ['--workspace', workspace, '--sandbox', 'enabled', '--trust', ...(mode === 'read' ? ['--mode', 'ask'] : []), ...(model === undefined ? [] : ['--model', model]), 'acp']
 }
 
@@ -79,7 +101,7 @@ function assertPlan(plan: NativePlan, root: string, execution: CursorStructuredE
   if (plan?.version !== 1 || native?.version !== 1 || plan.root !== root || native.root !== root
     || !nonempty(plan.workspace) || worktreePath !== undefined && worktreePath !== plan.workspace || plan.tmp !== join(root, 'tmp')
     || plan.mode !== execution.worktree?.mode || !nonempty(plan.cliPath) || !nonempty(plan.cliVersion)
-    || !Array.isArray(plan.args) || digest(plan.args) !== digest(launchArgs(plan.workspace, plan.mode, cursorNativeModel(execution.model)))
+    || !Array.isArray(plan.args) || digest(plan.args) !== digest(recordedLaunchArgs(plan.workspace, plan.mode, cursorNativeModel(execution.model)))
     || plan.policyDigest !== digest(structuredExecutionPolicy(execution))
     || prompt !== undefined && (plan.promptDigest !== sha256(nativePrompt(prompt, execution)) || plan.promptDigest !== sha256(readEvidence(root, 'prompt.txt'))))
     throw stale('Cursor original worktree, prompt or policy binding differs')
@@ -248,140 +270,11 @@ export async function stopCursorStructuredTurn(execution: CursorStructuredExecut
   }
 }
 
-function reportedModel(packet: RpcObject): string | undefined {
-  const modelConfig = Array.isArray(packet.configOptions) ? packet.configOptions.map(object).find(option => option?.category === 'model' && option.type === 'select') : undefined
-  const value = modelConfig?.currentValue ?? object(packet.models)?.currentModelId
-  return nonempty(value) ? value : undefined
-}
-
-function permissionResult(params: RpcObject | undefined, plan: NativePlan, sessionId: string | undefined): RpcObject {
-  if (params?.sessionId !== sessionId || !sessionId) return { outcome: { outcome: 'cancelled' } }
-  const tool = object(params?.toolCall)
-  const withinWorktree = (value: unknown): boolean => {
-    const path = object(value)?.path
-    if (!nonempty(path)) return false
-    const fromWorkspace = relative(plan.workspace, resolve(plan.workspace, path))
-    return !isAbsolute(fromWorkspace) && fromWorkspace !== '..' && !fromWorkspace.startsWith('../') && fromWorkspace !== '.git' && !fromWorkspace.startsWith('.git/')
-  }
-  const editable = plan.mode === 'edit' && tool?.kind === 'edit' && Array.isArray(tool.locations) && tool.locations.length > 0 && tool.locations.every(withinWorktree)
-  // Commands that Cursor can run in its sandbox do not require a client grant to run outside it.
-  const allow = tool?.kind === 'read' || tool?.kind === 'search' || editable
-  const option = Array.isArray(params?.options) ? params.options.map(object).find(entry => entry?.kind === (allow ? 'allow_once' : 'reject_once')) : undefined
-  return nonempty(option?.optionId) ? { outcome: { outcome: 'selected', optionId: option.optionId } } : { outcome: { outcome: 'cancelled' } }
-}
-
-async function observeAcp(stdout: Readable, plan: NativePlan, prompt: string, send: (packet: RpcObject) => void, hooks: {
-  onSession(sessionId: string): Promise<void>
-  startPrompt(request: NativeRequest): Promise<boolean>
-  onTerminal(output: NativeOutput): void
-  onProviderQuota?(request: NativeRequest, evidence: 'http_429' | 'usage_limit'): void
-  isInterrupted(): boolean
-}): Promise<{ output: NativeOutput; textOnlyWithoutTools: boolean }> {
-  const lines = createInterface({ input: stdout, crlfDelay: Infinity }), chunks: string[] = []
-  let awaiting: number | string = 1, sessionId: string | undefined, request: NativeRequest | undefined, terminal: NativeOutput | undefined, model: string | undefined
-  let textOnlyWithoutTools = true
-  try {
-    for await (const line of lines) {
-      if (!line.trim()) continue
-      let packet: RpcObject | undefined
-      try { packet = object(JSON.parse(line)) }
-      catch (error) { if (!(error instanceof SyntaxError)) throw error; throw pending('Cursor ACP stream contains invalid JSON') }
-      if (packet?.jsonrpc !== '2.0') throw pending('Cursor ACP stream contains an invalid envelope')
-      if (typeof packet.method === 'string') {
-        const params = object(packet.params)
-        if (typeof packet.id === 'string' || typeof packet.id === 'number') {
-          if (packet.method === 'session/request_permission') {
-            if (request && params?.sessionId === sessionId) textOnlyWithoutTools = false
-            const outcome = hooks.isInterrupted() || terminal || !request ? { outcome: { outcome: 'cancelled' } } : permissionResult(params, plan, sessionId)
-            send({ id: packet.id, result: outcome })
-          } else send({ id: packet.id, error: { code: -32601, message: 'Client method unavailable' } })
-        } else if (packet.method === 'session/update' && request && params?.sessionId === sessionId) {
-          const update = object(params?.update)
-          if (terminal) {
-            if (update?.sessionUpdate === 'available_commands_update' && !Object.hasOwn(packet, 'id')
-              && !Object.hasOwn(packet, 'result') && !Object.hasOwn(packet, 'error')
-              && Array.isArray(update.availableCommands) && update.availableCommands.every(value => {
-                const command = object(value)
-                return typeof command?.name === 'string' && typeof command.description === 'string'
-                  && (command.input == null || typeof object(command.input)?.hint === 'string')
-              })) continue
-            throw pending('Cursor ACP emitted session updates after its original prompt terminal')
-          }
-          if (update?.sessionUpdate === 'tool_call' || update?.sessionUpdate === 'tool_call_update') {
-            textOnlyWithoutTools = false
-            chunks.length = 0
-          }
-          else if (update?.sessionUpdate === 'agent_message_chunk') {
-            const content = object(update.content)
-            if (content?.type === 'text') {
-              if (typeof content.text !== 'string') throw pending('Cursor ACP assistant text chunk is malformed')
-              chunks.push(content.text)
-            } else textOnlyWithoutTools = false
-          } else if (update?.sessionUpdate === 'config_option_update') model = reportedModel(update) ?? model
-          else if (update?.sessionUpdate === 'current_mode_update' && plan.mode === 'read' && update.currentModeId !== 'ask') {
-            throw pending('Cursor ACP read session changed to an unverified mode')
-          }
-        }
-        continue
-      }
-      if (terminal || packet.id !== awaiting || Object.hasOwn(packet, 'result') === Object.hasOwn(packet, 'error'))
-        throw pending('Cursor ACP response differs from its original request')
-      const rpcError = object(packet.error), result = object(packet.result)
-      if (rpcError && request && hooks.onProviderQuota && !hooks.isInterrupted()) {
-        const data = object(rpcError.data)
-        const status = rpcError.code === 429 || data?.statusCode === 429
-        if (status || usageLimitNotice(rpcError.message)) {
-          hooks.onProviderQuota(request, status ? 'http_429' : 'usage_limit')
-          throw quotaFailure(request)
-        }
-      }
-      if (rpcError?.code === -32000 && typeof rpcError.message === 'string' && /^authentication required[.!]?$/i.test(rpcError.message.trim()))
-        throw failed('Cursor CLI authentication is required')
-      if (!result) throw failed(typeof awaiting === 'number' ? 'Cursor ACP session could not be started' : 'Cursor ACP prompt returned an error')
-      if (awaiting === 1) {
-        if (result.protocolVersion !== 1) throw new StructuredSessionError('unsupported', 'Cursor CLI does not negotiate ACP protocol v1')
-        awaiting = 2
-        send({ id: awaiting, method: 'session/new', params: { cwd: plan.workspace, mcpServers: [] } })
-        continue
-      }
-      if (awaiting === 2) {
-        if (!nonempty(result.sessionId)) throw failed('Cursor ACP session/new did not return a session ID')
-        sessionId = result.sessionId
-        await hooks.onSession(sessionId)
-        model = reportedModel(result)
-        const modes = object(result.modes)
-        if (plan.mode === 'read' && modes?.currentModeId !== 'ask') {
-          if (!Array.isArray(modes?.availableModes) || !modes.availableModes.some(mode => object(mode)?.id === 'ask'))
-            throw new StructuredSessionError('unsupported', 'Cursor ACP session does not advertise the ask mode')
-          if (hooks.isInterrupted()) break
-          awaiting = 3
-          send({ id: awaiting, method: 'session/set_mode', params: { sessionId, modeId: 'ask' } })
-          continue
-        }
-      }
-      if (awaiting === 2 || awaiting === 3) {
-        const binding = { planDigest: digest(plan), sessionId: sessionId!, requestId: randomUUID(), ...(model === undefined ? {} : { reportedModel: model }) }
-        if (!await hooks.startPrompt(binding) || hooks.isInterrupted()) break
-        request = binding
-        awaiting = request.requestId
-        send({ id: awaiting, method: 'session/prompt', params: { sessionId, prompt: [{ type: 'text', text: prompt }] } })
-      } else {
-        if (!request || !nonempty(result.stopReason)) throw pending('Cursor ACP lacks the original prompt stop reason')
-        model = reportedModel(result) ?? model
-        terminal = { requestDigest: digest(request), stopReason: result.stopReason, ...(model === undefined ? {} : { reportedModel: model }), text: chunks.join('') }
-        hooks.onTerminal(terminal)
-      }
-    }
-  } finally { lines.close() }
-  if (!terminal) throw request ? pending('Cursor ACP stream closed without its original prompt terminal') : failed('Cursor ACP closed before prompt dispatch')
-  return { output: terminal, textOnlyWithoutTools }
-}
-
 /** 启动 Cursor ACP 原生会话。已存在的派发只允许读取原结果或精确停止。 */
 export async function cursorStructuredTurn(realm: string, id: string, prompt: string, execution: CursorStructuredExecution, callbacks: Callbacks, worktreePath: string | undefined): Promise<NativeResult> {
   if (execution.version !== 6 || execution.policy !== 'native-worktree-v1' || !execution.worktree || !worktreePath || execution.frozenContext || execution.readerRuntime || execution.effort)
     throw new StructuredSessionError('unsupported', 'Cursor CLI requires an explicit native worktree request with native CLI effort')
-  const model = cursorNativeModel(execution.model), root = join(realm, id)
+  const root = join(realm, id)
   if (callbacks.signal?.aborted || execution.cancellation || ['cancelled', 'cancelling', 'timeout'].includes(execution.state ?? '')) throw cancelled(execution.cancellation?.reason === 'timeout' || execution.state === 'timeout')
   if (existsSync(join(root, 'settlement.json'))) {
     const { request, output, quota } = readSettledOutput(root, prompt, execution, worktreePath)
@@ -403,12 +296,20 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
   if (execution.cursorNative || execution.turnStartRequested || execution.threadId || execution.turnId || existsSync(root))
     throw pending('Cursor original dispatch has no settled result; exact stop is required')
 
-  const resolved = spawnSync('/usr/bin/which', ['cursor-agent'], { encoding: 'utf8', timeout: 10_000 })
-  if (resolved.status !== 0 || !resolved.stdout.trim()) throw new StructuredSessionError('unsupported', 'Cursor CLI is unavailable')
-  const cliPath = realpathSync(resolved.stdout.trim())
+  const runtime = await loadManagerNativeRuntime()
+  const provider = await runtime.loadNativeAdapter('cursor') as CursorAdapter
+  const cliPath = runtime.findNativeExecutable('cursor')
+  if (!cliPath) throw new StructuredSessionError('unsupported', 'Cursor CLI is unavailable')
+  let model: string | undefined
+  try { model = provider.cursorModelArgument(nativeModelValue(execution.model, 'cursor')) }
+  catch (error) {
+    if (error instanceof provider.CursorAcpError) throw new StructuredSessionError(error.code, error.message, error.detail)
+    throw error
+  }
   if (realpathSync(worktreePath) !== worktreePath) throw new StructuredSessionError('unsupported', 'Cursor CLI requires the exact physical worktree path')
-  const launch = nativeWorktreeLaunch(worktreePath, cliPath, []), args = launchArgs(worktreePath, execution.worktree.mode, model)
-  const version = spawnSync(launch.command, [...launch.args, '--version'], { cwd: worktreePath, encoding: 'utf8', timeout: 10_000 })
+  const launch = nativeWorktreeLaunch(worktreePath, cliPath, [])
+  const args = provider.cursorLaunchArgs(worktreePath, execution.worktree.mode, model)
+  const version = spawnSync(launch.command, [...launch.args, ...provider.CURSOR_VERSION_ARGS], { cwd: worktreePath, encoding: 'utf8', timeout: 10_000 })
   const cliVersion = version.stdout?.trim()
   if (version.status !== 0 || !cliVersion) throw new StructuredSessionError('unsupported', 'Cursor CLI did not report a version')
 
@@ -428,8 +329,7 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
 
   const env: NodeJS.ProcessEnv = { ...process.env, TMPDIR: tmp }
   for (const key of sessionIdentityEnvVars()) delete env[key]
-  // Keep the launch gate separate from ACP stdin. The shell may otherwise read ahead into the first frame.
-  const child = spawn('/bin/sh', ['-c', 'IFS= read -r ready <&3 && [ "$ready" = start ] || exit 1; exec 3<&-; exec "$@"', 'spex-cursor-launch', launch.command, ...launch.args, ...args], { cwd: worktreePath, env, detached: true, stdio: ['pipe', 'pipe', 'ignore', 'pipe'] })
+  const child = runtime.spawnGatedNativeProcess(launch.command, [...launch.args, ...args], { cwd: worktreePath, env, stderr: 'ignore' })
   const stdin = child.stdin!, stdout = child.stdout!, gate = child.stdio[3] as Writable
   const closed = new Promise<Exit>(resolveExit => child.once('close', (code, signal) => resolveExit({ code, signal })))
   let gatedLaunch: OwnedLaunch | undefined, owned: OwnedLaunch | undefined, boundRequest: NativeRequest | undefined
@@ -444,12 +344,12 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
     deadline = Date.now() + STOP_MS
     stopTimer = setTimeout(expire, STOP_MS)
   }
-  const send = (packet: RpcObject): void => { stdin.write(JSON.stringify({ jsonrpc: '2.0', ...packet }) + '\n') }
+  const send = (packet: RpcObject): void => { stdin.write(provider.encodeCursorAcpPacket(packet)) }
   const shutdown = (): void => {
     armStop()
     if (!owned || forceTimer) return
     if (boundRequest && !terminalSeen && !stdin.destroyed && !stdin.writableEnded) {
-      send({ method: 'session/cancel', params: { sessionId: boundRequest.sessionId } })
+      send(provider.cursorAcpCancel(boundRequest.sessionId))
       cancelSent = true
     }
     forceTimer = setTimeout(() => {
@@ -482,7 +382,8 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
     abort()
     void callbacks.onTimeout?.().catch(error => { timeoutFailure = error })
   })
-  const observed = observeAcp(stdout, plan, promptBytes, send, {
+  const observed = provider.observeCursorAcp(stdout, { workspace: plan.workspace, mode: plan.mode, planDigest: digest(plan) }, promptBytes, send, {
+    digestRequest: digest,
     onSession: callbacks.onThread,
     ...(managedRoute(execution.model) ? {
       onProviderQuota: (request: NativeRequest, evidence: 'http_429' | 'usage_limit') =>
@@ -513,7 +414,10 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
         } catch (error) { fault(error) }
       }, EOF_GRACE_MS)
     },
-  }).then(output => output, error => { fault(error); return null })
+  }).then(output => output, (error: unknown) => {
+    fault(error instanceof provider.CursorAcpError ? new StructuredSessionError(error.code, error.message, error.detail) : error)
+    return null
+  })
   try {
     if (!child.pid) throw pending('Cursor launch PID is unavailable')
     try { writeDetachedRuntimeReceipt(child.pid, receiptFile) }
@@ -528,7 +432,7 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
     if (interrupted || callbacks.signal?.aborted || existsSync(cancelPath)) abort()
     else if (!failure) {
       gate.end('start\n')
-      send({ id: 1, method: 'initialize', params: { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false } } })
+      send(provider.cursorAcpInitialize())
     } else shutdown()
     const sample = periodicNativeWorktreeSampler(launched, () => deadline !== undefined, observationFault)
     census = setInterval(() => {
@@ -554,7 +458,7 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
     if (!success) throw failed('Cursor ACP prompt did not complete successfully')
     writeEvidence(root, 'result.json', output)
     let quotaDigest: string | undefined
-    if (managedRoute(execution.model) && observation?.textOnlyWithoutTools && usageLimitNotice(output.text)) {
+    if (managedRoute(execution.model) && observation?.textOnlyWithoutTools && provider.cursorUsageLimitNotice(output.text)) {
       try {
         const actual = nativeWorktreeResult(worktreePath, execution.worktree)
         if (actual.headCommit === execution.worktree.baseCommit && actual.tree === execution.worktree.tree) {
