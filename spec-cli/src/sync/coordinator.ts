@@ -13,6 +13,7 @@ import { actualTreeDiff, exportCandidate, isHostPrivatePath, verifyCandidate } f
 import type { CodeBehaviorCheckpoints, CodeBehaviorContinuation, CodeBehaviorMaterialRequest, CodeBehaviorPostGateReview } from './code-behavior.js'
 import type { CrossFreezeSource } from './cross-freeze-source.js'
 import { lockCrossFreezeSource } from './cross-freeze-binding.js'
+import { frozenSyncCanonicalBranch } from './settings.js'
 import { prepareCrossFreezeImpactReview, restoreCrossFreezeImpactReview, verifyCrossFreezeImpactReview, type CrossFreezeImpactEvidence, type CrossFreezeImpactReview } from './cross-freeze-impact-review.js'
 import { analyzeCodeBehavior, authoredContractChanges, CODE_BEHAVIOR_DRAFT_COMMIT_MISSING, CODE_BEHAVIOR_FAILURE_STATUS, CODE_BEHAVIOR_GUIDANCE_VERSION, CODE_BEHAVIOR_REVIEW_COVERAGE_MISSING, LEGACY_CODE_BEHAVIOR_GUIDANCE_VERSION, codeBehaviorReviewSchema, codeBehaviorContinuationStatus, codeBehaviorDraftStatus, deriveBehaviorAuthorization, isCodeBehaviorContextTransport, readCodeBehaviorContext, type CodeBehaviorContextTransport, type CodeBehaviorCrossFreezeAuthor, type CodeBehaviorReviewReference } from './code-behavior.js'
 import type { CodeBehaviorAnalysis, CodeBehaviorCrossFreezeAuthorProof, CodeBehaviorEvidence, SyncDecisionInput } from './writeback-types.js'
@@ -2004,7 +2005,7 @@ function readLockedCrossFreezeSource(store: SyncStore, operation: SyncOperation)
   const selected = lockCrossFreezeSource(store, operation, {
     load: () => operation.crossFreezeBinding!.ref,
     save: () => fail('cross_freeze_binding', '冷验不得重新选择跨冻结来源'),
-  }, { canonicalBranch: operation.input.source.branch })
+  })
   if (!selected.source || !selected.binding || !selected.bindingRef
     || operation.crossFreezeBinding.provenanceRef?.sha256 !== selected.binding.provenanceRef.sha256) return null
   return selected
@@ -3108,11 +3109,12 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
       const runner = options.runner ? injectedRunner(store, fence, options.runner) : createAttemptRunner(store, fence, { retireSettledWorktrees: true, ...options.nativeExecution })
       if (options.plan.version === 'sync-coordinator-v2' && options.plan.agentWorkflow === 'native-worktree-v1'
           && operation.origin === 'initial' && !operation.retryOf && !operation.requestBlob && operation.input.captureKind === 'commit'
-          && attempt.number === 1 && !attempt.dispatchPlans.length && !operation.crossFreezeBinding && !options.runner) {
+          && attempt.number === 1 && !attempt.dispatchPlans.length && !operation.crossFreezeBinding && !options.runner
+          && operation.input.source.branch === frozenSyncCanonicalBranch(operation.input)) {
         const binding = lockCrossFreezeSource(store, operation, {
           load: () => store.readOperation(operation.id).crossFreezeBinding?.ref ?? null,
           save: ref => store.lockCrossFreezeBinding(fence!, ref),
-        }, { canonicalBranch: operation.input.source.branch })
+        })
         if (!binding.binding) fail('cross_freeze_binding', `无法固定跨冻结来源（${binding.reason}）`)
         operation = store.readOperation(operation.id)
       }

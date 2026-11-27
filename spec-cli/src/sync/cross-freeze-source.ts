@@ -7,6 +7,7 @@ import { isSyncSpecPath } from './frozen-contracts.js'
 import type { SyncAttempt, SyncOperation } from './operation-types.js'
 import { readEvidence, readObject, verifySnapshot, withReadonlySnapshotQuery } from './snapshot.js'
 import { SyncStoreError, type SyncStore } from './store.js'
+import { frozenSyncCanonicalBranch } from './settings.js'
 
 export type CrossFreezeSource = {
   operation: SyncOperation
@@ -89,9 +90,10 @@ function earlierOperations(store: SyncStore, current: SyncOperation, oldOperatio
 export function selectCrossFreezeSource(store: SyncStore, operation: SyncOperation, options: SourceSelection = {}): CrossFreezeSource | null {
   return withReadonlySnapshotQuery(() => {
     const current = store.readOperation(operation.id), { oldOperationId, expectedAttemptIds, expectedProvenanceDigest } = options
-    if (!isDeepStrictEqual(current.input, operation.input) || current.policyDigest !== operation.policyDigest
+    const canonicalBranch = frozenSyncCanonicalBranch(current.input)
+    if (options.canonicalBranch !== undefined && options.canonicalBranch !== canonicalBranch || !isDeepStrictEqual(current.input, operation.input) || current.policyDigest !== operation.policyDigest
       || current.origin !== 'initial' || current.retryOf || current.requestBlob || current.input.captureKind !== 'commit'
-      || current.input.source.branch !== (options.canonicalBranch ?? 'refs/heads/main')
+      || current.input.source.branch !== canonicalBranch
       || !current.planBlob || current.planBlob.sha256 !== current.policyDigest || !originalsMatch(store, current)
       || !oldOperationId && (expectedAttemptIds || expectedProvenanceDigest)) return null
     const plan = JSON.parse(readEvidence(current.input.source.commonDir, current.planBlob).toString('utf8')) as SyncCoordinatorPlan
@@ -99,7 +101,7 @@ export function selectCrossFreezeSource(store: SyncStore, operation: SyncOperati
       if (old.origin !== 'initial' || old.requestBlob || old.input.headCommit === current.input.headCommit
         || !isDeepStrictEqual(old.input.source, current.input.source) || old.policyDigest !== current.policyDigest
         || old.planBlob?.sha256 !== current.planBlob.sha256 || old.recordUnverifiedCoverage !== current.recordUnverifiedCoverage
-        || !originalsMatch(store, old)) continue
+        || !originalsMatch(store, old) || frozenSyncCanonicalBranch(old.input) !== canonicalBranch) continue
       const attempts = settledAttempts(store, old)
       if (!attempts.length || expectedAttemptIds && !isDeepStrictEqual(attempts.map(attempt => attempt.id), expectedAttemptIds)) continue
       const provenance = deriveCrossFreezeProvenance(old.input, current.input)

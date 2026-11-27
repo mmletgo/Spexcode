@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { selectCrossFreezeSource, type CrossFreezeSource } from './cross-freeze-source.js'
 import type { BlobRef, SyncOperation } from './operation-types.js'
 import { identifyWorktree, readEvidence, sourceGit, writeEvidence } from './snapshot.js'
+import { frozenSyncCanonicalBranch } from './settings.js'
 import type { SyncStore } from './store.js'
 
 const NO_SOURCE_REASONS = ['source_head_changed', 'source_not_clean', 'source_git_unavailable', 'source_not_found', 'source_evidence_unavailable'] as const
@@ -119,8 +120,8 @@ export function lockCrossFreezeSource(store: SyncStore, operation: SyncOperation
   let current: SyncOperation
   try { current = store.readOperation(operation.id) }
   catch (cause) { return invalid('binding_current_mismatch', saved, cause) }
-  const canonicalBranch = options.canonicalBranch ?? 'refs/heads/main'
-  if (current.origin !== 'initial' || current.retryOf || current.requestBlob || current.input.captureKind !== 'commit'
+  const canonicalBranch = frozenSyncCanonicalBranch(current.input)
+  if (options.canonicalBranch !== undefined && options.canonicalBranch !== canonicalBranch || current.origin !== 'initial' || current.retryOf || current.requestBlob || current.input.captureKind !== 'commit'
     || current.input.source.branch !== canonicalBranch || current.policyDigest !== operation.policyDigest
     || !isDeepStrictEqual(current.input, operation.input) || options.oldOperationId === '')
     return invalid('binding_current_mismatch', saved)
