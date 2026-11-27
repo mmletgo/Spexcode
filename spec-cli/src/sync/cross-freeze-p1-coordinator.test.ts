@@ -18,6 +18,8 @@ import type { SyncCoordinatorOptions, SyncCoordinatorPlan } from './coordinator-
 import { CROSS_FREEZE_IMPACT_PURPOSE, type CrossFreezeImpactEvidence, type CrossFreezeImpactOutput } from './cross-freeze-impact-review.js'
 import { p1ReviewDiagnosticEvidence, p1ReviewDiagnosticMarker } from './elaboration-review-challenge.js'
 import { ELABORATION_BOUNDARIES, type ElaborationResult } from './elaboration-types.js'
+import { outputErrors } from './elaboration-schema.js'
+import type { NativeRunCheckpoint } from './native-run.js'
 import { migrateSyncStore } from './migrations.js'
 import type { BlobRef, P1ReviewChallenge, SyncAttempt } from './operation-types.js'
 import { captureInputSnapshot, contentHash, readEvidence, writeEvidence } from './snapshot.js'
@@ -31,9 +33,10 @@ const stopBeforeGeneration = 'fixture reached P1 whole before generation'
 const oldReviewFailure = 'fixture old read-only reviewer stopped without a verdict'
 const digest = (value: unknown): string => contentHash(JSON.stringify(value))
 
-for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent', 'prior-attempt-reviewer-present', 'prior-attempt-reviewer-absent', 'operator-challenge'] as const) test('跨冻结正式 P1 复用与冷验 ' + mode, async t => {
+for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent', 'prior-attempt-reviewer-present', 'prior-attempt-reviewer-absent', 'operator-challenge', 'impact-format-retry'] as const) test('跨冻结正式 P1 复用与冷验 ' + mode, async t => {
   const oldApproved = mode !== 'old-unapproved', operatorChallenge = mode === 'operator-challenge'
-  const acrossAttempt = mode.startsWith('prior-attempt-') || operatorChallenge
+  const retryImpactFormat = mode === 'impact-format-retry'
+  const acrossAttempt = mode.startsWith('prior-attempt-') || operatorChallenge || retryImpactFormat
   const testHome = process.env.SPEXCODE_TEST_HOME
   assert.ok(testHome, '正式会话夹具必须通过 test-home 隔离')
   assert.equal(process.env.SPEX_SESSION_DATABASE_PATH, join(testHome, 'sessions.sqlite'))
@@ -59,6 +62,16 @@ for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent',
     git(root, 'commit', '-qm', message)
     assert.equal(git(root, 'status', '--porcelain'), '')
   }
+  const siblingTarget = '.spec/export/import-contract/spec.md', siblingSource = 'src/import.js'
+  if (retryImpactFormat) {
+    for (const [from, to] of [[targetPath, siblingTarget], [sourcePath, siblingSource], ['tests/export.test.mjs', 'tests/import.test.mjs']]) {
+      const source = readFileSync(join(root, from), 'utf8').replaceAll('export-job', 'import-job').replaceAll('EXPORT', 'IMPORT')
+        .replaceAll('export-contract', 'import-contract').replaceAll('ExportService', 'ImportService')
+        .replaceAll(sourcePath, siblingSource).replaceAll('tests/export.test.mjs', 'tests/import.test.mjs')
+      mkdirSync(dirname(join(root, to)), { recursive: true })
+      writeFileSync(join(root, to), source, 'utf8')
+    }
+  }
   writeFileSync(join(root, '.spec/spexcode.json'), JSON.stringify({ mainBranch: 'main', harnesses: [] }), 'utf8')
   git(root, 'init', '-q', '-b', 'main')
   commit('old clean committed initial')
@@ -71,24 +84,27 @@ for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent',
     protocol = openProtocol(dbPath)
     store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) })
   }
-  const targetSource = readFileSync(join(root, targetPath), 'utf8')
-  const contract = parseContract({ nodeId: 'export-contract', path: targetPath, source: targetSource }).contract!
+  const targets = [{ nodeId: 'export-contract', path: targetPath, decision: 'EXPORT-POLICY' },
+    ...(retryImpactFormat ? [{ nodeId: 'import-contract', path: siblingTarget, decision: 'IMPORT-POLICY' }] : [])]
+  const targetSources = new Map(targets.map(({ path }) => [path, readFileSync(join(root, path), 'utf8')]))
   const environment = { version: 'trusted-test-v1', image: 'node@sha256:' + 'a'.repeat(64), platform: 'linux/arm64',
     memoryBytes: 10_000_000, cpus: 1, pidsLimit: 64, scratchBytes: 1_000_000, logBytes: 100_000 } as const
-  const verifications = contract.items.filter(item => item.kind === 'VERIFY')
-    .map(({ id, command, cwd, timeoutMs }) => ({ definition: { id, command, cwd, timeoutMs }, environment }))
+  const verifications = targets.flatMap(({ nodeId, path }) => parseContract({ nodeId, path, source: targetSources.get(path)! }).contract!.items
+    .filter(item => item.kind === 'VERIFY').map(({ id, command, cwd, timeoutMs }) => ({ definition: { id, command, cwd, timeoutMs }, environment })))
+  const sourcePaths = retryImpactFormat ? [sourcePath, siblingSource] : [sourcePath]
   const plan: SyncCoordinatorPlan = {
     version: 'sync-coordinator-v2', direction: 'code_to_spec', agentWorkflow: 'native-worktree-v1',
-    intentNodeId: 'export-contract', sourcePaths: [sourcePath], readPaths: ['.spec', 'src', 'tests'], writePaths: ['.spec'],
-    targets: [{ nodeId: 'export-contract', path: targetPath }], facts: [{ source: 'decision:EXPORT-POLICY', text: targetSource }], verifications, mandatoryTests: [],
+    intentNodeId: 'export-contract', sourcePaths, readPaths: ['.spec', 'src', 'tests'], writePaths: ['.spec'],
+    targets: targets.map(({ nodeId, path }) => ({ nodeId, path })),
+    facts: targets.map(({ path, decision }) => ({ source: 'decision:' + decision, text: targetSources.get(path)! })), verifications, mandatoryTests: [],
     partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 32768, maxParallel: 1 },
   }
   const admit = async (input: typeof oldInput, name: string) => {
-    const executionScope = { paths: [targetPath, sourcePath], contractIds: [], flowIds: [] }
-    const selected = operatorChallenge ? store.readBaselineSelection(input.source, executionScope.paths.map(path => ({ kind: 'path' as const, path }))) : undefined
+    const executionScope = { paths: [...targets.map(target => target.path), ...sourcePaths], contractIds: [], flowIds: [] }
+    const selected = operatorChallenge || retryImpactFormat ? store.readBaselineSelection(input.source, executionScope.paths.map(path => ({ kind: 'path' as const, path }))) : undefined
     if (selected && !('selection' in selected)) assert.fail(selected.failure.message)
     const next = store.admitAndEnqueue(await prepareSyncAdmission(input, plan, {
-      ingressKey: name, rootCauseId: name, origin: 'initial', budget: { maxAttempts: acrossAttempt ? 2 : 1, maxCalls: 24, maxRepairs: 0, timeoutMs: 120_000 },
+      ingressKey: name, rootCauseId: name, origin: 'initial', budget: { maxAttempts: acrossAttempt ? 2 : 1, maxCalls: 24, maxRepairs: retryImpactFormat ? 1 : 0, timeoutMs: 120_000 },
       managedRoot, model: 'claude:default', ...(selected ? { baselineSelection: selected.selection, executionScope } : {}),
     }))
     assert.equal(next.retryOf, undefined)
@@ -98,7 +114,9 @@ for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent',
     const wrapper = read<{ stage?: string; resultRef: BlobRef }>(ref)
     return wrapper.stage ? [[wrapper.stage, wrapper.resultRef] as const] : []
   }))
-  const calls: { operationId: string; purpose: string; sessionId: string; impact?: 'p0' | 'p1' }[] = []
+  const calls: { operationId: string; purpose: string; sessionId: string; owner?: string; impact?: 'p0' | 'p1' }[] = []
+  const impactDrafts = new Map<string, Buffer[]>()
+  let firstImpactOwner: string | undefined, failedImpactOwner: string | undefined
   const old = await admit(oldInput, 'p1-old-initial')
   let active = old
   let challenge: P1ReviewChallenge | undefined
@@ -113,14 +131,14 @@ for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent',
         const threadId = 'thread-' + sessionId, turnId = 'turn-' + sessionId, branch = 'codex/cross-freeze-p1-fixture-' + sessionId
         const workspace = join(parent, sessionId)
         git(root, 'worktree', 'add', '-q', '-b', branch, workspace, seed.baseCommit)
-        let output: unknown, draft: unknown, impact: 'p0' | 'p1' | undefined
+        let output: unknown, draft: unknown, owner: string | undefined, impact: 'p0' | 'p1' | undefined
         if (request.purpose === CROSS_FREEZE_IMPACT_PURPOSE) {
           assert.equal(seed.mode, 'read')
           const materialPath = git(workspace, 'ls-files', '.spex-sync-drafts').split('\n').find(path => path.endsWith('/review.json'))!
           const material = JSON.parse(readFileSync(join(workspace, materialPath), 'utf8')) as CrossFreezeImpactEvidence['binding']
             & { previous: { commit: string }; current: { commit: string }; changes: { path: string }[]; approvalFile: string | null }
-          impact = material.stage
-          assert.deepEqual(material.changes.map(change => change.path), [sourcePath])
+          impact = material.stage; owner = material.owner
+          assert.deepEqual(material.changes.map(change => change.path), sourcePaths)
           assert.match(readFileSync(join(workspace, dirname(materialPath), 'changes.diff'), 'utf8'), /H2 comment only/)
           assert.equal(material.previous.commit, oldInput.headCommit)
           assert.equal(material.current.commit, active.input.headCommit)
@@ -134,13 +152,28 @@ for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent',
               assert.equal(originalApproval.reviewPassed, true)
             }
           }
-          output = { inputDigest: request.inputDigest, verdict: 'reuse',
-            history: { previousCommit: material.previous.commit, currentCommit: material.current.commit, evidence: sourcePath, reason: 'ExportService behavior is unchanged.' },
-            paths: material.changes.map(({ path }) => ({ path, verdict: 'reuse', evidence: path + '#ExportService', reason: 'Only a source comment changed.' })),
+          const verdict = { inputDigest: request.inputDigest, verdict: 'reuse',
+            history: { previousCommit: material.previous.commit, currentCommit: material.current.commit, evidence: sourcePath, reason: 'Business behavior is unchanged.' },
+            paths: material.changes.map(({ path }) => ({ path, verdict: 'reuse', evidence: path, reason: 'Only a source comment changed.' })),
           } satisfies CrossFreezeImpactOutput
+          if (retryImpactFormat && impact === 'p1') {
+            const bytes = readFileSync(join(workspace, dirname(materialPath), 'candidate.json'))
+            const drafts = impactDrafts.get(owner) ?? []
+            drafts.push(bytes)
+            impactDrafts.set(owner, drafts)
+            firstImpactOwner ??= owner
+            if (!failedImpactOwner && firstImpactOwner !== owner) {
+              failedImpactOwner = owner
+              verdict.paths[1] = { ...verdict.paths[0] }
+              assert.deepEqual(outputErrors(verdict, request.schema), [], '业务路径重复但 JSON 结构仍满足正式 Native schema')
+            }
+          }
+          output = verdict
         } else if (request.purpose.startsWith('code_behavior_')) {
           const { task, pendingAnalysis } = readCodeBehaviorContext(request, commonDir)
-          const paths = task.requiredChangedPaths as string[], rule = 'RULE-EXPORT-05'
+          const paths = task.requiredChangedPaths as string[]
+          owner = (task.partition as { id: string }).id
+          const rule = paths.includes(siblingSource) ? 'RULE-IMPORT-05' : 'RULE-EXPORT-05'
           draft = pendingAnalysis ? {
             inputDigest: request.inputDigest, analysisDigest: pendingAnalysis.analysisDigest, verdict: 'accept',
             checkedPaths: paths, checkedChangeIds: pendingAnalysis.analysis.changes.map(change => change.id), findings: [],
@@ -154,7 +187,10 @@ for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent',
         } else {
           assert.equal(request.purpose, 'elaboration_review')
           assert.equal(seed.mode, 'read')
-          assert.equal(readFileSync(join(workspace, targetPath), 'utf8'), targetSource)
+          const task = JSON.parse(request.prompt.split('\n任务:\n')[1].split('\n')[0]) as { targets: { path: string }[]; partitionBinding: { partitionId: string } }
+          owner = task.partitionBinding.partitionId
+          const reviewedPath = task.targets[0].path
+          assert.equal(readFileSync(join(workspace, reviewedPath), 'utf8'), targetSources.get(reviewedPath))
           if (active.id !== old.id) assert.match(readFileSync(join(workspace, sourcePath), 'utf8'), /H2 comment only/)
           if (operatorChallenge && active.id !== old.id && !challenge) {
             rejectedReviewSeed = { ...seed, mode: 'read' }
@@ -180,7 +216,7 @@ for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent',
           git(workspace, 'commit', '-qm', 'Native P1 fixture draft')
           output = { summary: 'Native fixture committed its Git draft' }
         }
-        calls.push({ operationId: active.id, purpose: request.purpose, sessionId, ...(impact ? { impact } : {}) })
+        calls.push({ operationId: active.id, purpose: request.purpose, sessionId, ...(impact ? { impact } : {}), ...(owner ? { owner } : {}) })
         const worktree = nativeWorktreeResult(workspace, seed), resultDigest = digest(output)
         const execution = structuredExecutionPolicy(request)
         const fails = active.id === old.id && !oldApproved && request.purpose === 'elaboration_review'
@@ -201,10 +237,17 @@ for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent',
     } },
   }
   let interruptAfter: string | undefined
+  let omittedBudgetHint: { minimumCalls: number; remainingCalls: number } | undefined
   const runUntilP1 = async () => {
     const checkpoint = store.checkpoint.bind(store)
     store.checkpoint = (fence, ref) => {
-      const saved = checkpoint(fence, ref), stage = read<{ stage?: string }>(ref).stage
+      const { stage, resultRef } = read<{ stage?: string; resultRef: BlobRef }>(ref)
+      if (retryImpactFormat && active.id !== old.id && stage === 'partition-budget' && store.readAttempt(fence.attemptId).number === 2) {
+        store.assertWriteFence(fence)
+        omittedBudgetHint = read(resultRef)
+        return store.readAttempt(fence.attemptId)
+      }
+      const saved = checkpoint(fence, ref)
       if (stage && stage === interruptAfter) throw new SyncStoreError('SYNC_FENCE_EXPIRED', 'fixture exits after saving ' + stage)
       if (stage === 'elaboration') throw new StructuredSessionError('unsupported', stopBeforeGeneration)
       return saved
@@ -215,7 +258,10 @@ for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent',
   const first = await runUntilP1()
   assert.equal(first.failure?.message, stopBeforeGeneration, JSON.stringify({ failure: first.failure, calls, stages: [...stages(store.listAttempts(old.id)[0]).keys()] }))
   assert.equal(first.operation.phase, 'failed')
-  assert.deepEqual(calls.map(call => call.purpose), ['code_behavior_analyze', 'code_behavior_review', 'elaboration_generate', 'elaboration_review'])
+  assert.deepEqual(calls.map(call => call.purpose), [
+    ...targets.flatMap(() => ['code_behavior_analyze', 'code_behavior_review']),
+    ...targets.flatMap(() => ['elaboration_generate', 'elaboration_review']),
+  ])
   const [oldAttempt] = store.listAttempts(old.id), oldStages = stages(oldAttempt)
   const oldStage = [...oldStages].find(([key]) => /^partition:[^:]+:elaboration$/.test(key))
   assert.ok(oldStage)
@@ -228,7 +274,7 @@ for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent',
   assert.equal(store.readRetryEligibility(old.id).eligible, true)
   const oldDraft = readStageDraft(commonDir, oldRound.draft, oldRound.draft)
 
-  writeFileSync(join(root, sourcePath), readFileSync(join(root, sourcePath), 'utf8') + '\n// H2 comment only\n', 'utf8')
+  for (const path of sourcePaths) writeFileSync(join(root, path), readFileSync(join(root, path), 'utf8') + '\n// H2 comment only\n', 'utf8')
   commit('new clean committed initial')
   const currentInput = await captureInputSnapshot(root, { committed: true })
   reopen()
@@ -236,6 +282,57 @@ for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent',
   const oldBefore = { operation: store.readOperation(old.id), attempts: store.listAttempts(old.id), resources: store.listResources(oldAttempt.id) }
   assert.equal(oldBefore.operation.phase, 'superseded')
   const currentCalls = () => calls.filter(call => call.operationId === active.id)
+  if (retryImpactFormat) {
+    const result = await runUntilP1()
+    assert.equal(result.failure?.message, stopBeforeGeneration, JSON.stringify({ failure: result.failure, calls: currentCalls() }))
+    assert.equal(result.operation.id, active.id)
+    assert.equal(result.operation.retryOf, undefined)
+    assert.ok(firstImpactOwner && failedImpactOwner && firstImpactOwner !== failedImpactOwner)
+    const attempts = store.listAttempts(active.id)
+    assert.equal(attempts.length, 2)
+    const [bad, recovered] = attempts, badStages = stages(bad), recoveredStages = stages(recovered)
+    assert.equal(bad.failure?.code, 'cross_freeze_impact_review_retry')
+    const failedKey = 'partition:' + failedImpactOwner + ':elaboration'
+    const siblingKey = 'partition:' + firstImpactOwner + ':elaboration'
+    const originalRef = oldStages.get(failedKey)!, originalP1 = read<ElaborationResult>(originalRef), originalDraft = originalP1.rounds.at(-1)!
+    assert.equal(originalP1.structurePassed && originalP1.reviewPassed, true)
+    assert.ok(originalDraft.draft)
+    const drafts = impactDrafts.get(failedImpactOwner)!
+    assert.equal(drafts.length, 2)
+    for (const bytes of drafts) assert.equal(bytes.toString(), readStageDraft(commonDir, originalDraft.draft, originalDraft.draft))
+    assert.equal(badStages.has(failedKey), false)
+    assert.ok(badStages.get(siblingKey))
+    assert.deepEqual(recoveredStages.get(siblingKey), badStages.get(siblingKey), '已审兄弟 P1 继续使用同一结果引用')
+    assert.deepEqual(recovered.dispatchPlans.map(dispatch => dispatch.purpose), [CROSS_FREEZE_IMPACT_PURPOSE, 'elaboration_review'])
+    assert.ok(omittedBudgetHint && omittedBudgetHint.remainingCalls >= omittedBudgetHint.minimumCalls)
+    assert.equal(recoveredStages.has('partition-budget'), false, '已开始的影响复核续审不靠首次复用预算提示')
+    assert.equal(store.readBudgetUsage(active.id).callsUsed, 9, '夹具保留正式预算计账')
+    assert.equal(currentCalls().some(call => ['code_behavior_analyze', 'elaboration_generate'].includes(call.purpose)), false)
+    assert.deepEqual(currentCalls().filter(call => call.owner === failedImpactOwner).map(call => call.impact ?? call.purpose),
+      ['p0', 'code_behavior_review', 'p1', 'p1', 'elaboration_review'])
+    assert.deepEqual(currentCalls().filter(call => call.owner === firstImpactOwner).map(call => call.impact ?? call.purpose),
+      ['p0', 'code_behavior_review', 'p1', 'elaboration_review'])
+    assert.ok(attempts.every(attempt => store.listResources(attempt.id).every(resource => resource.phase === 'removed')))
+    const failedCall = currentCalls().find(call => call.owner === failedImpactOwner && call.impact === 'p1')!
+    const failedDispatch = bad.dispatchPlans.find(dispatch => dispatch.session?.sessionId === failedCall.sessionId)!
+    const failedResource = store.findResource(bad.id, failedDispatch.key)!
+    const failedNative = read<NativeRunCheckpoint>(failedResource.checkpointRef)
+    const invalid = failedNative.result!.output as CrossFreezeImpactOutput
+    assert.deepEqual(invalid.paths.map(({ path }) => path), [sourcePath, sourcePath])
+    assert.equal(bad.failure.evidenceRefs[0].sha256, failedResource.checkpointRef.sha256)
+    const final = read<ElaborationResult>(recoveredStages.get(failedKey)!), finalRound = final.rounds.at(-1)!
+    assert.equal(final.reviewPassed, true)
+    assert.deepEqual(read(badStages.get(failedKey + ':cross-freeze-impact-retry')!), {
+      version: 'cross-freeze-impact-retry-v1', sourceRef: result.operation.crossFreezeBinding?.ref,
+      authorRef: originalRef, currentInputDigest: final.inputDigest, checkpointRef: failedResource.checkpointRef,
+    })
+    assert.deepEqual(finalRound.crossFreezeAuthor?.oldResultRef, originalRef)
+    assert.deepEqual(finalRound.draft, originalDraft.draft)
+    assert.deepEqual(finalRound.traces[0], originalDraft.traces[0])
+    assert.deepEqual({ operation: store.readOperation(old.id), attempts: store.listAttempts(old.id), resources: store.listResources(oldAttempt.id) }, oldBefore)
+    assert.equal(git(root, 'status', '--porcelain'), '')
+    return
+  }
   const impactKey = localKey + ':cross-freeze-impact'
   interruptAfter = impactKey
   const interrupted = await runUntilP1()
