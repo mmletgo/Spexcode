@@ -45,7 +45,6 @@ from llm_manager import (
     ProviderView,
     ProviderWrite,
     RouteChoice,
-    RouteDisposition,
     SettlementOutcome,
     SettlementRequest,
     ThinkingEffort,
@@ -61,8 +60,7 @@ from llm_manager import (
     upgrade_schedule_schema,
     validate_feature_group_catalog,
 )
-from llm_manager.api_probe import probe_api, revalidate_api
-from llm_manager.catalog import provider_satisfies_capability_gate
+from llm_manager.api_probe import probe_api
 from llm_manager.claude_relay import ClaudeRelayError
 from llm_manager.db import enable_sqlite_foreign_keys
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
@@ -419,45 +417,21 @@ def transaction(config: HostConfig, key: bytes | None) -> Iterator[LlmManager]:
         engine.dispose()
 
 
-def provider_transport(provider: ProviderView) -> bool:
-    """
-    Business Logic（为什么需要这个函数）:
-        Manager 可以保存多种通道，SpexCode 只能派发其工作树执行器实际支持的通道。
-
-    Code Logic（这个函数做什么）:
-        判断宿主支持的无 Key 原生 CLI，或使用兼容 Anthropic Messages 的 API Provider。
-    """
-
-    if provider.kind == ProviderKind.cli:
-        return provider.cli_vendor in VENDORS and not provider.keys
-    return provider.api_format == ApiFormat.anthropic_messages
-
-
-def execution_manager(manager: LlmManager, config: HostConfig, key: bytes | None, native_capability: NativeCapability | None = None) -> LlmManager:
+def execution_manager(manager: LlmManager, config: HostConfig, native_capability: NativeCapability | None = None) -> LlmManager:
     """
     Business Logic（为什么需要这个函数）:
         Manager 应按原功能组优先级与备用规则选择 SpexCode 实际可派发的成员。
 
     Code Logic（这个函数做什么）:
-        将宿主执行器兼容性与起始组能力合并，再将请求的原生能力交给同 owner、同事务的 Manager。
+        声明本宿主可执行的 API 协议、CLI 厂商和请求能力，由同 owner、同事务的 Manager 选择执行通道。
     """
 
-    capability = "spex-execution-transport-v1"
-    requested = next(group for group in manager.catalog if group.id == config.group_id)
-    capable = {
-        provider.id: (capability,)
-        for provider in manager.list_providers()
-        if provider_transport(provider)
-        and (key is not None or provider.kind == ProviderKind.cli)
-        and provider_satisfies_capability_gate(requested, manager.provider_capabilities.get(provider.id, frozenset()))
-    }
-    gated = requested.model_copy(update={"required_capabilities": (capability,)})
-    catalog = tuple(gated if group.id == config.group_id else group for group in manager.catalog)
-    if native_capability is not None:
-        if not hasattr(manager, "attest_native_capability"):
-            raise HostError("llm_manager_native_capability_unavailable")
-        return LlmManager(manager.owner_id, manager.session, key, catalog, provider_capabilities=capable, native_capability=native_capability)
-    return LlmManager(manager.owner_id, manager.session, key, catalog, provider_capabilities=capable)
+    return manager.for_execution(
+        config.group_id,
+        api_formats=frozenset({ApiFormat.anthropic_messages}),
+        cli_vendors=VENDORS,
+        native_capability=native_capability,
+    )
 
 
 def frozen_choice(binding: RouteBinding) -> RouteChoice:
@@ -567,49 +541,11 @@ def is_current(manager: LlmManager, binding: RouteBinding, choice: RouteChoice) 
         return False
     return (
         provider.enabled and provider.version == binding.provider_version
-        and provider_transport(provider) and provider.id in manager.provider_capabilities
+        and provider.id in manager.provider_capabilities
         and digest == binding.key_nonce_digest
         and option is not None and option.enabled and option.group_id == choice.group_id
         and option.model_id == choice.model_id and option.thinking_tier_id == binding.tier_id
     )
-
-
-def same_choice(current: RouteChoice, frozen: RouteChoice) -> bool:
-    """
-    Business Logic（为什么需要这个函数）:
-        派发前重新验证路线可用时，应匹配原组、选项和 Key。
-
-    Code Logic（这个函数做什么）:
-        比较 Manager 本次返回的身份，Provider 版本、档位和 Key 版本另由冻结记录校验。
-    """
-
-    return (current.group_id, current.option_id, current.model_id, current.key_id) == (
-        frozen.group_id, frozen.option_id, frozen.model_id, frozen.key_id,
-    )
-
-
-def ready_choice(manager: LlmManager, choice: RouteChoice | None) -> RouteChoice | None:
-    """
-    Business Logic（为什么需要这个函数）:
-        只发出 Manager 正式判为 ready 的路线，过期的 API 熔断要先试探。
-
-    Code Logic（这个函数做什么）:
-        按原 Manager 游标试探 API 或跳过宿主不能选用的选项。
-    """
-
-    tried: set[tuple[str, str | None]] = set()
-    while choice is not None:
-        attempt = (choice.option_id, choice.key_id)
-        if choice.provider_id not in manager.provider_capabilities:
-            choice = manager.skip_option(choice)
-        elif choice.disposition == RouteDisposition.ready:
-            return choice
-        elif choice.kind == ProviderKind.api and attempt not in tried:
-            tried.add(attempt)
-            choice = manager.revalidate(choice, partial(revalidate_api, choice.model_name))
-        else:
-            choice = manager.skip_option(choice)
-    return None
 
 
 def resolve(manager: LlmManager, config: HostConfig, request: RouteLookup) -> ManagedRoute | None:
@@ -631,7 +567,7 @@ def resolve(manager: LlmManager, config: HostConfig, request: RouteLookup) -> Ma
     if after is None:
         if request.failedSessionId is not None:
             raise HostError("llm_manager_quota_required")
-        choice = ready_choice(manager, manager.resolve(config.group_id))
+        choice = manager.prepare_route(manager.resolve(config.group_id))
     else:
         old = require_binding(manager, config.group_id, after)
         claims = select(RouteClaim).where(
@@ -643,17 +579,13 @@ def resolve(manager: LlmManager, config: HostConfig, request: RouteLookup) -> Ma
         if claim is None:
             raise HostError("llm_manager_quota_required")
         if claim.successor_id is None:
-            choice = ready_choice(manager, manager.skip_option(frozen_choice(old)))
+            choice = manager.prepare_route(manager.skip_option(frozen_choice(old)))
         else:
             binding = manager.session.get_one(RouteBinding, (manager.owner_id, claim.successor_id))
             frozen = frozen_choice(binding)
-            current = manager.resolve(config.group_id)
-            while current is not None and current.option_id != frozen.option_id:
-                current = manager.skip_option(current)
-            if (current is not None and same_choice(current, frozen)
-                    and is_current(manager, binding, frozen) and current.disposition == RouteDisposition.ready):
+            if is_current(manager, binding, frozen) and manager.matches_ready_route(config.group_id, frozen):
                 return ManagedRoute.model_validate_json(binding.public_route)
-            choice = ready_choice(manager, manager.skip_option(frozen))
+            choice = manager.prepare_route(manager.skip_option(frozen))
     return bind_choice(manager, config.group_id, choice, request.capability) if choice is not None else None
 
 
@@ -675,17 +607,13 @@ def reserve(manager: LlmManager, config: HostConfig, request: ReserveRequest) ->
         if claim.route_id != binding.route_id or claim.outcome is not None:
             raise HostError("llm_manager_session_conflict")
         return
-    choice = manager.resolve(config.group_id)
-    while choice is not None:
-        if choice.disposition == RouteDisposition.ready and same_choice(choice, frozen):
-            lease = manager.acquire(frozen.group_id, frozen.provider_id)
-            manager.session.add(RouteClaim(
-                owner_id=manager.owner_id, session_id=request.sessionId, route_id=binding.route_id, lease_id=lease.id,
-            ))
-            return
-        choice = manager.skip_option(choice)
-    # Manager.resolve also skips full groups and Providers. Ask the same acquisition
-    # gate, keeping the probe transaction from leaving a lease for an unavailable route.
+    if manager.matches_ready_route(config.group_id, frozen):
+        lease = manager.acquire(frozen.group_id, frozen.provider_id)
+        manager.session.add(RouteClaim(
+            owner_id=manager.owner_id, session_id=request.sessionId, route_id=binding.route_id, lease_id=lease.id,
+        ))
+        return
+    # Obtain the original capacity error without retaining a probe lease.
     with manager.session.begin_nested() as probe:
         manager.acquire(frozen.group_id, frozen.provider_id)
         probe.rollback()
@@ -739,7 +667,7 @@ def settle(manager: LlmManager, config: HostConfig, request: SettleRequest) -> d
         manager.report_success(choice, now=moment)
     if outcome == "quota":
         successor = manager.report_failure(choice, FailureReport(status_code=429), now=moment) if current else manager.skip_option(choice, now=moment)
-        successor = ready_choice(manager, successor)
+        successor = manager.prepare_route(successor)
         if successor is not None:
             claim.successor_id = bind_choice(manager, config.group_id, successor, request.route.frozenReader.capability if request.route.frozenReader else None).routeId
     claim.outcome = outcome
@@ -953,7 +881,7 @@ def rpc(config: HostConfig) -> object:
         if isinstance(request, SettingsRequest):
             return settings(manager, request.body)
         capability = request.capability if isinstance(request, RouteLookup) else request.route.frozenReader.capability if request.route.frozenReader else None
-        execution = execution_manager(manager, config, key, capability)
+        execution = execution_manager(manager, config, capability)
         if isinstance(request, RouteLookup):
             return resolve(execution, config, request)
         if isinstance(request, SettleRequest):
@@ -1054,7 +982,7 @@ def report_api_terminal_timeout(
         lease = manager.session.get_one(Lease, (manager.owner_id, claim.lease_id))
         if binding.request_group != config.group_id or lease.released_at is not None:
             return
-        execution = execution_manager(manager, config, key)
+        execution = execution_manager(manager, config)
         choice = frozen_choice(binding)
         if is_current(execution, binding, choice):
             execution.report_failure(choice, FailureReport(transport="timeout"))
@@ -1087,7 +1015,7 @@ def launch_claude(
         command = ["/usr/bin/sandbox-exec", "-p", f"{profile} (deny file-read* {literals})", *command]
     key = master_key(config.master_key_file)
     with transaction(config, key) as manager:
-        execution = execution_manager(manager, config, key)
+        execution = execution_manager(manager, config)
         claim = manager.session.get(RouteClaim, (manager.owner_id, session_id))
         binding = manager.session.get(RouteBinding, (manager.owner_id, route_id))
         if claim is None or claim.route_id != route_id or claim.outcome is not None or binding is None or binding.request_group != config.group_id:

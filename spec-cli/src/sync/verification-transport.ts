@@ -41,7 +41,8 @@ export function sshVerificationRpc(configuration: VerificationTransportConfigura
     const source = await readFile(new URL('./verification-remote-helper.mjs', import.meta.url))
     const command = `exec node --input-type=module -e 'import{gunzipSync}from"node:zlib";import("data:text/javascript;base64,"+gunzipSync(Buffer.from("${gzipSync(source).toString('base64')}","base64")).toString("base64")).then(m=>m.verificationSshMain())'`
     return new Promise((fulfil, reject) => {
-      const child = spawn('ssh', ['-T', '-o', 'BatchMode=yes', '--', configuration.sshAlias, command], { shell: false, stdio: ['pipe', 'pipe', 'pipe'] })
+      const materializing = request.action === 'effect' && (request.effect as VerificationEffect).kind === 'materialize'
+      const child = spawn('ssh', ['-T', ...(materializing ? ['-C'] : []), '-o', 'BatchMode=yes', '--', configuration.sshAlias, command], { shell: false, stdio: ['pipe', 'pipe', 'pipe'] })
       const startedAt = performance.now(), preparationMs = startedAt - preparingAt, loopAtStart = performance.eventLoopUtilization()
       let output = Buffer.alloc(0), diagnostics = Buffer.alloc(0), excessive = false
       let stdoutBytes = 0, stderrBytes = 0, firstOutputAtMs: number | null = null, lastOutputAtMs: number | null = null
@@ -52,7 +53,6 @@ export function sshVerificationRpc(configuration: VerificationTransportConfigura
       child.stdout.once('end', () => { stdoutEnded = true })
       child.stderr.once('end', () => { stderrEnded = true })
       child.once('exit', () => { childExitObserved = true })
-      const materializing = request.action === 'effect' && (request.effect as VerificationEffect).kind === 'materialize'
       const timeoutMs = materializing ? Math.max(1, Number(request.deadlineAt) - Date.now()) : 15_000
       const timer = setTimeout(() => {
         const elapsedMs = performance.now() - startedAt

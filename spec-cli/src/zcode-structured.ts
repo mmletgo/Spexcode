@@ -49,7 +49,7 @@ type ManagerZCodeAdapter = {
   ZCodeProtocolError: abstract new (...args: never[]) => ManagerZCodeError
   ZCodeNativeTurnFailedError: new (sessionId: string, turnId: string, code: unknown, worktree: boolean, attribution?: unknown) => ManagerZCodeError
   zcodeCapability: typeof zcodeCapability
-  zcodeVersionArgs(): string[]
+  inspectZCodeCliVersion(launch: ReturnType<typeof nativeWorktreeLaunch> & { cwd: string; env: NodeJS.ProcessEnv }, nativeConfiguration: boolean): string
   zcodeAppServerArgs(workspace: string): string[]
   zcodeNativeIdentity(): { sessionId: string; inputId: string; queryId: string }
   zcodeNativeSelection(model: string | undefined, effort?: string): NativeSelection
@@ -684,9 +684,7 @@ export async function zcodeStructuredTurn(realm: string, id: string, prompt: str
   }
   const env = adapter.zcodeRuntimeEnv({ path: `${dirname(process.execPath)}:/usr/bin:/bin:/usr/sbin:/sbin`, home, tmp, personal })
   const launch = worktreeLaunch ?? { command: '/usr/bin/sandbox-exec', args: ['-f', profile, cliPath] }
-  const version = spawnSync(launch.command, [...launch.args, ...adapter.zcodeVersionArgs()], { cwd: workspace, env, encoding: 'utf8', timeout: 10000 })
-  const cliVersion = version.stdout?.trim()
-  if (version.error || version.status !== 0 || !cliVersion || !genericNativeConfiguration && cliVersion !== capability.cliVersion) throw new StructuredSessionError('unsupported', 'ZCode CLI version could not be recorded for this runtime')
+  const cliVersion = zcodeAdapterValue(adapter, () => adapter.inspectZCodeCliVersion({ ...launch, cwd: workspace, env }, genericNativeConfiguration))
   if (!worktree) {
     const oracle = join(root, 'outside-oracle.txt'); writeFileSync(oracle, 'UNCHANGED', { mode: 0o600 })
     const targets = { runtime: join(runtime, 'canary'), tmp: join(tmp, 'canary'), oracle, config, input, profile, frozen: execution.frozenContext!.manifestPath, workspace: join(workspace, 'forbidden-write') }

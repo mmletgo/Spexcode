@@ -392,6 +392,13 @@ for (const action of ['terminal', 'cancel'] as const) {
   })
 }
 
+test('Cursor rejects an unavailable CLI version before reserving the original dispatch', async t => {
+  const f = fixture(t, 'read')
+  writeFileSync(f.cli, `#!${process.execPath}\nprocess.stdout.write('public-version-fixture'); process.exitCode = 1\n`)
+  await assert.rejects(f.run(), { code: 'unsupported', message: 'Cursor CLI did not report a version' })
+  assert.equal(existsSync(f.sessionRoot), false)
+})
+
 test('Cursor ACP binds native session, exact client request, reported model and real Git draft', async t => {
   const f = fixture(t, 'edit', 'cursor:opaque/vendor +preview ')
   const result = await f.run()

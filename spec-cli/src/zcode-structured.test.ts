@@ -653,7 +653,12 @@ for (const censusPhase of ['pre-exit', 'post-exit', 'late-protocol-error', 'star
   const cli = join(bin, 'zcode')
   const rpcFixture = `#!/usr/bin/env node
 const readline=require('node:readline'),cp=require('node:child_process');
-if(process.argv.includes('--version')){process.stdout.write('99.4.1\\n');process.exit(0)}
+if(process.argv.includes('--version')){
+  if(process.cwd()!==require('node:fs').realpathSync(${JSON.stringify(workspace)})
+    ||process.env.HOME!==${JSON.stringify(join(root, 'runtime', 'home'))}
+    ||process.env.ZCODE_DATA_BASE_DIR!==process.env.HOME)process.exit(2);
+  process.stdout.write('99.4.1\\n');process.exit(0)
+}
 const rl=readline.createInterface({input:process.stdin});let create,send,closeCount=0;
 const turnId='fixture-turn',response='{"ok":true}',model=()=>create.model,quota=${censusPhase === 'managed-quota'};
 const reply=(id,result)=>process.stdout.write(JSON.stringify({id,result})+'\\n');
