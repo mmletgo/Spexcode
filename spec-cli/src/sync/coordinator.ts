@@ -2008,7 +2008,7 @@ function authenticateCrossFreezeImpact(
 async function runCrossFreezeImpact(
   runner: ElaborationRunner, store: SyncStore, operation: SyncOperation, attemptId: string,
   prepared: CrossFreezeImpactReview, signal: AbortSignal, assertFence: () => void,
-  readNativeRecord: (id: string) => NativeRunRecord | null = readRecord,
+  recordRetry: (checkpointRef: BlobRef) => void, readNativeRecord: (id: string) => NativeRunRecord | null = readRecord,
 ): Promise<CrossFreezeImpactEvidence> {
   const key = prepared.request.requestKey
   let result: ElaborationSessionResult
@@ -2021,6 +2021,7 @@ async function runCrossFreezeImpact(
     authenticateNativeFailure(store, operation, store.readAttempt(attemptId), key, {
       code: error.code, message: error.message, sessionId: error.sessionId, threadId: error.threadId, turnId: error.turnId,
     })
+    recordRetry(resource.checkpointRef)
     return fail('cross_freeze_impact_review_retry', '影响复核格式失败，保留原 Git 稿并续同一材料的独审', [resource.checkpointRef])
   }
   const trace: ElaborationTrace = { purpose: prepared.request.purpose, sessionId: result.sessionId, threadId: result.threadId,
@@ -2031,8 +2032,24 @@ async function runCrossFreezeImpact(
     if (!(error instanceof CrossFreezeImpactVerdictError)) throw error
     const resource = store.findResource(attemptId, key)
     if (!resource || resource.phase !== 'removed') throw error
+    recordRetry(resource.checkpointRef)
     return fail('cross_freeze_impact_review_retry', error.message, [resource.checkpointRef])
   }
+}
+
+type CrossFreezeImpactRetry = {
+  version: 'cross-freeze-impact-retry-v1'
+  sourceRef: BlobRef
+  authorRef: BlobRef
+  currentInputDigest: string
+  checkpointRef: BlobRef
+}
+
+function matchesCrossFreezeImpactRetry(
+  previous: CrossFreezeImpactRetry | null, sourceRef: BlobRef, authorRef: BlobRef, currentInputDigest: string,
+): boolean {
+  return previous?.version === 'cross-freeze-impact-retry-v1' && previous.sourceRef.sha256 === sourceRef.sha256
+    && previous.authorRef.sha256 === authorRef.sha256 && previous.currentInputDigest === currentInputDigest
 }
 
 function readLockedCrossFreezeSource(store: SyncStore, operation: SyncOperation) {
@@ -4252,12 +4269,15 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         if (!author) return null
         const commonDir = operation.input.source.commonDir
         const current = store.readAttempt(fence!.attemptId)
-        const history = store.listAttempts(owner.id).reverse()
+        const history = store.listAttempts(owner.id).reverse(), retryKey = `${key}:cross-freeze-impact-retry`
+        let retrying = false
         for (const prior of history) {
           if (prior.operationId === current.operationId && prior.number > current.number || prior.id !== current.id && !['failed', 'superseded', 'settled'].includes(prior.status)) continue
           await yieldToControl()
           assertMaterialFence()
           const index = readSyncCheckpointStageIndex(store, owner, prior)
+          const retry = stage<CrossFreezeImpactRetry>(store, owner, prior, retryKey, 'automatic', index)
+          retrying ||= matchesCrossFreezeImpactRetry(retry, selected.bindingRef, author.analysisRef, currentInputDigest)
           if (stage(store, owner, prior, `${key}:cross-freeze-structure-rejection`, 'automatic', index)) return null
           const previous = partitionStage<CodeBehaviorContinuation>(store, owner, prior, `${key}:continuation`, undefined, index)?.result
           if (previous?.inputDigest === currentInputDigest && previous.crossFreezeAuthorReviewRepair) return null
@@ -4267,13 +4287,16 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         }
         if (existing || owner.id !== operation.id) return null
         const sizing = stage<{ minimumCalls: number; remainingCalls: number | null }>(store, operation, current, 'partition-budget')
-        if (budget && (!sizing || sizing.remainingCalls === null || sizing.remainingCalls < sizing.minimumCalls + 2 * plan.partitions.length)) return null
+        if (budget && !retrying && (!sizing || sizing.remainingCalls === null || sizing.remainingCalls < sizing.minimumCalls + 2 * plan.partitions.length)) return null
         const original = readStageDraft(commonDir, author.draft, author.draft)
         const rawRef = writeEvidenceBytes(commonDir, Buffer.from(original, 'utf8'))
         const seed = stageWorktree(commonDir, operation.input.headCommit, view.composed.tree)
         const prepared = prepareCrossFreezeImpactReview(crossFreezeP0ImpactInput(operation, current.id, selected.source,
           partition.id, author, seed, partition.readPaths, callTimeoutMs, rawRef))
-        const evidence = await runCrossFreezeImpact(runner, store, operation, current.id, prepared, signal, assertMaterialFence, options.nativeExecution?.runtime?.readRecord)
+        const evidence = await runCrossFreezeImpact(runner, store, operation, current.id, prepared, signal, assertMaterialFence,
+          checkpointRef => { saveStage(store, fence!, retryKey, { version: 'cross-freeze-impact-retry-v1',
+            sourceRef: selected.bindingRef, authorRef: author.analysisRef, currentInputDigest, checkpointRef } satisfies CrossFreezeImpactRetry) },
+          options.nativeExecution?.runtime?.readRecord)
         const impactReviewRef = saveStage(store, fence!, `${key}:cross-freeze-impact`, {
           version: 'cross-freeze-p0-impact-v1', sourceRef: selected.bindingRef, currentInputDigest,
           checkedPaths: [...partition.readPaths].sort(), worktree: prepared.request.worktree, timeoutMs: callTimeoutMs, evidence,
@@ -4291,23 +4314,29 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         assertMaterialFence()
         const author = historicalElaborationAuthor(store, selected.selected.source, partition.id)
         if (!author) return null
-        const current = store.readAttempt(fence!.attemptId)
+        const current = store.readAttempt(fence!.attemptId), retryKey = `${key}:cross-freeze-impact-retry`
+        let retrying = false
         for (const prior of store.listAttempts(selected.owner.id).reverse()) {
           if (prior.operationId === current.operationId && prior.number > current.number || prior.id !== current.id && !['failed', 'superseded', 'settled'].includes(prior.status)) continue
           await yieldToControl()
           assertMaterialFence()
+          const retry = stage<CrossFreezeImpactRetry>(store, selected.owner, prior, retryKey)
+          retrying ||= matchesCrossFreezeImpactRetry(retry, selected.selected.bindingRef, author.resultRef, inputDigest)
           const proof = readCrossFreezeP1Impact(store, selected.owner, prior, key, inputDigest, selected.selected, author, options.nativeExecution?.runtime?.readRecord)
           if (proof && (!existing || canonical(existing) === canonical(proof.author.proof))) return proof.verdict === 'reuse' ? proof.author : null
         }
         if (existing || selected.owner.id !== operation.id || input.worktree.tree !== view.composed.tree) return null
         const sizing = stage<{ minimumCalls: number; remainingCalls: number | null }>(store, operation, current, 'partition-budget')
-        if (budget && (!sizing || sizing.remainingCalls === null || sizing.remainingCalls < sizing.minimumCalls + 2 * plan.partitions.length)) return null
+        if (budget && !retrying && (!sizing || sizing.remainingCalls === null || sizing.remainingCalls < sizing.minimumCalls + 2 * plan.partitions.length)) return null
         const commonDir = operation.input.source.commonDir, original = readStageDraft(commonDir, author.draft, author.draft)
         const rawRef = writeEvidenceBytes(commonDir, Buffer.from(original, 'utf8'))
         const seed = stageWorktree(commonDir, operation.input.headCommit, overlayStageTree(commonDir, input.worktree.tree, input.context ?? []))
         const prepared = prepareCrossFreezeImpactReview(crossFreezeP1ImpactInput(operation, current.id, selected.selected.source,
           partition.id, author, seed, partition.readPaths, callTimeoutMs, rawRef))
-        const evidence = await runCrossFreezeImpact(runner, store, operation, current.id, prepared, signal, assertMaterialFence, options.nativeExecution?.runtime?.readRecord)
+        const evidence = await runCrossFreezeImpact(runner, store, operation, current.id, prepared, signal, assertMaterialFence,
+          checkpointRef => { saveStage(store, fence!, retryKey, { version: 'cross-freeze-impact-retry-v1',
+            sourceRef: selected.selected!.bindingRef, authorRef: author.resultRef, currentInputDigest: inputDigest, checkpointRef } satisfies CrossFreezeImpactRetry) },
+          options.nativeExecution?.runtime?.readRecord)
         const reviewRef = saveStage(store, fence!, `${key}:cross-freeze-impact`, {
           version: 'cross-freeze-p1-impact-v1', sourceRef: selected.selected.bindingRef, currentInputDigest: inputDigest,
           composedDigest: view.composed.contentDigest, checkedPaths: [...partition.readPaths].sort(),
@@ -5058,7 +5087,14 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           : undefined
         const serialRetry = previousElaboration?.status === 'superseded' && previousElaboration.failure?.kind === 'repairable'
           && (previousElaboration.failure.serialElaborationRetry || isNativeObservationFailure(previousElaboration.failure))
-        const result = partitions ? await elaborateSyncPartitions(elaborationInput, partitions, serialRetry ? 1 : maxParallel, partitionCheckpoints, runner, view.composed) : await elaborate(elaborationInput, { runner, draft: cacheDraft, loadDraft, loadDraftMaterial: draftProtocol ? (schemaDigest, request) => loadElaborationDraftMaterial('elaboration', undefined, schemaDigest, request) : undefined, seed: loadElaborationRepairSeed('elaboration', freezeElaborationInput(elaborationInput).inputDigest) ?? undefined, repairDiagnostics: loadElaborationRepairDiagnostics('elaboration', freezeElaborationInput(elaborationInput).inputDigest) ?? undefined })
+        let result: ElaborationResult
+        try {
+          result = partitions ? await elaborateSyncPartitions(elaborationInput, partitions, serialRetry ? 1 : maxParallel, partitionCheckpoints, runner, view.composed) : await elaborate(elaborationInput, { runner, draft: cacheDraft, loadDraft, loadDraftMaterial: draftProtocol ? (schemaDigest, request) => loadElaborationDraftMaterial('elaboration', undefined, schemaDigest, request) : undefined, seed: loadElaborationRepairSeed('elaboration', freezeElaborationInput(elaborationInput).inputDigest) ?? undefined, repairDiagnostics: loadElaborationRepairDiagnostics('elaboration', freezeElaborationInput(elaborationInput).inputDigest) ?? undefined })
+        } catch (error) {
+          if (!(error instanceof SyncCoordinatorError) || error.code !== 'cross_freeze_impact_review_retry' || signal.aborted) throw error
+          store.recordFailure(fence, failure(error.code, error.message, 'repairable', error.evidenceRefs), true)
+          continue
+        }
         const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = result
         elaboration = compact; saveStage(store, fence, 'elaboration', compact, !operation.baselineSelection ? { readSetDigest: operation.readSetDigest } : undefined, { composedTree: view.composed.tree, composedContentDigest: view.composed.contentDigest })
       }

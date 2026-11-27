@@ -689,8 +689,17 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
     pending = pending.filter(partition => !byPartition.has(partition.id))
   }
   const remaining = writers.filter(partition => !byPartition.has(partition.id))
-  const parallel = await mapSyncPartitions(remaining, maxParallel, input.signal, run)
-  for (let index = 0; index < remaining.length; index++) byPartition.set(remaining[index].id, parallel[index])
+  const impactFailures: Error[] = []
+  const parallel = await mapSyncPartitions(remaining, maxParallel, input.signal, async partition => {
+    try { return await run(partition) }
+    catch (error) {
+      if (!(error instanceof Error) || !('code' in error) || error.code !== 'cross_freeze_impact_review_retry') throw error
+      impactFailures.push(error)
+      return null
+    }
+  })
+  if (impactFailures.length) throw impactFailures[0]
+  for (const [index, result] of parallel.entries()) if (result) byPartition.set(remaining[index].id, result)
   const results = writers.map(partition => byPartition.get(partition.id)!)
   const first = results[0]
   if (!first) reject('分区细化结果为空')
