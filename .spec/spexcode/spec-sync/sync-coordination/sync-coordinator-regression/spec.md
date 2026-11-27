@@ -6,6 +6,7 @@ desc: 真实 SQLite/Git 和隔离 Docker 检查编排与恢复门禁。
 code:
   - spec-cli/src/sync/coordinator.test.ts
 related:
+  - spec-cli/src/sync/cross-freeze-coordinator.test.ts
   - spec-cli/src/sync/verification-transport.fixture.test.ts
 ---
 # P2 中央编排集成证据
@@ -15,6 +16,8 @@ related:
 中央应用编排必须由实际输入、候选、验收和交付事实证明，不能把模型 stub 的通过声明当最终产品证据。
 
 ## expanded spec
+
+跨冻结 P0 回归用两次从干净主分支正式接入的 committed initial、隔离 SQLite、真实 Git 草稿与受控 Native 运行时。影响复核逐项读取第二次提交的源文件和测试变更。适用分区保留完整原稿、原作者 trace 和旧批准引用，仅派当前独审。命中影响的分区重新派发当前作者和独审。无基线路径在影响复核结算后重开 SQLite，沿同一检查点恢复且只保存一次影响复核。核对各阶段真实 Native 资源结算、历史证明和冻结源保留。夹具在 P0 汇总后停止。
 
 P1 托管独审使用已结算 429 的精确会话后继。回归验证同候选、原草稿与作者 trace、独立后继会话、失败已落盘后重启、无后继或宿主不可达时不新增派发，以及选路可用后沿同稿恢复。
 
