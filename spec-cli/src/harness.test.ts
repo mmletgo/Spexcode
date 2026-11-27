@@ -2320,6 +2320,12 @@ test('Codex archive re-censuses native descendants after mutation and compensate
   }
 })
 
+function createStaleUnixSocket(path: string): void {
+  // Direct exit leaves the bound socket on disk, as when the owner crashes.
+  execFileSync(process.execPath, ['-e', "require('node:net').createServer().listen(process.argv[1], () => process.exit(0))", path], { timeout: 5000 })
+  assert.ok(statSync(path).isSocket())
+}
+
 test('codex shared probe treats dead PID plus stale socket files as a healthy empty root', async () => {
   const dir = mkdtempSync(join(tmpdir(), `spex-codex-stale-root-${process.pid}-`))
   const socketDir = join(dir, 'socket-dir')
@@ -2329,7 +2335,7 @@ test('codex shared probe treats dead PID plus stale socket files as a healthy em
     const socket = codexAppServerSock(dir)
     writeFileSync(codexAppServerPid(dir), '999999999\n')
     writeFileSync(codexAppServerReceipt(dir), 'detached-v3 999999999 dead 999999999 999999999\n')
-    writeFileSync(socket, 'stale socket path, no listener\n')
+    createStaleUnixSocket(socket)
     assert.deepEqual(await codexSharedRuntimeProbe(dir), { healthy: true, references: [] })
   } finally {
     if (previousSocketDir === undefined) delete process.env.SPEXCODE_CODEX_SOCKET_DIR
@@ -3176,7 +3182,7 @@ test('cleanupRuntime sweeps a transport it PROVED dead, and never one still answ
   // nothing behind it. THAT residue is ours — close must leave zero socket behind (the acceptance matrix's
   // close row).
   const dead = `unit-cleanup-dead-${process.pid}-${Date.now()}`
-  writeFileSync(rvSock(dead), '')                  // a path nothing listens on → connect ECONNREFUSED = proven dead
+  createStaleUnixSocket(rvSock(dead))
   await claudeHarness.cleanupRuntime({ session: dead })
   assert.equal(existsSync(rvSock(dead)), false, 'a proven-dead socket is swept')
 
