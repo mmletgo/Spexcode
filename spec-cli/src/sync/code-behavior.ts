@@ -108,6 +108,7 @@ export type CodeBehaviorCrossFreezeAuthor = {
   draft: ElaborationDraft
   trace: ElaborationTrace
   proof: CodeBehaviorCrossFreezeAuthorProof
+  independentOf?: readonly ElaborationTrace[]
 }
 export type CodeBehaviorCheckpoints = {
   replayDraft?(requestKey: string, purpose: BehaviorPurpose): { request: ElaborationSessionRequest; result: ElaborationSessionResult } | null
@@ -1185,6 +1186,8 @@ SPEX_P0_REVIEW_PATHS`
     identityMismatch: [...review.inputDigest !== inputDigest ? ['inputDigest'] : [], ...review.analysisDigest !== analysisDigest ? ['analysisDigest'] : [], ...traces[0].sessionId === traces[1].sessionId ? ['sessionId'] : [], ...traces[0].threadId === traces[1].threadId ? ['threadId'] : []],
     verdict: review.verdict, findings: review.findings,
   }
+  if (crossFreezeAuthor?.independentOf?.some(trace => trace.sessionId === traces[1].sessionId || trace.threadId === traces[1].threadId || trace.turnId === traces[1].turnId))
+    reject('当前行为独审必须独立于原独审及影响复核', reviewDetails, 'behavior_analysis_invalid', true)
   if (traces[0].sessionId === traces[1].sessionId || traces[0].threadId === traces[1].threadId) reject('行为分析与审查必须使用独立会话及线程', reviewDetails, 'behavior_analysis_invalid', true)
   validatePaths(review.checkedPaths, reviewDetails)
   const referencedPaths = [...proposal.changes.flatMap(item => item.paths), ...proposal.facts.filter(fact => fact.source.startsWith('code:')).map(fact => anchorPath(fact.source.slice(5))), ...proposal.newNodes.map(item => item.codePath), ...proposal.resolutions.map(item => item.path)]

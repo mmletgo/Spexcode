@@ -95,10 +95,9 @@ function assertCurrentSeed(commonDir: string, seed: StageWorktree, headCommit: s
     throw new Error('影响复核的阶段 seed 未绑定当前冻结提交和实际树')
 }
 
-/** 以已认证的旧候选和完整差量冻结当前 owner 的只读 Native 请求。 */
-export function prepareCrossFreezeImpactReview(input: ImpactReviewInput): CrossFreezeImpactReview {
-  const { operation, attemptId, source, prior, owner, stage, seed, timeoutMs, signal } = input
-  const { commonDir, canonicalRoot } = operation.input.source
+function impactFiles(input: ImpactReviewInput) {
+  const { operation, attemptId, source, prior, owner, stage, seed } = input
+  const { commonDir } = operation.input.source
   const { operation: oldOperation, provenance } = source, { digest, patch, ...delta } = provenance
   if (oldOperation.id === operation.id || oldOperation.policyDigest !== operation.policyDigest
     || !source.attempts.some(attempt => attempt.id === prior.attemptId && attempt.operationId === oldOperation.id)
@@ -116,7 +115,8 @@ export function prepareCrossFreezeImpactReview(input: ImpactReviewInput): CrossF
     owner, stage, provenanceDigest: digest, seed, readPaths: [...new Set(input.readPaths ?? [])].sort(),
   }
   const folder = `.spex-sync-drafts/cross-freeze-impact-${hash(binding)}`
-  if (readTree(commonDir, seed.tree).some(({ path }) => {
+  const seedEntries = readTree(commonDir, seed.tree)
+  if (seedEntries.some(({ path }) => {
     const lower = path.toLowerCase()
     return lower === folder || lower.startsWith(`${folder}/`) || folder.startsWith(`${lower}/`)
   })) throw new Error('影响复核证据目录与当前阶段 Git 树冲突')
@@ -128,7 +128,13 @@ export function prepareCrossFreezeImpactReview(input: ImpactReviewInput): CrossF
     { path: `${folder}/candidate.json`, source: readReviewMaterial(commonDir, prior.resultRef) },
     ...(prior.approvalRef && approvalFile === 'approval.json' ? [{ path: `${folder}/approval.json`, source: readReviewMaterial(commonDir, prior.approvalRef) }] : []),
   ]
-  const worktree = stageWorktree(commonDir, seed.baseCommit, overlayStageTree(commonDir, seed.tree, files))
+  return { binding, files, seedEntries, folder }
+}
+
+function impactRequest(input: ImpactReviewInput, material: ReturnType<typeof impactFiles>, worktree: StageWorktree): CrossFreezeImpactReview {
+  const { operation, attemptId, source: { provenance }, stage, timeoutMs, signal } = input
+  const { commonDir, canonicalRoot } = operation.input.source
+  const { binding, folder } = material
   const inputDigest = hash({ binding, worktree })
   const requestKey = `sync:${attemptId}:${CROSS_FREEZE_IMPACT_PURPOSE}:${stage}:${inputDigest}`
   const prompt = [
@@ -143,6 +149,32 @@ export function prepareCrossFreezeImpactReview(input: ImpactReviewInput): CrossF
       schema: impactSchema(inputDigest, provenance.previous.commit, provenance.current.commit, provenance.changes.length), timeoutMs, model: syncModel(operation), signal },
     binding, changedPaths: provenance.changes.map(change => change.path), commonDir,
   }
+}
+
+/** 以已认证的旧候选和完整差量冻结当前 owner 的只读 Native 请求。 */
+export function prepareCrossFreezeImpactReview(input: ImpactReviewInput): CrossFreezeImpactReview {
+  const material = impactFiles(input), { commonDir } = input.operation.input.source
+  const worktree = stageWorktree(commonDir, input.seed.baseCommit, overlayStageTree(commonDir, input.seed.tree, material.files))
+  return impactRequest(input, material, worktree)
+}
+
+/** 冷读只接受原 stage 的精确额外文件和父提交，不重建或修改 Git 对象。 */
+export function restoreCrossFreezeImpactReview(input: ImpactReviewInput, worktree: StageWorktree): CrossFreezeImpactReview {
+  const material = impactFiles(input), { commonDir } = input.operation.input.source
+  const exactCommit = objectGit(commonDir, ['rev-parse', '--verify', `${worktree.baseCommit}^{commit}`]).toString().trim()
+  const actualTree = objectGit(commonDir, ['rev-parse', '--verify', `${worktree.baseCommit}^{tree}`]).toString().trim()
+  const parents = objectGit(commonDir, ['rev-list', '--parents', '-n', '1', exactCommit]).toString().trim().split(' ')
+  if (exactCommit !== worktree.baseCommit || actualTree !== worktree.tree || worktree.mode !== 'read'
+      || parents.length !== 2 || parents[1] !== input.seed.baseCommit)
+    throw new Error('影响复核停止记录没有原阶段证据提交')
+  const expected = new Map(material.seedEntries.map(entry => [entry.path, { mode: entry.mode, digest: entry.digest }]))
+  for (const entry of material.files) expected.set(entry.path, { mode: '100644', digest: contentHash(entry.source) })
+  const actual = readTree(commonDir, worktree.tree)
+  if (actual.length !== expected.size || actual.some(entry => {
+    const original = expected.get(entry.path)
+    return !original || original.mode !== entry.mode || original.digest !== entry.digest
+  })) throw new Error('影响复核的保留工作树不匹配原材料')
+  return impactRequest(input, material, worktree)
 }
 
 /** 认证已由调用者核实正式派发及资源的独立结论，并生成可保存的精确证据。 */

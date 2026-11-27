@@ -5,7 +5,7 @@ import { readStageDraft, stageWorktree, STAGE_READING_INSTRUCTIONS } from './sta
 import { posix, sep } from 'node:path'
 import { configPath } from '@spexcode/spec-core'
 import { contractReferences, parseContract, parseParts } from '@spexcode/spec-core/contracts'
-import { analyzeCodeBehavior, CodeBehaviorReviewRepairError, CodeBehaviorAuthorEvidenceError, compositionConflictPaths, deriveBehaviorAuthorization, partitionBehaviorChangedPaths, uncoveredCompositionConflicts, verifyBehaviorReadBasis } from './code-behavior.js'
+import { analyzeCodeBehavior, CodeBehaviorCrossFreezeAuthorRejectedError, CodeBehaviorReviewRepairError, CodeBehaviorAuthorEvidenceError, compositionConflictPaths, deriveBehaviorAuthorization, partitionBehaviorChangedPaths, uncoveredCompositionConflicts, verifyBehaviorReadBasis } from './code-behavior.js'
 import type { CodeBehaviorApprovalBinding, CodeBehaviorApprovalInput, CodeBehaviorCheckpoints, CodeBehaviorInput, CodeBehaviorContinuation, CodeBehaviorMaterialRequest, CodeBehaviorReviewReference } from './code-behavior.js'
 import { elaborationSchema, outputErrors } from './elaboration-schema.js'
 import { elaborate, freezeElaborationInput, inspectElaborationGaps, verifyElaborationDraftCache, projectElaborationFlowReadiness, sealPartitionedElaboration, partitionSealRepairContext } from './elaboration.js'
@@ -37,6 +37,7 @@ export type PartitionCheckpoints = {
   loadCompletedCandidateReview?(key: string, plan: SyncPartitionPlan, input: GenerationInput, candidate: NonNullable<GenerationResult['candidate']>, builders: readonly ElaborationTrace[], current: Omit<GenerationResult, 'candidateFiles'> | undefined, cache: GenerationReadCache): Omit<GenerationResult, 'candidateFiles'> | null
   elaborationDraftTagged?(key: string, result: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>): boolean
   loadBehaviorDraftMaterial?(key: string, planDigest: string, purpose: string, schemaDigest: string, inputDigest: string, request: CodeBehaviorMaterialRequest, existingDraft?: ElaborationDraft): ElaborationDraftMaterial | null | Promise<ElaborationDraftMaterial | null>
+  loadCrossFreezeBehaviorAuthor?(key: string, plan: SyncPartitionPlan, partition: SyncPartition, inputDigest: string, binding: CodeBehaviorApprovalBinding): ReturnType<NonNullable<CodeBehaviorCheckpoints['loadCrossFreezeAuthor']>>
   replayBehaviorDraft?: CodeBehaviorCheckpoints['replayDraft']
   loadBehaviorContinuation?(key: string, planDigest: string, inputDigest: string, analysisSchemaDigest: string): CodeBehaviorContinuation | null
   loadBehaviorReviewFeedback?(key: string, planDigest: string, inputDigest: string): CodeBehaviorReviewReference | null
@@ -337,7 +338,27 @@ export async function analyzeSyncPartitions(input: CodeBehaviorInput, plan: Sync
       const saved = audit ? null : checkpoints.load<CodeBehaviorAnalysis>(key)
       const paths = partitionBehaviorChangedPaths(localInput)
       scopes.set(partition.id, paths)
-      const local = restored.get(partition.id) ?? await analyzeCodeBehavior(localInput, runner, audit ? undefined : (inputDigest, binding) => saved?.inputDigest === inputDigest && (!diagnostic || saved.reviewDiagnosticRef?.sha256 === diagnostic.ref.sha256) ? saved : checkpoints.loadAcceptedAnalysis?.(key, plan, inputDigest, binding) ?? null, { replayDraft: checkpoints.replayBehaviorDraft, loadReviewFeedback: inputDigest => checkpoints.loadBehaviorReviewFeedback?.(key, plan.digest, inputDigest) ?? null, loadMaterial: (purpose, schemaDigest, inputDigest, request, existingDraft) => checkpoints.loadBehaviorDraftMaterial?.(key, plan.digest, purpose, schemaDigest, inputDigest, request, existingDraft) ?? null, load: (inputDigest, analysisSchemaDigest) => checkpoints.loadBehaviorContinuation?.(key, plan.digest, inputDigest, analysisSchemaDigest) ?? null, save: continuation => { checkpoints.save(`${key}:continuation`, continuation) } }, verified ??= verifyBehaviorReadBasis(localInput))
+      const accepted = audit ? undefined : (inputDigest: string, binding: CodeBehaviorApprovalBinding) =>
+        saved?.inputDigest === inputDigest && (!diagnostic || saved.reviewDiagnosticRef?.sha256 === diagnostic.ref.sha256) ? saved
+          : checkpoints.loadAcceptedAnalysis?.(key, plan, inputDigest, binding) ?? null
+      const continuation: CodeBehaviorCheckpoints = {
+        replayDraft: checkpoints.replayBehaviorDraft,
+        loadCrossFreezeAuthor: (inputDigest, binding) => checkpoints.loadCrossFreezeBehaviorAuthor?.(key, plan, partition, inputDigest, binding) ?? null,
+        loadReviewFeedback: inputDigest => checkpoints.loadBehaviorReviewFeedback?.(key, plan.digest, inputDigest) ?? null,
+        loadMaterial: (purpose, schemaDigest, inputDigest, request, existingDraft) => checkpoints.loadBehaviorDraftMaterial?.(key, plan.digest, purpose, schemaDigest, inputDigest, request, existingDraft) ?? null,
+        load: (inputDigest, analysisSchemaDigest) => checkpoints.loadBehaviorContinuation?.(key, plan.digest, inputDigest, analysisSchemaDigest) ?? null,
+        save: value => { checkpoints.save(`${key}:continuation`, value) },
+      }
+      let local = restored.get(partition.id)
+      if (!local) {
+        verified ??= verifyBehaviorReadBasis(localInput)
+        try { local = await analyzeCodeBehavior(localInput, runner, accepted, continuation, verified) }
+        catch (error) {
+          if (!(error instanceof CodeBehaviorCrossFreezeAuthorRejectedError)) throw error
+          checkpoints.save(`${key}:cross-freeze-structure-rejection`, { message: error.message })
+          local = await analyzeCodeBehavior(localInput, runner, accepted, { ...continuation, loadCrossFreezeAuthor: undefined }, verified)
+        }
+      }
       if (local.changes.some(change => change.paths.some(path => !paths.includes(path)))) reject(`分析超出本区真实变更集合: ${partition.id}`)
       checkpoints.save(key, local)
       return local
@@ -360,7 +381,7 @@ export async function analyzeSyncPartitions(input: CodeBehaviorInput, plan: Sync
   independentTraces(analyses.flatMap(analysis => analysis.traces))
   const first = analyses[0]
   if (!first) reject('分区计划为空')
-  const { reviewDiagnosticRef: _localDiagnostic, ...wholeBasis } = first
+  const { reviewDiagnosticRef: _localDiagnostic, crossFreezeAuthor: _localAuthor, ...wholeBasis } = first
   const merged: CodeBehaviorAnalysis = { ...wholeBasis,
     inputDigest: contentHash(JSON.stringify({ partitionPlanDigest: plan.digest, inputs: analyses.map(item => item.inputDigest) })),
     authorChanges: distinct(analyses.flatMap(item => item.authorChanges ?? []), item => item.path, 'author'),
@@ -473,7 +494,8 @@ export function analysisOnlyPartitionEvidence(commonDir: string, plan: SyncParti
     if (!local.reviewPassed || local.partitionCoverage || local.partitionEvidence || local.inputId !== analysis.inputId || local.baselinePairId !== analysis.baselinePairId
       || local.baselineSelectionDigest !== analysis.baselineSelectionDigest || local.policyDigest !== analysis.policyDigest || local.readSetDigest !== analysis.readSetDigest || local.composedDigest !== analysis.composedDigest
       || local.traces.length !== 2 || local.traces[0].purpose !== 'code_behavior_analyze' || local.traces[1].purpose !== 'code_behavior_review'
-      || local.traces.some(trace => !trace.sessionId || !trace.threadId || !trace.turnId || !trace.resultDigest || trace.inputDigest !== local.inputDigest)
+      || local.traces.some((trace, index) => !trace.sessionId || !trace.threadId || !trace.turnId || !trace.resultDigest
+        || trace.inputDigest !== (index === 0 && local.crossFreezeAuthor ? local.crossFreezeAuthor.oldInputDigest : local.inputDigest))
       || owner.changedPaths.length !== partition.changedPaths.length || JSON.stringify(unique(owner.changedPaths)) !== JSON.stringify(unique(partition.changedPaths))
       || owner.changedPaths.some(path => !coverage.changedPaths.includes(path))
       || JSON.stringify(unique(local.changes.flatMap(change => change.paths))) !== JSON.stringify(unique(partition.changedPaths))

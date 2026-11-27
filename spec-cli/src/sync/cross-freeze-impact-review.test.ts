@@ -10,7 +10,7 @@ import { nativeWorktreePrompt } from '../native-worktree-runtime.js'
 import { structuredExecutionPolicy } from '../session-structured-policy.js'
 import { sessionIdForCreateKey } from '../sessions.js'
 import { lockCrossFreezeSource } from './cross-freeze-binding.js'
-import { CROSS_FREEZE_IMPACT_PURPOSE, prepareCrossFreezeImpactReview, verifyCrossFreezeImpactReview, type CrossFreezeImpactOutput } from './cross-freeze-impact-review.js'
+import { CROSS_FREEZE_IMPACT_PURPOSE, prepareCrossFreezeImpactReview, restoreCrossFreezeImpactReview, verifyCrossFreezeImpactReview, type CrossFreezeImpactOutput } from './cross-freeze-impact-review.js'
 import type { ElaborationSessionResult } from './elaboration-types.js'
 import { migrateSyncStore } from './migrations.js'
 import { createAttemptRunner, type NativeRunCheckpoint, type NativeRunPlan, type NativeRunRecord } from './native-run.js'
@@ -121,6 +121,12 @@ test('readonly Manager runner freezes original refs and every changed object in 
   assert.equal(f.git('status', '--short'), '')
   assert.doesNotMatch(JSON.stringify(request), /OLD_SOURCE_FIXTURE|NEW_SOURCE_FIXTURE|registerFormerTest|registered\.test\.mjs/u)
   assert.deepEqual(prepareCrossFreezeImpactReview(f.input).request, request)
+  const beforeRefs = f.git('for-each-ref', 'refs/spex-sync/seeds')
+  const restored = restoreCrossFreezeImpactReview(f.input, request.worktree)
+  assert.deepEqual(restored.request, request)
+  assert.throws(() => restoreCrossFreezeImpactReview({ ...f.input, readPaths: [shared] }, request.worktree), /不匹配原材料/)
+  assert.throws(() => restoreCrossFreezeImpactReview(f.input, { ...request.worktree, mode: 'edit' }), /没有原阶段证据提交/)
+  assert.equal(f.git('for-each-ref', 'refs/spex-sync/seeds'), beforeRefs)
 
   const reviewCheckout = join(f.root, '..', 'review-checkout')
   f.git('worktree', 'add', '-q', '--detach', reviewCheckout, request.worktree.baseCommit)
