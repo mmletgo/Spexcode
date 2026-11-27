@@ -30,7 +30,15 @@ const importTest = 'tests/import.test.mjs'
 const boundary = 'fixture reached P0 whole before P1'
 const digest = (value: unknown): string => contentHash(JSON.stringify(value))
 
-for (const useBaseline of [false, true]) test('跨冻结正式 P0 复用原作者并分流受影响范围 baseline=' + useBaseline, async t => {
+const scenarios = [
+  { useBaseline: false, mainBranch: 'main', checkout: 'main' },
+  { useBaseline: true, mainBranch: 'main', checkout: 'main' },
+  { useBaseline: true, mainBranch: 'main', checkout: 'feature' },
+  { useBaseline: true, mainBranch: 'stable', checkout: 'stable' },
+] as const
+
+for (const { useBaseline, mainBranch, checkout } of scenarios) test(`跨冻结正式 P0 configured=${mainBranch} checkout=${checkout} baseline=${useBaseline}`, async t => {
+  const canonicalCheckout = mainBranch === checkout
   assert.ok(process.env.SPEXCODE_TEST_HOME, '必须通过 test-home 隔离正式会话夹具')
   assert.equal(process.env.SPEX_SESSION_DATABASE_PATH, join(process.env.SPEXCODE_TEST_HOME, 'sessions.sqlite'))
   const parent = realpathSync(mkdtempSync(join(tmpdir(), 'sync-cross-freeze-coordinator-')))
@@ -60,15 +68,17 @@ for (const useBaseline of [false, true]) test('跨冻结正式 P0 复用原作�
   write(importSpec, renamed(exportSpec))
   write(importSource, 'export class ImportService {}\n')
   write(importTest, 'import assert from "node:assert/strict"\n')
-  write('.spec/spexcode.json', JSON.stringify({ mainBranch: 'main', harnesses: [] }))
-  git(root, 'init', '-q', '-b', 'main')
+  write('.spec/spexcode.json', JSON.stringify({ mainBranch, harnesses: [] }))
+  git(root, 'init', '-q', '-b', mainBranch)
   const commit = (message: string) => {
     git(root, 'add', '-A')
     git(root, 'commit', '-qm', message)
   }
   commit('old clean committed initial')
+  if (!canonicalCheckout) git(root, 'switch', '-qc', checkout)
   process.chdir(root)
   const oldInput = await captureInputSnapshot(root, { committed: true }), commonDir = oldInput.source.commonDir
+  assert.equal(oldInput.source.branch, `refs/heads/${checkout}`)
   const read = <T>(ref: BlobRef): T => JSON.parse(readEvidence(commonDir, ref).toString('utf8'))
   let store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) })
   const plan: SyncCoordinatorPlan = {
@@ -200,6 +210,7 @@ for (const useBaseline of [false, true]) test('跨冻结正式 P0 复用原作�
   store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) })
   active = await admit(currentInput, 'new-initial')
   assert.notEqual(active.input.headCommit, old.input.headCommit)
+  assert.equal(active.input.source.branch, `refs/heads/${checkout}`)
   assert.equal(active.policyDigest, first.operation.policyDigest)
   assert.equal(active.retryOf, undefined)
   const before = { operation: store.readOperation(old.id), attempts: store.listAttempts(old.id) }
@@ -224,28 +235,45 @@ for (const useBaseline of [false, true]) test('跨冻结正式 P0 复用原作�
   assert.equal(attempts.length, 1)
   const [currentAttempt] = attempts, currentStages = stages(currentAttempt)
   const currentCalls = calls.filter(call => call.freeze === active.id)
-  assert.deepEqual(currentCalls.filter(call => call.owner === unaffected).map(call => call.purpose), [CROSS_FREEZE_IMPACT_PURPOSE, 'code_behavior_review'])
-  assert.deepEqual(currentCalls.filter(call => call.owner === affected).map(call => call.purpose), [CROSS_FREEZE_IMPACT_PURPOSE, 'code_behavior_analyze', 'code_behavior_review'])
-  assert.ok(second.operation.crossFreezeBinding)
-  const originalDraft = oldContinuation.drafts.code_behavior_analyze
-  assert.ok(originalDraft)
-  const reused = read<CodeBehaviorAnalysis>(currentStages.get('partition:' + unaffected + ':analysis')!.resultRef)
-  const impactStage = currentStages.get(impactKey)!
-  const newImpact = read<{ evidence: CrossFreezeImpactEvidence }>(impactStage.resultRef).evidence
-  assert.deepEqual(reused.traces[0], original.traces[0])
-  assert.equal(reused.traces[1].inputDigest, reused.inputDigest)
-  assert.notEqual(reused.inputDigest, original.inputDigest)
-  assert.notEqual(reused.traces[1].sessionId, original.traces[1].sessionId)
-  assert.notEqual(reused.traces[1].sessionId, newImpact.trace.sessionId)
-  assert.equal(reused.crossFreezeAuthor?.oldAttemptId, oldAttempt.id)
-  assert.equal(reused.crossFreezeAuthor?.oldInputDigest, original.inputDigest)
-  assert.deepEqual(reused.crossFreezeAuthor?.impactReviewRef, impactStage.resultRef)
-  assert.deepEqual(impactWrites.filter(stage => stage === impactKey), [impactKey], '冷重启必须直接读取已认证的影响复核')
-  assert.equal(impactStage.readSetDigest, second.operation.readSetDigest)
-  assert.equal(newImpact.verdict, 'reuse')
-  assert.deepEqual(newImpact.output.paths.map(path => path.path), [importSource, importTest])
-  assert.equal(readEvidence(commonDir, newImpact.binding.prior.resultRef).toString('utf8'), readStageDraft(commonDir, originalDraft, originalDraft))
-  assert.equal(newImpact.binding.prior.approvalRef?.sha256, oldStages.get('partition:' + unaffected + ':analysis')!.resultRef.sha256)
+  if (canonicalCheckout) {
+    assert.deepEqual(currentCalls.filter(call => call.owner === unaffected).map(call => call.purpose), [CROSS_FREEZE_IMPACT_PURPOSE, 'code_behavior_review'])
+    assert.deepEqual(currentCalls.filter(call => call.owner === affected).map(call => call.purpose), [CROSS_FREEZE_IMPACT_PURPOSE, 'code_behavior_analyze', 'code_behavior_review'])
+    assert.ok(second.operation.crossFreezeBinding)
+    const binding = read<{ canonicalBranch: string; oldOperationId: string }>(second.operation.crossFreezeBinding.ref)
+    assert.equal(binding.canonicalBranch, `refs/heads/${mainBranch}`)
+    assert.equal(binding.oldOperationId, old.id)
+    const originalDraft = oldContinuation.drafts.code_behavior_analyze
+    assert.ok(originalDraft)
+    const reused = read<CodeBehaviorAnalysis>(currentStages.get('partition:' + unaffected + ':analysis')!.resultRef)
+    const impactStage = currentStages.get(impactKey)!
+    const newImpact = read<{ evidence: CrossFreezeImpactEvidence }>(impactStage.resultRef).evidence
+    assert.deepEqual(reused.traces[0], original.traces[0])
+    assert.equal(reused.traces[1].inputDigest, reused.inputDigest)
+    assert.notEqual(reused.inputDigest, original.inputDigest)
+    assert.notEqual(reused.traces[1].sessionId, original.traces[1].sessionId)
+    assert.notEqual(reused.traces[1].sessionId, newImpact.trace.sessionId)
+    assert.equal(reused.crossFreezeAuthor?.oldAttemptId, oldAttempt.id)
+    assert.equal(reused.crossFreezeAuthor?.oldInputDigest, original.inputDigest)
+    assert.deepEqual(reused.crossFreezeAuthor?.impactReviewRef, impactStage.resultRef)
+    assert.deepEqual(impactWrites.filter(stage => stage === impactKey), [impactKey], '冷重启必须直接读取已认证的影响复核')
+    assert.equal(impactStage.readSetDigest, second.operation.readSetDigest)
+    assert.equal(newImpact.verdict, 'reuse')
+    assert.deepEqual(newImpact.output.paths.map(path => path.path), [importSource, importTest])
+    assert.equal(readEvidence(commonDir, newImpact.binding.prior.resultRef).toString('utf8'), readStageDraft(commonDir, originalDraft, originalDraft))
+    assert.equal(newImpact.binding.prior.approvalRef?.sha256, oldStages.get('partition:' + unaffected + ':analysis')!.resultRef.sha256)
+  } else {
+    assert.deepEqual(currentCalls.map(call => call.purpose), [
+      'code_behavior_analyze', 'code_behavior_review', 'code_behavior_analyze', 'code_behavior_review',
+    ], '未配置的分支应按正常 P0 路径运行，不能派发跨冻结影响复核')
+    assert.equal(first.operation.crossFreezeBinding, undefined)
+    assert.equal(second.operation.crossFreezeBinding, undefined)
+    assert.equal(currentStages.has(impactKey), false)
+    assert.deepEqual(impactWrites, [])
+    const local = read<CodeBehaviorAnalysis>(currentStages.get('partition:' + unaffected + ':analysis')!.resultRef)
+    assert.equal(local.crossFreezeAuthor, undefined)
+    assert.equal(local.reviewPassed, true)
+    assert.notEqual(local.traces[0].sessionId, original.traces[0].sessionId)
+  }
   assert.equal(read<CodeBehaviorAnalysis>(currentStages.get('partition:' + affected + ':analysis')!.resultRef).crossFreezeAuthor, undefined)
   assert.deepEqual(store.readOperation(old.id), before.operation)
   assert.deepEqual(store.listAttempts(old.id), before.attempts)
