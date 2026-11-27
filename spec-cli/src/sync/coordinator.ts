@@ -4338,7 +4338,12 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           if (!result.reviewPassed && (round?.candidate || round?.findings.some(finding => finding.severity === 'error') || result.readonlySpecRepair)) return null
           if (owner.id === operation.id) continue
           if (result.inputDigest !== inputDigest || canonical(result.partitionBinding) !== canonical(binding) || result.phase !== (interfaceSeed ? 'interface_seed' : undefined)
-            || ![interfaceSeed ? 'interface_seed' : 'complete', 'needs_input', 'conflict'].includes(result.status) || !authenticatedApprovedElaboration(store, owner, prior, result)) continue
+            || ![interfaceSeed ? 'interface_seed' : 'complete', 'needs_input', 'conflict'].includes(result.status)) continue
+          if (!authenticatedApprovedElaboration(store, owner, prior, result)) {
+            if (round?.review?.verdict === 'accept' && hasApprovedElaborationReview(result) && result.rounds.some(item => item.crossFreezeAuthor))
+              fail('cross_freeze_p1_approval_binding', '正式重试的跨冻结 P1 祖先批准缺少原独审原件', [source.resultRef])
+            continue
+          }
           assertMaterialFence()
           saveStage(store, fence!, `${key}:provenance`, { fromOperationId: owner.id, fromAttemptId: prior.id, resultRef: source.resultRef })
           partitionCheckpoints.save(key, result)

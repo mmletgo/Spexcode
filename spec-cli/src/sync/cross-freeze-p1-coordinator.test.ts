@@ -33,7 +33,7 @@ const stopBeforeGeneration = 'fixture reached P1 whole before generation'
 const oldReviewFailure = 'fixture old read-only reviewer stopped without a verdict'
 const digest = (value: unknown): string => contentHash(JSON.stringify(value))
 
-for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent', 'prior-attempt-reviewer-present', 'prior-attempt-reviewer-absent', 'operator-challenge', 'impact-format-retry', 'impact-format-formal-retry', 'impact-format-formal-retry-missing-native'] as const) test('跨冻结正式 P1 复用与冷验 ' + mode, async t => {
+for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent', 'prior-attempt-reviewer-present', 'prior-attempt-reviewer-absent', 'operator-challenge', 'impact-format-retry', 'impact-format-formal-retry', 'impact-format-formal-retry-missing-native', 'impact-format-formal-retry-missing-sibling-reviewer'] as const) test('跨冻结正式 P1 复用与冷验 ' + mode, async t => {
   const oldApproved = mode !== 'old-unapproved', operatorChallenge = mode === 'operator-challenge'
   const formalImpactRetry = mode.startsWith('impact-format-formal-retry')
   const retryImpactFormat = mode === 'impact-format-retry' || formalImpactRetry
@@ -299,18 +299,40 @@ for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent',
       active = store.ackDispatch(currentInput.source.repositoryId, retry.dispatchMessageId)
       assert.equal(active.input.id, originalCurrent.input.id)
       assert.equal(active.crossFreezeBinding, undefined)
-      if (mode === 'impact-format-formal-retry-missing-native') {
+      const missingSiblingReviewer = mode === 'impact-format-formal-retry-missing-sibling-reviewer'
+      if (mode === 'impact-format-formal-retry-missing-native' || missingSiblingReviewer) {
         const failed = calls.find(call => call.operationId === originalCurrent.id && call.owner === failedImpactOwner && call.impact === 'p1')!
-        const path = realpathSync(sessionRecordPath(failed.sessionId)), backup = join(parent, 'failed-impact.runtime.json')
+        const siblingKey = 'partition:' + firstImpactOwner + ':elaboration'
+        const siblingRef = stages(store.listAttempts(originalCurrent.id)[0]).get(siblingKey)!
+        const sibling = read<ElaborationResult>(siblingRef)
+        const siblingReviewer = sibling.rounds.at(-1)?.traces.find(trace => trace.purpose === 'elaboration_review')
+        assert.ok(sibling.structurePassed && sibling.reviewPassed && siblingReviewer)
+        const hiddenId = missingSiblingReviewer ? siblingReviewer.sessionId : failed.sessionId
+        const path = realpathSync(sessionRecordPath(hiddenId)), backup = join(parent, 'missing-review.runtime.json')
         assert.ok(path.startsWith(realpathSync(testHome) + sep))
-        assert.equal(readRecord(failed.sessionId)?.structuredExecution?.state, 'completed')
+        assert.equal(readRecord(hiddenId)?.structuredExecution?.state, 'completed')
+        const original = readFileSync(path)
+        const savedSiblingBytes = readEvidence(commonDir, siblingRef)
         renameSync(path, backup)
         try {
+          assert.equal(readRecord(hiddenId)?.structuredExecution, undefined)
+          if (missingSiblingReviewer) assert.equal(readRecord(failed.sessionId)?.structuredExecution?.state, 'completed')
           const blocked = await runUntilP1()
-          assert.equal(blocked.failure?.code, 'cross_freeze_native_binding', JSON.stringify(blocked.failure))
+          assert.equal(blocked.failure?.code, missingSiblingReviewer ? 'cross_freeze_p1_approval_binding' : 'cross_freeze_native_binding',
+            JSON.stringify({ failure: blocked.failure, calls: currentCalls().map(call => call.purpose) }))
           assert.deepEqual(currentCalls(), [])
-          assert.equal(stages(store.listAttempts(active.id)[0]).has('elaboration'), false)
-        } finally { renameSync(backup, path) }
+          const activeStages = stages(store.listAttempts(active.id)[0])
+          assert.equal(activeStages.has('elaboration'), false)
+          if (missingSiblingReviewer) {
+            assert.deepEqual(blocked.failure?.evidenceRefs, [siblingRef])
+            assert.equal(activeStages.has(siblingKey), false)
+            assert.equal(activeStages.has(siblingKey + ':provenance'), false)
+          }
+          assert.deepEqual(readEvidence(commonDir, siblingRef), savedSiblingBytes)
+        } finally {
+          renameSync(backup, path)
+          assert.deepEqual(readFileSync(path), original)
+        }
         return
       }
       assert.ok(failedImpactOwner)
