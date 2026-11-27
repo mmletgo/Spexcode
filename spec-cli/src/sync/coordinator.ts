@@ -4064,7 +4064,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         const impactReviewRef = saveStage(store, fence!, `${key}:cross-freeze-impact`, {
           version: 'cross-freeze-p0-impact-v1', sourceRef: crossFreezeSource.bindingRef, currentInputDigest,
           checkedPaths: [...partition.readPaths].sort(), worktree: prepared.request.worktree, timeoutMs: callTimeoutMs, evidence,
-        } satisfies SavedCrossFreezeP0Impact)
+        } satisfies SavedCrossFreezeP0Impact, operation.baselineSelection ? undefined : { readSetDigest: operation.readSetDigest })
         return evidence.verdict === 'reuse' ? {
           draft: author.draft, trace: author.authorTrace, proof: crossFreezeP0AuthorProof(author, partition.id, crossFreezeSource.bindingRef, impactReviewRef),
           independentOf: [author.reviewTrace, evidence.trace],
