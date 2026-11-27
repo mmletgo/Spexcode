@@ -20,7 +20,7 @@ const sha256 = (text: string): string => createHash('sha256').update(text).diges
 
 type Scenario = 'startup-error' | 'success' | 'wrong-session' | 'wrong-cwd' | 'missing-request' | 'duplicate-terminal' | 'missing-terminal' | 'wrong-format' | 'bad-schema' | 'hang' | 'read' | 'periodic' | 'split-settlement-window' | 'cancel-during-settlement' | 'inherited-stdout' | 'inherited-stdout-trailing' | 'parent-awaits-owned-child' | 'parent-restarts-owned-child' | 'mcp-transport-reconnect' | 'natural-child-shutdown' | 'short-lived-terminal-parent' | 'unowned-stdout' | 'terminal-exit-timeout' | 'terminal-timeout-unowned-stdout'
   | 'native-schema-success' | 'native-schema-trailing' | 'native-schema-missing' | 'native-schema-mismatch'
-  | 'acp-success' | 'acp-missing' | 'acp-quota' | 'acp-startup-quota' | 'acp-startup-delayed-quota' | 'acp-auth-quota' | 'acp-auth-stderr-quota' | 'acp-prompt-stderr-quota' | 'acp-signal'
+  | 'acp-success' | 'acp-missing' | 'acp-quota' | 'acp-startup-quota' | 'acp-startup-delayed-quota' | 'acp-auth-quota' | 'acp-auth-stderr-quota' | 'acp-prompt-stderr-quota' | 'acp-signal' | 'acp-mismatched-response'
 
 function fixture(t: TestContext, scenario: Scenario, model = 'grok:default', purpose = 'grok-fixture', stderrChunks: readonly string[] = []) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'spex-grok-fixture-')))
