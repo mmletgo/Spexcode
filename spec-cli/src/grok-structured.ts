@@ -1,5 +1,5 @@
 import { managedRoute, nativeModelValue } from './llm-manager-route.js'
-import { spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -30,12 +30,11 @@ type GrokStderrDiagnostic = {
   httpStatuses: number[]; usageBalanceExhausted: boolean
 }
 type GrokAdapter = {
-  GROK_MAX_SCHEMA_ARGUMENT_BYTES: number
   GrokAcpProtocolError: new (...args: never[]) => Error & { code: string }
-  grokAcpProbeArguments(): string[]
+  inspectGrokStructuredCli(launch: { command: string; args: readonly string[]; cwd: string }, mode: 'read' | 'edit', schemaArgument: string): {
+    cliVersion: string; useAcp: boolean; nativeSchema: boolean
+  } | undefined
   grokAcpArguments(): string[]
-  grokSupportsAcp(help: string): boolean
-  grokSupportsStreamingSchema(help: string): boolean
   grokStreamingArguments(options: {
     cwd: string; sessionId: string; promptFile: string; mode: 'read' | 'edit'; model?: string; schemaArgument?: string
   }): string[]
@@ -279,20 +278,11 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
   if (!cliPath) throw new StructuredSessionError('unsupported', 'Grok Build CLI is unavailable')
   if (realpathSync(worktreePath) !== worktreePath) throw new StructuredSessionError('unsupported', 'Grok Build requires the exact physical worktree path')
   const launch = nativeWorktreeLaunch(worktreePath, cliPath, [])
-  const version = spawnSync(launch.command, [...launch.args, '--version'], { cwd: worktreePath, encoding: 'utf8', timeout: 10_000 })
-  const cliVersion = version.stdout?.trim()
-  if (version.status !== 0 || !cliVersion) throw new StructuredSessionError('unsupported', 'Grok Build CLI did not report a version')
   const schemaArgument = JSON.stringify(execution.schema)
-  const help = Buffer.byteLength(schemaArgument) <= provider.GROK_MAX_SCHEMA_ARGUMENT_BYTES
-    ? spawnSync(launch.command, [...launch.args, '--help'], { cwd: worktreePath, encoding: 'utf8', timeout: 10_000 })
-    : undefined
-  const acpHelp = execution.worktree.mode === 'edit'
-    ? spawnSync(launch.command, [...launch.args, ...provider.grokAcpProbeArguments()], { cwd: worktreePath, encoding: 'utf8', timeout: 10_000 })
-    : undefined
-  const acp = acpHelp?.status === 0 && provider.grokSupportsAcp(acpHelp.stdout)
-    ? { version: 1 as const, promptId: randomUUID() }
-    : undefined
-  const nativeSchema = !!acp || help?.status === 0 && provider.grokSupportsStreamingSchema(help.stdout)
+  const nativeCli = provider.inspectGrokStructuredCli({ ...launch, cwd: worktreePath }, execution.worktree.mode, schemaArgument)
+  if (!nativeCli) throw new StructuredSessionError('unsupported', 'Grok Build CLI did not report a version')
+  const { cliVersion, nativeSchema, useAcp } = nativeCli
+  const acp = useAcp ? { version: 1 as const, promptId: randomUUID() } : undefined
 
   const native = { version: 1 as const, root, sessionId: randomUUID() }
   const readGuidance = execution.worktree.mode === 'read'

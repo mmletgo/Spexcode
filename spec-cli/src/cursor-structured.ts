@@ -1,6 +1,5 @@
 import { loadManagerNativeRuntime } from './llm-manager-host.js'
 import { managedRoute, nativeModelValue } from './llm-manager-route.js'
-import { spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -28,12 +27,12 @@ type StopResult = { nativeStopped: boolean; acknowledged: boolean; nativeStatus?
 type RpcObject = Record<string, unknown>
 
 type CursorAdapter = {
-  CURSOR_VERSION_ARGS: readonly string[]
   CursorAcpError: new (...args: never[]) => Error & {
     code: 'failed' | 'unsupported' | 'cancellation_pending' | 'provider_quota_exhausted'
     detail?: { threadId: string; turnId: string }
   }
   cursorModelArgument(value: string): string | undefined
+  inspectCursorCliVersion(launch: ReturnType<typeof nativeWorktreeLaunch> & { cwd: string }): string
   cursorLaunchArgs(workspace: string, mode: NativePlan['mode'], model?: string): string[]
   cursorAcpInitialize(): RpcObject
   cursorAcpCancel(sessionId: string): RpcObject
@@ -47,6 +46,10 @@ type CursorAdapter = {
     isInterrupted(): boolean
     digestRequest(request: NativeRequest): string
   }): Promise<{ output: NativeOutput; textOnlyWithoutTools: boolean }>
+}
+
+function cursorHostError(provider: CursorAdapter, error: unknown): unknown {
+  return error instanceof provider.CursorAcpError ? new StructuredSessionError(error.code, error.message, error.detail) : error
 }
 
 const STOP_MS = 15_000
@@ -302,16 +305,13 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
   if (!cliPath) throw new StructuredSessionError('unsupported', 'Cursor CLI is unavailable')
   let model: string | undefined
   try { model = provider.cursorModelArgument(nativeModelValue(execution.model, 'cursor')) }
-  catch (error) {
-    if (error instanceof provider.CursorAcpError) throw new StructuredSessionError(error.code, error.message, error.detail)
-    throw error
-  }
+  catch (error) { throw cursorHostError(provider, error) }
   if (realpathSync(worktreePath) !== worktreePath) throw new StructuredSessionError('unsupported', 'Cursor CLI requires the exact physical worktree path')
   const launch = nativeWorktreeLaunch(worktreePath, cliPath, [])
   const args = provider.cursorLaunchArgs(worktreePath, execution.worktree.mode, model)
-  const version = spawnSync(launch.command, [...launch.args, ...provider.CURSOR_VERSION_ARGS], { cwd: worktreePath, encoding: 'utf8', timeout: 10_000 })
-  const cliVersion = version.stdout?.trim()
-  if (version.status !== 0 || !cliVersion) throw new StructuredSessionError('unsupported', 'Cursor CLI did not report a version')
+  let cliVersion: string
+  try { cliVersion = provider.inspectCursorCliVersion({ ...launch, cwd: worktreePath }) }
+  catch (error) { throw cursorHostError(provider, error) }
 
   const native: CursorNativeState = { version: 1, root }
   const promptBytes = nativePrompt(prompt, execution), receiptFile = join(root, 'process.json'), tmp = join(root, 'tmp'), cancelPath = join(root, 'cancel.json')
@@ -415,7 +415,7 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
       }, EOF_GRACE_MS)
     },
   }).then(output => output, (error: unknown) => {
-    fault(error instanceof provider.CursorAcpError ? new StructuredSessionError(error.code, error.message, error.detail) : error)
+    fault(cursorHostError(provider, error))
     return null
   })
   try {

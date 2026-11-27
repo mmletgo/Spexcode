@@ -2,7 +2,7 @@ import { loadManagerNativeRuntime, managedClaudeCommand } from './llm-manager-ho
 import { managedRoute, nativeModelValue } from './llm-manager-route.js'
 import { NATIVE_PROCESS_OBSERVATION_LIMIT_MS, NATIVE_PROCESS_OBSERVATION_PENDING, nativeWorktreeLaunch, nativeWorktreeProcessesStopped, sampleNativeWorktreeProcesses } from './native-worktree-runtime.js'
 import { Ajv } from 'ajv'
-import { spawnSync, execFileSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -36,9 +36,13 @@ type ClaudeProjection =
   | { kind: 'interrupt-ack'; requestId: string }
   | { kind: 'result'; result: ClaudeFrozenWitness['result']; receipt: WorktreeTerminalResult }
 type ClaudeAdapter = {
-  CLAUDE_LEGACY_CLI_VERSION: string
-  CLAUDE_VERSION_ARGS: readonly string[]
   ClaudeNativeProtocolError: new (...args: never[]) => Error & { code: 'unsupported' | 'stale_result' }
+  inspectClaudeCliVersion(launch: ReturnType<typeof nativeWorktreeLaunch>, nativeConfiguration?: ClaudeConfiguration): string
+  inspectClaudeIsolatedAuthentication(launch: ReturnType<typeof nativeWorktreeLaunch> & { cwd: string; env: NodeJS.ProcessEnv }): {
+    authentication: { loggedIn?: boolean; authMethod?: string; apiProvider?: string }
+    exitStatus: number | null
+    rejection?: InstanceType<ClaudeAdapter['ClaudeNativeProtocolError']>
+  }
   assertClaudeLegacyConfiguration(environment: NodeJS.ProcessEnv): void
   claudeNativeModel(model: string | undefined, configuration?: ClaudeConfiguration, managedModel?: string): string
   claudeStructuredArgs(options: ClaudeModelOptions & { mcpConfig: string; allowedTools: readonly string[]; systemPrompt: string }): string[]
@@ -48,8 +52,6 @@ type ClaudeAdapter = {
     environment: NodeJS.ProcessEnv; nativeConfiguration?: ClaudeConfiguration; configHome: string; tmpDir: string; debugDir: string
     stripEnvironment?: readonly string[]
   }): { environment: NodeJS.ProcessEnv; source: string }
-  claudeAuthenticationArgs(): string[]
-  interpretClaudeAuthenticationStatus(output: string, status: number | null): { loggedIn?: boolean; authMethod?: string; apiProvider?: string }
   encodeClaudeUserMessage(sessionId: string, userUuid: string, prompt: string): string
   encodeClaudeInterrupt(requestId: string): string
   readClaudeStreamEvent(line: string): Record<string, unknown>
@@ -578,8 +580,9 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
   const cliPath = runtime.findNativeExecutable('claude')
   if (!cliPath) throw new StructuredSessionError('unsupported', 'Claude CLI is unavailable in the current process PATH')
   const worktreeLaunch = worktree ? nativeWorktreeLaunch(worktreePath!, cliPath, []) : undefined
-  const cliVersion = execFileSync(worktreeLaunch?.command ?? cliPath, [...(worktreeLaunch?.args ?? []), ...provider.CLAUDE_VERSION_ARGS], { encoding: 'utf8' }).trim()
-  if (!cliVersion || !nativeConfiguration && cliVersion !== provider.CLAUDE_LEGACY_CLI_VERSION) throw new StructuredSessionError('unsupported', 'Claude CLI version has no verified isolated capability identity')
+  let cliVersion: string
+  try { cliVersion = provider.inspectClaudeCliVersion(worktreeLaunch ?? { command: cliPath, args: [] }, nativeConfiguration) }
+  catch (error) { throw claudeAdapterError(provider, error) }
   const binaryDigest = createHash('sha256').update(readFileSync(cliPath)).digest('hex')
   mkdirSync(realm, { recursive: true, mode: 0o700 })
   try { mkdirSync(root, { mode: 0o700 }) }
@@ -609,14 +612,13 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
     env = environment.environment
     if (nativeConfiguration) env.SPEXCODE_SESSION_ID = id
     if (!worktree) {
-      const auth = spawnSync('/usr/bin/sandbox-exec', ['-f', profile, cliPath, ...provider.claudeAuthenticationArgs()], { cwd, env, encoding: 'utf8', timeout: 10000 })
-      if (auth.error) throw new StructuredSessionError('unsupported', `Claude isolated authentication status failed (${(auth.error as NodeJS.ErrnoException).code ?? 'unknown'})`)
-      const authentication = provider.interpretClaudeAuthenticationStatus(auth.stdout, auth.status)
+      const { authentication, exitStatus, rejection } = provider.inspectClaudeIsolatedAuthentication({
+        command: '/usr/bin/sandbox-exec', args: ['-f', profile, cliPath], cwd, env,
+      })
       writeFileSync(join(root, 'auth-status.json'), JSON.stringify({
-        loggedIn: authentication.loggedIn, authMethod: authentication.authMethod, apiProvider: authentication.apiProvider,
-        source: environment.source, exitStatus: auth.status,
+        ...authentication, source: environment.source, exitStatus,
       }), { mode: 0o600 })
-      if (auth.status !== 0 || authentication.loggedIn !== true) throw new StructuredSessionError('unsupported', 'The actual Claude CLI reports authentication unavailable in its isolated runtime; existing keychain/wrapper authentication is preserved and credentials are never copied')
+      if (rejection) throw rejection
     }
     args = worktree
       ? provider.claudeWorktreeArgs({

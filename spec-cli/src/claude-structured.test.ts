@@ -1263,6 +1263,7 @@ const waiting = setInterval(() => {
     if (selected !== 'default') assert.equal(observed.args[observed.args.indexOf('--model') + 1], selected)
     const plan = JSON.parse(readFileSync(join(root, 'plan.json'), 'utf8')) as { version: number; cliVersion: string; binaryDigest: string; requestedModel: string; resolvedModel: string; historyDigest: string }
     assert.equal(plan.version, 2); assert.equal(plan.cliVersion, '9.8.7 (Claude Code)'); assert.match(plan.binaryDigest, /^[a-f0-9]{64}$/)
+    assert.equal(existsSync(join(root, 'auth-status.json')), false)
     assert.equal(plan.requestedModel, `claude:${selected}`); assert.equal(plan.resolvedModel, actualModel)
     const snapshot = readFileSync(join(root, 'public-history.json'), 'utf8'); assert(!snapshot.includes('SYNTHETIC_PRIVATE_THINKING'))
     if (configMode === 'unset') {

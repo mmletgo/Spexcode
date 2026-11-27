@@ -13,6 +13,21 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
+// src/llm_manager/native/cli-probe.mjs
+import { spawnSync } from "node:child_process";
+function runNativeCliProbe(launch, flags) {
+  return spawnSync(launch.command, [...launch.args, ...flags], {
+    cwd: launch.cwd,
+    env: launch.env,
+    encoding: "utf8",
+    timeout: 1e4
+  });
+}
+var init_cli_probe = __esm({
+  "src/llm_manager/native/cli-probe.mjs"() {
+  }
+});
+
 // src/llm_manager/native/claude.mjs
 var claude_exports = {};
 __export(claude_exports, {
@@ -28,16 +43,26 @@ __export(claude_exports, {
   claudeWorktreeArgs: () => claudeWorktreeArgs,
   encodeClaudeInterrupt: () => encodeClaudeInterrupt,
   encodeClaudeUserMessage: () => encodeClaudeUserMessage,
+  inspectClaudeCliVersion: () => inspectClaudeCliVersion,
+  inspectClaudeIsolatedAuthentication: () => inspectClaudeIsolatedAuthentication,
   interpretClaudeAuthenticationStatus: () => interpretClaudeAuthenticationStatus,
   interpretClaudeStreamEvent: () => interpretClaudeStreamEvent,
   isClaudeRateLimitTerminal: () => isClaudeRateLimitTerminal,
   prepareClaudeAuthenticationEnvironment: () => prepareClaudeAuthenticationEnvironment,
   readClaudeStreamEvent: () => readClaudeStreamEvent
 });
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+function inspectClaudeCliVersion(launch, nativeConfiguration) {
+  const cliVersion = execFileSync(launch.command, [...launch.args, ...CLAUDE_VERSION_ARGS], { encoding: "utf8" }).trim();
+  if (!cliVersion || !nativeConfiguration && cliVersion !== CLAUDE_LEGACY_CLI_VERSION) {
+    throw new ClaudeNativeProtocolError("unsupported", "Claude CLI version has no verified isolated capability identity");
+  }
+  return cliVersion;
+}
 function assertClaudeLegacyConfiguration(environment) {
   if (["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"].some((key) => environment[key])) {
     throw new ClaudeNativeProtocolError("unsupported", "Claude third-party provider isolation has not been verified");
@@ -110,6 +135,16 @@ function interpretClaudeAuthenticationStatus(stdout, status) {
   }
   const { loggedIn, authMethod, apiProvider } = authentication;
   return { loggedIn, authMethod, apiProvider };
+}
+function inspectClaudeIsolatedAuthentication(launch) {
+  const auth = runNativeCliProbe(launch, claudeAuthenticationArgs());
+  if (auth.error) {
+    throw new ClaudeNativeProtocolError("unsupported", `Claude isolated authentication status failed (${/** @type {NodeJS.ErrnoException} */
+    auth.error.code ?? "unknown"})`);
+  }
+  const authentication = interpretClaudeAuthenticationStatus(auth.stdout, auth.status);
+  const rejection = auth.status !== 0 || authentication.loggedIn !== true ? new ClaudeNativeProtocolError("unsupported", "The actual Claude CLI reports authentication unavailable in its isolated runtime; existing keychain/wrapper authentication is preserved and credentials are never copied") : void 0;
+  return { authentication, exitStatus: auth.status, rejection };
 }
 function claudeNativeModel(model, nativeConfiguration, managedModel) {
   const requested = model ?? "";
@@ -310,6 +345,7 @@ function isClaudeRateLimitTerminal(result, exit) {
 var CLAUDE_LEGACY_CLI_VERSION, CLAUDE_VERSION_ARGS, authenticationKeys, isolatedSettings, streamArgs, ClaudeNativeProtocolError;
 var init_claude = __esm({
   "src/llm_manager/native/claude.mjs"() {
+    init_cli_probe();
     CLAUDE_LEGACY_CLI_VERSION = "2.1.309 (Claude Code)";
     CLAUDE_VERSION_ARGS = Object.freeze(["--version"]);
     authenticationKeys = ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL"];
@@ -1492,11 +1528,20 @@ __export(cursor_exports, {
   cursorModelArgument: () => cursorModelArgument,
   cursorUsageLimitNotice: () => cursorUsageLimitNotice,
   encodeCursorAcpPacket: () => encodeCursorAcpPacket,
+  inspectCursorCliVersion: () => inspectCursorCliVersion,
   observeCursorAcp: () => observeCursorAcp
 });
 import { randomUUID } from "node:crypto";
 import { isAbsolute as isAbsolute2, relative, resolve } from "node:path";
 import { createInterface as createInterface2 } from "node:readline";
+function inspectCursorCliVersion(launch) {
+  const version = runNativeCliProbe(launch, CURSOR_VERSION_ARGS);
+  const cliVersion = version.stdout?.trim();
+  if (version.status !== 0 || !cliVersion) {
+    throw new CursorAcpError("unsupported", "Cursor CLI did not report a version");
+  }
+  return cliVersion;
+}
 function cursorModelArgument(value) {
   if (!value.trim() || value.includes("\0")) {
     throw new CursorAcpError("unsupported", "Cursor CLI requires cursor:<model> or cursor:default");
@@ -1670,6 +1715,7 @@ async function observeCursorAcp(stdout, plan, prompt, send, hooks) {
 var CURSOR_COMMAND, CURSOR_VERSION_ARGS, CursorAcpError, object3, nonempty2, cursorUsageLimitNotice;
 var init_cursor = __esm({
   "src/llm_manager/native/cursor.mjs"() {
+    init_cli_probe();
     CURSOR_COMMAND = "cursor-agent";
     CURSOR_VERSION_ARGS = Object.freeze(["--version"]);
     CursorAcpError = class extends Error {
@@ -1707,6 +1753,7 @@ __export(grok_exports, {
   grokStreamingArguments: () => grokStreamingArguments,
   grokSupportsAcp: () => grokSupportsAcp,
   grokSupportsStreamingSchema: () => grokSupportsStreamingSchema,
+  inspectGrokStructuredCli: () => inspectGrokStructuredCli,
   observeGrokNativeAcp: () => observeGrokNativeAcp,
   observeGrokNativeStderr: () => observeGrokNativeStderr,
   observeGrokNativeStreaming: () => observeGrokNativeStreaming
@@ -1722,6 +1769,21 @@ function grokSupportsAcp(help) {
 }
 function grokSupportsStreamingSchema(help) {
   return /^[\t ]*--json-schema(?:[\t ]|\r?$)/m.test(help);
+}
+function inspectGrokStructuredCli({ command, args, cwd }, mode, schemaArgument) {
+  const launch = { command, args, cwd };
+  const probe = (flags) => runNativeCliProbe(launch, flags);
+  const version = probe(["--version"]);
+  const cliVersion = version.stdout?.trim();
+  if (version.status !== 0 || !cliVersion) return void 0;
+  const schemaHelp = Buffer.byteLength(schemaArgument) <= GROK_MAX_SCHEMA_ARGUMENT_BYTES ? probe(["--help"]) : void 0;
+  const acpHelp = mode === "edit" ? probe(grokAcpProbeArguments()) : void 0;
+  const useAcp = acpHelp?.status === 0 && grokSupportsAcp(acpHelp.stdout);
+  return {
+    cliVersion,
+    useAcp,
+    nativeSchema: useAcp || schemaHelp?.status === 0 && grokSupportsStreamingSchema(schemaHelp.stdout)
+  };
 }
 function grokAcpArguments() {
   return ["--no-auto-update", "--permission-mode", "bypassPermissions", "agent", "--no-leader", "stdio"];
@@ -2017,6 +2079,7 @@ function grokStderrHasQuotaExhaustion({ ended, readError, oversizedLine, usageBa
 var GROK_MAX_SCHEMA_ARGUMENT_BYTES, GrokAcpProtocolError, requestIds, stopReasons;
 var init_grok = __esm({
   "src/llm_manager/native/grok.mjs"() {
+    init_cli_probe();
     GROK_MAX_SCHEMA_ARGUMENT_BYTES = 64 * 1024;
     GrokAcpProtocolError = class extends Error {
       /** @param {string} message @param {GrokProtocolErrorCode} code */
@@ -2038,6 +2101,7 @@ __export(zcode_exports, {
   assertZCodeModelSnapshot: () => assertZCodeModelSnapshot,
   decodeZCodeJsonText: () => decodeZCodeJsonText,
   decodeZCodeStructuredText: () => decodeZCodeStructuredText,
+  inspectZCodeCliVersion: () => inspectZCodeCliVersion,
   isZCodeEventsRpcTimeout: () => isZCodeEventsRpcTimeout,
   isZCodeEventsTimeout: () => isZCodeEventsTimeout,
   isZCodeProviderPipeFailure: () => isZCodeProviderPipeFailure,
@@ -2214,6 +2278,14 @@ function zcodeMessages(history) {
     /** @type {NativeMessage[]} */
     history.messages
   );
+}
+function inspectZCodeCliVersion(launch, nativeConfiguration) {
+  const version = runNativeCliProbe(launch, zcodeVersionArgs());
+  const cliVersion = version.stdout?.trim();
+  if (version.error || version.status !== 0 || !cliVersion || !nativeConfiguration && cliVersion !== zcodeCapability.cliVersion) {
+    throw new ZCodeProtocolError("unsupported", "ZCode CLI version could not be recorded for this runtime");
+  }
+  return cliVersion;
 }
 function zcodeRuntimeFiles(home, hostHome) {
   return {
@@ -2630,6 +2702,7 @@ function zcodeWorktreeResponse({ identity, model, prompt, terminal, events, mess
 var zcodeCapability, ZCodeProtocolError, providerRejection, ZCodeNativeTurnFailedError, nativeRpcTimeoutMessage, zcodeVersionArgs, zcodeNativeIdentity, zcodeAppServerArgs, terminalTypes;
 var init_zcode = __esm({
   "src/llm_manager/native/zcode.mjs"() {
+    init_cli_probe();
     zcodeCapability = Object.freeze({
       cliVersion: "0.17.1",
       cliSha256: "9afd565a104d660259e6bdeeaa5cb8abc74a908559e21aa3c5f6a06f2a9da6c6",
@@ -2670,7 +2743,7 @@ var init_zcode = __esm({
 });
 
 // src/llm_manager/native/index.mjs
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync as spawnSync2 } from "node:child_process";
 import { realpathSync as realpathSync2 } from "node:fs";
 var nativeRuntimeVersion = 1;
 var commands = Object.freeze({
@@ -2695,7 +2768,7 @@ function loadNativeAdapter(vendor) {
   }
 }
 function findNativeExecutable(vendor) {
-  const located = spawnSync("/usr/bin/which", [commands[vendor]], { encoding: "utf8", timeout: 1e4 });
+  const located = spawnSync2("/usr/bin/which", [commands[vendor]], { encoding: "utf8", timeout: 1e4 });
   const executable = located.status === 0 && located.stdout.trim();
   return executable ? realpathSync2(executable) : void 0;
 }
