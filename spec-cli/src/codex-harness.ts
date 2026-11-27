@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { closeSync, openSync, readSync, readFileSync, existsSync, mkdirSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { homedir } from 'node:os'
@@ -85,6 +86,18 @@ function codexMutationGeneration(dir = runtimeRoot(), endpoint = legacyCodexGene
   } catch { return null }
   if (!migrateLegacyDetachedRuntimeReceipt(pid, codexAppServerLegacyScope(dir), codexAppServerReceipt(dir))) return null
   return codexRuntimeGeneration(dir, endpoint)
+}
+
+const legacyStructuredCodexControl = new AsyncLocalStorage<true>()
+function usesLegacyStructuredCodex(execution: unknown): boolean {
+  const state = execution as Partial<StructuredExecution> | null | undefined
+  return state?.version === 1 && state.policy === 'codex-read-only-v1'
+    || state?.version === 2 && state.policy === 'codex-frozen-read-only-v2'
+    || state?.version === 5 && (state.policy === 'codex-read-only-v1' || state.policy === 'codex-frozen-read-only-v2')
+}
+
+function withLegacyStructuredCodexControl<T>(execution: unknown, action: () => T): T {
+  return usesLegacyStructuredCodex(execution) ? legacyStructuredCodexControl.run(true, action) : action()
 }
 
 const codexDescriptorKey = (endpoint: CodexGenerationEndpoint) => endpoint.id === 'legacy' ? 'codex-app-server' : `codex-app-server:${endpoint.id}`
@@ -568,6 +581,25 @@ function codexThreadMutation(sock: string, method: 'thread/archive' | 'thread/de
   if (before) return Promise.resolve({ ok: false, error: before, commit: 'refused' })
   if (method === 'turn/interrupt' && !turnId)
     return Promise.resolve({ ok: false, error: 'Codex turn interrupt needs an exact turn id', commit: 'refused' })
+  if (legacyStructuredCodexControl.getStore() && method !== 'turn/interrupt') {
+    const operation = method === 'thread/archive' ? 'archive' : method === 'thread/delete' ? 'delete' : 'unarchive'
+    return (async (): Promise<CodexMutationOutcome> => {
+      let sent = false
+      try {
+        await withLegacyStructuredCodexClient(sock, budgetMs, client => client.mutateLegacyThread(operation, threadId, () => {
+          const changed = generationError()
+          if (changed) throw new Error(changed)
+          sent = true
+        }))
+      } catch (error) {
+        const refused = (error as { code?: string }).code
+        return { ok: false, error: generationError() || `Codex ${method} failed: ${rpcError(error)}`,
+          commit: sent && refused !== 'failed' && refused !== 'not_materialized' ? 'unknown' : 'refused' }
+      }
+      const changed = generationError()
+      return changed ? { ok: false, error: changed, commit: 'unknown' } : { ok: true }
+    })()
+  }
   return new Promise((resolve) => {
     const conn: Socket = createConnection(sock)
     const fs: FrameState = { buf: Buffer.alloc(0), fragOp: 0, fragBuf: Buffer.alloc(0) }
@@ -706,6 +738,20 @@ function codexPagedIds(
   onItem?: (item: unknown) => void,
   timeoutMs = CODEX_MUTATION_CENSUS_MS,
 ): Promise<CodexPagedIdsResult> {
+  if (legacyStructuredCodexControl.getStore()) {
+    return withLegacyStructuredCodexClient(sock, timeoutMs, async client => {
+      if (method === 'thread/loaded/list') return { ok: true as const, ids: await client.listLoadedThreadIds() }
+      const { archived, cwd, ancestorThreadId, parentThreadId } = params as LegacyCodexThreadScope
+      const rows = await client.listLegacyThreadRows({ archived, cwd, ancestorThreadId, parentThreadId })
+      const ids = new Set<string>()
+      for (const item of rows) {
+        onItem?.(item)
+        const id = extractId(item)
+        if (typeof id === 'string') ids.add(id)
+      }
+      return { ok: true as const, ids: [...ids] }
+    }).catch(error => ({ ok: false as const, error: `Codex ${label} failed: ${rpcError(error)}` }))
+  }
   return new Promise((resolve) => {
     const conn: Socket = createConnection(sock)
     const fs: FrameState = { buf: Buffer.alloc(0), fragOp: 0, fragBuf: Buffer.alloc(0) }
@@ -789,6 +835,12 @@ async function waitForCodexGeneration(dir: string, endpoint: CodexGenerationEndp
 type CodexTurnCensus = { ok: true; turnPresence: 'idle' | 'active' | 'unknown'; turnId?: string; unmaterialized?: true } | { ok: false; error: string }
 
 function codexRunningTurn(sock: string, threadId: string): Promise<CodexTurnCensus> {
+  if (legacyStructuredCodexControl.getStore()) {
+    return withLegacyStructuredCodexClient(sock, CODEX_RUNNING_TURN_READ_MS, client => client.readLegacyColdTurn(threadId))
+      .then(result => ({ ok: true as const, ...result }), error => ({
+        ok: false as const, error: `Codex target thread ${threadId} turn census failed: ${rpcError(error)}`,
+      }))
+  }
   return new Promise((resolve) => {
     const conn: Socket = createConnection(sock)
     const fs: FrameState = { buf: Buffer.alloc(0), fragOp: 0, fragBuf: Buffer.alloc(0) }
@@ -1627,6 +1679,27 @@ export function codexSharedRuntimeProbe(dir = runtimeRoot(), endpoint = legacyCo
     if (!pidLive || listener !== 'live') return { healthy: false, references: [], error: 'Codex shared root state is unknown (PID/listener identity is not proven)' }
     const generation = codexRuntimeGeneration(dir, endpoint)
     if (!generation) return { healthy: false, references: [], error: 'Codex shared root detached receipt/socket generation is not proven' }
+    if (legacyStructuredCodexControl.getStore()) {
+      try {
+        const references = await withLegacyStructuredCodexClient(sock, 5000, async client => {
+          const ids = await client.listLoadedThreadIds()
+          return Promise.all(ids.map(async (threadId): Promise<SharedRuntimeProbe['references'][number]> => {
+            const reference = { referenceId: threadId, ...codexReferenceParent(threadId) }
+            if (referenceIds !== undefined && !referenceIds.includes(threadId))
+              return { ...reference, turnPresence: 'unknown' }
+            const thread = await client.readThread(threadId)
+            const turnId = activeTurnIdFromThread({ thread })
+            const status = typeof thread.status === 'string' ? thread.status : codexRowStatus(thread)
+            return { ...reference, turnPresence: turnId || status === 'active' ? 'active' : status === 'idle' ? 'idle' : 'unknown',
+              ...(turnId ? { turnId } : {}) }
+          }))
+        })
+        return codexRuntimeGeneration(dir, endpoint) === generation ? { healthy: true, references }
+          : { healthy: false, references, error: 'Codex shared root detached receipt/socket generation changed during ownership probe' }
+      } catch (error) {
+        return { healthy: false, references: [], error: `Codex app-server ownership probe failed: ${rpcError(error)}` }
+      }
+    }
     return new Promise<SharedRuntimeProbe>((resolve) => {
     const conn: Socket = createConnection(sock)
     const fs: FrameState = { buf: Buffer.alloc(0), fragOp: 0, fragBuf: Buffer.alloc(0) }
@@ -2235,7 +2308,16 @@ function codexRuntimeDescriptors(runtimeDir: string, rec?: HarnessLivenessRecord
   }
   const endpoints = codexGenerationEndpoints(runtimeDir)
   return (endpoints.length ? endpoints : [legacyCodexGenerationEndpoint(runtimeDir)])
-    .map((endpoint) => codexRuntimeDescriptor(endpoint, runtimeDir))
+    .map((endpoint) => {
+      const descriptor = codexRuntimeDescriptor(endpoint, runtimeDir)
+      if (!usesLegacyStructuredCodex(rec?.structuredExecution)) return descriptor
+      return {
+        ...descriptor,
+        residency: () => legacyStructuredCodexControl.run(true, descriptor.residency!),
+        mutationGuard: (...args) => legacyStructuredCodexControl.run(true, () => descriptor.mutationGuard!(...args)),
+        probe: (...args) => legacyStructuredCodexControl.run(true, () => descriptor.probe(...args)),
+      }
+    })
 }
 
 function codexResumeArg(rec: { session: string; harnessSessionId?: string | null }, pendingLaunchPayload?: string | null): string {
@@ -2498,7 +2580,14 @@ export const codexHarness: Harness = {
       if (inArchived && !inActive) return { ok: false, reason: 'Codex thread remains archived; restore can be retried' }
       return { ok: false, reason: 'Codex restore state is ambiguous (thread in both or neither collection)' }
     }
-    const restored = await codexThreadMutation(sock, 'thread/unarchive', rec.harnessSessionId)
+    const structured = legacyStructuredCodexControl.getStore()
+    const generation = structured ? codexRuntimeGeneration(dir, endpoint) : null
+    if (structured && !generation)
+      return { ok: false, reason: 'shared Codex app-server generation is unproven before restore' }
+    const restored = await codexThreadMutation(sock, 'thread/unarchive', rec.harnessSessionId,
+      generation ? { dir, endpoint, generation } : undefined)
+    if (generation && codexRuntimeGeneration(dir, endpoint) !== generation)
+      return { ok: false, reason: 'shared Codex app-server generation changed during restore' }
     if (!restored.ok) return reconcile()
     return reconcile()
   },
@@ -2837,14 +2926,14 @@ export const codexHeadlessHarness: Harness = {
   coldPreflight: async (rec) => {
     if (managedFrozenWorktreeExecution(rec.structuredExecution)) return managedFrozenColdProof(rec, false)
     const execution = ephemeralWorktreeExecution(rec.structuredExecution)
-    if (!execution) return codexHarness.coldPreflight!(rec)
+    if (!execution) return withLegacyStructuredCodexControl(rec.structuredExecution, () => codexHarness.coldPreflight!(rec))
     const { codexNativeWorktreeIsStopped } = await import('./codex-native-worktree-structured.js')
     return await codexNativeWorktreeIsStopped(rec.session, rec.harnessSessionId, execution) ? { ok: true, alreadyCold: true } : { ok: false, reason: 'exact ephemeral Codex worktree stop is unproven' }
   },
   coldRuntime: async (rec, receipt) => {
     if (managedFrozenWorktreeExecution(rec.structuredExecution)) return managedFrozenColdProof(rec, true)
     const execution = ephemeralWorktreeExecution(rec.structuredExecution)
-    if (!execution) return codexHarness.coldRuntime!(rec, receipt)
+    if (!execution) return withLegacyStructuredCodexControl(rec.structuredExecution, () => codexHarness.coldRuntime!(rec, receipt))
     const { codexNativeWorktreeIsStopped } = await import('./codex-native-worktree-structured.js')
     return await codexNativeWorktreeIsStopped(rec.session, rec.harnessSessionId, execution) ? { ok: true } : { ok: false, reason: 'exact ephemeral Codex worktree stop is unproven' }
   },
@@ -2855,12 +2944,13 @@ export const codexHeadlessHarness: Harness = {
       return proof.alreadyCold ? { ok: true, alreadyCold: true } : { ok: false, reason: 'managed frozen thread must be archived before retirement' }
     }
     const execution = ephemeralWorktreeExecution(rec.structuredExecution)
-    if (!execution) return codexHarness.coldRetirementPreflight!(rec)
+    if (!execution) return withLegacyStructuredCodexControl(rec.structuredExecution, () => codexHarness.coldRetirementPreflight!(rec))
     const { codexNativeWorktreeIsStopped } = await import('./codex-native-worktree-structured.js')
     return await codexNativeWorktreeIsStopped(rec.session, rec.harnessSessionId, execution) ? { ok: true, alreadyCold: true } : { ok: false, reason: 'exact ephemeral Codex worktree stop is unproven' }
   },
   restoreRuntime: async (rec, receipt) => managedFrozenWorktreeExecution(rec.structuredExecution) ? { ok: false, reason: 'managed frozen archive recovery requires read-back of the original session' }
-    : ephemeralWorktreeExecution(rec.structuredExecution) ? { ok: true } : codexHarness.restoreRuntime!(rec, receipt),
+    : ephemeralWorktreeExecution(rec.structuredExecution) ? { ok: true }
+      : withLegacyStructuredCodexControl(rec.structuredExecution, () => codexHarness.restoreRuntime!(rec, receipt)),
   launchOneShot: true,
   launchCmd: (id, runtimeDir, cmd) => codexHeadlessLaunchCommandLocal(id, codexBaseCmd(cmd), runtimeDir ?? runtimeRoot()),
   // A headless thread has no pane to witness it. The shared app-server generation is therefore the adapter's
@@ -3000,9 +3090,15 @@ async function managedCodexFrozenTurn(sock: string, cwd: string, prompt: string,
   }
 }
 
+type LegacyCodexThreadScope = { archived: boolean; cwd?: string; ancestorThreadId?: string; parentThreadId?: string }
+
 type LegacyStructuredCodexClient = Pick<InstanceType<ManagerPersistentCodexModule['CodexPersistentAppServer']>,
-  'initialize' | 'readExactTurn' | 'close'> & {
+  'initialize' | 'readExactTurn' | 'listLoadedThreadIds' | 'close'> & {
+  readThread(threadId: string): Promise<{ id: string; status?: unknown; turns?: unknown[] }>
   initializeLegacyControl(): Promise<void>
+  listLegacyThreadRows(scope: LegacyCodexThreadScope): Promise<unknown[]>
+  readLegacyColdTurn(threadId: string): Promise<Omit<Extract<CodexTurnCensus, { ok: true }>, 'ok'>>
+  mutateLegacyThread(operation: 'archive' | 'delete' | 'unarchive', threadId: string, beforeSend: () => void): Promise<void>
   runLegacyStructuredTurn(
     request: { cwd: string; prompt: string; schema: StructuredExecution['schema']; model?: string; effort?: string;
       threadId?: string; turnId?: string; readerRuntime?: StructuredExecution['readerRuntime']; frozenTool?: typeof frozenReadTool },
@@ -3020,6 +3116,21 @@ type LegacyStructuredCodexAdapter = {
 
 async function loadLegacyStructuredCodexAdapter(): Promise<LegacyStructuredCodexAdapter> {
   return await (await loadManagerNativeRuntime()).loadNativeAdapter('codex') as LegacyStructuredCodexAdapter
+}
+
+async function withLegacyStructuredCodexClient<T>(
+  sock: string, budgetMs: number, action: (client: LegacyStructuredCodexClient) => Promise<T>,
+): Promise<T> {
+  const adapter = await loadLegacyStructuredCodexAdapter()
+  const client = new adapter.CodexPersistentAppServer(sock, budgetMs)
+  const timeout = setTimeout(() => client.close(), budgetMs)
+  try {
+    await client.initializeLegacyControl()
+    return await action(client)
+  } finally {
+    clearTimeout(timeout)
+    client.close()
+  }
 }
 
 export async function codexStructuredTurn(sock: string, cwd: string, prompt: string, execution: StructuredExecution, callbacks: StructuredTurnCallbacks, hosted?: ManagedCodexFrozenRuntime): Promise<StructuredTurnResult> {

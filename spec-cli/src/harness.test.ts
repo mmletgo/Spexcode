@@ -5,6 +5,9 @@ import { join, dirname } from 'node:path'
 import { platform, tmpdir } from 'node:os'
 import { createServer } from 'node:net'
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { bindCodexGeneration, ensureCodexCurrentGeneration, type CodexGenerationEndpoint } from './codex-runtime-generations.js'
+import { structuredRealmRoot } from './session-structured-policy.js'
 import { assertRvSockPath, HARNESSES, claudeHarness, opencodeHarness, piHarness, zcodeHarness, claudeHeadlessHarness, opencodeHeadlessHarness, piHeadlessHarness, writeManagedBlock, removeManagedBlock, writeManagedJsonHooks, removeManagedJsonHooks, sharedShimHasHostContent, GENERATED_MARK, launcherList, resolveLauncher, defaultLauncher, launcherDefault, rendezvousListening, rvSock, legacyRvSock, scopedRvSock, stampRvSock, deliverViaRendezvous, deliverViaClaudeRendezvous } from './harness.js'
 import { activeTurnIdFromThread, codexAppServerSock, codexAppServerPid, codexAppServerReceipt, codexSharedRuntimeProbe, codexBinary, codexHandshakeMessages, codexInjectMessage, codexLoadedReferenceIds, codexThreadList, codexTurn, codexTurnFailureObserver, codexObservedActiveTurnId, CODEX_THREAD_SOURCE_KINDS, CODEX_TURN_OBSERVER_SUBSCRIBE_MS, codexHarness, codexHeadlessHarness, codexLaunchCommand, codexLauncherThreadPolicy, codexStartThread, codexStartThreadParams, paneTreeRunsCodex, codexRolloutExists, writeCodexTrust } from './codex-harness.js'
 import { shQuote } from './sh.js'
@@ -103,6 +106,7 @@ const codexRpcFixture = (handler: (message: any, send: (value: unknown) => void)
   initialize?: (message: any, send: (value: unknown) => void) => unknown
   initialized?: (message: any, send: (value: unknown) => void) => unknown
   nativeFilters?: 'raw'
+  websocketAccept?: 'valid' | 'invalid'
 } = {}) => createServer((socket) => {
   let buffer = Buffer.alloc(0)
   let upgraded = false
@@ -134,7 +138,10 @@ const codexRpcFixture = (handler: (message: any, send: (value: unknown) => void)
     if (!upgraded) {
       const split = buffer.indexOf('\r\n\r\n')
       if (split < 0) return
-      socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n')
+      const key = /^Sec-WebSocket-Key: (.+)$/im.exec(buffer.subarray(0, split).toString())?.[1]
+      const accept = lifecycle.websocketAccept === 'invalid' ? 'wrong' :
+        createHash('sha1').update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64')
+      socket.write(`HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`)
       upgraded = true
       buffer = buffer.slice(split + 4)
     }
@@ -444,11 +451,11 @@ test('Codex turn observer drops restart reconciliation when a new turn starts', 
   }
 })
 
-const startCodexOwner = (root: string) => spawnDetachedRuntime({
+const startCodexOwner = (root: string, endpoint?: CodexGenerationEndpoint) => spawnDetachedRuntime({
   cwd: root,
   logFile: join(root, 'codex-owner.log'),
-  pidFile: codexAppServerPid(root),
-  receiptFile: codexAppServerReceipt(root),
+  pidFile: endpoint?.pidFile ?? codexAppServerPid(root),
+  receiptFile: endpoint?.receiptFile ?? codexAppServerReceipt(root),
   command: process.execPath,
   args: ['-e', 'setInterval(() => {}, 1000)'],
 })
@@ -859,11 +866,14 @@ test('Codex cold preflight waits through a short app-server census refusal strea
 // carries no terminal record.
 type NativeRow = { id: string; parent?: string; cwd?: string; archived?: boolean; status?: string; loaded?: boolean; unmaterialized?: boolean; unlisted?: 'everywhere' | 'outside-relations'; rollout?: false; settled?: false }
 type NativeFault = {
+  structured?: typeof legacyStructuredFixture
+  websocketAccept?: 'valid' | 'invalid'
   // replace the faithful answer to one request with what a faulty server says instead
   answer?: (params: any, rows: any[], table: NativeRow[]) => any[]
   // change the world immediately before a request is answered
   before?: (message: any, table: NativeRow[], env: { root: string }) => void
 }
+const legacyStructuredFixture = { version: 1, policy: 'codex-read-only-v1', timeoutMs: 1000, threadId: 'target' } as const
 const nativeDescendants = (table: NativeRow[], ancestor: string): Set<string> => {
   const found = new Set<string>()
   for (let grew = true; grew;) {
@@ -901,7 +911,7 @@ async function withNativeThreads(table: NativeRow[], fault: NativeFault, body: (
     const lines = [JSON.stringify(header), ...(row.settled === false ? [] : [JSON.stringify(terminal)])]
     writeFileSync(join(row.archived ? archivedRollouts : activeRollouts, rolloutName(row.id)), `${lines.join('\n')}\n`)
   }
-  const root = runtimeRoot()
+  const root = fault.structured ? join(structuredRealmRoot(fault.structured)!, 'control') : runtimeRoot()
   const mutations: string[] = []
   const lists: any[] = []
   const find = (id: string) => table.find((row) => row.id === id)
@@ -929,12 +939,21 @@ async function withNativeThreads(table: NativeRow[], fault: NativeFault, body: (
       return { data: fault.answer ? fault.answer(params, rows, table) : rows, nextCursor: null }
     }
     throw new Error(`unexpected RPC ${message.method}`)
-  }, { nativeFilters: 'raw' })
+  }, { nativeFilters: 'raw', websocketAccept: fault.websocketAccept })
   let owner: ReturnType<typeof startCodexOwner> | null = null
   try {
-    await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(codexAppServerSock(root), () => resolve()) })
     mkdirSync(root, { recursive: true })
-    owner = startCodexOwner(root)
+    const start = async (endpoint?: CodexGenerationEndpoint) => {
+      await new Promise<void>((resolve, reject) => {
+        server.once('error', reject)
+        server.listen(endpoint?.socketPath ?? codexAppServerSock(root), () => resolve())
+      })
+      owner = startCodexOwner(root, endpoint)
+    }
+    if (fault.structured) {
+      const endpoint = await ensureCodexCurrentGeneration(root, start)
+      bindCodexGeneration(root, 'target-session', fault.structured.threadId, endpoint.id)
+    } else await start()
     await body({ root, table, mutations, lists })
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()))
@@ -981,6 +1000,36 @@ const refusesColdPreflightOnce = async (table: NativeRow[], fault: NativeFault, 
     assert.deepEqual(mutations, [], 'a refusal archives nothing')
   })
 }
+
+test('legacy structured Codex close uses the Manager control socket for scoped archive, retirement and restore', async () => {
+  const rec = { ...subtreeRec('target'), structuredExecution: legacyStructuredFixture }
+  await withNativeThreads(subtreeTable(), { structured: legacyStructuredFixture }, async ({ mutations, lists }) => {
+    const preflight = await codexHeadlessHarness.coldPreflight!(rec)
+    assert.equal(preflight.ok, true, preflight.ok ? undefined : preflight.reason)
+    if (!preflight.ok) return
+    const descriptor = codexHeadlessHarness.sharedRuntimes!(runtimeRoot(), rec)
+      .find(item => item.key === codexHeadlessHarness.targetDescriptorKey!(rec))
+    assert.ok(descriptor)
+    const guard = await descriptor.mutationGuard!('target', { targetCwd: FIXTURE_CWD, coldReceipt: preflight.receipt })
+    assert.equal(guard.healthy, true, guard.error)
+    assert.deepEqual(await codexHeadlessHarness.coldRuntime!(rec, preflight.receipt), { ok: true })
+    assert.deepEqual(await codexHeadlessHarness.coldRetirementPreflight!(rec), { ok: true, alreadyCold: true })
+    assert.deepEqual(await codexHeadlessHarness.restoreRuntime!(rec, preflight.receipt), { ok: true })
+    assert.deepEqual(mutations, ['archive:child', 'archive:target', 'unarchive:target', 'unarchive:child'])
+    assert.deepEqual(lists.filter(params => !isScopedList(params)), [], 'legacy formal review reads its own scopes')
+  })
+})
+
+test('legacy structured Codex close rejects a WebSocket that cannot validate the Manager handshake', async () => {
+  const rec = { ...subtreeRec('target'), structuredExecution: legacyStructuredFixture }
+  await withNativeThreads(subtreeTable(), { structured: legacyStructuredFixture, websocketAccept: 'invalid' }, async ({ mutations, lists }) => {
+    const preflight = await codexHeadlessHarness.coldPreflight!(rec)
+    assert.equal(preflight.ok, false, 'an unverified WebSocket must never produce a structured cleanup receipt')
+    if (!preflight.ok) assert.match(preflight.reason, /invalid WebSocket or RPC packet/)
+    assert.deepEqual(mutations, [])
+    assert.deepEqual(lists, [])
+  })
+})
 
 test('Codex cold proof costs the target subtree: every native list is scoped, and the rest of the host is never read', async () => {
   await withNativeThreads(subtreeTable(), {}, async ({ mutations, lists, table }) => {
@@ -2271,6 +2320,12 @@ test('Codex archive re-censuses native descendants after mutation and compensate
   }
 })
 
+function createStaleUnixSocket(path: string): void {
+  // Direct exit leaves the bound socket on disk, as when the owner crashes.
+  execFileSync(process.execPath, ['-e', "require('node:net').createServer().listen(process.argv[1], () => process.exit(0))", path], { timeout: 5000 })
+  assert.ok(statSync(path).isSocket())
+}
+
 test('codex shared probe treats dead PID plus stale socket files as a healthy empty root', async () => {
   const dir = mkdtempSync(join(tmpdir(), `spex-codex-stale-root-${process.pid}-`))
   const socketDir = join(dir, 'socket-dir')
@@ -2280,7 +2335,7 @@ test('codex shared probe treats dead PID plus stale socket files as a healthy em
     const socket = codexAppServerSock(dir)
     writeFileSync(codexAppServerPid(dir), '999999999\n')
     writeFileSync(codexAppServerReceipt(dir), 'detached-v3 999999999 dead 999999999 999999999\n')
-    writeFileSync(socket, 'stale socket path, no listener\n')
+    createStaleUnixSocket(socket)
     assert.deepEqual(await codexSharedRuntimeProbe(dir), { healthy: true, references: [] })
   } finally {
     if (previousSocketDir === undefined) delete process.env.SPEXCODE_CODEX_SOCKET_DIR
@@ -3127,7 +3182,7 @@ test('cleanupRuntime sweeps a transport it PROVED dead, and never one still answ
   // nothing behind it. THAT residue is ours — close must leave zero socket behind (the acceptance matrix's
   // close row).
   const dead = `unit-cleanup-dead-${process.pid}-${Date.now()}`
-  writeFileSync(rvSock(dead), '')                  // a path nothing listens on → connect ECONNREFUSED = proven dead
+  createStaleUnixSocket(rvSock(dead))
   await claudeHarness.cleanupRuntime({ session: dead })
   assert.equal(existsSync(rvSock(dead)), false, 'a proven-dead socket is swept')
 

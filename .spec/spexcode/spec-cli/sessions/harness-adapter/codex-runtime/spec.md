@@ -64,8 +64,10 @@ falls through to the project's legacy endpoint. The close contract is [[archive]
 the policy identity in [[structured-session-runtime]].
 
 Old structured read-only records also use the installed LLM Manager's Codex app-server adapter. Manager owns
-the legacy request and tool frames, turn and terminal interpretation, and exact read and interrupt RPCs. The
-host binds the original runtime generation, frozen bytes, read receipts, and result coverage. Legacy frozen
+the legacy request and tool frames, turn and terminal interpretation, and the exact read, interrupt, scoped
+archive census, archive, delete, and unarchive RPCs. A formal conformance review uses that same adapter
+with or without a configured provider group. The host binds the original runtime generation, frozen bytes,
+read receipts and result coverage, and owns the session records, teardown proof and compensation. Legacy frozen
 runtime version 1 may only observe its original turn. An interrupt acknowledgement alone cannot settle a
 turn. The host rechecks the generation immediately before the request and verifies the original turn after it.
 
