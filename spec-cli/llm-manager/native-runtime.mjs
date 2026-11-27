@@ -3224,8 +3224,14 @@ async function observeGrokNativeAcp(stdout, stdin, request, onTerminal) {
       }
       continue;
     }
-    if (id !== requestIds[awaiting] || hasResult === hasError || Object.hasOwn(packet, "params"))
-      throw new GrokAcpProtocolError("Grok ACP response differs from its outstanding request");
+    const expectedId = requestIds[awaiting];
+    const hasParams = Object.hasOwn(packet, "params");
+    if (id !== expectedId || hasResult === hasError || hasParams) {
+      const idShape = id === expectedId ? "matching" : id === String(expectedId) ? "expected-digit-string" : id === null ? "null" : typeof id;
+      const code = object4(packet.error)?.code;
+      const rpcCode = typeof code === "number" && Number.isInteger(code) && code >= -32768 && code <= -32e3 ? code : "other";
+      throw new GrokAcpProtocolError(`Grok ACP response differs from its outstanding request (stage=${awaiting}, id=${idShape}, result=${hasResult}, error=${hasError}, params=${hasParams}, rpcCode=${rpcCode})`);
+    }
     if (hasError) {
       const error = object4(packet.error);
       if (!Number.isSafeInteger(error?.code) || typeof error?.message !== "string")

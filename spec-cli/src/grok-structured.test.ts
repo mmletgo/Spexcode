@@ -20,7 +20,7 @@ const sha256 = (text: string): string => createHash('sha256').update(text).diges
 
 type Scenario = 'startup-error' | 'success' | 'wrong-session' | 'wrong-cwd' | 'missing-request' | 'duplicate-terminal' | 'missing-terminal' | 'wrong-format' | 'bad-schema' | 'hang' | 'read' | 'periodic' | 'split-settlement-window' | 'cancel-during-settlement' | 'inherited-stdout' | 'inherited-stdout-trailing' | 'parent-awaits-owned-child' | 'parent-restarts-owned-child' | 'mcp-transport-reconnect' | 'natural-child-shutdown' | 'short-lived-terminal-parent' | 'unowned-stdout' | 'terminal-exit-timeout' | 'terminal-timeout-unowned-stdout'
   | 'native-schema-success' | 'native-schema-trailing' | 'native-schema-missing' | 'native-schema-mismatch'
-  | 'acp-success' | 'acp-missing' | 'acp-quota' | 'acp-startup-quota' | 'acp-startup-delayed-quota' | 'acp-auth-quota' | 'acp-auth-stderr-quota' | 'acp-prompt-stderr-quota' | 'acp-signal'
+  | 'acp-success' | 'acp-missing' | 'acp-quota' | 'acp-startup-quota' | 'acp-startup-delayed-quota' | 'acp-auth-quota' | 'acp-auth-stderr-quota' | 'acp-prompt-stderr-quota' | 'acp-signal' | 'acp-mismatched-response'
 
 function fixture(t: TestContext, scenario: Scenario, model = 'grok:default', purpose = 'grok-fixture', stderrChunks: readonly string[] = []) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'spex-grok-fixture-')))
@@ -99,6 +99,10 @@ if (acp) {
       }
       if (scenario === 'acp-prompt-stderr-quota') {
         stderrQuota()
+        return
+      }
+      if (scenario === 'acp-mismatched-response') {
+        send({ id: String(id), error: { code: -32600, message: 'fixture private response' } })
         return
       }
       writeFileSync('draft.json', ${JSON.stringify(finalText)})
@@ -448,12 +452,16 @@ for (const scenario of ['acp-startup-quota', 'acp-startup-delayed-quota'] as con
   assert.equal(existsSync(join(f.sessionRoot, 'result.json')), false)
 })
 
-for (const scenario of ['acp-auth-quota', 'acp-auth-stderr-quota', 'acp-prompt-stderr-quota', 'acp-signal'] as const) {
+for (const scenario of ['acp-auth-quota', 'acp-auth-stderr-quota', 'acp-prompt-stderr-quota', 'acp-signal', 'acp-mismatched-response'] as const) {
   test(`Grok ACP rejects ${scenario} without publishing a result or manager quota`, async t => {
     const f = fixture(t, scenario, managedGrok)
     await assert.rejects(f.run(), error => {
       assert(error instanceof StructuredSessionError)
       assert.equal(error.code, 'failed')
+      if (scenario === 'acp-mismatched-response') {
+        assert.match(error.message, /stage=session\/prompt, id=expected-digit-string, result=false, error=true, params=false, rpcCode=-32600/)
+        assert.doesNotMatch(error.message, /fixture private response/)
+      }
       return true
     })
     assert.equal(f.state().turnId, undefined)
