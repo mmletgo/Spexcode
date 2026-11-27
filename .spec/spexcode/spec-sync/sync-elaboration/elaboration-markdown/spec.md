@@ -32,6 +32,8 @@ contract_omission 与普通事实同 owner 时，事实修正仍只认原 candid
 
 目标影响归属复用[[sync-governance-owners]]的低层纯治理判定，不经分区装配模块加载配置或细化schema；行渲染、事实权限与既有请求字节保持原合同。
 
+Code→Spec 的 `candidate_review` 返修冻结 `reviewed-owner-v1` 时，现有行 ID 校验与稀疏行装配读取同 node/path 已认证的局部已审全文。允许省略的既有目标、行及正文按该已审正文补齐。raw 的原意、`beforeDigest`、可改范围、演进与严格封口仍从原冻结输入及既有事实继承判据确定。旧请求缺该版本时按原行基线回放。
+
 连续事实修复以认证的上一轮确定事实值为行差量基线，未列行照常继承。新relatedIds不含的旧RULE.basis既不能自由再改，也不能因省略而回滚到原作者旧值；全部非事实字段仍逐值等于作者基线。
 
 [[sync-elaboration]]的合法只读事实返修复用同一目标影响归属与行差量比较。只有V5完整叶阶段的原candidate_review结构化relatedIds命中且P0未变的owner，preserve_business才渲染description、显式prose和命中RULE.basis；保原raw及非expanded正文，未列行继承、全部业务列/绑定及其他元数据逐值保持。显式事实prose重建expanded表时使用同一canonical列序，不能吞掉修正或错配旧列。普通纯重构与旧缺席诊断继续原严格保留。
