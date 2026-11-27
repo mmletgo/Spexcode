@@ -40,6 +40,7 @@ export type PartitionCheckpoints = {
   loadBehaviorContinuation?(key: string, planDigest: string, inputDigest: string, analysisSchemaDigest: string): CodeBehaviorContinuation | null
   loadBehaviorReviewFeedback?(key: string, planDigest: string, inputDigest: string): CodeBehaviorReviewReference | null
   loadAcceptedAnalysis?(key: string, plan: SyncPartitionPlan, inputDigest: string, binding: CodeBehaviorApprovalBinding): CodeBehaviorAnalysis | null
+  continueAfterSettledGrokExit?(error: unknown): boolean
   auditP0Approvals?(plan: SyncPartitionPlan): P0ApprovalAudit | Promise<P0ApprovalAudit>
   authenticateAnalysisOnly?(plan: SyncPartitionPlan, evidence: CodeBehaviorEvidence, owners: readonly AnalysisOnlyPartitionEvidence[]): boolean
   loadAcceptedElaboration?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'> | null
@@ -342,7 +343,7 @@ export async function analyzeSyncPartitions(input: CodeBehaviorInput, plan: Sync
     } catch (error) {
       const issue = error as { code?: string; message?: string }
       failures.push({ partitionId: partition.id, code: issue.code ?? 'behavior_analysis_failed', message: issue.message ?? String(error), error })
-      if (error instanceof CodeBehaviorReviewRepairError || error instanceof CodeBehaviorAuthorEvidenceError) return null
+      if (error instanceof CodeBehaviorReviewRepairError || error instanceof CodeBehaviorAuthorEvidenceError || checkpoints.continueAfterSettledGrokExit?.(error)) return null
       throw error
     }
   })

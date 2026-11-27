@@ -77,13 +77,13 @@ export function hasSettledNativeTurnTransportFailure(store: SyncStore, operation
   return failure.code === 'native_turn_transport_failed' && hasSettledNativeFailure(store, operation, attempt, failure)
 }
 
-/** 认证可在原操作内重跑的 Grok P0 退出失败，原轮次保持未批准。 */
-export function hasSettledGrokP0ExitFailure(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, failure: NativeFailureIdentity & Pick<StructuredSessionError, 'rejectedOutput' | 'failedWorktree'>): boolean {
+/** 认证 Grok P0 退出失败，分别供本轮继续调度和整轮结算后重试。 */
+export function hasSettledGrokP0ExitFailure(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, failure: NativeFailureIdentity & Pick<StructuredSessionError, 'rejectedOutput' | 'failedWorktree'>, settlement: 'attempt' | 'native-session' = 'attempt'): boolean {
   if (failure.code !== 'failed' || failure.message !== GROK_NATIVE_EXIT_DEADLINE_FAILURE || !failure.sessionId
     || failure.rejectedOutput !== undefined || failure.failedWorktree !== undefined) return false
   try {
     const current = store.assertWriteFence({ operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, sourceFingerprint: operation.input.source.physicalFingerprint, leaseToken: attempt.leaseToken })
-    if (!hasSettledNativeFailure(store, current.operation, current.attempt, failure)) return false
+    if (!hasSettledNativeFailure(store, current.operation, current.attempt, failure, settlement)) return false
     const budget = finiteSyncBudget(current.operation.budget)
     if (budget) {
       const usage = store.readBudgetUsage(operation.id)
@@ -96,10 +96,12 @@ export function hasSettledGrokP0ExitFailure(store: SyncStore, operation: SyncOpe
   }
 }
 
-function hasSettledNativeFailure(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, failure: NativeFailureIdentity): boolean {
+function hasSettledNativeFailure(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, failure: NativeFailureIdentity, settlement: 'attempt' | 'native-session' = 'attempt'): boolean {
   const current = store.readOperation(operation.id)
   if (!failure.sessionId || current.control !== 'run' || current.currentAttemptId !== attempt.id || current.generation !== attempt.generation || ['failed', 'superseded', 'settled'].includes(attempt.status) || attempt.expiresAtMs <= Date.now() || store.readPhysicalControl(current.input.source).control !== 'run') return false
-  const resources = attempt.dispatchPlans.map(dispatch => ({ dispatch, resource: store.findResource(attempt.id, dispatch.key) }))
+  const dispatches = settlement === 'attempt' ? attempt.dispatchPlans
+    : attempt.dispatchPlans.filter(dispatch => dispatch.session?.sessionId === failure.sessionId)
+  const resources = dispatches.map(dispatch => ({ dispatch, resource: store.findResource(attempt.id, dispatch.key) }))
   if (resources.some(({ resource }) => !resource || resource.phase !== 'removed')) return false
   const directory = join(operation.input.source.commonDir, 'spexcode', 'evidence')
   const read = <T>(ref: BlobRef): T => {
