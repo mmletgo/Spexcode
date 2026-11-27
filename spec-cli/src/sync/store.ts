@@ -1215,7 +1215,12 @@ export class SyncStore {
   private p1OrLater(tx: ProtocolTransaction, operation: SyncOperation): boolean {
     const attempts = tx.query('SELECT record_json FROM sync_attempts WHERE operation_id=?', operation.id).map(row => parseRecord<SyncAttempt>(row)!)
     return !!operation.delivery || !contains(emptyScope(), operation.deliveredScope) || this.verificationOrJournalExists(tx, operation.id)
-      || attempts.some(attempt => attempt.candidate || attempt.dispatchPlans.some(dispatch => !['code_behavior_analyze', 'code_behavior_review'].includes(dispatch.purpose)))
+      || attempts.some(attempt => {
+        const p0ImpactPrefix = `sync:${attempt.id}:cross_freeze_impact_review:p0:`
+        return attempt.candidate || attempt.dispatchPlans.some(dispatch => !['code_behavior_analyze', 'code_behavior_review'].includes(dispatch.purpose)
+          && !(dispatch.purpose === 'cross_freeze_impact_review' && dispatch.key.startsWith(p0ImpactPrefix)
+            && /^[a-f0-9]{64}$/.test(dispatch.key.slice(p0ImpactPrefix.length))))
+      })
   }
   private verificationOrJournalExists(tx: ProtocolTransaction, operationId: string): boolean {
     return tx.query(`SELECT EXISTS (SELECT 1 FROM sync_apply_journals WHERE operation_id=?)
