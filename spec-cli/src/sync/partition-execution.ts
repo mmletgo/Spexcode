@@ -6,7 +6,7 @@ import { posix, sep } from 'node:path'
 import { configPath } from '@spexcode/spec-core'
 import { contractReferences, parseContract, parseParts } from '@spexcode/spec-core/contracts'
 import { analyzeCodeBehavior, CodeBehaviorReviewRepairError, CodeBehaviorAuthorEvidenceError, compositionConflictPaths, deriveBehaviorAuthorization, partitionBehaviorChangedPaths, uncoveredCompositionConflicts, verifyBehaviorReadBasis } from './code-behavior.js'
-import type { CodeBehaviorApprovalBinding, CodeBehaviorApprovalInput, CodeBehaviorInput, CodeBehaviorContinuation, CodeBehaviorMaterialRequest, CodeBehaviorReviewReference } from './code-behavior.js'
+import type { CodeBehaviorApprovalBinding, CodeBehaviorApprovalInput, CodeBehaviorCheckpoints, CodeBehaviorInput, CodeBehaviorContinuation, CodeBehaviorMaterialRequest, CodeBehaviorReviewReference } from './code-behavior.js'
 import { elaborationSchema, outputErrors } from './elaboration-schema.js'
 import { elaborate, freezeElaborationInput, inspectElaborationGaps, verifyElaborationDraftCache, projectElaborationFlowReadiness, sealPartitionedElaboration, partitionSealRepairContext } from './elaboration.js'
 import type { Contract, ContractFinding, Verification } from '@spexcode/spec-core/contracts'
@@ -37,6 +37,7 @@ export type PartitionCheckpoints = {
   loadCompletedCandidateReview?(key: string, plan: SyncPartitionPlan, input: GenerationInput, candidate: NonNullable<GenerationResult['candidate']>, builders: readonly ElaborationTrace[], current: Omit<GenerationResult, 'candidateFiles'> | undefined, cache: GenerationReadCache): Omit<GenerationResult, 'candidateFiles'> | null
   elaborationDraftTagged?(key: string, result: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>): boolean
   loadBehaviorDraftMaterial?(key: string, planDigest: string, purpose: string, schemaDigest: string, inputDigest: string, request: CodeBehaviorMaterialRequest, existingDraft?: ElaborationDraft): ElaborationDraftMaterial | null | Promise<ElaborationDraftMaterial | null>
+  replayBehaviorDraft?: CodeBehaviorCheckpoints['replayDraft']
   loadBehaviorContinuation?(key: string, planDigest: string, inputDigest: string, analysisSchemaDigest: string): CodeBehaviorContinuation | null
   loadBehaviorReviewFeedback?(key: string, planDigest: string, inputDigest: string): CodeBehaviorReviewReference | null
   loadAcceptedAnalysis?(key: string, plan: SyncPartitionPlan, inputDigest: string, binding: CodeBehaviorApprovalBinding): CodeBehaviorAnalysis | null
@@ -336,7 +337,7 @@ export async function analyzeSyncPartitions(input: CodeBehaviorInput, plan: Sync
       const saved = audit ? null : checkpoints.load<CodeBehaviorAnalysis>(key)
       const paths = partitionBehaviorChangedPaths(localInput)
       scopes.set(partition.id, paths)
-      const local = restored.get(partition.id) ?? await analyzeCodeBehavior(localInput, runner, audit ? undefined : (inputDigest, binding) => saved?.inputDigest === inputDigest && (!diagnostic || saved.reviewDiagnosticRef?.sha256 === diagnostic.ref.sha256) ? saved : checkpoints.loadAcceptedAnalysis?.(key, plan, inputDigest, binding) ?? null, { loadReviewFeedback: inputDigest => checkpoints.loadBehaviorReviewFeedback?.(key, plan.digest, inputDigest) ?? null, loadMaterial: (purpose, schemaDigest, inputDigest, request, existingDraft) => checkpoints.loadBehaviorDraftMaterial?.(key, plan.digest, purpose, schemaDigest, inputDigest, request, existingDraft) ?? null, load: (inputDigest, analysisSchemaDigest) => checkpoints.loadBehaviorContinuation?.(key, plan.digest, inputDigest, analysisSchemaDigest) ?? null, save: continuation => { checkpoints.save(`${key}:continuation`, continuation) } }, verified ??= verifyBehaviorReadBasis(localInput))
+      const local = restored.get(partition.id) ?? await analyzeCodeBehavior(localInput, runner, audit ? undefined : (inputDigest, binding) => saved?.inputDigest === inputDigest && (!diagnostic || saved.reviewDiagnosticRef?.sha256 === diagnostic.ref.sha256) ? saved : checkpoints.loadAcceptedAnalysis?.(key, plan, inputDigest, binding) ?? null, { replayDraft: checkpoints.replayBehaviorDraft, loadReviewFeedback: inputDigest => checkpoints.loadBehaviorReviewFeedback?.(key, plan.digest, inputDigest) ?? null, loadMaterial: (purpose, schemaDigest, inputDigest, request, existingDraft) => checkpoints.loadBehaviorDraftMaterial?.(key, plan.digest, purpose, schemaDigest, inputDigest, request, existingDraft) ?? null, load: (inputDigest, analysisSchemaDigest) => checkpoints.loadBehaviorContinuation?.(key, plan.digest, inputDigest, analysisSchemaDigest) ?? null, save: continuation => { checkpoints.save(`${key}:continuation`, continuation) } }, verified ??= verifyBehaviorReadBasis(localInput))
       if (local.changes.some(change => change.paths.some(path => !paths.includes(path)))) reject(`分析超出本区真实变更集合: ${partition.id}`)
       checkpoints.save(key, local)
       return local
