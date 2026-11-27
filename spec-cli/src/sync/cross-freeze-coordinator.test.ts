@@ -35,9 +35,14 @@ const scenarios = [
   { useBaseline: true, mainBranch: 'main', checkout: 'main' },
   { useBaseline: true, mainBranch: 'main', checkout: 'feature' },
   { useBaseline: true, mainBranch: 'stable', checkout: 'stable' },
+  { useBaseline: true, mainBranch: 'main', checkout: 'main', hideCurrentReview: true },
 ] as const
 
-for (const { useBaseline, mainBranch, checkout } of scenarios) test(`跨冻结正式 P0 configured=${mainBranch} checkout=${checkout} baseline=${useBaseline}`, async t => {
+for (const scenario of scenarios) test(
+  '跨冻结正式 P0 ' + ('hideCurrentReview' in scenario ? 'whole 冷恢复缺少当前独审原件' : `configured=${scenario.mainBranch} checkout=${scenario.checkout} baseline=${scenario.useBaseline}`),
+  async t => {
+  const { useBaseline, mainBranch, checkout } = scenario
+  const hideCurrentReview = 'hideCurrentReview' in scenario
   const canonicalCheckout = mainBranch === checkout
   assert.ok(process.env.SPEXCODE_TEST_HOME, '必须通过 test-home 隔离正式会话夹具')
   assert.equal(process.env.SPEX_SESSION_DATABASE_PATH, join(process.env.SPEXCODE_TEST_HOME, 'sessions.sqlite'))
@@ -81,6 +86,11 @@ for (const { useBaseline, mainBranch, checkout } of scenarios) test(`跨冻结�
   assert.equal(oldInput.source.branch, `refs/heads/${checkout}`)
   const read = <T>(ref: BlobRef): T => JSON.parse(readEvidence(commonDir, ref).toString('utf8'))
   let store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) })
+  const reopen = () => {
+    protocol.close()
+    protocol = openProtocol(join(parent, 'sync.sqlite'))
+    store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) })
+  }
   const plan: SyncCoordinatorPlan = {
     version: 'sync-coordinator-v2', direction: 'code_to_spec', agentWorkflow: 'native-worktree-v1',
     intentNodeId: 'export-contract', sourcePaths: ['src'], readPaths: ['.spec', 'src', 'tests'], writePaths: ['.spec'],
@@ -174,13 +184,17 @@ for (const { useBaseline, mainBranch, checkout } of scenarios) test(`跨冻结�
   }
   const old = active, oldOwners: Partial<Record<'EXPORT' | 'IMPORT', string>> = {}
   let interruptAfterImpact: string | undefined
+  let interruptAfterWhole = false
   const impactWrites: string[] = []
   const runUntilP0 = async () => {
     const checkpoint = store.checkpoint.bind(store)
     store.checkpoint = (fence, ref) => {
       const saved = checkpoint(fence, ref)
       const stage = read<{ stage?: string }>(ref).stage
-      if (stage === 'analysis') throw new StructuredSessionError('unsupported', boundary)
+      if (stage === 'analysis') {
+        if (interruptAfterWhole) throw new SyncStoreError('SYNC_FENCE_EXPIRED', '测试在当前 whole 持久化后首次冷停')
+        throw new StructuredSessionError('unsupported', boundary)
+      }
       if (stage?.endsWith(':cross-freeze-impact')) impactWrites.push(stage)
       if (stage && stage === interruptAfterImpact) throw new SyncStoreError('SYNC_FENCE_EXPIRED', 'fixture process stops after impact checkpoint')
       return saved
@@ -205,9 +219,7 @@ for (const { useBaseline, mainBranch, checkout } of scenarios) test(`跨冻结�
   write(importTest, readFileSync(join(root, importTest), 'utf8') + '// H2 test discovery assertion context\n')
   commit('new clean committed initial')
   const currentInput = await captureInputSnapshot(root, { committed: true })
-  protocol.close()
-  protocol = openProtocol(join(parent, 'sync.sqlite'))
-  store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) })
+  reopen()
   active = await admit(currentInput, 'new-initial')
   assert.notEqual(active.input.headCommit, old.input.headCommit)
   assert.equal(active.input.source.branch, `refs/heads/${checkout}`)
@@ -224,13 +236,17 @@ for (const { useBaseline, mainBranch, checkout } of scenarios) test(`跨冻结�
     assert.equal(interrupted.failure?.code, 'SYNC_FENCE_EXPIRED')
     assert.deepEqual(impactWrites.filter(stage => stage === impactKey), [impactKey])
     interruptAfterImpact = undefined
-    protocol.close()
-    protocol = openProtocol(join(parent, 'sync.sqlite'))
-    store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) })
+    reopen()
   }
+  interruptAfterWhole = hideCurrentReview
   const second = await runUntilP0()
-  assert.equal(second.failure?.message, boundary, JSON.stringify(second.failure))
-  assert.equal(second.operation.phase, 'failed')
+  if (hideCurrentReview) {
+    assert.equal(second.status, 'recovery_required', JSON.stringify(second.failure))
+    assert.equal(second.failure?.code, 'SYNC_FENCE_EXPIRED')
+  } else {
+    assert.equal(second.failure?.message, boundary, JSON.stringify(second.failure))
+    assert.equal(second.operation.phase, 'failed')
+  }
   const attempts = store.listAttempts(active.id)
   assert.equal(attempts.length, 1)
   const [currentAttempt] = attempts, currentStages = stages(currentAttempt)
@@ -275,6 +291,37 @@ for (const { useBaseline, mainBranch, checkout } of scenarios) test(`跨冻结�
     assert.notEqual(local.traces[0].sessionId, original.traces[0].sessionId)
   }
   assert.equal(read<CodeBehaviorAnalysis>(currentStages.get('partition:' + affected + ':analysis')!.resultRef).crossFreezeAuthor, undefined)
+  if (hideCurrentReview) {
+    const whole = currentStages.get('analysis')!
+    const local = read<CodeBehaviorAnalysis>(currentStages.get('partition:' + unaffected + ':analysis')!.resultRef)
+    const currentReview = currentAttempt.dispatchPlans.find(dispatch => dispatch.purpose === 'code_behavior_review' && dispatch.session?.sessionId === local.traces[1].sessionId)
+    assert.ok(currentReview)
+    const resource = store.findResource(currentAttempt.id, currentReview.key)
+    assert.equal(resource?.phase, 'removed')
+    reopen()
+    const findResource = store.findResource.bind(store)
+    const reserveDispatch = store.reserveDispatch.bind(store)
+    const attempted: string[] = []
+    store.findResource = (attemptId, key) => attemptId === currentAttempt.id && key === currentReview.key ? null : findResource(attemptId, key)
+    store.reserveDispatch = (_fence, dispatch) => {
+      attempted.push(dispatch.purpose)
+      throw new SyncStoreError('SYNC_FENCE_EXPIRED', '测试在试图新增 Native 派发处停止')
+    }
+    try {
+      const cold = await runSyncOperation(store, active.id, options)
+      assert.deepEqual(attempted, [], '当前独审原件缺席时，冷恢复不能进入 P1 或重派 P0')
+      assert.equal(cold.failure?.code, 'cross_freeze_approval_binding', JSON.stringify(cold.failure))
+      assert.equal(cold.operation.callsUsed, second.operation.callsUsed)
+      const recovered = store.readAttempt(currentAttempt.id)
+      assert.deepEqual(recovered.dispatchPlans, currentAttempt.dispatchPlans)
+      assert.deepEqual(stages(recovered).get('analysis'), whole)
+      assert.deepEqual(stages(recovered).get(impactKey), currentStages.get(impactKey))
+    } finally {
+      store.findResource = findResource
+      store.reserveDispatch = reserveDispatch
+    }
+    assert.deepEqual(store.findResource(currentAttempt.id, currentReview.key), resource)
+  }
   assert.deepEqual(store.readOperation(old.id), before.operation)
   assert.deepEqual(store.listAttempts(old.id), before.attempts)
   for (const attempt of [oldAttempt, currentAttempt]) {
