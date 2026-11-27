@@ -3,7 +3,7 @@ import { ownerNodesForPath } from './governance-owners.js'
 import { CONTRACT_COLUMNS, contractReferences, contractTableCells, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
 import type { Contract, ContractFinding, ContractItem, ContractKind, Verification } from '@spexcode/spec-core/contracts'
 import type { Applicability, ElaborationCandidate, ElaborationInput, ElaborationTarget, ReadonlySpecRepair } from './elaboration-types.js'
-import { ELABORATION_GENERATION_GUIDANCE } from './elaboration-types.js'
+import { ELABORATION_GENERATION_GUIDANCE, READONLY_SPEC_REPAIR_RENDER_BASE } from './elaboration-types.js'
 import { contractBusinessProse } from './contract-evolution.js'
 import { isUnsupportedSourceCitationFailure } from './frozen-anchors.js'
 import { isSyncSpecPath } from './frozen-contracts.js'
@@ -127,11 +127,21 @@ export function readonlyFactRepairPreservesTarget(target: ElaborationTarget, sou
   return unchangedTargetOutput(target, { nodeId: target.nodeId, path: target.path, title: String(fm.title ?? ''), description: String(fm.desc ?? ''), code: next.code, related: next.related, prose: null, removeIds: [], tables: Object.fromEntries(Object.keys(CONTRACT_COLUMNS).map(kind => [kind, next.items.filter(item => item.kind === kind).map(contractRow)])) as GeneratedTables }, ids)
 }
 
+// 补齐省略行与校验行 ID 共用已审正文，源摘要仍取原冻结目标。
+function renderingTarget(input: ElaborationInput, target: ElaborationTarget): ElaborationTarget {
+  const repair = input.readonlySpecRepair
+  const reviewed = repair?.kind === 'candidate_review' && repair.renderBase === READONLY_SPEC_REPAIR_RENDER_BASE
+    ? repair.changes.find(change => change.nodeId === target.nodeId && change.path === target.path)
+    : undefined
+  return reviewed ? { ...target, source: reviewed.source, sourceDigest: reviewed.contentDigest } : target
+}
+
 /** 当前协议按冻结节点应用完整行更新；重复更新或不属于该节点的删除不能被合并掩盖。 */
 export function elaborationPatchErrors(input: ElaborationInput, generated: GeneratedElaboration): string[] {
   return generated.changes.flatMap(node => {
     const move = input.nodeChanges?.find(change => change.action === 'move' && change.to.nodeId === node.nodeId && change.to.path === node.path)
-    const target = input.targets.find(target => move ? target.nodeId === move.from.nodeId && target.path === move.from.path : target.nodeId === node.nodeId && target.path === node.path)
+    const frozenTarget = input.targets.find(target => move ? target.nodeId === move.from.nodeId && target.path === move.from.path : target.nodeId === node.nodeId && target.path === node.path)
+    const target = frozenTarget && renderingTarget(input, frozenTarget)
     const baseline = target?.source ? parseContract({ ...target, source: target.source }).contract : null
     const ids = new Set(baseline?.items.map(item => item.id) ?? [])
     const updates = new Set<string>(), removes = new Set<string>(), errors: string[] = []
@@ -306,7 +316,8 @@ export function renderElaboration(input: ElaborationInput, generated: GeneratedE
   const errors = elaborationPatchErrors(input, generated)
   if (errors.length) throw new TypeError(errors.join('; '))
   const nodes = [...generated.changes]
-  for (const target of input.targets) {
+  for (const frozenTarget of input.targets) {
+    const target = renderingTarget(input, frozenTarget)
     const lifecycle = input.nodeChanges?.find(change => change.from.nodeId === target.nodeId && change.from.path === target.path)
     if (lifecycle?.action === 'retire') continue
     const identity = lifecycle?.action === 'move' ? lifecycle.to : target
@@ -318,22 +329,25 @@ export function renderElaboration(input: ElaborationInput, generated: GeneratedE
   }
   const changes = nodes.map(node => {
     const move = input.nodeChanges?.find(change => change.action === 'move' && change.to.nodeId === node.nodeId && change.to.path === node.path)
-    const target = input.targets.find(target => move ? target.nodeId === move.from.nodeId && target.path === move.from.path : target.nodeId === node.nodeId && target.path === node.path)
-    const factRepair = target ? readonlyFactRepairIds(input, target).size > 0 : false
+    const frozenTarget = input.targets.find(target => move ? target.nodeId === move.from.nodeId && target.path === move.from.path : target.nodeId === node.nodeId && target.path === node.path)
+    const target = frozenTarget && renderingTarget(input, frozenTarget)
+    const identity = { nodeId: node.nodeId, path: node.path, beforeDigest: frozenTarget?.sourceDigest ?? null }
+    const factRepair = frozenTarget ? readonlyFactRepairIds(input, frozenTarget).size > 0 : false
     const original = target?.source ? parseFrontmatter(target.source).fm : {}
-    const originalParts = target?.source ? parseParts(target.source) : null
-    const legacyBody = target?.source && !originalParts ? parseFrontmatter(target.source).body : null
+    const targetParts = target?.source ? parseParts(target.source) : null
+    const originalParts = target === frozenTarget ? targetParts : frozenTarget?.source ? parseParts(frozenTarget.source) : null
+    const legacyBody = target?.source && !targetParts ? parseFrontmatter(target.source).body : null
     const normalizedSource = target?.source?.replace(/\r\n?/g, '\n') ?? null
     const renderingSource = normalizedSource !== null && legacyBody !== null ? `${normalizedSource.slice(0, normalizedSource.length - legacyBody.length)}## expanded spec\n\n${legacyBody}` : normalizedSource
     const parts = renderingSource ? parseParts(renderingSource) : null
     const baseline = target && renderingSource ? parseContract({ ...target, source: renderingSource }).contract : null
     const programVerificationUpdates = input.phase === 'interface_seed' ? (input.verifications ?? []).filter(policy => baseline?.items.some(item => item.kind === 'VERIFY' && item.id === policy.id) && input.authorizedChanges?.some(change => change.id === policy.id && change.action === 'update_verification')) : []
-    const raw = (move && target?.source ? originalParts?.rawSource : node.nodeId === input.intent.nodeId ? input.intent.rawSource : target?.rawSource || originalParts?.rawSource) || null
+    const raw = (move && frozenTarget?.source ? originalParts?.rawSource : node.nodeId === input.intent.nodeId ? input.intent.rawSource : frozenTarget?.rawSource || originalParts?.rawSource) || null
     const preserveBusiness = input.mode === 'preserve_business' || hasTypedCitationRepair(input.readonlySpecRepair)
     const fm = preserveBusiness && target?.source ? { ...original, ...(factRepair ? { desc: node.description } : {}), 'contract-schema': 'sync-v1', code: node.code, related: node.related } : { ...original, title: node.title, desc: node.description, 'contract-schema': 'sync-v1', ...(!target?.source ? { status: 'pending' } : {}), code: node.code, related: node.related }
-    if (target && unchangedTargetOutput(target, node) && raw === (parts?.rawSource || null) && !move && !programVerificationUpdates.length) return { nodeId: node.nodeId, path: node.path, beforeDigest: target.sourceDigest, source: target.source! }
+    if (target && unchangedTargetOutput(target, node) && raw === (parts?.rawSource || null) && !move && !programVerificationUpdates.length) return { ...identity, source: target.source! }
     const metadataEqual = Object.entries(fm).every(([key, value]) => JSON.stringify(value) === JSON.stringify((key === 'code' || key === 'related') && typeof original[key] === 'string' ? [original[key]] : original[key]) || Array.isArray(value) && !value.length && !original[key] || value === '' && original[key] === undefined)
-    if (baseline && (node.prose === null || preserveBusiness && !factRepair) && metadataEqual && raw === (parts?.rawSource || null) && !move && !programVerificationUpdates.length && !node.removeIds.length && Object.values(node.tables).every(rows => !rows.length)) return { nodeId: node.nodeId, path: node.path, beforeDigest: target!.sourceDigest, source: target!.source! }
+    if (baseline && (node.prose === null || preserveBusiness && !factRepair) && metadataEqual && raw === (parts?.rawSource || null) && !move && !programVerificationUpdates.length && !node.removeIds.length && Object.values(node.tables).every(rows => !rows.length)) return { ...identity, source: target!.source! }
     const metadata = Object.entries(fm).filter(([_key, value]) => !Array.isArray(value) || value.length).map(([key, value]) => Array.isArray(value)
       ? `${key}:\n${value.map(item => `  - ${JSON.stringify(item)}`).join('\n')}`
       : `${key}: ${JSON.stringify(value)}`).join('\n')
@@ -405,11 +419,11 @@ export function renderElaboration(input: ElaborationInput, generated: GeneratedE
       let rendered = normalized.slice(0, normalized.length - originalBody.length) + body
 
       if (!metadataEqual) rendered = `---\n${metadata}\n---\n${parseFrontmatter(rendered).body}`
-      return { nodeId: node.nodeId, path: node.path, beforeDigest: target!.sourceDigest, source: rendered === normalized && legacyBody === null ? target!.source! : target!.source!.includes('\r\n') ? rendered.replace(/\n/g, '\r\n') : rendered }
+      return { ...identity, source: rendered === normalized && legacyBody === null ? target!.source! : target!.source!.includes('\r\n') ? rendered.replace(/\n/g, '\r\n') : rendered }
     }
     const prose = legacyBody === null ? node.prose ?? parts?.expandedSpec ?? '' : `${legacyBody}\n${node.prose ?? ''}`
     const rendered = `---\n${metadata}\n---\n# ${node.title}\n\n${raw === null ? '' : `## raw source\n\n${raw}\n\n`}## expanded spec\n\n${prose}\n\n${(Object.keys(CONTRACT_COLUMNS) as ContractKind[]).map(section).filter(Boolean).join('\n\n')}\n`
-    return { nodeId: node.nodeId, path: node.path, beforeDigest: target?.sourceDigest ?? null, source: target?.source?.includes('\r\n') ? rendered.replace(/\n/g, '\r\n') : rendered }
+    return { ...identity, source: target?.source?.includes('\r\n') ? rendered.replace(/\n/g, '\r\n') : rendered }
   })
   return { inputDigest, changes, applicability: generated.applicability, ...(input.nodeChanges?.length ? { nodeChanges: structuredClone([...input.nodeChanges]) } : {}) }
 }

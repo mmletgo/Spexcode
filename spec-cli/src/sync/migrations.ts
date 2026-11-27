@@ -234,7 +234,8 @@ CREATE INDEX sync_apply_journals_operation ON sync_apply_journals(operation_id,a
 { version: 78, sql: 'SELECT 1; -- Protect the frozen P1 review contract item ID guidance.' },
 { version: 79, sql: 'SELECT 1; -- Protect formal P1 review continuation provenance.' },
 { version: 80, sql: 'SELECT 1; -- Protect pending operator P1 review challenges from older writers.' },
-{ version: 81, sql: 'SELECT 1; -- Protect cross-freeze initial bindings and partition applicability evidence.' }]
+{ version: 81, sql: 'SELECT 1; -- Protect cross-freeze initial bindings and partition applicability evidence.' },
+{ version: 82, sql: 'SELECT 1; -- Protect the frozen reviewed owner render base for readonly candidate repair.' }]
 
 /** 升级前以 SQLite online backup 保存一致性旧库；迁移本身由组件事务执行。 */
 export async function migrateSyncStore(protocol: SessionProtocol, options: { backupPath?: string } = {}): Promise<number> {

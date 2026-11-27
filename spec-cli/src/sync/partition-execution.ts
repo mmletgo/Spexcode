@@ -11,7 +11,7 @@ import { elaborationSchema, outputErrors } from './elaboration-schema.js'
 import { elaborate, freezeElaborationInput, inspectElaborationGaps, verifyElaborationDraftCache, projectElaborationFlowReadiness, sealPartitionedElaboration, partitionSealRepairContext } from './elaboration.js'
 import type { Contract, ContractFinding, Verification } from '@spexcode/spec-core/contracts'
 import { sameContractBusinessMeaning } from './contract-evolution.js'
-import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE, partitionedElaborationCoverageMatches, partitionedElaborationInputDigest } from './elaboration-types.js'
+import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE, READONLY_SPEC_REPAIR_RENDER_BASE, partitionedElaborationCoverageMatches, partitionedElaborationInputDigest } from './elaboration-types.js'
 import type { AnalysisOnlyPartitionEvidence, Applicability, ElaborationGapRepair, ElaborationGapReviewCheckpoint, ElaborationGapReviewEvidence, ElaborationCrossFreezeAuthor, ElaborationCrossFreezeAuthorProof, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationTrace, ElaborationSessionRequest, ElaborationChange, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, InheritedAuthoredParentScope, ReadonlySpecRepair, VerificationOwnershipProjection } from './elaboration-types.js'
 import { elaborationTargetBindings, projectVerificationTable, withoutVerificationTables, readonlyFactRepairPreservesTarget, targetHasCurrentChanges } from './elaboration-markdown.js'
 import { actualTreeDiff, isHostPrivatePath, verifyCandidate } from './candidate.js'
@@ -85,6 +85,7 @@ function primaryPartitionFailure<T>(values: readonly T[]): T | undefined {
   return values.reduce<T | undefined>((primary, value) => priority(value) > priority(primary) ? value : primary, values[0])
 }
 function readonlyRepairInput(input: ElaborationInput, repair: ReadonlySpecRepair, inheritFacts = false): ElaborationInput {
+  if (repair.renderBase !== undefined && (repair.kind !== 'candidate_review' || repair.renderBase !== READONLY_SPEC_REPAIR_RENDER_BASE)) reject('未知只读返修渲染基线')
   if (repair.kind === 'partition_seal') {
     const repaired = { ...input, readonlySpecRepair: repair }
     partitionSealRepairContext(repaired)

@@ -4,7 +4,7 @@ import test from 'node:test'
 import { buildContractGraph, CONTRACT_COLUMNS, parseContract, parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
 import { elaborate, elaborationDigest, elaborationReviewScopeErrors, elaborationScopeErrors, freezeElaborationInput, sealPartitionedElaboration } from './elaboration.js'
 import { elaborationSchema, outputErrors } from './elaboration-schema.js'
-import { bindElaborationTargets, elaborationTargetBindings, renderElaboration, readonlyFactRepairIds } from './elaboration-markdown.js'
+import { bindElaborationTargets, elaborationPatchErrors, elaborationTargetBindings, renderElaboration, readonlyFactRepairIds } from './elaboration-markdown.js'
 import type { ContractCell, GeneratedTargetElaboration } from './elaboration-markdown.js'
 import { contractBusinessProse } from './contract-evolution.js'
 import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE, ELABORATION_GENERATION_GUIDANCE_V4 } from './elaboration-types.js'
@@ -614,6 +614,43 @@ for (const mode of ['preserve_business', 'reelaborate'] as const) test(`candidat
   assert.deepEqual(frozen, original, '只读诊断不能改写原input、P0分类或授权')
 })
 
+
+test('candidate_review稀疏返修按冻结版本继承同owner已审行并保留原源摘要', () => {
+  const frozen = ownerScopeInput()
+  frozen.targets = [frozen.targets[0]]
+  frozen.implementationWritePaths = []
+  const target = frozen.targets[0]
+  const firstId = 'STEP-EXPORT-02', secondId = 'STEP-EXPORT-03'
+  const first = primary.items.find(item => item.id === firstId)
+  const second = primary.items.find(item => item.id === secondId)
+  assert.equal(first?.kind, 'STEP'); assert.equal(second?.kind, 'STEP')
+  const priorAction = '按当前执行编号开始任务', repairedAction = '核对当前执行编号后处理回调'
+  const accepted = primarySource.replace(first.action, priorAction)
+  const factRepair = factRepairInput().readonlySpecRepair!
+  const repair = { ...factRepair, changes: [{ nodeId: target.nodeId, path: target.path, beforeDigest: target.sourceDigest, source: accepted, contentDigest: elaborationDigest(accepted) }],
+    findings: [{ ...factRepair.findings[0], itemId: secondId, relatedIds: [secondId] }] }
+  const renderInput = { ...frozen, readonlySpecRepair: { ...repair, renderBase: 'reviewed-owner-v1' as const } }
+  const row = Object.fromEntries(CONTRACT_COLUMNS.STEP.map(column => {
+    const key = column === 'depends-on' ? 'dependsOn' : column
+    const value = (second as unknown as Record<string, ContractCell>)[key]
+    return [column, column === 'source' ? `${second.source.kind}:${second.source.ref}` : value]
+  }))
+  const node = unchangedOwner(frozen, 0)
+  node.tables.STEP = [{ ...row, action: repairedAction }]
+  const generated = bindElaborationTargets(frozen, { version: 'elaboration-target-rows-v3', changes: [node], applicability: [] })
+  const legacy = renderElaboration({ ...frozen, readonlySpecRepair: repair }, generated, 'legacy')
+  assert.equal(legacy.changes[0].source, primarySource.replace(second.action, repairedAction))
+  const candidate = renderElaboration(renderInput, generated, 'reviewed')
+  assert.deepEqual(candidate.changes, [{ nodeId: target.nodeId, path: target.path, beforeDigest: target.sourceDigest, source: accepted.replace(second.action, repairedAction) }])
+  assert.equal(renderElaboration(renderInput, { ...generated, changes: [] }, 'omitted').changes[0].source, accepted)
+
+  const reviewedId = 'STEP-EXPORT-REVIEWED'
+  const reviewedWithNewId = accepted.replaceAll(firstId, reviewedId)
+  const removal = { ...generated, changes: [{ ...generated.changes[0], removeIds: [reviewedId] }] }
+  renderInput.readonlySpecRepair.changes[0] = { ...repair.changes[0], source: reviewedWithNewId, contentDigest: elaborationDigest(reviewedWithNewId) }
+  assert.deepEqual(elaborationPatchErrors(renderInput, removal), [])
+  assert.deepEqual(elaborationPatchErrors(frozen, removal), [`${target.path}: 删除行不属于冻结节点 ${reviewedId}`])
+})
 
 test('candidate_review事实范围只消费当前结构化relatedIds，旧缺席/未知/外owner不扩权', () => {
   const frozen = factRepairInput(), target = frozen.targets[0], original = structuredClone(frozen)

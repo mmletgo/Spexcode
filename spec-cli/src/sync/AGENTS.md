@@ -23,6 +23,8 @@
 - 模型临时业务行由 `CONTRACT_COLUMNS` 渲染唯一 Markdown；raw/摘要由程序复制，JSON 仅是执行证据。
 - 生成和独立评审使用不同会话。输入、候选和检查结果均按内容摘要绑定；未决 GAP 只阻塞依赖闭包。
 - P1候选GAP只复核同operation新提议的code/derived missing_fact；原aggregate/local/Native refs冷验后只让命中owner续原Git稿、新独审及strict seal，其他业务字段与源码/tests保持。新checkpoint仅留refs和身份，诊断现读；真实未知及已处理负例不反复派发，旧批准不改签。
+- 新 Code→Spec 普通候选返修沿已认证 owner 的冻结正文补齐稀疏行，演进和 strict seal 沿原输入。旧请求无版本逐字重放，writer82 升降级沿 [[sync-migrations]]。
+
 - P1 V5完整叶只读事实返修只消费原candidate_review认证诊断的typed relatedIds与冻结owner交集：仅desc/expanded及命中RULE.basis可变，其余业务列/raw/绑定/AC/VERIFY严格保持；旧缺席不补写、不从message或草稿errors授信，局部与strict seal共用。
 - P1独审共用生成侧owner范围；仅要求冻结owner改写的repair或未知ID绑定须给具体拒因重审。原JSON/Git稿、候选与原Native生成身份冷验相同后只续独审；域内语义repair仍续生成。已结算的 ZCode session/events 超时与 Grok 独审退出逾期均可仅续审。沿同一 operation 冷验原只读请求、canonical 失败和正式 removed/stop。Grok 另核原生启动与停止原件和只读 Git 归档。ZCode provider EPIPE 仅在同一 operation 显式暂停恢复后，凭 adapter 认证的原只读终态和正式结算只续审。保留原失败及未批准状态。旧请求字段不追补。
 - ZCode P1 作者的 provider EPIPE 沿 [[sync-coordinator]] 的同操作显式暂停恢复。等 attempt 正式 `unsupported` 且资源结算后，按每个 owner 的局部终态和精确原 seed 读取未批准物理稿。仅有未跟踪文件且缺稿时按无稿派发。同操作的未跟踪草稿与额外未跟踪文件并存，可同时有被忽略的文件。核完整保护面后，保存拒绝原件并继续查该 owner 的合格材料。正常提交后仍独立审查。writer68 保护来源已登记和请求已保留的冷恢复，升级与回滚沿 [[sync-migrations]] 的一致 v67 备份。显式跨原生执行器的正式重试只核直接父操作当前已结算失败的原模型与同冻结合格稿，writer69 保护该接续并沿一致 v68 备份。

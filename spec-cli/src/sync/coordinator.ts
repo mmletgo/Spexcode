@@ -1,4 +1,4 @@
-import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE, ELABORATION_GENERATION_GUIDANCE_V1, ELABORATION_GENERATION_GUIDANCE_V2, ELABORATION_GENERATION_GUIDANCE_V3, ELABORATION_GENERATION_GUIDANCE_V4, partitionedElaborationCoverageMatches, type AnalysisOnlyPartitionEvidence, type ElaborationGenerationGuidance } from './elaboration-types.js'
+import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE, ELABORATION_GENERATION_GUIDANCE_V1, ELABORATION_GENERATION_GUIDANCE_V2, ELABORATION_GENERATION_GUIDANCE_V3, ELABORATION_GENERATION_GUIDANCE_V4, READONLY_SPEC_REPAIR_RENDER_BASE, partitionedElaborationCoverageMatches, type AnalysisOnlyPartitionEvidence, type ElaborationGenerationGuidance } from './elaboration-types.js'
 import { finiteSyncBudget, syncDeadlineExpired } from './budget.js'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { assertWorktreeSyncModel, syncModel, syncModelBinding } from './model-selection.js'
@@ -291,6 +291,13 @@ function reuseBehaviorDependentStages(store: SyncStore, operation: SyncOperation
   if (original) requireChallengedWholeApproval(store, operation, attempt, original, challenges)
   return original?.guidanceContractVersion === undefined || original.guidanceContractVersion === CODE_BEHAVIOR_GUIDANCE_VERSION
     && stage<CodeBehaviorAnalysis>(store, operation, attempt, 'analysis', 'automatic', checkpoints) !== null
+}
+type ReadonlyRepairProvenance = {
+  fromAttemptId: string
+  resultRef: BlobRef
+  generationRef: BlobRef
+  wholeFileSourcePaths?: string[]
+  renderBase?: ReadonlySpecRepair['renderBase']
 }
 type ReadonlyRepairBinding = { readonlyOwnerRepair?: ReadonlyOwnerRepair; readonlyBaseRef?: BlobRef }
 /** pending可以结束，已审返修的原始因果仍由同attempt最近完整原件负责。 */
@@ -4721,14 +4728,18 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           const sourcePaths = !readonlyOwnerRepair!.kind && findings.every(issue => issue.citation)
             ? findings.filter(issue => issue.code === 'anchor-dead' && issue.citation?.origin === 'source').map(issue => parseCodeEntry(issue.citation!.ref).path)
             : []
-          const wholeFileSourcePaths = reserved
-            ? stage<{ wholeFileSourcePaths?: string[] }>(store, operation, current, name)?.wholeFileSourcePaths
+          const saved = stage<ReadonlyRepairProvenance>(store, operation, current, name)
+          const wholeFileSourcePaths = reserved ? saved?.wholeFileSourcePaths
             : sourcePaths.length ? await findWholeFileSourcePaths(view.files, sourcePaths) : undefined
-          assertMaterialFence()
-          saveStage(store, fence!, name, { fromAttemptId: sourceAttempt.id, resultRef: owner.resultRef, generationRef: readonlyOwnerRepair!.generationRef,
-            ...(wholeFileSourcePaths?.length ? { wholeFileSourcePaths } : {}) })
           const kind = findings.some(finding => finding.code === 'candidate-review-contract-omission') ? 'contract_omission' as const : readonlyOwnerRepair!.kind
-          return { prior, priorInput, wholeFileSourcePaths, repair: { ...(kind ? { kind, reviewEvidence: readonlyOwnerRepair!.reviewEvidence } : findings.every(issue => issue.citation) ? { applicability: round.candidate!.applicability } : {}), baseInputDigest: inputDigest, candidateDigest: readonlyOwnerRepair!.candidateDigest, generationRef: readonlyOwnerRepair!.generationRef, acceptedRef: owner.resultRef, changes: prior.changes, output: round.output, review: round.review, findings } }
+          const eligible = options.plan.version === 'sync-coordinator-v2' && options.plan.direction === 'code_to_spec' && kind === 'candidate_review'
+          const renderBase = saved || reserved ? saved?.renderBase : eligible ? READONLY_SPEC_REPAIR_RENDER_BASE : undefined
+          const provenance: ReadonlyRepairProvenance = { fromAttemptId: sourceAttempt.id, resultRef: owner.resultRef, generationRef: readonlyOwnerRepair!.generationRef,
+            ...(wholeFileSourcePaths?.length ? { wholeFileSourcePaths } : {}), ...(renderBase ? { renderBase } : {}) }
+          if (renderBase !== undefined && (!eligible || renderBase !== READONLY_SPEC_REPAIR_RENDER_BASE) || eligible && saved && canonical(saved) !== canonical(provenance)) fail('readonly_spec_repair_binding', '只读返修渲染版本或已审owner原件与本attempt冻结证据不一致')
+          assertMaterialFence()
+          if (!eligible || !saved) saveStage(store, fence!, name, provenance)
+          return { prior, priorInput, wholeFileSourcePaths, repair: { ...(kind ? { kind, reviewEvidence: readonlyOwnerRepair!.reviewEvidence } : findings.every(issue => issue.citation) ? { applicability: round.candidate!.applicability } : {}), ...(renderBase ? { renderBase } : {}), baseInputDigest: inputDigest, candidateDigest: readonlyOwnerRepair!.candidateDigest, generationRef: readonlyOwnerRepair!.generationRef, acceptedRef: owner.resultRef, changes: prior.changes, output: round.output, review: round.review, findings } }
         },
         loadPartitionSealRepair: async (key, binding, inputDigest) => {
           const source = await loadSealRepairSource()
