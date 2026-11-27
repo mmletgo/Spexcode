@@ -21,9 +21,9 @@ related:
 
 SPEX_VERIFICATION_SSH_ALIAS 与 SPEX_VERIFICATION_SSH_ROOT 成对来自 server 环境；认证沿本机 SSH，alias 作为独立 argv，固定 bootstrap 以外的路径、命令、文件名及候选字节只作 stdin 数据。不得关闭 host key 检查、读取凭据、拼接候选 shell、固定模型/CLI版本或 BaseURL。只需要远端已支持的 Node 内建 API 与 Linux flock。
 
-可信helper原字节以gzip/base64内联进固定bootstrap，远端仅用Node内建zlib解压并导入同一data URI模块；不改helper、stdin请求/上传帧、effect/恢复身份或既有RPC与验证期限。命令压缩不得把项目载荷移入shell。
+可信helper原字节以gzip/base64内联进固定bootstrap，远端仅用Node内建zlib解压并导入同一data URI模块；bootstrap 保留原 helper 字节、effect/恢复身份和既有验证期限。项目载荷始终只经 stdin。
 
-候选物化通过 SSH 客户端协商无损压缩，缩短上传占用的冻结验收预算。远端继续认证解压后的原路径、模式和字节，使用同一执行期限与原 effect 身份。
+候选物化在原 JSON 请求头之后流式 gzip 压缩上传帧，由固定 bootstrap 为原 worker 启用解压。远端确认 gzip 正常结束后继续认证原路径、模式和字节，使用同一执行期限与原 effect 身份。其他 RPC 沿原 stdin 协议。
 
 新SSH RPC超时附带版本化安全诊断：仅固定action/Docker verb、单调时钟预算/耗时/迟到量、准备耗时、事件循环active/idle累计时间、首末输出观察时间、原始输出字节数/换行与流结束状态、child退出/close观察，以及模块URL摘要、helper字节摘要和bootstrap尺寸。输出时刻仅为本机回调观察；未观察到字节不证明远端未输出。换行或child退出不是成功或远端停止证明；不记录原请求、完整argv、路径、环境、stdout/stderr正文或凭据，不改15秒RPC与原上传deadline。
 
