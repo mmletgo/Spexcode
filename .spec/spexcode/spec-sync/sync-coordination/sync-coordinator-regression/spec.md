@@ -80,7 +80,7 @@ P2 混合失败使用真实 Git/Native 资源记录与 SQLite 冷开：普通 re
 
 当前协议的只读候选续审回归通过真实 Git 草稿取得当前 P0 与 P1 原件。有限预算、多个格式拒稿、独审缓存和锚点返修均从各阶段的冻结输入与精确 Git seed 检查。冻结上下文旧运输另由历史请求验证。
 
-文件规划的续审场景从 raw-only 目标和当前 native-worktree 计划开始，P0/P1 正常提交真实 JSON，P2 再规划并正常提交原先缺席的新源码与新测试，以及获准的 Spec 映射。正式 null 扩域及 V1 通过后，格式失败只续原候选独审，不重派 P0/P1、implementation_plan 或 builder；前后 candidate 和 file-writer 证据相同，作者 HEAD、index、WIP 与新增路径的原缺席保持。该受控 Native 回应夹具在 Docker 前停止，不声称真实模型、验收运行或交付。
+文件规划的续审场景从 raw-only 目标和当前 native-worktree 计划开始，P0/P1 正常提交真实 JSON，P2 再规划并正常提交原先缺席的新源码与新测试，以及获准的 Spec 映射。正式 null 扩域及 V1 通过后，格式失败只续原候选独审，不重派 P0/P1、implementation_plan 或 builder；前后 candidate 和 file-writer 证据相同，作者 HEAD、index、WIP 与新增路径的原缺席保持。引用绑定回归覆盖未知路径、未知 ID、未知 affectedIds 和跨 owner 正文。冷恢复原 Native 完成结果后，只派同候选独审并保留兄弟 accept；替换原 Native turn 或缺少聚合候选检查点时零重派，修正引用且通过完整独审门的业务 repair 继续派原精确 owner。受控 Native 回应夹具在 Docker 前停止，真实模型、运行验收和交付需另有原件。
 
 多 owner 候选独审失败回归从全局 generation 保存到失败结算统计阶段读取。每轮局部结论只共用一份索引，完整历史对象克隆为零，继续核原预算、格式续审范围和旧审批。
 

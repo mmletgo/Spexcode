@@ -30,7 +30,6 @@ import { composeInputSnapshots } from './composition.js'
 import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence, writeObject, writeTree } from './snapshot.js'
 import { buildSyncApplicationPlan } from './planning.js'
 import { verifyCandidate } from './candidate.js'
-import { GROK_NATIVE_EXIT_DEADLINE_FAILURE } from '../grok-structured.js'
 import { nativeWorktreeResult } from '../native-worktree-runtime.js'
 import { StructuredSessionError } from '../session-structured-policy.js'
 import { readFrozenBehaviorContext } from '../../test/frozen-behavior-context.js'
@@ -726,7 +725,8 @@ for (const [failedPurpose, settled] of [
       writePaths: ['.spec'], facts: [], verifications: [], mandatoryTests: [],
       partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 } },
   }
-  const exitFailure = new StructuredSessionError('failed', GROK_NATIVE_EXIT_DEADLINE_FAILURE, { sessionId: 'grok-exit-session' })
+  const historicalExitMessage = 'Grok native exit was not observed before the settlement deadline'
+  const exitFailure = new StructuredSessionError('failed', historicalExitMessage, { sessionId: 'grok-exit-session' })
   const scopedCheckpoints = { ...checkpoints, continueAfterSettledGrokExit: (error: unknown) => settled && error === exitFailure }
   const dispatched: string[] = []
   const runner: ElaborationRunner = async request => {
@@ -749,7 +749,7 @@ for (const [failedPurpose, settled] of [
 
   await assert.rejects(analyzeSyncPartitions(analysisInput, plan, 1, runner, scopedCheckpoints), (error: unknown) => error === exitFailure)
   assert.deepEqual(checkpoints.load('partition:analysis-failures'), { planDigest: plan.digest, failures: [
-    { partitionId: first.id, code: 'failed', message: GROK_NATIVE_EXIT_DEADLINE_FAILURE },
+    { partitionId: first.id, code: 'failed', message: historicalExitMessage },
   ] })
   assert.equal(checkpoints.load('partition:' + first.id + ':analysis'), null)
   const expected = [first.id + ':code_behavior_analyze']

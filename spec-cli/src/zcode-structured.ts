@@ -458,7 +458,8 @@ async function completedResult(root: string, prompt: string, execution: ZCodeStr
     if (!['terminal.json', 'messages.json', 'events.json', 'exit.json', 'send.json'].every(name => existsSync(join(root, name))) || !(await ownedProcessesStopped(plan))) return null
     const exit = JSON.parse(readFileSync(join(root, 'exit.json'), 'utf8')) as StopEvidence
     const terminal = JSON.parse(readFileSync(join(root, 'terminal.json'), 'utf8')) as NativeEvent
-    if (!exit.stopped || !exit.idle || !exit.closed || exit.code !== 0 || exit.signal !== null || terminal.type !== 'turn.completed' || terminal.payload.resultType !== 'success') return null
+    const observed = zcodeReplayTerminal(terminal)
+    if (!exit.stopped || !exit.idle || !exit.closed || exit.code !== 0 || exit.signal !== null || observed.kind !== 'completed' || observed.result !== 'success') return null
     return settleResult(plan, prompt, execution)
   }
   const saved = JSON.parse(readFileSync(path, 'utf8')) as Completed

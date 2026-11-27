@@ -1,3 +1,4 @@
+import { codexReplay } from '../llm-manager/native-runtime.mjs'
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
@@ -227,31 +228,41 @@ export class StructuredSessionTransportError extends StructuredSessionError {
   }
 }
 
-const configText = `approval_policy = "never"\nsandbox_mode = "read-only"\nweb_search = "disabled"\n[features]\napps = false\nplugins = false\nhooks = false\nmulti_agent = false\nshell_tool = false\ncode_mode = false\ncode_mode_host = false\nunified_exec = false\n[mcp_servers]\n`
-export const frozenReaderDisabledFeatures = ['goals', 'view_image', 'image_generation', 'sleep_tool', 'tool_suggest', 'current_time_reminder', 'send_message_to_user_async', 'token_budget', 'default_mode_request_user_input'] as const
+const codexFrozenAdapter = codexReplay as Pick<ManagerPersistentCodexModule,
+  'codexAuditFrozenCatalog' | 'codexBuildFrozenCatalog' | 'codexPersistentAppServerArgs'
+  | 'codexPersistentConfig' | 'codexPersistentHomePaths' | 'codexPersistentSocketPaths'> & {
+  CodexPersistentAppServer: new (socketPath: string) => InstanceType<ManagerPersistentCodexModule['CodexPersistentAppServer']> & {
+    initializeLegacyControl(): Promise<void>
+  }
+  codexLegacyFrozenCliVersion(): string
+  codexPersistentDisabledFeatures: readonly string[]
+}
+export const frozenReaderDisabledFeatures = codexFrozenAdapter.codexPersistentDisabledFeatures
 const readerFlights = new Map<string, Promise<FrozenReaderRuntime>>()
 
 /** 固定原生版本和去工具目录共同构成v2的能力身份，不读取用户模型缓存。 */
 export function assertFrozenReaderRuntime(runtime: FrozenReaderRuntime, model?: string, toolOutputTokenLimit?: number, hosted?: Pick<ManagedCodexFrozenRuntime, 'reader'> & Pick<ManagerPersistentCodexModule, 'codexAuditFrozenCatalog'>): void {
-  const cliVersion = hosted?.reader.cliVersion ?? execFileSync('codex', ['--version'], { encoding: 'utf8' }).trim()
-  if ((runtime.version !== 1 && runtime.version !== 2) || (runtime.version === 2 && (!Number.isSafeInteger(runtime.toolOutputTokenLimit) || runtime.toolOutputTokenLimit <= 0
-    || (toolOutputTokenLimit !== undefined && runtime.toolOutputTokenLimit !== toolOutputTokenLimit)))
-    || (!hosted && cliVersion !== 'codex-cli 0.160.0') || runtime.cliVersion !== cliVersion || !/^[a-f0-9]{64}$/.test(runtime.catalogDigest))
-    throw new StructuredSessionError('unsupported', 'frozen reader CLI version or immutable tool catalog identity differs')
-  if (hosted) return hosted.codexAuditFrozenCatalog({ path: runtime.catalogPath, digest: runtime.catalogDigest, model })
-  if (createHash('sha256').update(readFileSync(runtime.catalogPath)).digest('hex') !== runtime.catalogDigest)
-    throw new StructuredSessionError('unsupported', 'frozen reader CLI version or immutable tool catalog identity differs')
-  const catalog = JSON.parse(readFileSync(runtime.catalogPath, 'utf8')) as { models?: Array<{ slug?: string; apply_patch_tool_type?: unknown; experimental_supported_tools?: unknown[] }> }
-  if (!catalog.models?.length || catalog.models.some(model => model.apply_patch_tool_type !== null || !Array.isArray(model.experimental_supported_tools) || model.experimental_supported_tools.length))
-    throw new StructuredSessionError('unsupported', 'frozen reader catalog still exposes native tool capabilities')
-  if (model && !catalog.models.some(entry => entry.slug === model))
-    throw new StructuredSessionError('unsupported', 'requested model is absent from the immutable frozen reader catalog')
+  const adapter = hosted ?? codexFrozenAdapter
+  try {
+    const cliVersion = hosted?.reader.cliVersion ?? codexFrozenAdapter.codexLegacyFrozenCliVersion()
+    if ((runtime.version !== 1 && runtime.version !== 2) || (runtime.version === 2 && (!Number.isSafeInteger(runtime.toolOutputTokenLimit) || runtime.toolOutputTokenLimit <= 0
+      || (toolOutputTokenLimit !== undefined && runtime.toolOutputTokenLimit !== toolOutputTokenLimit)))
+      || runtime.cliVersion !== cliVersion || !/^[a-f0-9]{64}$/.test(runtime.catalogDigest))
+      throw new StructuredSessionError('unsupported', 'frozen reader CLI version or immutable tool catalog identity differs')
+    adapter.codexAuditFrozenCatalog({ path: runtime.catalogPath, digest: runtime.catalogDigest, model })
+  } catch (error) {
+    if ((error as { code?: string }).code === 'unsupported' && !(error instanceof StructuredSessionError))
+      throw new StructuredSessionError('unsupported', (error as Error).message)
+    throw error
+  }
 }
 
 /** 从独立无turn的清洁原生realm获取provider metadata，只删工具能力并固定摘要。 */
 export async function prepareFrozenReaderRuntime(root: string, frozenContext: FrozenContextRef, hosted?: ManagedCodexFrozenRuntime): Promise<FrozenReaderRuntime> {
-  const cliVersion = hosted?.reader.cliVersion ?? execFileSync('codex', ['--version'], { encoding: 'utf8' }).trim()
-  if (!hosted && cliVersion !== 'codex-cli 0.160.0') throw new StructuredSessionError('unsupported', 'this native CLI has no verified frozen-reader host capability evidence')
+  const adapter = hosted ?? codexFrozenAdapter
+  let cliVersion: string
+  try { cliVersion = hosted?.reader.cliVersion ?? codexFrozenAdapter.codexLegacyFrozenCliVersion() }
+  catch (error) { throw new StructuredSessionError('unsupported', (error as Error).message) }
   const { frozenReadMaximumResponseBytes, frozenReadOutputTokenLimit } = await import('./frozen-context.js')
   const toolOutputTokenLimit = hosted ? hosted.codexFrozenToolOutputTokenLimit(frozenReadMaximumResponseBytes(frozenContext)) : frozenReadOutputTokenLimit(frozenContext)
   const policyRoot = join(root, 'reader-policy', createHash('sha256').update(JSON.stringify({ cliVersion, toolOutputTokenLimit, ...(hosted ? { capability: hosted.reader } : {}) })).digest('hex').slice(0, 16))
@@ -263,40 +274,34 @@ export async function prepareFrozenReaderRuntime(root: string, frozenContext: Fr
       if (existsSync(descriptor)) { const runtime = JSON.parse(readFileSync(descriptor, 'utf8')) as FrozenReaderRuntime; assertFrozenReaderRuntime(runtime, hosted?.reader.model, toolOutputTokenLimit, hosted); return runtime }
       mkdirSync(policyRoot, { recursive: true, mode: 0o700 })
       const metadataRoot = join(policyRoot, 'metadata')
-      const { codexLoadedReferenceIds, codexRefreshStructuredModels, stopUnboundManagedFrozenRealm } = await import('./codex-harness.js')
+      const { stopUnboundManagedFrozenRealm } = await import('./codex-harness.js')
       const { endpoint, beforeDigest, changedFields, runtime } = await (async () => {
         try {
           const { endpoint } = await structuredGeneration(metadataRoot, undefined, hosted)
-          if (hosted) {
-            const client = new hosted.CodexPersistentAppServer(endpoint.socketPath)
-            try {
-              await client.initialize('spexcode-frozen-metadata', '1')
-              if (!(await client.refreshModels()).includes(hosted.reader.model)) throw new StructuredSessionError('unsupported', 'Manager model is absent from the isolated native catalog')
-            } finally { client.close() }
-          } else await codexRefreshStructuredModels(endpoint.socketPath)
-          const home = join(metadataRoot, 'data/codex-home')
-          const catalog = hosted ? hosted.codexBuildFrozenCatalog({ home, cliVersion, model: hosted.reader.model }) : (() => {
-            const provider = JSON.parse(readFileSync(join(home, 'models_cache.json'), 'utf8')) as { client_version?: string; models?: Array<Record<string, unknown>> }
-            if (provider.client_version !== cliVersion.replace(/^codex-cli /u, '') || !provider.models?.length || provider.models.some(model => typeof model.slug !== 'string'))
-              throw new StructuredSessionError('unsupported', 'clean native provider catalog provenance is unavailable')
-            const bytes = Buffer.from(JSON.stringify({ models: provider.models.map(model => ({ ...model, apply_patch_tool_type: null, experimental_supported_tools: [] })) }))
-            return { bytes, digest: createHash('sha256').update(bytes).digest('hex'), beforeDigest: createHash('sha256').update(JSON.stringify({ models: provider.models })).digest('hex'),
-              changedFields: ['apply_patch_tool_type', 'experimental_supported_tools'] }
-          })()
-          const catalogDigest = catalog.digest, catalogPath = join(policyRoot, `${catalogDigest}.json`)
-          if (!existsSync(catalogPath)) writeFileSync(catalogPath, catalog.bytes, { mode: 0o400 })
-          const runtime: FrozenReaderRuntime = { version: 2, cliVersion, catalogDigest, catalogPath, toolOutputTokenLimit }
-          assertFrozenReaderRuntime(runtime, hosted?.reader.model, toolOutputTokenLimit, hosted)
-          if (!hosted) {
-            const references = await codexLoadedReferenceIds(endpoint.socketPath)
-            const pid = Number(readFileSync(endpoint.pidFile, 'utf8').trim()), proof = verifyDetachedRuntime(pid, endpoint.receiptFile)
-            if (!references.ok || references.referenceIds.length || !proof.ok)
-              throw new StructuredSessionError('unsupported', 'isolated metadata realm cannot prove zero threads and its exact process identity')
-            process.kill(pid, 'SIGTERM')
-            for (let retry = 0; retry < 100 && processStartToken(pid) === proof.identity.startToken; retry++) await new Promise<void>(resolve => setTimeout(resolve, 20))
-            if (processStartToken(pid) === proof.identity.startToken) throw new StructuredSessionError('unsupported', 'isolated metadata process did not stop after exact zero-thread cleanup')
-          }
-          return { endpoint, runtime, beforeDigest: catalog.beforeDigest, changedFields: catalog.changedFields }
+          const legacyClient = hosted ? undefined : new codexFrozenAdapter.CodexPersistentAppServer(endpoint.socketPath)
+          const client = legacyClient ?? new hosted!.CodexPersistentAppServer(endpoint.socketPath)
+          try {
+            if (legacyClient) await legacyClient.initializeLegacyControl()
+            else await client.initialize('spexcode-frozen-metadata', '1')
+            const models = await client.refreshModels()
+            if (hosted && !models.includes(hosted.reader.model)) throw new StructuredSessionError('unsupported', 'Manager model is absent from the isolated native catalog')
+            const home = join(metadataRoot, 'data/codex-home')
+            const catalog = adapter.codexBuildFrozenCatalog({ home, cliVersion, model: hosted?.reader.model })
+            const catalogDigest = catalog.digest, catalogPath = join(policyRoot, `${catalogDigest}.json`)
+            if (!existsSync(catalogPath)) writeFileSync(catalogPath, catalog.bytes, { mode: 0o400 })
+            const runtime: FrozenReaderRuntime = { version: 2, cliVersion, catalogDigest, catalogPath, toolOutputTokenLimit }
+            assertFrozenReaderRuntime(runtime, hosted?.reader.model, toolOutputTokenLimit, hosted)
+            if (!hosted) {
+              const references = await client.listLoadedThreadIds()
+              const pid = Number(readFileSync(endpoint.pidFile, 'utf8').trim()), proof = verifyDetachedRuntime(pid, endpoint.receiptFile)
+              if (references.length || !proof.ok)
+                throw new StructuredSessionError('unsupported', 'isolated metadata realm cannot prove zero threads and its exact process identity')
+              process.kill(pid, 'SIGTERM')
+              for (let retry = 0; retry < 100 && processStartToken(pid) === proof.identity.startToken; retry++) await new Promise<void>(resolve => setTimeout(resolve, 20))
+              if (processStartToken(pid) === proof.identity.startToken) throw new StructuredSessionError('unsupported', 'isolated metadata process did not stop after exact zero-thread cleanup')
+            }
+            return { endpoint, runtime, beforeDigest: catalog.beforeDigest, changedFields: catalog.changedFields }
+          } finally { client.close() }
         } finally {
           if (hosted) await stopUnboundManagedFrozenRealm(metadataRoot, async () => hosted, 'metadata').catch((error: Error) => {
             throw new StructuredSessionError('cancellation_pending', `Manager metadata realm needs exact recovery: ${error.message}`)
@@ -342,10 +347,11 @@ export function prepareStructuredRealm(root: string, readerRuntime?: FrozenReade
   const writable = join(root, 'data'); mkdirSync(writable, { recursive: true, mode: 0o700 })
   const home = join(root, 'config'); mkdirSync(home, { recursive: true, mode: 0o700 })
   const auth = process.env.CODEX_HOME || join(homedir(), '.codex')
-  const paths = (path: string) => hosted?.codexPersistentHomePaths(path) ?? { configPath: join(path, 'config.toml'), authPath: join(path, 'auth.json') }
+  const adapter = hosted ?? codexFrozenAdapter
+  const paths = adapter.codexPersistentHomePaths
   const config = paths(home).configPath
   if (readerRuntime) assertFrozenReaderRuntime(readerRuntime, hosted?.reader.model, undefined, hosted)
-  const trustedConfig = hosted ? hosted.codexPersistentConfig(readerRuntime) : readerRuntime ? `model_catalog_json = ${JSON.stringify(readerRuntime.catalogPath)}\n` + (readerRuntime.version === 2 ? `tool_output_token_limit = ${readerRuntime.toolOutputTokenLimit}\n` : '') + configText.replace('code_mode_host = false', 'code_mode_host = true').replace('[features]', '[features]\n' + frozenReaderDisabledFeatures.map(feature => `${feature} = false`).join('\n')) : configText
+  const trustedConfig = adapter.codexPersistentConfig(readerRuntime)
   if (existsSync(config) && readFileSync(config, 'utf8') !== trustedConfig)
     throw new StructuredSessionError('unsupported', 'structured runtime configuration differs from the trusted fixed policy')
   writeFileSync(config, trustedConfig, { mode: 0o600 })
@@ -380,16 +386,11 @@ export function prepareStructuredRealm(root: string, readerRuntime?: FrozenReade
     const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: homedir(), TMPDIR: join(writable, 'tmp'), CODEX_HOME: runtimeCwd }
     mkdirSync(env.TMPDIR!, { recursive: true, mode: 0o700 })
     const endpointProfile = join(root, `${endpoint.id}.sb`)
-    const { rendezvous, daemonDirectory, physicalSocket, lockPath } = hosted ? hosted.codexPersistentSocketPaths(endpoint.socketPath, process.getuid!()) : (() => {
-      const rendezvous = join(realpathSync(dirname(endpoint.socketPath)), basename(endpoint.socketPath))
-      const daemonDirectory = join('/private/tmp', `codex-daemon-${process.getuid!()}`)
-      const physicalSocket = join(daemonDirectory, createHash('sha256').update(rendezvous).digest('hex'))
-      return { rendezvous, daemonDirectory, physicalSocket, lockPath: `${physicalSocket}.lock` }
-    })()
+    const { rendezvous, daemonDirectory, physicalSocket, lockPath } = adapter.codexPersistentSocketPaths(endpoint.socketPath, process.getuid!())
     writeFileSync(endpointProfile, policy
       + `(allow file-write-create (literal ${JSON.stringify(daemonDirectory)}) (literal ${JSON.stringify(dirname(rendezvous))}))\n`
       + `(allow file-write* (literal ${JSON.stringify(rendezvous)}) (literal ${JSON.stringify(physicalSocket)}) (literal ${JSON.stringify(lockPath)}) (literal ${JSON.stringify(join(realpathSync(dirname(endpoint.logFile)), basename(endpoint.logFile)))}))\n`, { mode: 0o600 })
-    const command = hosted ? [hosted.executable, ...hosted.codexPersistentAppServerArgs(endpoint.socketPath)] : ['codex', 'app-server', '--strict-config', '--listen', `unix://${endpoint.socketPath}`]
+    const command = [hosted?.executable ?? 'codex', ...adapter.codexPersistentAppServerArgs(endpoint.socketPath)]
     spawnDetachedRuntime({ cwd: runtimeCwd, logFile: endpoint.logFile, pidFile: endpoint.pidFile,
       receiptFile: endpoint.receiptFile, command: '/usr/bin/sandbox-exec',
       args: ['-f', endpointProfile, ...command], env })

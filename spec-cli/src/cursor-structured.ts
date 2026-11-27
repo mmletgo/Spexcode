@@ -41,6 +41,10 @@ type CursorAdapter = {
   cursorTerminalCancelled<T extends { stopReason: string }>(output: T | undefined): output is T
   cursorTerminalCompleted(output: NativeOutput | undefined): output is NativeOutput
   cursorUsageLimitNotice(value: unknown): boolean
+  cursorCloseMatches(exit: Exit | undefined, signalled: boolean): boolean
+  cursorPromptQuotaFailure(request: NativeRequest): {
+    code: 'provider_quota_exhausted'; message: string; detail: { threadId: string; turnId: string }
+  }
   observeCursorAcp(stdout: Readable, plan: Pick<NativePlan, 'workspace' | 'mode'> & { planDigest: string }, prompt: string, send: (packet: RpcObject) => void, hooks: {
     onSession(id: string): Promise<void>
     startPrompt(request: NativeRequest): Promise<boolean>
@@ -51,7 +55,8 @@ type CursorAdapter = {
   }): Promise<{ output: NativeOutput; textOnlyWithoutTools: boolean }>
 }
 
-const cursorReplay = bundledCursor as Pick<CursorAdapter, 'CursorAcpError' | 'cursorLaunchArgs' | 'cursorModelArgument' | 'cursorTerminalCancelled' | 'cursorTerminalCompleted' | 'cursorUsageLimitNotice'>
+const cursorReplay = bundledCursor as Pick<CursorAdapter, 'CursorAcpError' | 'cursorLaunchArgs' | 'cursorModelArgument' | 'cursorTerminalCancelled' | 'cursorTerminalCompleted'
+  | 'cursorUsageLimitNotice' | 'cursorCloseMatches' | 'cursorPromptQuotaFailure'>
 
 function cursorHostError(provider: CursorAdapter, error: unknown): unknown {
   return error instanceof provider.CursorAcpError ? new StructuredSessionError(error.code, error.message, error.detail) : error
@@ -68,8 +73,10 @@ const failed = (message: string): StructuredSessionError => new StructuredSessio
 const cancelled = (timedOut = false): StructuredSessionError => new StructuredSessionError(timedOut ? 'timeout' : 'cancelled', timedOut ? 'Cursor native turn timed out' : 'Cursor native turn cancelled')
 const object = (value: unknown): RpcObject | undefined => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as RpcObject : undefined
 const nonempty = (value: unknown): value is string => typeof value === 'string' && !!value.trim()
-const quotaFailure = (request: NativeRequest): StructuredSessionError => new StructuredSessionError('provider_quota_exhausted',
-  'Cursor provider reported quota exhaustion for the original ACP prompt', { threadId: request.sessionId, turnId: request.requestId })
+function quotaFailure(request: NativeRequest, adapter: Pick<CursorAdapter, 'cursorPromptQuotaFailure'>): StructuredSessionError {
+  const failure = adapter.cursorPromptQuotaFailure(request)
+  return new StructuredSessionError(failure.code, failure.message, failure.detail)
+}
 const terminalQuotaReceipt = (request: NativeRequest, output: NativeOutput) => ({ requestDigest: digest(request), sessionId: request.sessionId,
   requestId: request.requestId, evidence: 'usage_limit' as const, source: 'acp_terminal' as const, outputDigest: digest(output) })
 
@@ -144,19 +151,13 @@ function stopObservation(root: string, launch: NativeLaunch, hash?: string): str
   return sha256(line)
 }
 
-function closeMatches(exit: Exit | undefined, signalled: boolean): boolean {
-  return exit?.code === 0 && exit.signal === null || signalled && (
-    exit?.code === 143 && exit.signal === null || exit?.code === null && exit.signal === 'SIGTERM'
-  )
-}
-
 function readSettledOutput(root: string, prompt: string, execution: CursorStructuredExecution, worktreePath: string): { request: NativeRequest; output: NativeOutput; quota: boolean } {
   const plan = read<NativePlan>(root, 'plan.json'), launch = read<NativeLaunch>(root, 'launch.json')
   assertPlan(plan, root, execution, prompt, worktreePath)
   assertLaunch(plan, launch, execution.cursorNative!)
   const request = readRequest(plan, execution), output = read<NativeOutput>(root, 'result.json'), settlement = read<NativeSettlement>(root, 'settlement.json')
   if (settlement?.launchDigest !== digest(launch) || settlement.outputDigest !== digest(output) || !nonempty(settlement.stopDigest)
-    || !closeMatches(settlement.exit, settlement.closeDigest !== undefined) || existsSync(join(root, 'cancel.json'))
+    || !cursorReplay.cursorCloseMatches(settlement.exit, settlement.closeDigest !== undefined) || existsSync(join(root, 'cancel.json'))
     || existsSync(join(root, 'close.json')) !== (settlement.closeDigest !== undefined)
     || output?.requestDigest !== digest(request) || !cursorReplay.cursorTerminalCompleted(output) || typeof output.text !== 'string'
     || output.reportedModel !== undefined && !nonempty(output.reportedModel))
@@ -284,7 +285,7 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
     const { request, output, quota } = readSettledOutput(root, prompt, execution, worktreePath)
     if (quota) {
       if (execution.state === 'completed') throw stale('Cursor completed state differs from its settled usage notice')
-      throw quotaFailure(request)
+      throw quotaFailure(request, cursorReplay)
     }
     let result: NativeResult
     try { result = verifyFinal(request, output, prompt, execution) }
@@ -448,7 +449,7 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
     const output = observation?.output
     if (interrupted && cancelSent && boundRequest && provider.cursorTerminalCancelled(output))
       writeEvidence(root, 'cancel-ack.json', { launchDigest: digest(binding), requestDigest: digest(boundRequest), stopReason: output.stopReason })
-    const success = !failure && provider.cursorTerminalCompleted(output) && closeMatches(exit, normalClose !== undefined) && !interrupted
+    const success = !failure && provider.cursorTerminalCompleted(output) && provider.cursorCloseMatches(exit, normalClose !== undefined) && !interrupted
     stopped = await waitForStop(owned, success ? Date.now() + STOP_MS : deadline!, !success || normalClose !== undefined)
     if (!stopped) throw pending('Cursor native close and process-group stop remain unproven')
     if (interrupted || callbacks.signal?.aborted || existsSync(cancelPath)) {
@@ -473,7 +474,7 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
       }
     }
     writeEvidence(root, 'settlement.json', { launchDigest: digest(binding), outputDigest: digest(output), stopDigest: stopObservation(root, binding), exit, ...(normalClose ? { closeDigest: digest(normalClose) } : {}), ...(quotaDigest ? { quotaDigest } : {}) } satisfies NativeSettlement)
-    if (quotaDigest) throw quotaFailure(boundRequest)
+    if (quotaDigest) throw quotaFailure(boundRequest, provider)
     return verifyFinal(boundRequest, output, prompt, execution)
   } catch (error) {
     if (!stopped) {

@@ -45,7 +45,15 @@ type ClaudeDiagnostics = {
     init: ClaudeInit; echo: ClaudeFrozenWitness['echo']; result: ClaudeFrozenWitness['result']
   }): ClaudeRetryEvidence
 }
-type ClaudeAdapter = ClaudeHistoryDecoder & ClaudeDiagnostics & {
+type ClaudeSettlement = {
+  claudeUnsuccessfulExitMessage(exit: Pick<NativeExit, 'code' | 'signal'>, reportedError: boolean | 'invalid'): string
+  claudeStoppedAnalysisFailureMatches(message?: string): boolean
+  claudeNaturalSuccessExit(exit: Pick<NativeExit, 'code' | 'signal'>): boolean
+  claudeControlledTerminalExit(exit: Pick<NativeExit, 'code' | 'signal'>): boolean
+  claudeSchemaExhaustionExit(exit: Pick<NativeExit, 'code' | 'signal'>, terminalSignalSent: boolean): boolean
+  claudeStoppedErrorExit(exit: Pick<NativeExit, 'code' | 'signal' | 'stopped'>): boolean
+}
+type ClaudeAdapter = ClaudeHistoryDecoder & ClaudeDiagnostics & ClaudeSettlement & {
   inspectClaudeCliVersion(launch: ReturnType<typeof nativeWorktreeLaunch>, nativeConfiguration?: ClaudeConfiguration): string
   inspectClaudeIsolatedAuthentication(launch: ReturnType<typeof nativeWorktreeLaunch> & { cwd: string; env: NodeJS.ProcessEnv }): {
     authentication: { loggedIn?: boolean; authMethod?: string; apiProvider?: string }
@@ -72,7 +80,7 @@ type ClaudeAdapter = ClaudeHistoryDecoder & ClaudeDiagnostics & {
   isClaudeRateLimitTerminal(result: WorktreeTerminalResult, exit: Pick<NativeExit, 'code' | 'signal'>): boolean
 }
 
-const claudeReplayAdapter = claudeReplay as Pick<ClaudeAdapter, 'claudeNativeModel'> & ClaudeHistoryDecoder & ClaudeDiagnostics
+const claudeReplayAdapter = claudeReplay as Pick<ClaudeAdapter, 'claudeNativeModel'> & ClaudeHistoryDecoder & ClaudeDiagnostics & ClaudeSettlement
 
 export async function loadClaudeNativeAdapter(): Promise<ClaudeAdapter> {
   return await (await loadManagerNativeRuntime()).loadNativeAdapter('claude') as ClaudeAdapter
@@ -207,8 +215,8 @@ function terminalStopOutcome(plan: NativePlan, result: ClaudeFrozenWitness['resu
 }
 
 /** 自有终态清理只解释实际退出形态，不替代原生结果与停止认证。 */
-function controlledClaudeWorktreeTerminalExit(plan: NativePlan, execution: StructuredExecution, result: ClaudeFrozenWitness['result'], exit: { code: number | null; signal: string | null; stopped: boolean }, signal?: AbortSignal, adapter: Pick<ClaudeHistoryDecoder, 'claudeWorktreeTerminal'> = claudeReplayAdapter): boolean {
-  if (!(exit.code === 143 && exit.signal === null || exit.code === null && exit.signal === 'SIGTERM') || exit.stopped !== true
+function controlledClaudeWorktreeTerminalExit(plan: NativePlan, execution: StructuredExecution, result: ClaudeFrozenWitness['result'], exit: { code: number | null; signal: string | null; stopped: boolean }, signal?: AbortSignal, adapter: Pick<ClaudeHistoryDecoder, 'claudeWorktreeTerminal'> & Pick<ClaudeSettlement, 'claudeControlledTerminalExit'> = claudeReplayAdapter): boolean {
+  if (!adapter.claudeControlledTerminalExit(exit) || exit.stopped !== true
     || !adapter.claudeWorktreeTerminal(result).isSuccess
     || signal?.aborted || execution.cancellation || execution.error !== undefined || execution.errorCode !== undefined
     || execution.state !== undefined && execution.state !== 'running' && execution.state !== 'completed'
@@ -243,21 +251,21 @@ function authenticateClaudeWorktreeResult(plan: NativePlan, prompt: string, exec
 }
 
 /** 工作区模式只核原生输入、模型和终态身份，不借用冻结读取证明。 */
-async function settleClaudeWorktreeResult(plan: NativePlan, prompt: string, execution: StructuredExecution, deadline?: number, signal?: AbortSignal, adapter: ClaudeDiagnostics & ClaudeHistoryDecoder = claudeReplayAdapter): Promise<() => WorktreeNativeResult> {
+async function settleClaudeWorktreeResult(plan: NativePlan, prompt: string, execution: StructuredExecution, deadline?: number, signal?: AbortSignal, adapter: ClaudeDiagnostics & ClaudeHistoryDecoder & ClaudeSettlement = claudeReplayAdapter): Promise<() => WorktreeNativeResult> {
   assertClaudeWorktreePlan(plan, prompt, execution)
   if (execution.state !== 'completed' && !(await nativeWorktreeProcessesStopped(claudeWorktreeProcessPlan(plan), false, deadline))) throw new StructuredSessionError('cancellation_pending', 'Claude worktree native or unknown orphan stop remains unproven')
   const { root, init, echo, result, exit, selection, history, original, nativeTokenUsage } = authenticateClaudeWorktreeResult(plan, prompt, execution, false, adapter)
   const terminal = adapter.claudeWorktreeTerminal(result)
   if (terminal.subtype === 'schema_exhausted') {
     const terminalOutcome = terminalStopOutcome(plan, result)
-    const naturalExit = exit.code === 1 && exit.signal === null && terminalOutcome !== 'sent'
-    const controlledExit = exit.code === null && exit.signal === 'SIGTERM' && terminalOutcome === 'sent'
-    if (execution.state === 'completed' || existsSync(join(root, 'completed.json')) || !naturalExit && !controlledExit || !terminal.isSchemaExhausted) throw new StructuredSessionError('stale_result', 'Claude worktree schema exhaustion terminal differs')
+    if (execution.state === 'completed' || existsSync(join(root, 'completed.json'))
+      || !adapter.claudeSchemaExhaustionExit(exit, terminalOutcome === 'sent') || !terminal.isSchemaExhausted)
+      throw new StructuredSessionError('stale_result', 'Claude worktree schema exhaustion terminal differs')
     throw worktreeSchemaRetryError(history, original, execution, prompt, plan.version === 2 ? undefined : selection, nativeTokenUsage, adapter)
   }
   const controlled = controlledClaudeWorktreeTerminalExit(plan, execution, result, exit, signal, adapter)
   if (!controlled && execution.state !== 'completed' && terminalStopOutcome(plan, result) === 'sent') throw new StructuredSessionError('failed', 'Claude terminal success required process-group termination and is not a completed result')
-  if (!controlled && (exit.code !== 0 || exit.signal !== null) || !terminal.isSuccess) throw new StructuredSessionError('stale_result', 'Claude worktree success evidence differs')
+  if (!controlled && !adapter.claudeNaturalSuccessExit(exit) || !terminal.isSuccess) throw new StructuredSessionError('stale_result', 'Claude worktree success evidence differs')
   if (terminal.output === undefined) throw new StructuredSessionError(execution.state === 'completed' || existsSync(join(root, 'completed.json')) ? 'stale_result' : 'structured_output_format_invalid', 'Claude worktree success is missing required structured_output', { threadId: plan.sessionId, turnId: plan.userUuid, nativeTokenUsage })
   const validate = new Ajv({ allErrors: true }).compile(execution.schema)
   if (!validate(terminal.output)) throw new StructuredSessionError('failed', 'Claude worktree structured output does not match its schema', execution.state === 'completed' ? {} : { threadId: plan.sessionId, turnId: plan.userUuid, nativeTokenUsage, rejectedOutput: rejectedFinalOutput(JSON.stringify(terminal.output), prompt, execution, { threadId: plan.sessionId, turnId: plan.userUuid }, 'native_json') })
@@ -273,20 +281,16 @@ async function settleClaudeWorktreeResult(plan: NativePlan, prompt: string, exec
   }
 }
 
-function unsuccessfulClaudeExitMessage(exit: Pick<NativeExit, 'code' | 'signal'>, reportedError: boolean | 'invalid'): string {
-  return `Claude native execution exited unsuccessfully: code=${exit.code}, signal=${exit.signal}, result.is_error=${reportedError}`
-}
-
 /** 只识别P0规范失败投影；原Native与停止证据由读取入口核实。 */
 export function isClaudeFailedAnalysisDraftSource(execution: StructuredExecution): boolean {
   return execution.state === 'failed' && execution.purpose === 'code_behavior_analyze' && execution.errorCode === undefined
-    && execution.error === unsuccessfulClaudeExitMessage({ code: 1, signal: null }, true)
+    && claudeReplayAdapter.claudeStoppedAnalysisFailureMatches(execution.error)
 }
 
 function readClaudeStoppedErrorTerminal(native: NonNullable<StructuredExecution['claudeNative']>) {
   const { nativeTokenUsage: _usage, ...result } = JSON.parse(readFileSync(join(native.root, 'result.json'), 'utf8')) as WorktreeTerminalResult
   const exit = JSON.parse(readFileSync(join(native.root, 'exit.json'), 'utf8')) as NativeExit
-  if (exit.code === 1 && exit.signal === null && exit.stopped === true && claudeReplayAdapter.claudeWorktreeTerminal(result).isStoppedError
+  if (claudeReplayAdapter.claudeStoppedErrorExit(exit) && claudeReplayAdapter.claudeWorktreeTerminal(result).isStoppedError
     && claudeReplayAdapter.claudeTerminalMatchesIdentity(result, native)) return { exit, result }
   return null
 }
@@ -303,7 +307,7 @@ export function assertClaudeStoppedDraftSource(prompt: string, execution: Struct
   if (init.session_id !== plan.sessionId || echo.uuid !== plan.userUuid || echo.session_id !== plan.sessionId || hash(echo.message) !== hash({ role: 'user', content: [{ type: 'text', text: prompt }] })) throw new StructuredSessionError('stale_result', 'stopped draft observation lost its original native input')
   if (failedAnalysis) {
     const terminal = readClaudeStoppedErrorTerminal(native)
-    if (execution.cancellation.nativeStatus !== 'processGroupGone' || !terminal || execution.error !== unsuccessfulClaudeExitMessage(terminal.exit, claudeReplayAdapter.claudeWorktreeTerminal(terminal.result).reportedError)
+    if (execution.cancellation.nativeStatus !== 'processGroupGone' || !terminal || execution.error !== claudeReplayAdapter.claudeUnsuccessfulExitMessage(terminal.exit, claudeReplayAdapter.claudeWorktreeTerminal(terminal.result).reportedError)
       || terminalStopOutcome(plan, terminal.result) === 'sent') throw new StructuredSessionError('stale_result', 'Claude failed analysis draft lacks its exact stopped error terminal')
   }
 }
@@ -316,7 +320,7 @@ export function observeClaudeWorktreeMissingFinal(prompt: string, execution: Str
   if (plan.root !== native.root || realpathSync(claudeWorktreeProcessPlan(plan).workspace!) !== realpathSync(worktreePath)) throw new StructuredSessionError('stale_result', 'missing final observation differs from its recorded native worktree')
   const { result, exit } = authenticateClaudeWorktreeResult(plan, prompt, execution, true)
   const terminal = claudeReplayAdapter.claudeWorktreeTerminal(result)
-  if (exit.code !== 0 || exit.signal !== null || !terminal.isSuccess || terminal.output !== undefined || terminalStopOutcome(plan, result) === 'sent') throw new StructuredSessionError('stale_result', 'original native evidence is not a naturally stopped success missing structured_output')
+  if (!claudeReplayAdapter.claudeNaturalSuccessExit(exit) || !terminal.isSuccess || terminal.output !== undefined || terminalStopOutcome(plan, result) === 'sent') throw new StructuredSessionError('stale_result', 'original native evidence is not a naturally stopped success missing structured_output')
   return new StructuredSessionError('structured_output_format_invalid', 'Claude worktree success is missing required structured_output', { threadId: plan.sessionId, turnId: plan.userUuid })
 }
 
@@ -361,7 +365,7 @@ function completedResult(root: string, prompt: string, execution: StructuredExec
 }
 
 /** 原生完整result和停止证据可在崩溃后补成相同proof；任何缺失都不能通过新prompt补齐。 */
-function settleClaudeResult(plan: NativePlan, prompt: string, execution: StructuredExecution, adapter: ClaudeDiagnostics & ClaudeHistoryDecoder = claudeReplayAdapter): NativeResult {
+function settleClaudeResult(plan: NativePlan, prompt: string, execution: StructuredExecution, adapter: ClaudeDiagnostics & ClaudeHistoryDecoder & ClaudeSettlement = claudeReplayAdapter): NativeResult {
   const { root } = plan, model = claudeNativeModel(execution.model)
   const init = JSON.parse(readFileSync(join(root, 'init.json'), 'utf8')) as { session_id: string; model: string; tools: string[] }
   const echo = JSON.parse(readFileSync(join(root, 'user-echo.json'), 'utf8')) as ClaudeFrozenWitness['echo']
@@ -376,7 +380,7 @@ function settleClaudeResult(plan: NativePlan, prompt: string, execution: Structu
   const mcpPath = join(root, 'mcp-public.jsonl')
   if (terminal.subtype === 'schema_exhausted') {
     const exit = JSON.parse(readFileSync(join(root, 'exit.json'), 'utf8')) as { code: number | null; signal: string | null; stopped: boolean }
-    if (exit.code !== 1 || exit.signal !== null || exit.stopped !== true || terminalStopOutcome(plan, result) === 'sent'
+    if (!adapter.claudeStoppedErrorExit(exit) || terminalStopOutcome(plan, result) === 'sent'
       || plan.policyDigest !== hash(structuredExecutionPolicy(execution)) || execution.claudeNative && (execution.claudeNative.pid !== plan.pid || execution.claudeNative.receiptFile !== plan.receiptFile)
       || readClaudeMcpToolNames(mcpPath, adapter).some(name => name !== 'spex_read_frozen'))
       throw new StructuredSessionError('stale_result', 'Claude schema retry exhaustion lost its exact terminal, API, original user or isolated capability identity')
@@ -710,7 +714,10 @@ export async function claudeStructuredTurn(realm: string, id: string, prompt: st
           { threadId: plan.sessionId, turnId: plan.userUuid, nativeTokenUsage: publicResult.nativeTokenUsage })
       }
     }
-    if (exit.code !== 0 && provider.claudeWorktreeTerminal(result).subtype !== 'schema_exhausted' && !(worktree && controlledClaudeWorktreeTerminalExit(plan, execution, result, { ...exit, stopped }, callbacks.signal, provider))) throw new StructuredSessionError('failed', unsuccessfulClaudeExitMessage(exit, provider.claudeWorktreeTerminal(result).reportedError))
+    const terminal = provider.claudeWorktreeTerminal(result)
+    if (!provider.claudeNaturalSuccessExit(exit) && terminal.subtype !== 'schema_exhausted'
+      && !(worktree && controlledClaudeWorktreeTerminalExit(plan, execution, result, { ...exit, stopped }, callbacks.signal, provider)))
+      throw new StructuredSessionError('failed', provider.claudeUnsuccessfulExitMessage(exit, terminal.reportedError))
     const history = worktree ? claudeWorktreeHistory(plan, false, provider) : readClaudePublicHistory(nativeHistoryPath(root, native.sessionId), native.sessionId, provider), original = history.find(row => row.type === 'user' && row.uuid === native.userUuid)
     if (!original?.promptId) throw new StructuredSessionError('stale_result', 'Claude original native promptId is missing')
     await callbacks.onNative({ ...native, pid: child.pid, receiptFile: plan.receiptFile, promptId: original.promptId })

@@ -29,6 +29,7 @@ type GrokStderrDiagnostic = {
   bytes: number; sha256: string; ended: boolean; oversizedLine: boolean; readError: boolean
   httpStatuses: number[]; usageBalanceExhausted: boolean
 }
+type GrokTerminalFailure = { code: 'failed' | 'provider_quota_exhausted'; message: string }
 type GrokAdapter = {
   grokNativeModel(model: string): string | undefined
   inspectGrokStructuredCli(launch: { command: string; args: readonly string[]; cwd: string }, mode: 'read' | 'edit', schemaArgument: string): {
@@ -41,8 +42,15 @@ type GrokAdapter = {
   grokInvocationEnvironment(env: NodeJS.ProcessEnv, useAcp: boolean): NodeJS.ProcessEnv
   grokInvocationFlags(args: string[], useAcp: boolean): ReadonlySet<string>
   observeGrokNativeStderr(stderr: Readable, flags: ReadonlySet<string>): () => GrokStderrDiagnostic
-  grokStderrHasQuotaExhaustion(diagnostic: GrokStderrDiagnostic): boolean
   grokTerminalCompleted(terminal?: Terminal): boolean
+  classifyGrokNativeExit(observation: {
+    terminal?: Terminal; deadline: number; observedAt?: number; interrupted: boolean; observationFailed: boolean
+  }): 'accepted' | 'unproven' | { code: 'failed'; message: string; kind: 'exit_deadline' }
+  grokCleanNativeExit(terminal: Terminal | undefined, exit?: Exit): boolean
+  grokAcpNativeFailure(failure: GrokAcpFailure, exit: Exit, managed: boolean): GrokTerminalFailure
+  grokStreamingQuotaFailure(diagnostic: GrokStderrDiagnostic, exit: Exit): GrokTerminalFailure | undefined
+  grokTerminalFailure(terminal: Terminal, exit: Exit): GrokTerminalFailure | undefined
+  grokAcpProtocolFailure(code: string, message: string): GrokTerminalFailure | undefined
   observeGrokStructured(options: {
     stdout: Readable; stdin: Writable; sessionId: string; cwd: string; nativeSchema?: boolean
     acp?: { promptId: string; prompt: string; schema: unknown; model?: string }
@@ -54,12 +62,13 @@ type Exit = { code: number | null; signal: NodeJS.Signals | null }
 type NativeSettlement = { launchDigest: string; outputDigest: string; stopDigest: string; exit: Exit }
 type StopResult = { nativeStopped: boolean; acknowledged: false; nativeStatus?: string; error?: string }
 
-const STOP_MS = 15_000
-const { grokSettledOutputMatches } = grokReplay as { grokSettledOutputMatches(output: NativeOutput, request: { sessionId: string; cwd: string; promptId?: string; nativeSchema: boolean }): boolean }
-const NATIVE_SHUTDOWN_GRACE_MS = 5_000
-export const GROK_NATIVE_EXIT_DEADLINE_FAILURE = 'Grok native exit was not observed before the settlement deadline'
-export const isGrokNativeExitFailure = ({ code, message }: { code: string; message: string }): boolean =>
-  code === 'failed' && message === GROK_NATIVE_EXIT_DEADLINE_FAILURE
+const replay = grokReplay as Pick<GrokAdapter, 'grokCleanNativeExit'> & {
+  grokSettlementTiming: { stopMs: number; nativeShutdownGraceMs: number }
+  grokSettledOutputMatches(output: NativeOutput, request: { sessionId: string; cwd: string; promptId?: string; nativeSchema: boolean }): boolean
+  isGrokNativeExitFailure(failure: { code?: string; message?: string }): boolean
+}
+const { stopMs: STOP_MS, nativeShutdownGraceMs: NATIVE_SHUTDOWN_GRACE_MS } = replay.grokSettlementTiming
+export const { isGrokNativeExitFailure } = replay
 const sha256 = (bytes: string | Buffer): string => createHash('sha256').update(bytes).digest('hex')
 const digest = (value: unknown): string => sha256(JSON.stringify(value))
 const pending = (message: string): StructuredSessionError => new StructuredSessionError('cancellation_pending', message)
@@ -150,8 +159,9 @@ function readSettledOutput(root: string, prompt: string, execution: GrokStructur
   assertLaunch(plan, launch, execution)
   const output = read<NativeOutput>(root, 'result.json'), settlement = read<NativeSettlement>(root, 'settlement.json')
   if (settlement?.launchDigest !== digest(launch) || settlement.outputDigest !== digest(output) || typeof settlement.stopDigest !== 'string'
-    || settlement.exit?.code !== 0 || settlement.exit.signal !== null || existsSync(join(root, 'cancel.json'))
-    || !grokSettledOutputMatches(output, { sessionId: plan.sessionId, cwd: plan.workspace, promptId: plan.acp?.promptId, nativeSchema: plan.structuredOutput === 'native-schema-v1' })
+    || existsSync(join(root, 'cancel.json'))
+    || !replay.grokSettledOutputMatches(output, { sessionId: plan.sessionId, cwd: plan.workspace, promptId: plan.acp?.promptId, nativeSchema: plan.structuredOutput === 'native-schema-v1' })
+    || !replay.grokCleanNativeExit(output.terminal, settlement.exit)
     || output.terminal.requestId !== execution.turnId || output.terminal.requestId !== execution.grokNative?.turnId
     || output.terminal.sessionId !== execution.threadId)
     throw stale('Grok settled native terminal or stopped process evidence differs')
@@ -179,7 +189,8 @@ export function assertGrokRejectedFinalSource(prompt: string, execution: GrokStr
 export function assertGrokUnpublishedExitSource(id: string, prompt: string, execution: GrokStructuredExecution, worktreePath: string, purpose: 'code_behavior_analyze' | 'elaboration_generate' | 'elaboration_review'): void {
   const native = execution.grokNative, realm = structuredRealmRoot(execution)
   const mode = purpose === 'elaboration_review' ? 'read' : 'edit'
-  if (!realm || !native || native.root !== join(realm, id) || execution.state !== 'failed' || execution.errorCode || execution.error !== GROK_NATIVE_EXIT_DEADLINE_FAILURE
+  if (!realm || !native || native.root !== join(realm, id) || execution.state !== 'failed' || execution.errorCode
+    || !isGrokNativeExitFailure({ code: 'failed', message: execution.error })
     || execution.worktree?.mode !== mode || execution.purpose !== purpose || !execution.turnStartRequested
     || execution.threadId !== undefined || execution.turnId !== undefined || native.turnId !== undefined || execution.rejectedOutput || execution.resultWorktree || execution.failedWorktree
     || execution.output !== undefined || execution.resultDigest !== undefined || execution.cancellation?.nativeStopped !== true
@@ -435,24 +446,26 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
         }
         return exited
       }), expiry])
-      if (!ended || provider.grokTerminalCompleted(terminal) && ended.observedAt >= deadline!) {
-        if (provider.grokTerminalCompleted(terminal) && !timedOut && !callbacks.signal?.aborted && !observerFailure) {
-          deadlineDecision = {
-            atMs: performance.now() - launchedAt, exitObserved: observedExit !== undefined, exitCode: child.exitCode, signalCode: child.signalCode,
-            exitOverdueMs: ended ? ended.observedAt - deadline! : null,
-            stdoutEnded: child.stdout.readableEnded, signaledDescendants: signaled.size,
-          }
-          exitWindowFailure = new StructuredSessionError('failed', GROK_NATIVE_EXIT_DEADLINE_FAILURE)
-          throw exitWindowFailure
+      const settlement = provider.classifyGrokNativeExit({
+        terminal, deadline: deadline!, observedAt: ended?.observedAt,
+        interrupted: timedOut || callbacks.signal?.aborted === true, observationFailed: Boolean(observerFailure),
+      })
+      if (typeof settlement === 'object') {
+        deadlineDecision = {
+          atMs: performance.now() - launchedAt, exitObserved: observedExit !== undefined, exitCode: child.exitCode, signalCode: child.signalCode,
+          exitOverdueMs: ended ? ended.observedAt - deadline! : null,
+          stdoutEnded: child.stdout.readableEnded, signaledDescendants: signaled.size,
         }
-        throw pending('Grok native exit or terminal remains unproven')
+        exitWindowFailure = new StructuredSessionError(settlement.code, settlement.message)
+        throw exitWindowFailure
       }
+      if (!ended || settlement === 'unproven') throw pending('Grok native exit or terminal remains unproven')
       exit = { code: ended.code, signal: ended.signal }
     } finally { clearTimeout(reapTimer) }
     armStop()
     clearTimeout(stopTimer)
     const interrupted = callbacks.signal?.aborted === true || timedOut
-    const successfulExit = !observerFailure && !processFailed && provider.grokTerminalCompleted(terminal) && exit.code === 0 && exit.signal === null
+    const successfulExit = !observerFailure && !processFailed && provider.grokCleanNativeExit(terminal, exit)
     const stopDeadline = successfulExit && !interrupted ? Date.now() + STOP_MS : deadline!
     if (!observerFailure) stopPhase = 'native-process-group'
     stopped = await waitForStop(owned, stopDeadline, interrupted || observerFailure !== undefined || successfulExit && !stdoutFinished)
@@ -464,18 +477,20 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
     if (observerFailure) throw observerFailure
     if (processFailed || !observation || !child.stdout.readableEnded || Date.now() >= stopDeadline) throw pending('Grok native stdout EOF was not observed within the settlement window')
     if ('failure' in observation) {
-      if (observation.failure.kind === 'rate_limited' && managedRoute(execution.model) && exit.code === 0 && exit.signal === null) {
+      const { failure } = observation
+      const classified = provider.grokAcpNativeFailure(failure, exit, !!managedRoute(execution.model))
+      if (classified.code === 'provider_quota_exhausted' && failure.kind === 'rate_limited') {
         writeEvidence(root, 'acp-rate-limit-diagnostic.json', {
           version: 1, launchDigest: digest(binding), planDigest: digest(plan), stopDigest: stopObservation(root, binding),
-          sessionId: observation.failure.sessionId, requestId: observation.failure.requestId,
-          rpcCode: observation.failure.rpcCode, message: observation.failure.message, exit, stdoutEnded: true,
+          sessionId: failure.sessionId, requestId: failure.requestId,
+          rpcCode: failure.rpcCode, message: failure.message, exit, stdoutEnded: true,
         })
-        throw new StructuredSessionError('provider_quota_exhausted', 'Grok ACP reported HTTP 429 in the stopped native prompt')
       }
-      throw new StructuredSessionError('failed', 'Grok native ACP prompt did not complete successfully')
+      throw new StructuredSessionError(classified.code, classified.message)
     }
     const { output } = observation
-    if (!provider.grokTerminalCompleted(output.terminal) || exit.code !== 0 || exit.signal !== null) throw new StructuredSessionError('failed', 'Grok native turn did not complete successfully')
+    const terminalFailure = provider.grokTerminalFailure(output.terminal, exit)
+    if (terminalFailure) throw new StructuredSessionError(terminalFailure.code, terminalFailure.message)
     const turnId = output.terminal.requestId
     await callbacks.onThread(native.sessionId)
     await callbacks.onNative({ ...running, turnId })
@@ -527,14 +542,16 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
         console.warn('spex grok native missing-terminal diagnostic unavailable')
         throw error
       }
-      if (managedRoute(execution.model) && !timedOut && !callbacks.signal?.aborted && !existsSync(join(root, 'cancel.json'))
-        && observedExit.signal === null && observedExit.code !== null && observedExit.code !== 0
-        && provider.grokStderrHasQuotaExhaustion(stderr))
-        throw new StructuredSessionError('provider_quota_exhausted', 'Grok provider reported quota exhaustion in the stopped native invocation')
+      if (managedRoute(execution.model) && !timedOut && !callbacks.signal?.aborted && !existsSync(join(root, 'cancel.json'))) {
+        const classified = provider.grokStreamingQuotaFailure(stderr, observedExit)
+        if (classified) throw new StructuredSessionError(classified.code, classified.message)
+      }
     }
-    if (acp && error === observerFailure && error instanceof StructuredSessionError && error.code === 'cancellation_pending'
-      && !timedOut && !callbacks.signal?.aborted && !existsSync(join(root, 'cancel.json')))
-      throw new StructuredSessionError('failed', error.message)
+    if (acp && error === observerFailure && error instanceof StructuredSessionError
+      && !timedOut && !callbacks.signal?.aborted && !existsSync(join(root, 'cancel.json'))) {
+      const classified = provider.grokAcpProtocolFailure(error.code, error.message)
+      if (classified) throw new StructuredSessionError(classified.code, classified.message)
+    }
     throw error
   } finally {
     clearTimeout(timer); clearTimeout(stopTimer); clearInterval(census)
