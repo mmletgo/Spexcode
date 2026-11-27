@@ -1,4 +1,5 @@
 import { loadManagerNativeRuntime } from './llm-manager-host.js'
+import { codexReplay } from '../llm-manager/native-runtime.mjs'
 import { execFileSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
@@ -10,7 +11,7 @@ import { detachedRuntimeIsGone, verifyDetachedRuntime, writeDetachedRuntimeRecei
 import type { CodexStructuredStop } from './codex-harness.js'
 import { sessionIdentityEnvVars } from './harness-shim.js'
 import { periodicNativeWorktreeSampler, sampleNativeWorktreeProcesses, waitForNativeWorktreeProcessesStopped } from './native-worktree-runtime.js'
-import { assertRejectedOutput, isNativeTokenCount, rejectedFinalOutput, StructuredSessionError, structuredExecutionTimer, type NativeTokenUsage, type StructuredExecution } from './session-structured-policy.js'
+import { assertRejectedOutput, rejectedFinalOutput, StructuredSessionError, structuredExecutionTimer, type NativeTokenUsage, type StructuredExecution } from './session-structured-policy.js'
 import { nativeModelValue } from './llm-manager-route.js'
 
 export type NativeCodexWorktreeState = {
@@ -36,6 +37,7 @@ type NativePermissions = { name: string; writableRoots: string[]; shellPath?: st
 type NativeThreadOptions = { workspace: string; model?: string; permissions?: NativePermissions }
 type CodexAdapter = {
   CodexNativeProtocolError: new (...args: never[]) => Error & { code: 'failed' | 'unsupported' | 'cancelled' | 'provider_quota_exhausted' }
+  codexNativeModel(selection?: string): string | undefined
   codexNativeWorktreeArgs(root: string, tmp: string): string[]
   codexNativeTokenUsage(total?: Packet): NativeTokenUsage | undefined
   CodexNativeAppServer: new (input: Writable, output: Readable) => {
@@ -50,6 +52,7 @@ type CodexAdapter = {
   }
 }
 
+const { codexNativeModel, codexNativeTokenUsage } = codexReplay as Pick<CodexAdapter, 'codexNativeModel' | 'codexNativeTokenUsage'>
 const STOP_MS = 15_000
 const sha = (text: string | Buffer): string => createHash('sha256').update(text).digest('hex')
 const digest = (value: unknown): string => sha(JSON.stringify(value))
@@ -94,15 +97,7 @@ function stopDigest(plan: OwnedLaunch, expected?: string): string {
   return sha(line)
 }
 
-function observedUsage(total: Packet | undefined): NativeTokenUsage | undefined {
-  if (!total) return
-  const { inputTokens, cachedInputTokens, cacheWriteInputTokens, outputTokens } = total
-  if (!isNativeTokenCount(inputTokens) || !isNativeTokenCount(cachedInputTokens) || cachedInputTokens > inputTokens || !isNativeTokenCount(outputTokens)) return
-  return { source: 'codex-turn-usage', totalInputTokens: inputTokens, uncachedInputTokens: inputTokens - cachedInputTokens,
-    cacheReadInputTokens: cachedInputTokens, outputTokens, ...(isNativeTokenCount(cacheWriteInputTokens) ? { cacheWriteInputTokens } : {}) }
-}
-
-function resultFromFinal(final: Final, prompt: string, execution: Execution, nativeTokenUsage = observedUsage(final.tokenUsage)): NativeResult {
+function resultFromFinal(final: Final, prompt: string, execution: Execution, nativeTokenUsage: NativeTokenUsage | undefined): NativeResult {
   const reject = (message: string) => new StructuredSessionError('structured_output_format_invalid', message, {
     threadId: final.threadId, turnId: final.turnId, nativeTokenUsage,
     rejectedOutput: rejectedFinalOutput(final.text, prompt, execution, final),
@@ -152,11 +147,11 @@ export function assertCodexRejectedFinalSource(session: string, prompt: string, 
   if (execution.state !== 'failed' || execution.errorCode !== 'structured_output_format_invalid' || !execution.cancellation?.nativeStopped
     || !native || basename(native.root) !== session || !original)
     throw stale('Codex stopped draft lacks its original rejected worktree turn')
-  const model = nativeModelValue(execution.model, 'codex')
-  const final = readFinalProof(native.root, prompt, execution, workspace, model === 'default' ? undefined : model)
+  const model = codexNativeModel(nativeModelValue(execution.model, 'codex'))
+  const final = readFinalProof(native.root, prompt, execution, workspace, model)
   assertRejectedOutput(original, prompt, execution, execution)
   if (original.text !== final.text) throw stale('Codex rejected draft differs from its native terminal')
-  try { resultFromFinal(final, prompt, execution) }
+  try { resultFromFinal(final, prompt, execution, codexNativeTokenUsage(final.tokenUsage)) }
   catch (error) { if (error instanceof StructuredSessionError && error.code === 'structured_output_format_invalid') return; throw error }
   throw stale('Codex rejected draft unexpectedly passes its original schema')
 }
@@ -242,7 +237,6 @@ function editPermissions(workspace: string, tmp: string): NativePermissions {
 }
 
 export async function codexNativeWorktreeTurn(realm: string, id: string, prompt: string, execution: Execution, callbacks: Callbacks, workspace: string | undefined, modelSelection?: string): Promise<NativeResult> {
-  const nativeModel = modelSelection === 'default' ? undefined : modelSelection
   if (execution.version !== 6 || execution.policy !== 'native-worktree-v1' || execution.nativeConfiguration !== 'cli-config-v1'
     || !execution.worktree || !workspace || execution.frozenContext || execution.readerRuntime)
     throw new StructuredSessionError('unsupported', 'Codex CLI requires the native worktree policy')
@@ -250,7 +244,10 @@ export async function codexNativeWorktreeTurn(realm: string, id: string, prompt:
   if (callbacks.signal?.aborted || execution.cancellation || ['cancelled', 'cancelling', 'timeout'].includes(execution.state ?? ''))
     throw new StructuredSessionError(execution.cancellation?.reason ?? (execution.state === 'timeout' ? 'timeout' : 'cancelled'), 'Codex worktree turn was cancelled')
   if (execution.state === 'completed') {
-    try { return resultFromFinal(readFinalProof(root, prompt, execution, workspace, nativeModel), prompt, execution) }
+    try {
+      const final = readFinalProof(root, prompt, execution, workspace, codexNativeModel(modelSelection))
+      return resultFromFinal(final, prompt, execution, codexNativeTokenUsage(final.tokenUsage))
+    }
     catch (error) {
       if (error instanceof StructuredSessionError && error.code === 'structured_output_format_invalid')
         throw stale('Codex completed state cannot replay a rejected native final')
@@ -260,11 +257,12 @@ export async function codexNativeWorktreeTurn(realm: string, id: string, prompt:
   if (execution.codexNative || execution.turnStartRequested || execution.threadId || execution.turnId || existsSync(root))
     throw pending('Codex original worktree dispatch has no settled result; exact stop is required')
   if (realpathSync(workspace) !== workspace) throw stale('Codex requires the physical worktree path')
+  const runtime = await loadManagerNativeRuntime()
+  const provider = await runtime.loadNativeAdapter('codex') as CodexAdapter
+  const nativeModel = provider.codexNativeModel(modelSelection)
   const tmp = join(root, 'tmp'), receiptFile = join(root, 'process.json')
   const plan: Plan = { root, workspace, tmp, policyDigest: policyDigest(execution), promptDigest: sha(prompt), ...(nativeModel ? { model: nativeModel } : {}) }
   const permissions = execution.worktree.mode === 'edit' ? editPermissions(workspace, tmp) : undefined
-  const runtime = await loadManagerNativeRuntime()
-  const provider = await runtime.loadNativeAdapter('codex') as CodexAdapter
   const cli = runtime.findNativeExecutable('codex')
   if (!cli) throw new StructuredSessionError('unsupported', 'Codex CLI is unavailable')
   const args = provider.codexNativeWorktreeArgs(root, tmp)

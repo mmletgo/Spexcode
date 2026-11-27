@@ -7,7 +7,7 @@ import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { delimiter, join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
-import { assertGrokRejectedFinalSource, grokNativeModel, grokStructuredTurn, stopGrokStructuredTurn, type GrokStructuredExecution } from './grok-structured.js'
+import { assertGrokRejectedFinalSource, grokStructuredTurn, stopGrokStructuredTurn, type GrokStructuredExecution } from './grok-structured.js'
 import { managedModel } from './llm-manager-route.js'
 import { NATIVE_PROCESS_OBSERVATION_LIMIT_MS, nativeWorktreePrompt, nativeWorktreeResult } from './native-worktree-runtime.js'
 import { StructuredSessionError, structuredExecutionPolicy } from './session-structured-policy.js'
@@ -328,12 +328,6 @@ test('Grok settles a persistent census failure as failed after exact stop', { ti
     writeFileSync(join(f.sessionRoot, 'fixture-release'), '')
     await flight
   }
-})
-
-test('Grok default uses native config, explicit alias bytes are preserved and blank names are rejected', () => {
-  assert.equal(grokNativeModel('grok:default'), undefined)
-  assert.equal(grokNativeModel('grok:vendor/model+preview'), 'vendor/model+preview')
-  assert.throws(() => grokNativeModel('grok: '), { code: 'unsupported' })
 })
 
 test('Grok runs once in the exact worktree and replays original result and stop evidence after close', async t => {

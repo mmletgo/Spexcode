@@ -15,6 +15,8 @@ related:
 
 [[structured-session-runtime]] 的 ZCode 执行必须证明模型在精确一轮中收到全部冻结正文。MCP 账本只能证明工具服务端收到过调用，不能代替原生模型输入与输出；最终回复的 schema 验证和进程停止仍由执行器完成，重放重新绑定权威原生 JSON 正文。
 
+[[llm-manager-native-entry]] 校验冻结见证中的原生消息、事件、工具生命周期和消费顺序。SpexCode 绑定精确原件、复核独立 MCP 账本与读取覆盖、持久化原见证摘要。
+
 ## expanded spec
 
 版本4证明绑定 provider `zcode`、精确 providerId/modelId、CLI version/SHA256、session/turn/inputId、prompt 摘要及完整原始见证摘要。从 `session/messages` 的原生 `info.id/sessionID` 与 `parts.id/messageID/sessionID/callID/tool/state` 建立关系，不接受声明 DTO 的 messageId/callId 冒充 core 字段。唯一原始 user 的正文、turn.started 的 input/messageId/inputId 和一次 send 的 session/content/inputId 必须一致，唯一初轮的原生零基 turnNumber 必须为0；唯一原始输入以 real_user/user_prompt、realUser anchor 和可见性识别。只允许初次 assistant 前的原生 environment/model/runtime_mode/date 四类 synthetic model-only 提醒，每类最多一条，以及已有 assistant 后的原生 silent_turn_reminder；后者正文必须逐字为固定 CLI 的 “The user hasn't heard from you in a while. As you continue, keep them updated when there's something to tell — a finding, a change of plan.”。所有提醒的 semantics、anchor、metadata 来源与单个 text part 必须相符，不能宽泛接受同源任意正文。额外真实或未知 synthetic user 输入、消息或调用身份重复、外来 session/turn 均拒绝。send 若显式包含原生 modelSelection，必须与唯一 real_user 的原始 modelSelection 全值相等；冷验证若指定 options.reasoningLevel，也必须匹配该真实输入，不能从未携 options 的 synthetic 提醒补证。
@@ -31,4 +33,4 @@ related:
 
 原生最后一条消息必须是终态 assistant，其 anchor.boundaryMessageId 等于自身，orderedMessageIds 逐项闭合完整原始模型可见消息 ID 序列，historyRoundCount 等于原生 assistant 与 ModelRequest 数。只从此边界消息的 text parts 重建终态正文并与 turn.completed.response 逐字相等；不能按正文搜索历史 assistant。同一 JSON 在工具前后合法重复时，仍只绑定最终边界。缺 anchor、错顺序、漏消息、外来边界或轮数不符均拒绝。
 
-最终输出只接受严格 JSON 或唯一完整外层 JSON 围栏。共用 decoder 仅移除合法外围空白或完整 `json` 围栏，不抽取片段、不修改正文、不补字段。携带结果的冷重放从权威 terminal response 重新解码与 JSON.parse，整值比对 output；额外 prose、多段围栏、非 JSON 或另一个 schema 合法结果均拒绝。
+最终输出只接受严格 JSON 或唯一完整外层 JSON 围栏。共用的 Manager decoder 仅移除合法外围空白或完整 `json` 围栏，不抽取片段、不修改正文、不补字段。携带结果的冷重放从权威 terminal response 重新解码与 JSON.parse，整值比对 output；额外 prose、多段围栏、非 JSON 或另一个 schema 合法结果均拒绝。

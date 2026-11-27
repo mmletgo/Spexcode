@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { loadManagerNativeRuntime } from '../llm-manager-host.js'
+import { fileURLToPath } from 'node:url'
+import { loadManagerNativeRuntime, reserveManagedRoute } from '../llm-manager-host.js'
 import { managedModel, managedRoute, nativeModelValue } from '../llm-manager-route.js'
 import { configuredSyncModel, readSyncModelSettings, resolveSyncModel } from './model-selection.js'
 
@@ -18,6 +19,7 @@ test('settings and operation selection share the authoritative Manager bridge', 
   const unmanaged = await readSyncModelSettings()
   const runtime = await loadManagerNativeRuntime()
   assert.equal(runtime.nativeRuntimeVersion, 1)
+  assert.equal(runtime.nativeAdapterContract, 2)
   assert.equal(typeof (await runtime.loadNativeAdapter('grok') as { grokAcpArguments: unknown }).grokAcpArguments, 'function')
   assert.deepEqual(unmanaged.llmManager, { configured: false })
   assert.deepEqual(unmanaged.nativeVendors.map(({ id }) => id).sort(), ['claude', 'codex', 'cursor', 'grok', 'zcode'])
@@ -28,7 +30,17 @@ test('settings and operation selection share the authoritative Manager bridge', 
   const route = { routeId: 'a'.repeat(64), vendor: 'claude', model: 'fixture-model', kind: 'anthropic-messages' } as const
   writeFileSync(config, JSON.stringify({ ok: true, value: route }))
   writeFileSync(html, '<!doctype html><title>Manager fixture</title>')
-  writeFileSync(python, '#!/bin/sh\n[ "$1" = "-I" ] && [ "$3" = "rpc" ] || exit 2\n[ -z "\${SPEX_LLM_MANAGER_TEST_ENV_TRAP+x}" ] || exit 2\n/bin/cat >/dev/null\n/bin/cat "$4"\n', { mode: 0o700 })
+  const nativeEntry = fileURLToPath(new URL('../../llm-manager/native-runtime.mjs', import.meta.url))
+  writeFileSync(python, `#!${process.execPath}
+const { readFileSync } = require('node:fs')
+if (process.env.SPEX_LLM_MANAGER_TEST_ENV_TRAP || process.argv[2] !== '-I') process.exit(2)
+if (process.argv[3] === '-m' && process.argv[4] === 'llm_manager.native_runtime') {
+  process.stdout.write(JSON.stringify({version: 1, path: ${JSON.stringify(nativeEntry)}}))
+} else if (process.argv[4] === 'rpc') {
+  readFileSync(0)
+  process.stdout.write(readFileSync(process.argv[5]))
+} else process.exit(2)
+`, { mode: 0o700 })
   Object.assign(process.env, { SPEX_LLM_MANAGER_PYTHON: python, SPEX_LLM_MANAGER_CONFIG: config, SPEX_LLM_MANAGER_SETTINGS_HTML: html, SPEX_LLM_MANAGER_TEST_ENV_TRAP: 'host-only' })
 
   assert.deepEqual((await readSyncModelSettings()).llmManager, {
@@ -40,4 +52,19 @@ test('settings and operation selection share the authoritative Manager bridge', 
   assert.equal(nativeModelValue(managedModel(route), 'claude'), route.model)
   await assert.rejects(resolveSyncModel(managedModel(route), true), { code: 'sync_llm_manager_untrusted_route' })
   await assert.rejects(resolveSyncModel('grok:default', true), { code: 'sync_llm_manager_managed' })
+
+  const oldNative = join(root, 'old-native.mjs'), oldPython = join(root, 'old-python')
+  writeFileSync(oldNative, `export const nativeRuntimeVersion=1
+export const findNativeExecutable = () => { throw new Error('must not probe the CLI') }
+export const spawnGatedNativeProcess = findNativeExecutable
+export const spawnNativeProcess = findNativeExecutable
+export const loadNativeAdapter = findNativeExecutable
+`)
+  writeFileSync(oldPython, `#!${process.execPath}
+if (process.argv[3] !== '-m' || process.argv[4] !== 'llm_manager.native_runtime') process.exit(3)
+process.stdout.write(JSON.stringify({version:1,path:${JSON.stringify(oldNative)}}))
+`, { mode: 0o700 })
+  process.env.SPEX_LLM_MANAGER_PYTHON = oldPython
+  await assert.rejects(resolveSyncModel('llm-manager', true), { code: 'llm_manager_native_incompatible' })
+  await assert.rejects(reserveManagedRoute(route, 'existing-session', new AbortController().signal), { code: 'llm_manager_native_incompatible' })
 })

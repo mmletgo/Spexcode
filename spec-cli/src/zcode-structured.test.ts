@@ -10,7 +10,7 @@ import { basename, join } from 'node:path'
 import { processStartToken, verifyDetachedRuntime, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
 import { freezeContext, frozenReadTool, readFrozenRange } from './frozen-context.js'
 import { ZCODE_FROZEN_TOOL, type ZCodeFrozenWitness, type ZCodeNativeEvent } from './zcode-frozen-evidence.js'
-import { structuredExecutionPolicy, structuredRealmRoot, type StructuredExecution } from './session-structured-policy.js'
+import { StructuredSessionError, structuredExecutionPolicy, structuredRealmRoot, type StructuredExecution } from './session-structured-policy.js'
 import { sampleNativeWorktreeProcesses } from './native-worktree-runtime.js'
 import { managedModel } from './llm-manager-route.js'
 import { assertZCodeSettledProviderFailure, assertZCodeStoppedDraftSource, loadZCodeNativeAdapter, stopZCodeStructuredTurn, zcodeCapability, zcodeNativeConfigSelection, zcodeNativeModel, zcodeNativeSelection, zcodeStructuredPrompt, zcodeStructuredTurn, ZCodeNativeTurnFailedError, type ZCodeStructuredExecution } from './zcode-structured.js'
@@ -64,7 +64,9 @@ test('provider business rejection requires the exact non-retryable EPIPE attribu
 
 test('ZCode namespace requires both exact provider and model', () => {
   assert.deepEqual(zcodeNativeModel('zcode:bigmodel-api/GLM-5.3-Flash'), { providerId: 'bigmodel-api', modelId: 'GLM-5.3-Flash' })
-  for (const value of [undefined, 'GLM-5.3-Flash', 'zcode:GLM-5.3-Flash', 'zcode:bigmodel-api/', 'zcode:p/default', 'zcode:p/latest', 'zcode:p/m/other', 'zcode:p/model (context)', 'zcode:p/m\n']) assert.throws(() => zcodeNativeModel(value), { code: 'unsupported' })
+  for (const value of [undefined, 'GLM-5.3-Flash', 'zcode:GLM-5.3-Flash', 'zcode:bigmodel-api/', 'zcode:p/default', 'zcode:p/latest', 'zcode:p/m/other', 'zcode:p/model (context)', 'zcode:p/m\n']) {
+    assert.throws(() => zcodeNativeModel(value), error => error instanceof StructuredSessionError && error.code === 'unsupported')
+  }
 })
 
 test('ZCode text transport only unwraps one exact JSON shell without repairing data', async () => {
@@ -280,6 +282,7 @@ test('verified GLM high effort uses both native fields and requires the real set
   assert.throws(() => zcodeNativeSelection('zcode:other/GLM-5.3-Flash', 'high'), { code: 'unsupported' })
   const snapshot = { session: { sessionId: 'session', model: zcodeNativeModel('zcode:bigmodel-api/GLM-5.3-Flash') }, settings: { model: { current: selection.model, available: ['unrelated display metadata'] }, thoughtLevel: { current: 'high', available: [{ label: 'high', value: 'high' }], defaultLevel: 'max', enabled: true } } }
   assert.doesNotThrow(() => assertZCodeModelSnapshot(snapshot, selection))
+  assert.equal(JSON.stringify(selection), '{"model":{"providerId":"bigmodel-api","modelId":"GLM-5.3-Flash","options":{"reasoningLevel":"high"}},"thoughtLevel":"high"}')
   for (const corrupt of [
     () => ({ ...snapshot, settings: { ...snapshot.settings, model: { current: { ...selection.model, options: { reasoningLevel: 'max' } } } } }),
     () => ({ ...snapshot, settings: { ...snapshot.settings, model: { current: { providerId: 'other', modelId: selection.model.modelId, options: selection.model.options } } } }),
