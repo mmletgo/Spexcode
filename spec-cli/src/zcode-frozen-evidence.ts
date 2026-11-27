@@ -35,6 +35,8 @@ export type ZCodeFrozenNativeAdapter = {
   ZCodeProtocolError: abstract new (...args: never[]) => Error & { code: string }
   observeZCodeFrozenReadTurn(input: Pick<ZCodeFrozenWitness, 'sessionId' | 'turnId' | 'inputId' | 'prompt' | 'providerId' | 'modelId' | 'send' | 'messages' | 'events'> & { expectedTool: string }): ZCodeObservedReadTurn
   decodeZCodeJsonText(rawText: string): string
+  zcodeMcpClientMatches(client: NativeRecord, cliVersion: string): boolean
+  assertZCodeMcpRequestContext(meta: NativeRecord, identity: Pick<ZCodeFrozenWitness, 'sessionId' | 'turnId'>): void
 }
 const frozenReplay = zcodeReplay as ZCodeFrozenNativeAdapter
 const sha = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex')
@@ -55,7 +57,7 @@ function complete(value: NativeRecord): void {
 }
 function witnessPath(ref: FrozenContextRef, hash: string): string { return join(dirname(ref.manifestPath), 'histories', `zcode-witness-${hash}`) }
 
-function checkMcpHistory(witness: ZCodeFrozenWitness, calls: Map<string, { state: NativeRecord }>): void {
+function checkMcpHistory(witness: ZCodeFrozenWitness, calls: Map<string, { state: NativeRecord }>, decoder: ZCodeFrozenNativeAdapter): void {
   const history = record(witness.mcpHistory)
   if (!Array.isArray(history.records) || history.digest !== sha(encode(history.records))) stale('MCP public history digest differs')
   const pending = new Map<string, NativeRecord>(), seen = new Set<string>(), matched = new Set<string>()
@@ -76,7 +78,7 @@ function checkMcpHistory(witness: ZCodeFrozenWitness, calls: Map<string, { state
     pending.delete(id); complete(result)
     if (request.method === 'initialize') {
       const client = record(record(request.params).clientInfo)
-      if (client.name !== 'zcode' || client.version !== witness.cliVersion || record(result.serverInfo).name !== 'spex-immutable-reader') stale('MCP initialize differs from its exact CLI/reader')
+      if (!decoder.zcodeMcpClientMatches(client, witness.cliVersion) || record(result.serverInfo).name !== 'spex-immutable-reader') stale('MCP initialize differs from its exact CLI/reader')
       initialized = true
     } else if (request.method === 'tools/list') {
       if (!Array.isArray(result.tools) || result.tools.length !== 1) stale('MCP exposes more than the frozen reader')
@@ -85,10 +87,11 @@ function checkMcpHistory(witness: ZCodeFrozenWitness, calls: Map<string, { state
       listed = true
     } else if (request.method === 'tools/call') {
       const params = record(request.params), meta = record(params._meta)
-      if (!initialized || !listed || params.name !== 'spex_read_frozen' || meta.session_id !== witness.sessionId || meta.turn_id !== witness.turnId) stale('MCP call differs from its original reader/session/turn')
-      if (meta['com.zcode/request-context'] !== undefined) {
-        const nested = record(meta['com.zcode/request-context'])
-        if (nested.session_id !== witness.sessionId || nested.turn_id !== witness.turnId) stale('MCP nested request context differs')
+      if (!initialized || !listed || params.name !== 'spex_read_frozen') stale('MCP call differs from its original reader/session/turn')
+      try { decoder.assertZCodeMcpRequestContext(meta, witness) }
+      catch (error) {
+        if (!(error instanceof decoder.ZCodeProtocolError) || error.code !== 'stale_result') throw error
+        throw new StructuredSessionError('stale_result', error.message)
       }
       const match = [...calls].find(([id, call]) => !matched.has(id) && isDeepStrictEqual(call.state.input, params.arguments))
       if (!match || !isDeepStrictEqual(result.content, [{ type: 'text', text: match[1].state.output }])) stale('MCP call/response differs from a full original native part')
@@ -115,7 +118,7 @@ function prepareZCodeFrozenProof(ref: FrozenContextRef, witness: ZCodeFrozenWitn
     type: 'dynamicToolCall', id: callId, tool: 'spex_read_frozen', namespace: null, status: 'completed', success: true,
     arguments: input, contentItems: [{ type: 'inputText', text: output }],
   }))
-  checkMcpHistory(witness, observed.calls)
+  checkMcpHistory(witness, observed.calls, decoder)
   const shared = proveFrozenReads(ref, { threadId: sessionId, turnId }, items)
   const bytes = encode(witness), witnessDigest = sha(bytes), path = witnessPath(ref, witnessDigest)
   if (!existsSync(path)) writeFileSync(path, bytes, { mode: 0o400 })

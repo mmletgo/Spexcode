@@ -22,7 +22,7 @@ related:
 
 ZCode 版本4由 [[zcode-frozen-evidence]] 从实际 session/messages core 的完整参数与结果、精确原始 user/input/turn、原生模型请求和终态重建证明，区间与正文算法仍共用本节点。独占 MCP 的真实公开账本在回复前持久，随后与原生工具逐项核对；账本不得补原生缺失 input。完整原生见证内容寻址绑定并供冷回放重新校验，不能把工作区 MCP 清单、模型文字或另一 turn 当作实际工具面/读取证明。
 
-明确 Claude provider 的读取使用 [[claude-frozen-mcp]]，原不可变 manifest/readFrozenRange 响应及 requested coverage 共用，单段保守最多65536原字节。首次 prompt 准备即生成该计划，不能先产生 Codex 的262144字节 exec 计划再由 MCP 拒绝。原 Codex 索引、response、history 与旧 hash 不改。Claude 原生公开 JSONL 的投影来自 Manager。读取已绑定的历史文件、校验请求链和覆盖仍由本节点负责。
+明确 Claude provider 的读取使用 [[claude-frozen-mcp]]，原不可变 manifest/readFrozenRange 响应及 requested coverage 共用，单段保守最多65536原字节。首次 prompt 准备即生成该计划，不能先产生 Codex 的262144字节 exec 计划再由 MCP 拒绝。原 Codex 索引、response、history 与旧 hash 不改。LLM Manager 解析 Claude 原生公开 JSONL、核验请求父链、续行、压缩和真实 API 消费，返回可核对的已配对读取。SpexCode 读取已绑定的原件，逐字核验冻结回复、原 requested 覆盖及收据。
 
 固定 Claude CLI 的 `system/api_error` 仅在已核同一原生 producer 的 `request_retry` 或流式连接异常 `connection_retry`、error 级别、合法重试计数/延迟及原错误摘要完整时作为链节点保留；同 session、非 sidechain/agent、唯一 UUID 且直接衔接实际链尾（含附件与连续重试）。`connection_retry` 还必须从原 history 核其前后 actual API 的完整 params、shapeHash 与由原 base/keep/tail 重建的完整消息摘要列表完全相同，且重试后新请求被后续 assistant 以精确 requestRef 和当前父链实际消费；缺原请求、payload 变化、旧/未来请求借用、未消费及消费前新用户轮或压缩均拒绝。连续连接重试可沿同一原输入最终被消费，不授予额外正文权。该额外校验由唯一原 history 读取器供成功证明和失败来源索引复用，成功 proof 重新读取同一原件比对公开投影，不能用手造 witness 跳过完整 params 检查；params 摘要只留在本次读取内存，不增加公开 witness 字段。成功证明和失败专用来源索引共用该投影，错误正文不进入模型输入、receipt、coverage 或输出资格；未知来源、断链、fork 与新用户轮继续拒绝。原 `request_retry`、没有连接重试的既有公开历史及成功 proof 字节不变。
 
@@ -52,7 +52,7 @@ Claude 采用显式500000字符和500000 MCP token上限，并核实际序列化
 
 reader 的非法范围仍在读取正文前即时拒绝。同一原生轮中，只有独立重算同一冻结上下文/参数确实在范围边界抛出精确错误、公开 `is_error:true` 回复逐字匹配该错误、专属 MCP 无外部派发且后续 API 已消费错误时，才将它保留为无读取覆盖的参数拒绝事件，允许随后自行纠正。原意/entry 身份错误、正文摘要损坏、权限错误及未知错误不享有此例外；不能把失败请求算作已读。读取指引要求逐项照用计划 endByte，65536 只是最大跨度，不是短 entry 的结束位置。
 
-托管 Codex v7 从 [[llm-manager-native-entry]] 取得归一化调用参数、回复全文和实际可见输出。宿主提供业务清单、要求读取的区间、序列化回复的实际字节长度和最坏字节上限。Manager 生成原生提示、工具说明、分批与预算，托管与旧生产出的提示可逐字比对。宿主重算原冻结字节、逐块 receipt、完整覆盖与原始 items 摘要。冷复验只读取原冻结输入，以传入请求的原始业务字节核对已固定清单。归档复验用实际原件与此前可见性证明计算同一 v2 identity。v7 冷复验仅核原有逐块响应、原始历史和可见历史的内容寻址文件，缺项不得重建。
+托管 Codex v7 从 [[llm-manager-native-entry]] 取得归一化调用参数、回复全文和实际可见输出。宿主提供业务清单、要求读取的区间、序列化回复的实际字节长度和最坏字节上限。Manager 生成原生提示、工具说明、分批与预算，托管与旧生产出的提示可逐字比对。宿主重算原冻结字节、逐块 receipt、完整覆盖与原始 items 摘要。 旧 Codex 回放使用发行版内由同一 Manager 源生成的解释器，保留旧 prompt、工具声明、预算、精确 turn 与公开输出原字节。冷复验只读取原冻结输入，以传入请求的原始业务字节核对已固定清单。归档复验用实际原件与此前可见性证明计算同一 v2 identity。v7 冷复验仅核原有逐块响应、原始历史和可见历史的内容寻址文件，缺项不得重建。
 
 [[structured-readonly-policy]] 的v2仍保留既有只读隔离，仅增加spex_read_frozen。源码树外0700目录存储内容寻址字节与清单；contextDigest绑定logicalentry、类型、SHA256、字节长度、required及业务requestKey/inputDigest。真实attempt/policy存在时额外严格绑定，普通结构化调用不编造身份。相同bytes去重，logical身份仍保留。
 

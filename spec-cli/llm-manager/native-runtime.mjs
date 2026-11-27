@@ -35,15 +35,28 @@ __export(claude_exports, {
   CLAUDE_VERSION_ARGS: () => CLAUDE_VERSION_ARGS,
   ClaudeNativeProtocolError: () => ClaudeNativeProtocolError,
   assertClaudeLegacyConfiguration: () => assertClaudeLegacyConfiguration,
+  checkClaudeHistoryChain: () => checkClaudeHistoryChain,
+  claudeApiMessageBlobs: () => claudeApiMessageBlobs,
   claudeApiRequestHashes: () => claudeApiRequestHashes,
   claudeApiSourceDigest: () => claudeApiSourceDigest,
+  claudeApiToolResultIds: () => claudeApiToolResultIds,
   claudeAuthenticationArgs: () => claudeAuthenticationArgs,
+  claudeMcpToolNames: () => claudeMcpToolNames,
+  claudeMessageBlocks: () => claudeMessageBlocks,
+  claudeMessageDigest: () => claudeMessageDigest,
   claudeNativeModel: () => claudeNativeModel,
+  claudeOriginalReplayMismatch: () => claudeOriginalReplayMismatch,
+  claudeOutputLimitCompanions: () => claudeOutputLimitCompanions,
   claudeProcessEnvironment: () => claudeProcessEnvironment,
   claudeProtocolObservation: () => claudeProtocolObservation,
+  claudeRecoveryCompanion: () => claudeRecoveryCompanion,
+  claudeSchemaRetryDiagnostics: () => claudeSchemaRetryDiagnostics,
   claudeStructuredArgs: () => claudeStructuredArgs,
   claudeStructuredOutputError: () => claudeStructuredOutputError,
+  claudeTerminalMatchesIdentity: () => claudeTerminalMatchesIdentity,
   claudeWorktreeArgs: () => claudeWorktreeArgs,
+  claudeWorktreeTerminal: () => claudeWorktreeTerminal,
+  consumeClaudeRecoveryRequest: () => consumeClaudeRecoveryRequest,
   encodeClaudeInterrupt: () => encodeClaudeInterrupt,
   encodeClaudeUserMessage: () => encodeClaudeUserMessage,
   inspectClaudeCliVersion: () => inspectClaudeCliVersion,
@@ -51,10 +64,19 @@ __export(claude_exports, {
   interpretClaudeAuthenticationStatus: () => interpretClaudeAuthenticationStatus,
   interpretClaudeStreamEvent: () => interpretClaudeStreamEvent,
   isClaudeRateLimitTerminal: () => isClaudeRateLimitTerminal,
+  isClaudeRecoveryMessageDigest: () => isClaudeRecoveryMessageDigest,
+  isClaudeStructuredOutputEnforcement: () => isClaudeStructuredOutputEnforcement,
+  matchingClaudeRecoveries: () => matchingClaudeRecoveries,
   prepareClaudeAuthenticationEnvironment: () => prepareClaudeAuthenticationEnvironment,
   projectClaudeApiSourceMetadata: () => projectClaudeApiSourceMetadata,
+  projectClaudeFrozenReadEvidence: () => projectClaudeFrozenReadEvidence,
+  projectClaudeFrozenSchemaFailure: () => projectClaudeFrozenSchemaFailure,
   projectClaudePublicHistory: () => projectClaudePublicHistory,
-  readClaudeStreamEvent: () => readClaudeStreamEvent
+  projectClaudeReplayApiSourceMetadata: () => projectClaudeReplayApiSourceMetadata,
+  projectClaudeReplayHistory: () => projectClaudeReplayHistory,
+  projectClaudeWorktreeSchemaFailure: () => projectClaudeWorktreeSchemaFailure,
+  readClaudeStreamEvent: () => readClaudeStreamEvent,
+  recordClaudeRecoveryRequest: () => recordClaudeRecoveryRequest
 });
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -258,7 +280,10 @@ function sortHistoryKeys(value) {
   );
   return Object.fromEntries(Object.keys(row).sort().map((key) => [key, sortHistoryKeys(row[key])]));
 }
-function historyMessageBlocks(message) {
+function claudeMessageDigest(value) {
+  return jsonDigest(sortHistoryKeys(value));
+}
+function claudeMessageBlocks(message) {
   return typeof message.content === "string" ? [{ type: "text", text: message.content }] : message.content;
 }
 function withoutHistoryCacheControl(value) {
@@ -267,7 +292,7 @@ function withoutHistoryCacheControl(value) {
   return Object.fromEntries(Object.entries(value).filter(([key, item]) => key !== "cache_control" && item !== void 0).map(([key, item]) => [key, withoutHistoryCacheControl(item)]));
 }
 function claudeApiSourceDigest(message) {
-  return jsonDigest(sortHistoryKeys(withoutHistoryCacheControl({ ...message, content: historyMessageBlocks(message) })));
+  return claudeMessageDigest(withoutHistoryCacheControl({ ...message, content: claudeMessageBlocks(message) }));
 }
 function claudeApiRequestHashes(row, requests, shapes, model) {
   const base = row.base ? requests.get(row.base) : [];
@@ -296,13 +321,16 @@ function projectClaudeRequestRetry(row) {
       retryInMs: row.retryInMs,
       retryAttempt: row.retryAttempt,
       maxRetries: row.maxRetries,
-      errorDigest: jsonDigest(sortHistoryKeys(error))
+      errorDigest: claudeMessageDigest(error)
     }
   );
-  if (!["request_retry", "connection_retry"].includes(retry.source) || retry.level !== "error" || !Number.isSafeInteger(retry.retryInMs) || retry.retryInMs < 0 || !Number.isSafeInteger(retry.retryAttempt) || retry.retryAttempt < 1 || !Number.isSafeInteger(retry.maxRetries) || retry.maxRetries < retry.retryAttempt) {
+  checkClaudeRequestRetry(retry);
+  return retry;
+}
+function checkClaudeRequestRetry(retry) {
+  if (!retry || !["request_retry", "connection_retry"].includes(retry.source) || retry.level !== "error" || !Number.isSafeInteger(retry.retryInMs) || retry.retryInMs < 0 || !Number.isSafeInteger(retry.retryAttempt) || retry.retryAttempt < 1 || !Number.isSafeInteger(retry.maxRetries) || retry.maxRetries < retry.retryAttempt || !/^[a-f0-9]{64}$/.test(retry.errorDigest)) {
     throw new ClaudeNativeProtocolError("stale_result", "Claude API error is not an exact native request retry");
   }
-  return retry;
 }
 function projectClaudePublicHistory(source, sessionId) {
   if (!source.endsWith("\n")) {
@@ -352,7 +380,7 @@ function projectClaudePublicHistory(source, sessionId) {
             /** @type {string[] | undefined} */
             row.summarizedTurnPromptUuids
           ),
-          messageDigest: jsonDigest(sortHistoryKeys(row.message)),
+          messageDigest: claudeMessageDigest(row.message),
           textOnly: row.message?.role === "user" && (typeof content === "string" ? content.length > 0 : Array.isArray(content) && content.length > 0 && content.every((block) => block?.type === "text" && typeof block.text === "string"))
         };
       } else record2.message = row.message;
@@ -363,8 +391,8 @@ function projectClaudePublicHistory(source, sessionId) {
         row.message
       );
       const compactSummary = typeof message.content === "string";
-      record2.message = compactSummary ? { ...message, content: historyMessageBlocks(message) } : message;
-      if (compactSummary) record2.compactSummaryDigest = jsonDigest(sortHistoryKeys(message));
+      record2.message = compactSummary ? { ...message, content: claudeMessageBlocks(message) } : message;
+      if (compactSummary) record2.compactSummaryDigest = claudeMessageDigest(message);
       record2.hash = String(row.hash);
     }
     if (row.type === "assistant") {
@@ -372,7 +400,7 @@ function projectClaudePublicHistory(source, sessionId) {
         /** @type {HistoryMessage} */
         row.message
       );
-      record2.message = { role: "assistant", content: historyMessageBlocks(message).filter((block) => block.type === "tool_use") };
+      record2.message = { role: "assistant", content: claudeMessageBlocks(message).filter((block) => block.type === "tool_use") };
       latestAssistant = { uuid: row.uuid, stopReason: row.message?.stop_reason };
     }
     if (row.type === "api-request") {
@@ -384,7 +412,7 @@ function projectClaudePublicHistory(source, sessionId) {
       paramsDigests.set(
         /** @type {string} */
         record2.id,
-        jsonDigest(sortHistoryKeys(params))
+        claudeMessageDigest(params)
       );
     }
     if (row.type === "api-request-shape") {
@@ -394,11 +422,260 @@ function projectClaudePublicHistory(source, sessionId) {
       );
       record2.shapeHash = String(row.shapeHash);
       record2.toolNames = shape.tools.map((tool) => tool.name);
-      record2.placeholderValid = shape.tools.filter((tool) => tool.name === "DeferredToolPlaceholder").every((tool) => tool.description === "Reserved placeholder that keeps deferred tool loading active; never call this tool." && tool.defer_loading === true && jsonDigest(sortHistoryKeys(tool.input_schema)) === jsonDigest(sortHistoryKeys({ type: "object", properties: {} })));
+      record2.placeholderValid = shape.tools.filter((tool) => tool.name === "DeferredToolPlaceholder").every((tool) => tool.description === "Reserved placeholder that keeps deferred tool loading active; never call this tool." && tool.defer_loading === true && claudeMessageDigest(tool.input_schema) === claudeMessageDigest({ type: "object", properties: {} }));
     }
     records.push(record2);
   }
   return { records, paramsDigests };
+}
+function checkClaudeConnectionRetries(history, paramsDigests) {
+  if (!history.some((row) => row.requestRetry?.source === "connection_retry")) return;
+  const model = history.find((row) => row.type === "api-request")?.model;
+  if (!model) throw new ClaudeNativeProtocolError("stale_result", "Claude connection retry has no preceding actual API model");
+  const requests = /* @__PURE__ */ new Map();
+  const shapes = /* @__PURE__ */ new Set();
+  let latestChainNode;
+  let current;
+  let pending;
+  let retriedRequest;
+  for (const row of history) {
+    if (row.type === "api-request-shape") shapes.add(
+      /** @type {string} */
+      row.shapeHash
+    );
+    if (row.type === "api-request") {
+      const hashes = claudeApiRequestHashes(row, requests, shapes, model);
+      const id = (
+        /** @type {string} */
+        row.id
+      );
+      requests.set(id, hashes);
+      current = { id, shapeHash: (
+        /** @type {string} */
+        row.shapeHash
+      ), paramsDigest: (
+        /** @type {string} */
+        paramsDigests.get(id)
+      ), hashes };
+      if (pending) {
+        if (current.shapeHash !== pending.shapeHash || current.paramsDigest !== pending.paramsDigest || JSON.stringify(hashes) !== JSON.stringify(pending.hashes)) {
+          throw new ClaudeNativeProtocolError("stale_result", "Claude connection retry changed its exact API payload");
+        }
+        retriedRequest = id;
+      }
+    }
+    if (row.requestRetry?.source === "connection_retry") {
+      if (!current || row.parentUuid !== latestChainNode) {
+        throw new ClaudeNativeProtocolError("stale_result", "Claude connection retry lost its preceding request or exact chain tail");
+      }
+      pending = current;
+      retriedRequest = void 0;
+    }
+    if (pending && (row.type === "user" || row.subtype === "compact_boundary")) {
+      throw new ClaudeNativeProtocolError("stale_result", "Claude connection retry inserted a new user or compact boundary before consumption");
+    }
+    if (pending && row.type === "assistant") {
+      if (!retriedRequest || row.requestRef !== retriedRequest || row.parentUuid !== latestChainNode) {
+        throw new ClaudeNativeProtocolError("stale_result", "Claude connection retry lacks exact subsequent API and assistant consumption");
+      }
+      pending = void 0;
+    }
+    if (row.uuid) latestChainNode = row.uuid;
+  }
+  if (pending) throw new ClaudeNativeProtocolError("stale_result", "Claude connection retry has no subsequent API and assistant consumption");
+}
+function projectClaudeReplayHistory(source, sessionId) {
+  const { records, paramsDigests } = projectClaudePublicHistory(source, sessionId);
+  checkClaudeConnectionRetries(records, paramsDigests);
+  return records;
+}
+function claudeMcpToolNames(source) {
+  return source.split("\n").filter(Boolean).flatMap((line) => {
+    const row = JSON.parse(line);
+    if (row.type !== "request" || row.request?.method !== "tools/call") return [];
+    if (typeof row.request.params?.name !== "string") {
+      throw new ClaudeNativeProtocolError("stale_result", "Claude MCP call has no exact tool identity");
+    }
+    return [row.request.params.name];
+  });
+}
+function claudeApiMessageBlobs(history) {
+  const messages = /* @__PURE__ */ new Map();
+  for (const row of history) {
+    if (row.type !== "api-request-blob") continue;
+    const { hash, message, compactSummaryDigest } = row;
+    if (!message || message.role !== "user" || !Array.isArray(message.content) || hash !== claudeMessageDigest(message) || message.content.some((block) => !["tool_result", "text"].includes(block.type))) {
+      throw new ClaudeNativeProtocolError("stale_result", "Claude public API message has invalid bytes or type");
+    }
+    const blob = messages.get(hash) ?? {
+      content: message.content,
+      canonical: hash === claudeMessageDigest({ role: "user", content: message.content }),
+      summaries: /* @__PURE__ */ new Set()
+    };
+    if (compactSummaryDigest) blob.summaries.add(compactSummaryDigest);
+    messages.set(hash, blob);
+  }
+  return messages;
+}
+function claudeApiToolResultIds(content, responseBlocks) {
+  return content.filter((block) => block.type === "tool_result").map((block) => {
+    const callId = (
+      /** @type {string} */
+      block.tool_use_id
+    );
+    const original = responseBlocks.get(callId);
+    if (!original || claudeMessageDigest(original) !== claudeMessageDigest(block)) {
+      throw new ClaudeNativeProtocolError("stale_result", "Claude merged API tool result differs from its exact native public reply");
+    }
+    return callId;
+  });
+}
+function isClaudeStructuredOutputEnforcement(recovery) {
+  return recovery?.text === structuredOutputEnforcement;
+}
+function isClaudeRecoveryMessageDigest(digest) {
+  return recoveryTexts.some((text2) => digest === claudeMessageDigest({ role: "user", content: text2 }));
+}
+function claudeRecoveryCompanion(row, promptId, latestMessage, latestAssistant, outputLimitOnly = false) {
+  const message = row.message;
+  if (row.isMeta !== true || message?.role !== "user") return null;
+  const enforcement = !outputLimitOnly && row.turnCompanion === void 0 && message.content === structuredOutputEnforcement;
+  const text2 = enforcement ? structuredOutputEnforcement : row.turnCompanion === true ? (outputLimitOnly ? [outputLimitRecoveryText] : recoveryTexts).find((text3) => claudeMessageDigest(message) === claudeMessageDigest({ role: "user", content: text3 })) : void 0;
+  if (text2 === void 0) return null;
+  if (!row.uuid || !promptId || row.promptId !== promptId || row.sourceToolAssistantUUID !== void 0 || row.parentUuid !== latestMessage || row.parentUuid !== latestAssistant) {
+    throw new ClaudeNativeProtocolError("stale_result", "Claude recovery companion lost its exact native assistant or original prompt");
+  }
+  return {
+    text: text2,
+    hashes: /* @__PURE__ */ new Set([claudeMessageDigest(message), claudeMessageDigest({ role: "user", content: claudeMessageBlocks(message) })]),
+    summaries: /* @__PURE__ */ new Set(),
+    requests: /* @__PURE__ */ new Set(),
+    consumed: false
+  };
+}
+function claudeOutputLimitCompanions(history, original) {
+  const companions = /* @__PURE__ */ new Map();
+  let latestMessage, latestAssistant;
+  for (const row of history) {
+    if (row.type === "user" && row.uuid !== original?.uuid) {
+      const recovery = claudeRecoveryCompanion(row, original?.promptId, latestMessage, latestAssistant, true);
+      if (recovery) companions.set(
+        /** @type {string} */
+        row.uuid,
+        recovery
+      );
+    }
+    if (row.type === "assistant") latestAssistant = row.uuid;
+    if (row.type === "user" || row.type === "assistant" || row.type === "system" && row.subtype === "api_error") latestMessage = row.uuid;
+  }
+  return companions;
+}
+function matchingClaudeRecoveries(recoveries, content, prompt) {
+  const texts = content.filter((block) => block.type === "text");
+  return recoveries.filter((recovery) => {
+    const text2 = { type: "text", text: recovery.text };
+    return JSON.stringify(texts) === JSON.stringify([text2]) || JSON.stringify(content) === JSON.stringify([{ type: "text", text: prompt + "\n" }, text2]);
+  });
+}
+function recordClaudeRecoveryRequest(recoveries, row, hashes) {
+  for (const recovery of recoveries) {
+    if (row.tail?.some((hash) => recovery.hashes.has(hash)) || row.base && recovery.requests.has(row.base) && hashes.some((hash) => recovery.hashes.has(hash))) {
+      recovery.requests.add(
+        /** @type {string} */
+        row.id
+      );
+    }
+  }
+}
+function consumeClaudeRecoveryRequest(recoveries, requestRef) {
+  const recovery = recoveries.at(-1);
+  if (recovery && !recovery.requests.has(requestRef)) {
+    throw new ClaudeNativeProtocolError("stale_result", "Claude recovery companion has no new exact actual API consumer");
+  }
+  for (const item of recoveries) if (item.requests.has(requestRef)) item.consumed = true;
+}
+function* checkClaudeHistoryChain(history, original) {
+  if (typeof original.uuid !== "string") throw new ClaudeNativeProtocolError("stale_result", "Claude original user has no native UUID");
+  const { sessionId, uuid: userUuid, promptId } = original;
+  const seen = /* @__PURE__ */ new Set();
+  const parents = /* @__PURE__ */ new Map();
+  let latestMessage, latestChainNode;
+  let compaction;
+  for (const row of history) {
+    if (row.sessionId !== sessionId) throw new ClaudeNativeProtocolError("stale_result", "Claude native history changed its session identity");
+    if (row.uuid !== void 0 && typeof row.uuid !== "string") throw new ClaudeNativeProtocolError("stale_result", "Claude public history has a non-string native UUID");
+    const compact = row.type === "system" && row.subtype === "compact_boundary";
+    const retry = row.type === "system" && row.subtype === "api_error";
+    if (row.type === "system" && !compact && !retry) throw new ClaudeNativeProtocolError("stale_result", "Claude public system event is not a supported compact boundary");
+    if (retry) {
+      checkClaudeRequestRetry(row.requestRetry);
+      if (typeof row.uuid !== "string" || !row.uuid || typeof row.parentUuid !== "string" || !row.parentUuid || row.parentUuid !== latestChainNode || compaction) {
+        throw new ClaudeNativeProtocolError("stale_result", "Claude request retry does not extend its exact native chain");
+      }
+    }
+    if (compact) {
+      const metadata = row.compactMetadata;
+      const segment = metadata?.preservedSegment;
+      const preserved = metadata?.preservedMessages;
+      const logicalParent = row.logicalParentUuid;
+      if (!row.uuid || seen.has(row.uuid) || row.parentUuid !== null || !logicalParent || logicalParent !== latestMessage || !seen.has(logicalParent) || compaction || metadata?.runningTurnSends?.openerUuid !== userUuid || JSON.stringify(metadata.runningTurnSends.uuids) !== JSON.stringify([userUuid])) {
+        throw new ClaudeNativeProtocolError("stale_result", "Claude compact boundary lost its exact running turn or logical parent");
+      }
+      if (segment !== void 0 || preserved !== void 0) {
+        const ids = preserved?.allUuids;
+        if (!segment || !preserved || !Array.isArray(ids) || !ids.length || new Set(ids).size !== ids.length || JSON.stringify(preserved.uuids) !== JSON.stringify(ids) || segment.headUuid !== ids[0] || segment.tailUuid !== ids.at(-1) || segment.tailUuid !== logicalParent || !segment.anchorUuid || segment.anchorUuid !== preserved.anchorUuid || seen.has(segment.anchorUuid) || ids.some((id) => !seen.has(id))) {
+          throw new ClaudeNativeProtocolError("stale_result", "Claude compact preserved segment is not the exact observed chain");
+        }
+        const remaining = new Set(ids);
+        let cursor = segment.tailUuid;
+        while (cursor && cursor !== segment.headUuid && remaining.delete(cursor)) cursor = parents.get(cursor) ?? void 0;
+        if (cursor !== segment.headUuid || !remaining.delete(segment.headUuid) || remaining.size) {
+          throw new ClaudeNativeProtocolError("stale_result", "Claude compact preserved segment is not the exact observed chain");
+        }
+      }
+      compaction = { ancestors: /* @__PURE__ */ new Set([row.uuid]), ...segment ? { anchor: segment.anchorUuid } : {} };
+      parents.set(row.uuid, logicalParent);
+      seen.add(row.uuid);
+      latestChainNode = row.uuid;
+      yield row;
+      continue;
+    }
+    if (row.uuid) {
+      if (seen.has(row.uuid) || row.uuid !== userUuid && (!row.parentUuid || !seen.has(row.parentUuid))) {
+        throw new ClaudeNativeProtocolError("stale_result", "Claude public history is not the exact original main chain");
+      }
+      seen.add(row.uuid);
+      parents.set(row.uuid, row.parentUuid ?? null);
+      latestChainNode = row.uuid;
+    }
+    if (retry) {
+      latestMessage = row.uuid;
+      yield row;
+      continue;
+    }
+    if (compaction && row.type === "attachment") {
+      if (!row.uuid || !row.parentUuid || !compaction.ancestors.has(row.parentUuid)) {
+        throw new ClaudeNativeProtocolError("stale_result", "Claude compact attachment is outside its exact boundary");
+      }
+      compaction.ancestors.add(row.uuid);
+    }
+    if (row.compactSummary) {
+      const summary = row.compactSummary;
+      if (row.type !== "user" || row.turnCompanion !== void 0 || !row.uuid || !row.parentUuid || !compaction?.ancestors.has(row.parentUuid) || compaction.anchor && compaction.anchor !== row.uuid || row.promptId !== promptId || row.sourceToolAssistantUUID !== void 0 || !summary.transcriptOnly || !summary.textOnly || !/^[a-f0-9]{64}$/.test(summary.messageDigest) || JSON.stringify(summary.promptUuids) !== JSON.stringify([userUuid])) {
+        throw new ClaudeNativeProtocolError("stale_result", "Claude compact summary is not the exact original turn metadata");
+      }
+      compaction = void 0;
+      latestMessage = row.uuid;
+      yield row;
+      continue;
+    }
+    if (compaction && ["user", "assistant", "api-request"].includes(row.type)) {
+      throw new ClaudeNativeProtocolError("stale_result", "Claude compact boundary has no exact same-turn summary");
+    }
+    if (row.type === "user" || row.type === "assistant") latestMessage = row.uuid;
+    yield row;
+  }
+  if (compaction) throw new ClaudeNativeProtocolError("stale_result", "Claude compact boundary has no exact same-turn summary");
 }
 function projectClaudeApiSourceMetadata(source, sessionId, model, companionIds) {
   if (!source.endsWith("\n")) {
@@ -451,7 +728,7 @@ function projectClaudeApiSourceMetadata(source, sessionId, model, companionIds) 
       if (!run || run.role !== message.role || message.role !== "user" && !(typeof message.id === "string" && run.messageId === message.id)) {
         run = { role: row.type, ...typeof message.id === "string" ? { messageId: message.id } : {}, blocks: [], uuids: [] };
       }
-      run.blocks.push(...historyMessageBlocks(message));
+      run.blocks.push(...claudeMessageBlocks(message));
       run.uuids.push(row.uuid);
       const digest = claudeApiSourceDigest({ role: run.role, content: run.blocks });
       sources.set(digest, { digest, role: run.role, kind: "transcript-prefix", sourceUuids: [...run.uuids], ordinal });
@@ -476,9 +753,463 @@ function projectClaudeApiSourceMetadata(source, sessionId, model, companionIds) 
   }
   return snapshots;
 }
+function projectClaudeReplayApiSourceMetadata(source, sessionId, model) {
+  if (!source.endsWith("\n")) {
+    throw new ClaudeNativeProtocolError("history_pending", "Claude native source history has not flushed its final record");
+  }
+  const history = projectClaudeReplayHistory(source, sessionId);
+  const original = history.find((row) => row.type === "user" && row.parentUuid === null);
+  if (!original) throw new ClaudeNativeProtocolError("stale_result", "Claude failed source index has no original user");
+  Array.from(checkClaudeHistoryChain(history, original));
+  const companions = claudeOutputLimitCompanions(history, original);
+  return projectClaudeApiSourceMetadata(source, sessionId, model, new Set(companions.keys()));
+}
+function claudeOriginalReplayMismatch(history) {
+  if (history.some((row) => row.type === "user" && row.isMeta === true && row.turnCompanion === true && row.message?.role === "user" && row.message.content === outputLimitRecoveryText)) {
+    return "Claude output-limit witness differs from its original native history";
+  }
+  if (history.some((row) => row.type === "user" && row.message?.content === structuredOutputEnforcement)) {
+    return "Claude structured-output enforcement differs from its original native history";
+  }
+  if (history.some((row) => row.requestRetry?.source === "connection_retry")) {
+    return "Claude connection retry witness differs from its original native history";
+  }
+}
+function projectClaudeFrozenReadEvidence(witness, options) {
+  const { sessionId, userUuid, promptId, prompt, model, result, echo, history } = witness;
+  const { allowedTools, frozenToolName: frozenToolName2, mcpToolName, readNativeHistory, readMcpHistory } = options;
+  if (witness.version !== 1 || witness.provider !== "claude-code" || witness.cliVersion !== CLAUDE_LEGACY_CLI_VERSION || !model || !promptId || result.type !== "result" || result.subtype !== "success" || result.is_error !== false || result.structured_output === void 0 || !claudeTerminalMatchesIdentity(result, { sessionId, userUuid }) || echo.uuid !== userUuid || echo.session_id !== sessionId || JSON.stringify([...witness.initTools].sort()) !== JSON.stringify([...allowedTools].sort())) {
+    throw new ClaudeNativeProtocolError("stale_result", "Claude completion lacks exact native identity or isolated capabilities");
+  }
+  const original = history.find((row) => row.type === "user" && row.uuid === userUuid);
+  if (!original || original.parentUuid !== null || original.promptId !== promptId || JSON.stringify(original.message) !== JSON.stringify(echo.message) || !original.message || JSON.stringify({ ...original.message, content: claudeMessageBlocks(original.message) }) !== JSON.stringify({ role: "user", content: [{ type: "text", text: prompt }] })) {
+    throw new ClaudeNativeProtocolError("stale_result", "Claude original user echo/history/prompt identity differs");
+  }
+  const rawHistoryMismatch = claudeOriginalReplayMismatch(history);
+  if (rawHistoryMismatch && JSON.stringify(projectClaudeReplayHistory(readNativeHistory(), sessionId)) !== JSON.stringify(history)) {
+    throw new ClaudeNativeProtocolError("stale_result", rawHistoryMismatch);
+  }
+  if (witness.mcpHistory && (JSON.stringify(claudeMcpToolNames(readMcpHistory())) !== JSON.stringify(witness.mcpHistory.toolNames) || witness.mcpHistory.toolNames.some((name) => name !== mcpToolName))) {
+    throw new ClaudeNativeProtocolError("stale_result", "Claude MCP dispatched a foreign tool or its actual history changed");
+  }
+  const requests = /* @__PURE__ */ new Map();
+  const shapes = /* @__PURE__ */ new Set(), compactSummaries = /* @__PURE__ */ new Set(), requestRefs = /* @__PURE__ */ new Set(), readerCalls = /* @__PURE__ */ new Set();
+  const calls = /* @__PURE__ */ new Map();
+  const responseMessages = /* @__PURE__ */ new Map();
+  const responseBlocks = /* @__PURE__ */ new Map();
+  const reads = [];
+  const apiMessages = claudeApiMessageBlobs(history);
+  const recoveries = [];
+  const allowedShapeTools = [...allowedTools, "DeferredToolPlaceholder"];
+  const originalHash = claudeMessageDigest(original.message);
+  const originalBlocksHash = claudeMessageDigest({ role: "user", content: claudeMessageBlocks(original.message) });
+  let latestMessage, latestAssistant;
+  let acceptedOutput = false;
+  for (const row of checkClaudeHistoryChain(history, original)) {
+    if (row.type === "system") {
+      if (row.subtype === "api_error") latestMessage = row.uuid;
+      continue;
+    }
+    if (row.compactSummary) {
+      const { messageDigest } = row.compactSummary;
+      compactSummaries.add(messageDigest);
+      for (const recovery of recoveries) {
+        if (recovery.consumed) {
+          recovery.summaries.add(messageDigest);
+          recovery.hashes.add(messageDigest);
+        }
+      }
+      latestMessage = row.uuid;
+      continue;
+    }
+    if (row.type === "api-request-shape") {
+      const { shapeHash, toolNames, placeholderValid } = row;
+      if (!shapeHash || !/^[a-f0-9]{64}$/.test(shapeHash) || !toolNames || allowedTools.some((name) => !toolNames.includes(name)) || toolNames.some((name) => !allowedShapeTools.includes(name)) || !placeholderValid) {
+        throw new ClaudeNativeProtocolError("stale_result", "Claude API exposes a foreign or discoverable tool or has no shape identity");
+      }
+      shapes.add(shapeHash);
+    }
+    if (row.type === "api-request-blob") {
+      const { compactSummaryDigest } = row;
+      if (compactSummaryDigest && recoveries.length && isClaudeRecoveryMessageDigest(compactSummaryDigest)) {
+        throw new ClaudeNativeProtocolError("stale_result", "Claude recovery API message cannot masquerade as a compact summary");
+      }
+      if (compactSummaryDigest && !compactSummaries.has(compactSummaryDigest)) {
+        throw new ClaudeNativeProtocolError("stale_result", "Claude API string message is not an observed same-turn compact summary");
+      }
+      const blob = (
+        /** @type {ClaudeApiMessageBlob} */
+        apiMessages.get(
+          /** @type {string} */
+          row.hash
+        )
+      );
+      claudeApiToolResultIds(blob.content, responseBlocks);
+    }
+    if (row.type === "api-request") {
+      const hashes = claudeApiRequestHashes(row, requests, shapes, model);
+      if (!requests.size && (!row.tail?.includes(originalHash) || row.keep !== 0 || row.base)) {
+        throw new ClaudeNativeProtocolError("stale_result", "Claude original user prompt was not in the actual first API request");
+      }
+      for (const hash of hashes) {
+        const blob = apiMessages.get(hash);
+        if (!blob) continue;
+        for (const callId of claudeApiToolResultIds(blob.content, responseBlocks)) responseMessages.set(callId, hash);
+        const summaries = [...blob.summaries].filter((digest) => compactSummaries.has(digest));
+        if (compactSummaries.has(hash) || summaries.length) {
+          for (const recovery of recoveries) {
+            if (recovery.summaries.has(hash) || summaries.some((digest) => recovery.summaries.has(digest))) recovery.hashes.add(hash);
+          }
+          continue;
+        }
+        if (!blob.content.some((block) => block.type === "text")) continue;
+        const matching = matchingClaudeRecoveries(recoveries, blob.content, prompt);
+        if (!blob.canonical || hash !== originalHash && hash !== originalBlocksHash && !matching.length) {
+          throw new ClaudeNativeProtocolError("stale_result", "Claude API user message contains unobserved text or a different coalescing shape");
+        }
+        for (const recovery of matching) recovery.hashes.add(hash);
+      }
+      requests.set(
+        /** @type {string} */
+        row.id,
+        hashes
+      );
+      recordClaudeRecoveryRequest(recoveries, row, hashes);
+    }
+    if (row.type === "assistant") {
+      latestMessage = row.uuid;
+      if (!row.requestRef || !requests.has(row.requestRef)) {
+        throw new ClaudeNativeProtocolError("stale_result", "Claude assistant lacks an exact actual API request reference");
+      }
+      consumeClaudeRecoveryRequest(recoveries, row.requestRef);
+      latestAssistant = row.uuid;
+      requestRefs.add(row.requestRef);
+      for (const block of claudeMessageBlocks(
+        /** @type {HistoryMessage} */
+        row.message
+      )) {
+        if (!block.id || calls.has(block.id) || !block.name || block.name === "DeferredToolPlaceholder") {
+          throw new ClaudeNativeProtocolError("stale_result", "Claude called a forbidden, placeholder or repeated tool");
+        }
+        if (isClaudeStructuredOutputEnforcement(recoveries.at(-1)) && block.name !== "StructuredOutput") {
+          throw new ClaudeNativeProtocolError("stale_result", "Claude structured-output enforcement dispatched another tool");
+        }
+        calls.set(block.id, { row, block, recovery: recoveries.length });
+      }
+    }
+    if (row.type === "user" && row.uuid !== userUuid) {
+      const recovery = claudeRecoveryCompanion(row, promptId, latestMessage, latestAssistant);
+      if (recovery) {
+        if (isClaudeStructuredOutputEnforcement(recovery) && (acceptedOutput || recoveries.some(isClaudeStructuredOutputEnforcement))) {
+          throw new ClaudeNativeProtocolError("stale_result", "Claude structured-output enforcement is repeated or followed an accepted output");
+        }
+        recoveries.push(recovery);
+        acceptedOutput = false;
+        latestMessage = row.uuid;
+        continue;
+      }
+      latestMessage = row.uuid;
+      if (row.promptId !== promptId || !row.message || !Array.isArray(row.message.content) || !row.message.content.length || row.message.content.some((block) => block.type !== "tool_result")) {
+        throw new ClaudeNativeProtocolError("stale_result", "Claude history appended another user turn");
+      }
+      for (const reply of row.message.content) {
+        const callId = (
+          /** @type {string} */
+          reply.tool_use_id
+        );
+        const call = calls.get(callId);
+        if (!call || responseMessages.has(callId) || row.sourceToolAssistantUUID !== call.row.uuid || row.parentUuid !== call.row.uuid) {
+          throw new ClaudeNativeProtocolError("stale_result", "Claude tool result is not paired with its exact native call");
+        }
+        responseMessages.set(callId, claudeMessageDigest(row.message));
+        responseBlocks.set(callId, reply);
+        const name = (
+          /** @type {string} */
+          call.block.name
+        );
+        if (!allowedTools.includes(name)) {
+          if (!witness.mcpHistory || reply.is_error !== true || reply.content !== `<tool_use_error>Error: No such tool available: ${name}</tool_use_error>`) {
+            throw new ClaudeNativeProtocolError("stale_result", "Claude foreign tool call has no exact native non-dispatch rejection");
+          }
+          readerCalls.add(callId);
+        } else if (name === "StructuredOutput") {
+          if (!reply.is_error && call.recovery === recoveries.length && claudeMessageDigest(call.block.input) === claudeMessageDigest(result.structured_output)) acceptedOutput = true;
+        } else if (name === frozenToolName2) {
+          readerCalls.add(callId);
+          const item = Array.isArray(reply.content) ? reply.content[0] : void 0;
+          const text2 = !reply.is_error && item && typeof item === "object" && "text" in item && typeof item.text === "string" && JSON.stringify(reply.content) === JSON.stringify([{ type: "text", text: item.text }]) ? item.text : void 0;
+          const error = reply.is_error === true && typeof reply.content === "string" ? reply.content : void 0;
+          reads.push({ callId, input: call.block.input, ...text2 === void 0 ? {} : { text: text2 }, ...error === void 0 ? {} : { error } });
+        }
+      }
+    }
+    if (row.uuid === userUuid) latestMessage = row.uuid;
+  }
+  if (recoveries.some((recovery) => !recovery.consumed)) {
+    throw new ClaudeNativeProtocolError("stale_result", "Claude recovery companion has no new exact actual API consumer");
+  }
+  if (!acceptedOutput || [...calls.keys()].some((id) => !responseMessages.has(id))) {
+    throw new ClaudeNativeProtocolError("stale_result", "Claude result has no matching accepted schema tool output or has unanswered calls");
+  }
+  for (const callId of readerCalls) {
+    const messageHash = (
+      /** @type {string} */
+      responseMessages.get(callId)
+    );
+    if (![...requests].some(([id, hashes]) => hashes.includes(messageHash) && requestRefs.has(id))) {
+      throw new ClaudeNativeProtocolError("stale_result", "Claude reader result was not present in a subsequent actual model API request");
+    }
+  }
+  return reads;
+}
+function projectClaudeWorktreeSchemaFailure(history, original, { exactModel, isSchemaValid }) {
+  const calls = /* @__PURE__ */ new Map();
+  const responses = /* @__PURE__ */ new Map();
+  const requests = /* @__PURE__ */ new Set();
+  let latestMessage, latestAssistant;
+  let schemaErrors = 0, enforcementSeen = false;
+  let rejected;
+  for (const row of checkClaudeHistoryChain(history, original)) {
+    if (row.type === "api-request") {
+      if (!row.id || exactModel !== void 0 && row.model !== exactModel) {
+        throw new ClaudeNativeProtocolError("stale_result", "Claude worktree schema failure model request differs");
+      }
+      requests.add(row.id);
+    }
+    if (row.type === "assistant" && Array.isArray(row.message?.content)) {
+      for (const block of row.message.content) {
+        if (!block.id || calls.has(block.id) || !row.requestRef || !requests.has(row.requestRef)) {
+          throw new ClaudeNativeProtocolError("stale_result", "Claude worktree schema failure has no exact native tool call");
+        }
+        calls.set(block.id, row);
+      }
+      latestAssistant = row.uuid;
+    }
+    if (row.type === "user" && row.uuid !== original.uuid && !row.compactSummary) {
+      const recovery = claudeRecoveryCompanion(row, original.promptId, latestMessage, latestAssistant);
+      if (isClaudeStructuredOutputEnforcement(recovery ?? void 0)) {
+        if (enforcementSeen) throw new ClaudeNativeProtocolError("stale_result", "Claude worktree schema enforcement was repeated");
+        enforcementSeen = true;
+      }
+      if (!recovery) {
+        if (row.promptId !== original.promptId || !row.sourceToolAssistantUUID || row.sourceToolAssistantUUID !== row.parentUuid || !Array.isArray(row.message?.content) || !row.message.content.length) {
+          throw new ClaudeNativeProtocolError("stale_result", "Claude worktree schema failure contains another user input");
+        }
+        for (const reply of row.message.content) {
+          const callId = reply.tool_use_id ?? "";
+          const call = calls.get(callId);
+          if (reply.type !== "tool_result" || !call || call.uuid !== row.sourceToolAssistantUUID || responses.has(callId)) {
+            throw new ClaudeNativeProtocolError("stale_result", "Claude worktree schema error reply lost its exact native call");
+          }
+          responses.set(callId, reply);
+          const block = Array.isArray(call.message?.content) ? call.message.content.find((block2) => block2.id === callId) : void 0;
+          if (block && claudeStructuredOutputError(block.name, reply) !== void 0) {
+            if (isSchemaValid(block.input)) {
+              throw new ClaudeNativeProtocolError("stale_result", "Claude worktree schema error contradicts its pinned schema");
+            }
+            rejected = block.input;
+            schemaErrors++;
+          }
+        }
+      }
+    }
+    if (row.type === "user" || row.type === "assistant" || row.type === "system" && row.subtype === "api_error") latestMessage = row.uuid;
+  }
+  if (!requests.size || !schemaErrors) throw new ClaudeNativeProtocolError("stale_result", "Claude worktree exhaustion has no original native schema errors");
+  return { calls, responses, rejected };
+}
+function projectClaudeFrozenSchemaFailure(history, source, original, options) {
+  const { sessionId, userUuid, model, prompt, allowedTools, init, echo, result } = options;
+  if (init.session_id !== sessionId || init.model !== model) {
+    throw new ClaudeNativeProtocolError("stale_result", "Claude complete native result lost its version, model or process-stop identity");
+  }
+  const requests = history.filter((row) => row.type === "api-request");
+  const shapes = history.filter((row) => row.type === "api-request-shape");
+  const summaryIds = new Set(Array.from(checkClaudeHistoryChain(history, original)).filter((row) => row.compactSummary).map((row) => row.uuid));
+  const companions = claudeOutputLimitCompanions(history, original);
+  const unknownUser = history.some((row) => {
+    if (row.type !== "user" || row.uuid === userUuid || summaryIds.has(row.uuid) || companions.has(
+      /** @type {string} */
+      row.uuid
+    )) return false;
+    if (row.promptId !== original.promptId || !row.sourceToolAssistantUUID || row.parentUuid !== row.sourceToolAssistantUUID || row.message?.role !== "user" || !Array.isArray(row.message.content) || !row.message.content.length) return true;
+    const assistant = history.find((candidate) => candidate.type === "assistant" && candidate.uuid === row.sourceToolAssistantUUID);
+    const assistantBlocks = assistant?.message?.content;
+    return row.message.content.some((block) => block.type !== "tool_result" || !Array.isArray(assistantBlocks) || !assistantBlocks.some((call) => call.type === "tool_use" && call.id === block.tool_use_id));
+  });
+  const allowedShapeTools = [...allowedTools, "DeferredToolPlaceholder"];
+  const toolShapeMatches = (row) => shapes.some((shape) => shape.shapeHash === row.shapeHash && shape.placeholderValid && shape.toolNames && allowedTools.every((name) => shape.toolNames?.includes(name)) && shape.toolNames.every((name) => allowedShapeTools.includes(name)));
+  if (result.type !== "result" || result.subtype !== "error_max_structured_output_retries" || result.is_error !== true || !claudeTerminalMatchesIdentity(result, { sessionId, userUuid }) || echo.uuid !== userUuid || echo.session_id !== sessionId || original.type !== "user" || original.uuid !== userUuid || !original.promptId || original.parentUuid !== null || !original.message || JSON.stringify(original.message) !== JSON.stringify(echo.message) || JSON.stringify(original.message) !== JSON.stringify({ role: "user", content: [{ type: "text", text: prompt }] }) || JSON.stringify([...init.tools].sort()) !== JSON.stringify([...allowedTools].sort()) || !requests.length || requests[0].keep !== 0 || requests[0].base || !requests[0].tail?.includes(claudeMessageDigest(original.message)) || requests.some((row) => row.model !== model || !toolShapeMatches(row)) || unknownUser || history.some((row) => row.sessionId !== sessionId || row.type === "assistant" && Array.isArray(row.message?.content) && row.message.content.some((block) => !block.name || !allowedTools.includes(block.name)))) {
+    throw new ClaudeNativeProtocolError("stale_result", "Claude schema retry exhaustion lost its exact terminal, API, original user or isolated capability identity");
+  }
+  const blobs = claudeApiMessageBlobs(history), metadata = projectClaudeReplayApiSourceMetadata(source, sessionId, model);
+  const api = /* @__PURE__ */ new Map();
+  const observedShapes = /* @__PURE__ */ new Set(), assistants = /* @__PURE__ */ new Set(), compactSummaries = /* @__PURE__ */ new Set();
+  const users = /* @__PURE__ */ new Map();
+  const calls = /* @__PURE__ */ new Map();
+  const responses = /* @__PURE__ */ new Map();
+  const recoveries = [];
+  const originalHash = claudeMessageDigest(original.message);
+  const originalBlocksHash = claudeMessageDigest({ role: "user", content: claudeMessageBlocks(original.message) });
+  for (const row of history) {
+    if (row.type === "system") continue;
+    if (row.compactSummary) {
+      const { messageDigest } = row.compactSummary;
+      compactSummaries.add(messageDigest);
+      for (const recovery of recoveries) {
+        if (recovery.consumed) {
+          recovery.summaries.add(messageDigest);
+          recovery.hashes.add(messageDigest);
+        }
+      }
+      continue;
+    }
+    const uuid = (
+      /** @type {string} */
+      row.uuid
+    );
+    if (row.turnCompanion && !companions.has(uuid)) {
+      throw new ClaudeNativeProtocolError("stale_result", "Claude schema retry exhaustion cannot classify unknown recovery user inputs");
+    }
+    if (row.type === "api-request-blob" && row.compactSummaryDigest && !compactSummaries.has(row.compactSummaryDigest)) {
+      throw new ClaudeNativeProtocolError("stale_result", "Claude API string message is not an observed same-turn compact summary");
+    }
+    if (row.type === "api-request-shape") observedShapes.add(
+      /** @type {string} */
+      row.shapeHash
+    );
+    if (row.type === "assistant") {
+      if (!row.requestRef || !api.has(row.requestRef)) {
+        throw new ClaudeNativeProtocolError("stale_result", "Claude assistant has no preceding actual API request");
+      }
+      consumeClaudeRecoveryRequest(recoveries, row.requestRef);
+      assistants.add(uuid);
+      for (
+        const block of
+        /** @type {HistoryBlock[]} */
+        row.message?.content
+      ) {
+        if (!block.id || calls.has(block.id)) throw new ClaudeNativeProtocolError("stale_result", "Claude schema failure reused a native tool call identity");
+        calls.set(block.id, row);
+      }
+    }
+    if (row.type === "user") {
+      const recovery = companions.get(uuid);
+      const message = (
+        /** @type {HistoryMessage} */
+        row.message
+      );
+      if (recovery) {
+        recoveries.push(recovery);
+        users.set(uuid, message);
+        continue;
+      }
+      if (row.uuid !== userUuid) {
+        for (
+          const block of
+          /** @type {HistoryBlock[]} */
+          message.content
+        ) {
+          const callId = (
+            /** @type {string} */
+            block.tool_use_id
+          );
+          const call = calls.get(callId);
+          if (!call || responses.has(callId) || call.uuid !== row.sourceToolAssistantUUID || call.uuid !== row.parentUuid) {
+            throw new ClaudeNativeProtocolError("stale_result", "Claude schema failure tool reply has no preceding exact native call");
+          }
+          responses.set(callId, block);
+        }
+      }
+      users.set(uuid, message);
+    }
+    if (row.type === "api-request") {
+      const hashes = claudeApiRequestHashes(row, api, observedShapes, model);
+      const id = (
+        /** @type {string} */
+        row.id
+      );
+      const requestSources = metadata.get(id);
+      for (const digest of hashes) {
+        const inputSource = requestSources?.messages.get(digest);
+        if (!requestSources || !inputSource || inputSource.ordinal >= requestSources.ordinal) {
+          throw new ClaudeNativeProtocolError("stale_result", "Claude actual API input has no prior exact role source");
+        }
+        if (inputSource.role !== "user") {
+          if (inputSource.kind === "transcript-prefix" && inputSource.sourceUuids.some((uuid2) => !assistants.has(uuid2))) {
+            throw new ClaudeNativeProtocolError("stale_result", "Claude assistant source has no preceding public native identity");
+          }
+          continue;
+        }
+        const blob = blobs.get(digest);
+        const summaryAliases = [...blob?.summaries ?? []].filter((hash) => compactSummaries.has(hash));
+        if (compactSummaries.has(digest) || summaryAliases.length) {
+          if (blob) claudeApiToolResultIds(blob.content, responses);
+          for (const recovery of recoveries) {
+            if (recovery.summaries.has(digest) || summaryAliases.some((hash) => recovery.summaries.has(hash))) recovery.hashes.add(digest);
+          }
+          continue;
+        }
+        let content = blob?.content;
+        if (inputSource.kind === "transcript-prefix") {
+          content = inputSource.sourceUuids.flatMap((uuid2) => {
+            const message = users.get(uuid2);
+            if (!message || !Array.isArray(message.content) && uuid2 !== userUuid && !companions.has(uuid2)) {
+              throw new ClaudeNativeProtocolError("stale_result", "Claude user source UUID has no preceding authenticated public content");
+            }
+            return claudeMessageBlocks(message);
+          });
+        }
+        if (!users.has(userUuid) || !Array.isArray(content) || !content.length || claudeApiSourceDigest({ role: "user", content }) !== digest || inputSource.kind === "cas" && blob && (!blob.canonical || blob.summaries.size)) {
+          throw new ClaudeNativeProtocolError("stale_result", "Claude actual API user message has no observed original prompt or exact tool reply source");
+        }
+        const matching = matchingClaudeRecoveries(recoveries, content, prompt);
+        if (content.some((block) => block.type === "text") && digest !== originalHash && digest !== originalBlocksHash && !matching.length) {
+          throw new ClaudeNativeProtocolError("stale_result", "Claude actual API user message contains unobserved recovery text");
+        }
+        for (const recovery of matching) recovery.hashes.add(digest);
+        claudeApiToolResultIds(content, responses);
+      }
+      api.set(id, hashes);
+      recordClaudeRecoveryRequest(recoveries, row, hashes);
+    }
+  }
+  if (recoveries.some((recovery) => !recovery.consumed)) {
+    throw new ClaudeNativeProtocolError("stale_result", "Claude recovery companion has no new exact actual API consumer");
+  }
+  return { calls, responses };
+}
 function claudeStructuredOutputError(callName, reply) {
   if (callName !== "StructuredOutput" || reply.is_error !== true || typeof reply.content !== "string" || !reply.content.startsWith(structuredOutputErrorPrefix)) return void 0;
   return [...reply.content.slice(structuredOutputErrorPrefix.length).matchAll(/(?:^|, )(\/[A-Za-z0-9_/-]{0,160}): (must be (?:array|object|string|number|integer|boolean|null)|must NOT have more than \d{1,8} items|must have required property '[A-Za-z0-9_-]{1,80}')(?=, | \(got \d+\)|$)/g)].slice(0, 12).map((match) => ({ path: match[1], error: match[2] }));
+}
+function claudeSchemaRetryDiagnostics(calls, responses) {
+  return [...responses].flatMap(([callId, reply]) => {
+    const content = calls.get(callId)?.message?.content;
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(callId) || !Array.isArray(content)) return [];
+    const tool = content.find((block) => block.id === callId && block.name === "StructuredOutput");
+    const fields = claudeStructuredOutputError(tool?.name, reply);
+    return fields?.length ? [{ callId, fields }] : [];
+  }).slice(-5);
+}
+function claudeWorktreeTerminal(result) {
+  const subtype = result.subtype === "error_max_structured_output_retries" ? "schema_exhausted" : result.subtype === "success" ? "success" : "other";
+  const nativeResult = result.type === "result";
+  return {
+    subtype,
+    isSuccess: nativeResult && subtype === "success" && result.is_error === false,
+    isSchemaExhausted: nativeResult && subtype === "schema_exhausted" && result.is_error === true,
+    isStoppedError: nativeResult && subtype === "success" && result.is_error === true && result.structured_output === void 0,
+    mayRecoverFrozenRead: subtype === "schema_exhausted" || subtype === "success" && !result.is_error && result.structured_output !== void 0,
+    reportedError: typeof result.is_error === "boolean" ? result.is_error : (
+      /** @type {const} */
+      "invalid"
+    ),
+    output: result.structured_output
+  };
+}
+function claudeTerminalMatchesIdentity(result, { sessionId, userUuid }) {
+  return result.session_id === sessionId && result.user_message_uuid === userUuid && Array.isArray(result.user_message_uuids) && result.user_message_uuids.length === 1 && result.user_message_uuids[0] === userUuid;
 }
 function claudeProtocolObservation(event, ordinal) {
   const init = event.type === "system" && event.subtype === "init";
@@ -578,7 +1309,7 @@ function interpretClaudeStreamEvent(event, options) {
 function isClaudeRateLimitTerminal(result, exit) {
   return result.type === "result" && result.subtype === "success" && result.is_error === true && result.apiErrorStatus === 429 && exit.code === 1 && exit.signal === null;
 }
-var CLAUDE_LEGACY_CLI_VERSION, CLAUDE_VERSION_ARGS, authenticationKeys, isolatedSettings, streamArgs, ClaudeNativeProtocolError, outputLimitRecoveryText, historyRecordKeys, historyRowTypes, structuredOutputErrorPrefix;
+var CLAUDE_LEGACY_CLI_VERSION, CLAUDE_VERSION_ARGS, authenticationKeys, isolatedSettings, streamArgs, ClaudeNativeProtocolError, truncatedRecoveryText, outputLimitRecoveryText, structuredOutputEnforcement, recoveryTexts, historyRecordKeys, historyRowTypes, structuredOutputErrorPrefix;
 var init_claude = __esm({
   "src/llm_manager/native/claude.mjs"() {
     init_cli_probe();
@@ -601,7 +1332,10 @@ var init_claude = __esm({
         this.code = code;
       }
     };
+    truncatedRecoveryText = "Your response above was cut off mid-stream. Resume directly from where it stops \u2014 no apology, no recap. If none of it survived, answer the request from the start.";
     outputLimitRecoveryText = "Output token limit hit. Resume directly \u2014 no apology, no recap of what you were doing. Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.";
+    structuredOutputEnforcement = "[structured-output-enforce] You MUST call the StructuredOutput tool to complete this request. Call this tool now.";
+    recoveryTexts = [truncatedRecoveryText, outputLimitRecoveryText];
     historyRecordKeys = ["type", "sessionId", "uuid", "parentUuid", "promptId", "requestRef", "sourceToolAssistantUUID", "isMeta", "turnCompanion"];
     historyRowTypes = ["user", "assistant", "attachment", "api-request", "api-request-shape", "api-request-blob"];
     structuredOutputErrorPrefix = "Output does not match required schema: ";
@@ -741,7 +1475,7 @@ function codexFrozenToolDefinition() {
 function codexFrozenToolOutputTokenLimit(maxResponseBytes) {
   return Math.max(1e4, codexTextTokenCost(maxResponseBytes));
 }
-function codexFrozenPrompt({ prompt, taskIsFrozen, contextDigest, maxReadBytes, maxResponseBytes, entries, plans }) {
+function codexFrozenPromptIndex({ contextDigest, maxReadBytes, maxResponseBytes, entries, plans }) {
   const toolOutputTokenLimit = codexFrozenToolOutputTokenLimit(maxResponseBytes);
   const execMaxOutputTokens = codexExecMaxOutputTokens(toolOutputTokenLimit);
   const readBatches = [];
@@ -757,6 +1491,10 @@ function codexFrozenPrompt({ prompt, taskIsFrozen, contextDigest, maxReadBytes, 
     }
   }
   const index = JSON.stringify({ tool: frozenToolName, contextDigest, maxReadBytes, toolOutputTokenLimit, execMaxOutputTokens, entries, readBatches });
+  return { index, toolOutputTokenLimit };
+}
+function codexFrozenPrompt({ prompt, taskIsFrozen, ...options }) {
+  const { index, toolOutputTokenLimit } = codexFrozenPromptIndex(options);
   const instructions = taskIsFrozen ? `The complete original task, instructions, and context are frozen without truncation in entry task. Read its entire required content using ${frozenToolName}, then follow that original task and return its requested structured final answer. Byte offsets are end-exclusive; continue from the response's original endByte, never decodedEndByte. No shell, paths or live data are available.` : prompt;
   return { prompt: `${instructions}
 ${index}`, toolOutputTokenLimit };
@@ -822,6 +1560,57 @@ function decodeRolloutLine(line) {
     throw new CodexNativeProtocolError("stale_result", "Codex frozen rollout contains invalid JSONL");
   }
 }
+function isCodexVisibleOutput(output) {
+  return typeof output === "string" || Array.isArray(output) && output.every((block) => object(block).type === "input_text" && typeof object(block).text === "string");
+}
+function observeFrozenHostResponse(record2, payload, { calls, returned, outputs }, legacy = false) {
+  const callId = (
+    /** @type {string} */
+    payload.call_id
+  );
+  const validId = legacy ? Boolean(callId) : typeof callId === "string" && callId.length > 0;
+  if (payload.type === "custom_tool_call" || payload.type === "function_call") {
+    const name2 = payload.type === "custom_tool_call" ? "exec" : "wait";
+    if (payload.name !== name2 || !validId || calls.has(callId))
+      throw new CodexNativeProtocolError("stale_result", legacy ? "frozen visible history contains an invalid or repeated host call" : "Codex frozen rollout contains an invalid or repeated host call");
+    calls.set(callId, name2);
+    return;
+  }
+  if (payload.type !== "custom_tool_call_output" && payload.type !== "function_call_output") return;
+  const name = payload.type === "custom_tool_call_output" ? "exec" : "wait";
+  const { output } = payload;
+  const limit = object(record2.metadata).fallback_token_limit_override;
+  if (!validId || calls.get(callId) !== name || returned.has(callId) || !isCodexVisibleOutput(output) || typeof limit !== "number" || !Number.isSafeInteger(limit) || limit <= 0)
+    throw new CodexNativeProtocolError("stale_result", legacy ? "frozen visible output is not bound to its exact exec/wait call and history budget" : "Codex frozen rollout output does not match its exact host call and history budget");
+  returned.add(callId);
+  outputs.push({ callId, output, historyTokenLimit: limit });
+}
+function codexReadLegacyFrozenVisibleOutputs(rollout, turnId) {
+  if (!rollout.endsWith("\n"))
+    throw new CodexNativeProtocolError("not_materialized", "exact frozen visible rollout has not flushed its final record yet");
+  const responses = { calls: /* @__PURE__ */ new Map(), returned: /* @__PURE__ */ new Set(), outputs: [] };
+  let current;
+  let completed = false;
+  for (const line of rollout.split("\n")) {
+    if (!line.trim()) continue;
+    const record2 = JSON.parse(line);
+    const payload = object(record2.payload);
+    if (record2.type === "turn_context" || record2.type === "event_msg" && payload.type === "task_started")
+      current = payload.turn_id;
+    if (record2.type === "event_msg" && payload.type === "task_complete" && payload.turn_id === turnId) {
+      if (current !== turnId)
+        throw new CodexNativeProtocolError("stale_result", "frozen visible completion does not belong to the active exact turn");
+      completed = true;
+      current = void 0;
+    }
+    if (current === turnId && record2.type === "response_item") observeFrozenHostResponse(record2, payload, responses, true);
+  }
+  if (!completed)
+    throw new CodexNativeProtocolError("not_materialized", "exact frozen visible rollout has not persisted its completed turn yet");
+  if (responses.returned.size !== responses.calls.size)
+    throw new CodexNativeProtocolError("stale_result", "frozen visible history contains an exec call without its output");
+  return responses.outputs;
+}
 function decodeRollout(bytes, { threadId, turnId, cwd }, requireCompleted) {
   if (bytes.at(-1) !== 10)
     throw new CodexNativeProtocolError("not_materialized", "Codex frozen rollout has not flushed its last record");
@@ -836,9 +1625,7 @@ function decodeRollout(bytes, { threadId, turnId, cwd }, requireCompleted) {
   const meta = object(header.payload);
   if (header.type !== "session_meta" || meta.id !== threadId || meta.cwd !== cwd || meta.parent_thread_id != null)
     throw new CodexNativeProtocolError("stale_result", "Codex frozen rollout does not identify the exact root thread and workspace");
-  const calls = /* @__PURE__ */ new Map();
-  const returned = /* @__PURE__ */ new Set();
-  const outputs = [];
+  const responses = { calls: /* @__PURE__ */ new Map(), returned: /* @__PURE__ */ new Set(), outputs: [] };
   const turns = /* @__PURE__ */ new Set();
   const prompts = [];
   const finals = /* @__PURE__ */ new Set();
@@ -862,30 +1649,15 @@ function decodeRollout(bytes, { threadId, turnId, cwd }, requireCompleted) {
     if (current !== turnId) continue;
     if (record2.type === "event_msg" && payload.type === "user_message" && typeof payload.message === "string") prompts.push(payload.message);
     if (record2.type === "event_msg" && payload.type === "agent_message" && payload.phase === "final_answer" && typeof payload.message === "string" && payload.message) finals.add(payload.message);
-    if (record2.type !== "response_item") continue;
-    if (payload.type === "custom_tool_call" || payload.type === "function_call") {
-      const name2 = payload.type === "custom_tool_call" ? "exec" : "wait";
-      if (payload.name !== name2 || typeof payload.call_id !== "string" || !payload.call_id || calls.has(payload.call_id))
-        throw new CodexNativeProtocolError("stale_result", "Codex frozen rollout contains an invalid or repeated host call");
-      calls.set(payload.call_id, name2);
-      continue;
-    }
-    if (payload.type !== "custom_tool_call_output" && payload.type !== "function_call_output") continue;
-    const name = payload.type === "custom_tool_call_output" ? "exec" : "wait";
-    const { call_id: callId, output } = payload;
-    const limit = object(record2.metadata).fallback_token_limit_override;
-    if (typeof callId !== "string" || calls.get(callId) !== name || returned.has(callId) || typeof limit !== "number" || !Number.isSafeInteger(limit) || limit <= 0 || !(typeof output === "string" || Array.isArray(output) && output.every((block) => object(block).type === "input_text" && typeof object(block).text === "string")))
-      throw new CodexNativeProtocolError("stale_result", "Codex frozen rollout output does not match its exact host call and history budget");
-    returned.add(callId);
-    outputs.push({ callId, output, historyTokenLimit: limit });
+    if (record2.type === "response_item") observeFrozenHostResponse(record2, payload, responses);
   }
   if (turns.size && !turns.has(turnId))
     throw new CodexNativeProtocolError("stale_result", "Codex frozen rollout contains a different turn");
   if (requireCompleted && !completed)
     throw new CodexNativeProtocolError("not_materialized", "Codex frozen rollout has not persisted its exact completed turn");
-  if (completed && returned.size !== calls.size)
+  if (completed && responses.returned.size !== responses.calls.size)
     throw new CodexNativeProtocolError("stale_result", "Codex frozen rollout contains a completed host call without its output");
-  return { outputs, turns, prompts, finals };
+  return { outputs: responses.outputs, turns, prompts, finals };
 }
 function codexReadFrozenRollout(options) {
   const source = readRolloutFile(options.path);
@@ -894,20 +1666,22 @@ function codexReadFrozenRollout(options) {
     throw new CodexNativeProtocolError("stale_result", "Codex frozen rollout does not identify the exact turn");
   return { path: source.path, archived: basename(dirname(source.path)) === "archived_sessions", outputs: history.outputs };
 }
-function codexValidateFrozenVisibility(outputs, toolOutputTokenLimit, expectedResponses) {
+function codexValidateFrozenVisibility(outputs, toolOutputTokenLimit, expectedResponses, legacy = false) {
   const budget = codexExecMaxOutputTokens(toolOutputTokenLimit);
   const callIds = /* @__PURE__ */ new Set();
   const texts = /* @__PURE__ */ new Set();
+  const invalidBudget = legacy ? "frozen outer output exceeds or differs from its actual fixed history budget" : "Codex frozen model-visible body differs from its fixed history budget";
   for (const { callId, output, historyTokenLimit } of outputs) {
+    if (!callId || callIds.has(callId) || historyTokenLimit !== budget || !isCodexVisibleOutput(output))
+      throw new CodexNativeProtocolError("stale_result", invalidBudget);
     const bodies = typeof output === "string" ? [output] : output.map((block) => block.text);
     const cost = bodies.reduce((total, body) => total + codexTextTokenCost(Buffer.byteLength(body, "utf8")), 0);
-    if (!callId || callIds.has(callId) || historyTokenLimit !== budget || cost > budget)
-      throw new CodexNativeProtocolError("stale_result", "Codex frozen model-visible body differs from its fixed history budget");
+    if (cost > budget) throw new CodexNativeProtocolError("stale_result", invalidBudget);
     callIds.add(callId);
     for (const body of bodies) texts.add(body);
   }
   if (expectedResponses.some((response) => !texts.has(response)))
-    throw new CodexNativeProtocolError("stale_result", "Codex frozen body was not returned verbatim in the exact model-visible history");
+    throw new CodexNativeProtocolError("stale_result", legacy ? "frozen response was not returned verbatim in the exact model-visible exec output" : "Codex frozen body was not returned verbatim in the exact model-visible history");
 }
 function readArchive(options, path, turn, items) {
   if (!options.generation || turn.id !== options.turnId || typeof turn.status !== "string" || !["completed", "failed", "interrupted"].includes(turn.status) || options.prompt !== void 0 && !codexFrozenPromptMatches(items, options.prompt))
@@ -1006,6 +1780,7 @@ __export(codex_exports, {
   codexBuildFrozenCatalog: () => codexBuildFrozenCatalog,
   codexDecodeFrozenItems: () => codexDecodeFrozenItems,
   codexFrozenPrompt: () => codexFrozenPrompt,
+  codexFrozenPromptIndex: () => codexFrozenPromptIndex,
   codexFrozenToolDefinition: () => codexFrozenToolDefinition,
   codexFrozenToolOutputTokenLimit: () => codexFrozenToolOutputTokenLimit,
   codexNativeModel: () => codexNativeModel,
@@ -1018,6 +1793,7 @@ __export(codex_exports, {
   codexPersistentSocketPaths: () => codexPersistentSocketPaths,
   codexPersistentTerminalError: () => terminalError,
   codexReadFrozenRollout: () => codexReadFrozenRollout,
+  codexReadLegacyFrozenVisibleOutputs: () => codexReadLegacyFrozenVisibleOutputs,
   codexValidateFrozenVisibility: () => codexValidateFrozenVisibility,
   verifyCodexFrozenArchive: () => verifyCodexFrozenArchive
 });
@@ -1766,6 +2542,7 @@ __export(cursor_exports, {
   cursorAcpInitialize: () => cursorAcpInitialize,
   cursorLaunchArgs: () => cursorLaunchArgs,
   cursorModelArgument: () => cursorModelArgument,
+  cursorTerminalCancelled: () => cursorTerminalCancelled,
   cursorTerminalCompleted: () => cursorTerminalCompleted,
   cursorUsageLimitNotice: () => cursorUsageLimitNotice,
   encodeCursorAcpPacket: () => encodeCursorAcpPacket,
@@ -1785,6 +2562,9 @@ function inspectCursorCliVersion(launch) {
 }
 function cursorTerminalCompleted(output) {
   return output?.stopReason === "end_turn";
+}
+function cursorTerminalCancelled(output) {
+  return output?.stopReason === "cancelled";
 }
 function cursorModelArgument(value) {
   if (!value.trim() || value.includes("\0")) {
@@ -1996,6 +2776,7 @@ __export(grok_exports, {
   grokInvocationEnvironment: () => grokInvocationEnvironment,
   grokInvocationFlags: () => grokInvocationFlags,
   grokNativeModel: () => grokNativeModel,
+  grokSettledOutputMatches: () => grokSettledOutputMatches,
   grokStderrHasQuotaExhaustion: () => grokStderrHasQuotaExhaustion,
   grokStreamingArguments: () => grokStreamingArguments,
   grokSupportsAcp: () => grokSupportsAcp,
@@ -2020,6 +2801,11 @@ function grokTerminalCompleted(terminal) {
 }
 function grokCompletedTerminalEvidence(terminal) {
   return grokTerminalCompleted(terminal) && Array.isArray(terminal.models) && terminal.models.length > 0 && terminal.models.every((model) => typeof model === "string" && !!model.trim());
+}
+function grokSettledOutputMatches(output, request) {
+  const terminal = output?.terminal;
+  if (!terminal || terminal.sessionId !== request.sessionId || terminal.cwd !== request.cwd || typeof terminal.requestId !== "string" || !terminal.requestId.trim() || request.promptId !== void 0 && terminal.requestId !== request.promptId || !grokCompletedTerminalEvidence(terminal) || typeof output?.text !== "string") return false;
+  return request.nativeSchema ? output.structuredOutput === "present" || output.structuredOutput === "missing" : output.structuredOutput === void 0;
 }
 function describeGrokStructuredError(error, useAcp) {
   if (!(error instanceof GrokAcpProtocolError)) return void 0;
@@ -2386,6 +3172,7 @@ var zcode_exports = {};
 __export(zcode_exports, {
   ZCodeNativeTurnFailedError: () => ZCodeNativeTurnFailedError,
   ZCodeProtocolError: () => ZCodeProtocolError,
+  assertZCodeMcpRequestContext: () => assertZCodeMcpRequestContext,
   assertZCodeModelSnapshot: () => assertZCodeModelSnapshot,
   decodeZCodeJsonText: () => decodeZCodeJsonText,
   decodeZCodeStructuredText: () => decodeZCodeStructuredText,
@@ -2404,6 +3191,7 @@ __export(zcode_exports, {
   zcodeEventCollector: () => zcodeEventCollector,
   zcodeIdleObservation: () => zcodeIdleObservation,
   zcodeIsTerminal: () => zcodeIsTerminal,
+  zcodeMcpClientMatches: () => zcodeMcpClientMatches,
   zcodeMessages: () => zcodeMessages,
   zcodeNativeConfigModel: () => zcodeNativeConfigModel,
   zcodeNativeConfigSelection: () => zcodeNativeConfigSelection,
@@ -2415,6 +3203,7 @@ __export(zcode_exports, {
   zcodeProofEvent: () => zcodeProofEvent,
   zcodeProtocolLine: () => zcodeProtocolLine,
   zcodeProviderUsage: () => zcodeProviderUsage,
+  zcodeReplayTerminal: () => zcodeReplayTerminal,
   zcodeRequireSession: () => zcodeRequireSession,
   zcodeRpc: () => zcodeRpc,
   zcodeRuntimeConfiguration: () => zcodeRuntimeConfiguration,
@@ -2464,6 +3253,29 @@ function zcodeTerminalFailure(terminal, worktree, managed) {
     error?.attribution,
     worktree && managed && isZCodePublicHttp429(error)
   );
+}
+function zcodeReplayTerminal(terminal) {
+  if (terminal.type === "turn.failed") {
+    const error = (
+      /** @type {NativeFailure | undefined} */
+      terminal.payload.error
+    );
+    return {
+      kind: "failed",
+      pipeFailure: error?.code === "EPIPE",
+      providerInputRejection: terminal.payload.turnPhase === "processing_input" && isZCodeProviderPipeFailure(error?.code, error?.attribution),
+      publicHttp429: isZCodePublicHttp429(error)
+    };
+  }
+  if (terminal.type === "turn.completed") {
+    const { resultType, response } = terminal.payload;
+    return {
+      kind: "completed",
+      result: resultType === "success" || resultType === "cancelled" ? resultType : "other",
+      hasResponse: typeof response === "string"
+    };
+  }
+  return { kind: "other" };
 }
 function isZCodeEventsRpcTimeout(execution) {
   return execution.state === "failed" && execution.errorCode === "native_rpc_timeout" && execution.error === nativeRpcTimeoutMessage("session/events");
@@ -2998,6 +3810,17 @@ function record(value) {
     value
   );
 }
+function zcodeMcpClientMatches(client, cliVersion) {
+  return client.name === "zcode" && client.version === cliVersion;
+}
+function assertZCodeMcpRequestContext(meta, { sessionId, turnId }) {
+  if (meta.session_id !== sessionId || meta.turn_id !== turnId) stale("MCP call differs from its original reader/session/turn");
+  const context = meta["com.zcode/request-context"];
+  if (context !== void 0) {
+    const nested = record(context);
+    if (nested.session_id !== sessionId || nested.turn_id !== turnId) stale("MCP nested request context differs");
+  }
+}
 function text(value) {
   if (typeof value !== "string" || !value) stale("native evidence requires a nonempty identity");
   return value;
@@ -3236,7 +4059,7 @@ init_zcode();
 import { spawn, spawnSync as spawnSync2 } from "node:child_process";
 import { realpathSync as realpathSync2 } from "node:fs";
 var nativeRuntimeVersion = 1;
-var nativeAdapterContract = 2;
+var nativeAdapterContract = 3;
 var commands = Object.freeze({
   claude: "claude",
   codex: "codex",
