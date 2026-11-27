@@ -12,21 +12,24 @@ import { freezeContext, frozenReadTool, readFrozenRange } from './frozen-context
 import { ZCODE_FROZEN_TOOL, type ZCodeFrozenWitness, type ZCodeNativeEvent } from './zcode-frozen-evidence.js'
 import { structuredExecutionPolicy, structuredRealmRoot, type StructuredExecution } from './session-structured-policy.js'
 import { sampleNativeWorktreeProcesses } from './native-worktree-runtime.js'
-import { assertZCodeModelSnapshot, assertZCodeSettledProviderFailure, assertZCodeStoppedDraftSource, decodeZCodeStructuredText, stopZCodeStructuredTurn, zcodeCapability, zcodeIdleObservation, zcodeNativeConfigModel, zcodeNativeConfigSelection, zcodeNativeModel, zcodeNativeSelection, zcodeProofEvent, zcodeRuntimeConfiguration, zcodeStructuredPrompt, zcodeStructuredTurn, ZCodeNativeTurnFailedError, type ZCodeStructuredExecution } from './zcode-structured.js'
+import { managedModel } from './llm-manager-route.js'
+import { assertZCodeSettledProviderFailure, assertZCodeStoppedDraftSource, loadZCodeNativeAdapter, stopZCodeStructuredTurn, zcodeCapability, zcodeNativeConfigSelection, zcodeNativeModel, zcodeNativeSelection, zcodeStructuredPrompt, zcodeStructuredTurn, ZCodeNativeTurnFailedError, type ZCodeStructuredExecution } from './zcode-structured.js'
 
-test('Native failure diagnostics expose only safe errno codes and exact turn identity', () => {
+test('Native failure diagnostics expose only safe errno codes and exact turn identity', async () => {
+  const { ZCodeNativeTurnFailedError } = await loadZCodeNativeAdapter()
   for (const code of ['EPIPE', 'UNTRUSTED_PROVIDER_BODY', '__proto__', null, { message: 'UNTRUSTED_PROVIDER_BODY' }]) {
     const error = new ZCodeNativeTurnFailedError('exact-session', 'exact-turn', code, false)
     assert.equal(error.code, 'failed'); assert.equal(error.threadId, 'exact-session'); assert.equal(error.turnId, 'exact-turn')
     assert.equal(error.message, `ZCode native turn failed (code=${code === 'EPIPE' ? 'EPIPE' : 'unavailable'})`)
-    assert.equal(error.rejectedOutput, undefined); assert.equal(error.failedWorktree, undefined)
+    assert(!('rejectedOutput' in error)); assert(!('failedWorktree' in error))
     const worktree = new ZCodeNativeTurnFailedError('exact-session', 'exact-turn', code, true)
     assert.equal(worktree.code, code === 'EPIPE' ? 'native_turn_transport_failed' : 'failed')
     assert.equal(worktree.message, error.message)
   }
 })
 
-test('provider business rejection requires the exact non-retryable EPIPE attribution', () => {
+test('provider business rejection requires the exact non-retryable EPIPE attribution', async () => {
+  const { ZCodeNativeTurnFailedError } = await loadZCodeNativeAdapter()
   const provider = { source: 'provider', errorPhase: 'stream', exceptionKind: 'provider_business', transport: 'sse', retryable: false, message: 'UNTRUSTED_PROVIDER_BODY' }
   for (const { attribution, expected } of [
     { attribution: provider, expected: 'unsupported' },
@@ -46,7 +49,7 @@ test('provider business rejection requires the exact non-retryable EPIPE attribu
     assert.equal(error.code, expected)
     assert.equal(error.message, expected === 'unsupported' ? 'ZCode provider rejected the native turn (retryable=false)' : 'ZCode native turn failed (code=EPIPE)')
     assert.equal(error.threadId, 'exact-session'); assert.equal(error.turnId, 'exact-turn')
-    assert.equal(error.rejectedOutput, undefined); assert.equal(error.failedWorktree, undefined)
+    assert(!('rejectedOutput' in error)); assert(!('failedWorktree' in error))
     for (const [code, worktree] of [['EACCES', true], ['UNTRUSTED_PROVIDER_BODY', true], ['EPIPE', false]] as const) {
       const ordinary = new ZCodeNativeTurnFailedError('exact-session', 'exact-turn', code, worktree, attribution)
       assert.equal(ordinary.code, 'failed')
@@ -64,13 +67,15 @@ test('ZCode namespace requires both exact provider and model', () => {
   for (const value of [undefined, 'GLM-5.3-Flash', 'zcode:GLM-5.3-Flash', 'zcode:bigmodel-api/', 'zcode:p/default', 'zcode:p/latest', 'zcode:p/m/other', 'zcode:p/model (context)', 'zcode:p/m\n']) assert.throws(() => zcodeNativeModel(value), { code: 'unsupported' })
 })
 
-test('ZCode text transport only unwraps one exact JSON shell without repairing data', () => {
+test('ZCode text transport only unwraps one exact JSON shell without repairing data', async () => {
+  const { decodeZCodeStructuredText } = await loadZCodeNativeAdapter()
   const output = { value: '中文\n原文', list: [1, 2] }
   for (const raw of [JSON.stringify(output), ` \n\`\`\`json\n${JSON.stringify(output)}\n\`\`\`\n`]) assert.deepEqual(decodeZCodeStructuredText(raw), output)
   for (const raw of ['answer: {"value":1}', '```JSON\n{}\n```', '```json\n{}\n```\n```json\n{}\n```', '{} {}', '```json\n{"value":}\n```', '```json\n{}\n```\nprose']) assert.throws(() => decodeZCodeStructuredText(raw), { code: 'structured_output_format_invalid' })
 })
 
-test('large strict JSON syntax failures retain only safe parser category and numeric location', () => {
+test('large strict JSON syntax failures retain only safe parser category and numeric location', async () => {
+  const { decodeZCodeStructuredText } = await loadZCodeNativeAdapter()
   const raw = `{\n"payload":"${'x'.repeat(13200)}PRIVATE_DIAGNOSTIC_CANARY"\n"next":1\n}`, position = raw.indexOf('"next"')
   for (const text of [raw, `\`\`\`json\n${raw}\n\`\`\``]) assert.throws(() => decodeZCodeStructuredText(text), error => {
     const failure = error as { code: string; message: string }
@@ -266,7 +271,8 @@ test('one deterministic native input carries the exact schema and the original b
   assert.notEqual(native, zcodeStructuredPrompt(prompt, { ...schema, additionalProperties: true }))
 })
 
-test('verified GLM high effort uses both native fields and requires the real settings selection', () => {
+test('verified GLM high effort uses both native fields and requires the real settings selection', async () => {
+  const { assertZCodeModelSnapshot } = await loadZCodeNativeAdapter()
   const selection = zcodeNativeSelection('zcode:bigmodel-api/GLM-5.3-Flash', 'high')
   assert.deepEqual(selection, { model: { providerId: 'bigmodel-api', modelId: 'GLM-5.3-Flash', options: { reasoningLevel: 'high' } }, thoughtLevel: 'high' })
   assert.deepEqual(zcodeNativeSelection('zcode:bigmodel-api/GLM-5.3-Flash'), { model: zcodeNativeModel('zcode:bigmodel-api/GLM-5.3-Flash') })
@@ -283,7 +289,8 @@ test('verified GLM high effort uses both native fields and requires the real set
   ]) assert.throws(() => assertZCodeModelSnapshot(corrupt(), selection), { code: 'unsupported' })
 })
 
-test('cli-config-v1 forwards opaque provider/model and effort to SDK readback', () => {
+test('cli-config-v1 forwards opaque provider/model and effort to SDK readback', async () => {
+  const { assertZCodeModelSnapshot, zcodeNativeConfigModel } = await loadZCodeNativeAdapter()
   const route = 'zcode:anthropic/claude-sonnet-4:custom+context'
   const model = { providerId: 'anthropic', modelId: 'claude-sonnet-4:custom+context' }
   assert.deepEqual(zcodeNativeConfigModel(route), model)
@@ -476,7 +483,8 @@ for (const profile of ['cli-config-v1-explicit', 'cli-config-v1-default', 'cli-c
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
 
-test('safe event projection keeps the original proof object and never reads transport headers', () => {
+test('safe event projection keeps the original proof object and never reads transport headers', async () => {
+  const { zcodeProofEvent } = await loadZCodeNativeAdapter()
   const base = { sessionId: 'session', turnId: 'turn', seq: 1, eventId: 'event', type: 'session.updated' }
   const safe = { ...base, payload: { toolCount: 1, providerId: 'bigmodel-api', modelId: 'GLM-5.3-Flash', iteration: 0 } }
   assert.equal(zcodeProofEvent(safe), safe)
@@ -488,7 +496,8 @@ test('safe event projection keeps the original proof object and never reads tran
   assert.equal(zcodeProofEvent(terminal), terminal)
 })
 
-test('fixed ZCode configuration closes plugins, hooks, memory, subagents and instruction discovery', () => {
+test('fixed ZCode configuration closes plugins, hooks, memory, subagents and instruction discovery', async () => {
+  const { zcodeRuntimeConfiguration } = await loadZCodeNativeAdapter()
   assert.deepEqual(zcodeRuntimeConfiguration(), { features: { mcp: true, subagent: false, memory: false, skill: false }, mcp: { servers: {} }, plugins: { enabled: false, dirs: [], enabledPlugins: {}, extraKnownMarketplaces: {}, options: {}, suppressedBuiltins: [] }, hooks: { enabled: false, events: {} }, skills: { enabled: false, includeInstructions: false, roots: [] } })
   assert.equal(zcodeCapability.cliVersion, '0.17.1')
   assert.match(zcodeCapability.cliSha256, /^[a-f0-9]{64}$/)
@@ -500,7 +509,8 @@ test('unstarted and unproven ZCode cancellation do not invent stop authority', a
   assert.equal((await stopZCodeStructuredTurn({ ...execution, turnStartRequested: true })).nativeStopped, false)
 })
 
-test('completed native turn may remain the projection history pointer while real activity is idle', () => {
+test('completed native turn may remain the projection history pointer while real activity is idle', async () => {
+  const { zcodeIdleObservation } = await loadZCodeNativeAdapter()
   const snapshot = { session: { sessionId: 'session', status: 'idle' }, runtime: { pendingRequestIds: [] }, projection: { currentTurnId: 'turn', status: 'idle', pendingPermissions: [], activeToolCalls: [{ toolCallId: 'reader', toolName: zcodeCapability.tool, status: 'completed' }] } }
   Object.defineProperty(snapshot, 'transport', { get: () => { throw new Error('transport payload must not be read') } })
   const state = zcodeIdleObservation(snapshot, { sessionId: 'session', turnId: 'turn' })
@@ -628,7 +638,7 @@ test('cold ZCode cancellation settles an unpublished worktree launch only after 
   assert.equal(existsSync(join(root, 'exit.json')), false)
 })
 
-for (const censusPhase of ['pre-exit', 'post-exit', 'late-protocol-error', 'startup-transient', 'post-idle-transient', 'post-idle-timeout', 'post-idle-persistent', 'mixed-message-protocol'] as const) test(`same-stack ZCode completion reuses its fresh stop proof while cold unsettled replay reobserves processes: ${censusPhase}`, { timeout: 30_000 }, async t => {
+for (const censusPhase of ['pre-exit', 'post-exit', 'late-protocol-error', 'startup-transient', 'post-idle-transient', 'post-idle-timeout', 'post-idle-persistent', 'mixed-message-protocol', 'managed-quota'] as const) test(censusPhase === 'managed-quota' ? 'Manager-authenticated ZCode quota keeps the host failure class and turn identity' : `same-stack ZCode completion reuses its fresh stop proof while cold unsettled replay reobserves processes: ${censusPhase}`, { timeout: 30_000 }, async t => {
   const directory = mkdtempSync(join(tmpdir(), 'zcode-worktree-census-repro-'))
   t.after(() => rmSync(directory, { recursive: true, force: true }))
   const bin = join(directory, 'bin'), workspace = join(directory, 'workspace'), realm = join(directory, 'realm'), id = 'fixture'
@@ -645,15 +655,16 @@ for (const censusPhase of ['pre-exit', 'post-exit', 'late-protocol-error', 'star
 const readline=require('node:readline'),cp=require('node:child_process');
 if(process.argv.includes('--version')){process.stdout.write('99.4.1\\n');process.exit(0)}
 const rl=readline.createInterface({input:process.stdin});let create,send,closeCount=0;
-const turnId='fixture-turn',response='{"ok":true}',model=()=>create.model;
+const turnId='fixture-turn',response='{"ok":true}',model=()=>create.model,quota=${censusPhase === 'managed-quota'};
 const reply=(id,result)=>process.stdout.write(JSON.stringify({id,result})+'\\n');
 rl.on('line',line=>{const request=JSON.parse(line),params=request.params||{};
 if(request.method==='session/create'){create=params;reply(request.id,{session:{sessionId:create.sessionId,model:create.model}})}
-else if(request.method==='session/read')reply(request.id,{session:{sessionId:create.sessionId,status:'idle',model:model()},settings:{model:{current:model()}},runtime:{pendingRequestIds:[]},projection:{currentTurnId:send?turnId:undefined,pendingPermissions:[],activeToolCalls:[]}})
+else if(request.method==='session/read')reply(request.id,{session:{sessionId:create.sessionId,status:send&&quota?'error':'idle',model:model()},settings:{model:{current:model()}},runtime:{pendingRequestIds:[]},projection:{currentTurnId:send?turnId:undefined,pendingPermissions:[],activeToolCalls:[]}})
 else if(request.method==='session/send'){if(send)throw new Error('fixture accepts one send');if(process.platform==='darwin'&&${JSON.stringify(censusPhase)}==='pre-exit'){const probe=cp.spawnSync('/usr/bin/git',['config','core.filemode','core.autocrlf'],{stdio:'ignore'});if(probe.error)throw probe.error;}send=params;reply(request.id,{accepted:true,sessionId:create.sessionId})}
 else if(request.method==='session/events'){const events=[
 {type:'turn.started',payload:{inputId:send.inputId,queryId:send.queryId,messageId:'fixture-user'}},
 {type:'session.updated',payload:{providerId:model().providerId,modelId:model().modelId,toolCount:0}},
+quota?{type:'turn.failed',payload:{inputId:send.inputId,error:{code:'EPIPE',attribution:{source:'provider',exceptionKind:'provider_business',retryable:false,statusCode:429},message:'PRIVATE_FIXTURE_BODY'}}}:
 {type:'turn.completed',payload:{inputId:send.inputId,resultType:'success',response,usage:{source:${JSON.stringify(censusPhase === 'pre-exit' ? 'provider' : 'estimate')},inputTokens:1100,outputTokens:134,cacheReadTokens:800,cacheWriteTokens:0,unretained:'SYNTHETIC_USAGE_METADATA'}}}
 ].map((event,index)=>({...event,eventId:'fixture-event-'+index,seq:index+1,sessionId:create.sessionId,turnId}));reply(request.id,{events})}
 else if(request.method==='session/messages'&&['startup-transient','mixed-message-protocol'].includes(${JSON.stringify(censusPhase)})){
@@ -694,7 +705,8 @@ else throw new Error('unexpected fixture RPC')
   execFileSync('git', ['commit', '-qm', 'fixture seed'], { cwd: workspace })
   const baseCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: workspace, encoding: 'utf8' }).trim()
   const tree = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: workspace, encoding: 'utf8' }).trim()
-  const model = 'zcode:fixture/model', prompt = 'Return the fixed fixture object.'
+  const model = censusPhase === 'managed-quota' ? managedModel({ kind: 'cli', vendor: 'zcode', routeId: 'a'.repeat(64), model: 'fixture/model' }) : 'zcode:fixture/model'
+  const prompt = 'Return the fixed fixture object.'
   const policy = structuredExecutionPolicy({ schema: { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false }, inputDigest: 'census-input', purpose: 'same-stack-stop-proof', timeoutMs: null, model, worktree: { baseCommit, tree, mode: 'read' }, nativeConfiguration: 'cli-config-v1' })
   const execution = { ...policy, version: 6, policy: 'native-worktree-v1', nativeConfiguration: 'cli-config-v1' } as ZCodeStructuredExecution
   let replayExecution = execution
@@ -748,10 +760,26 @@ else throw new Error('unexpected fixture RPC')
   process.env.HOME = directory
   process.env.TMPDIR = directory
   try {
-    const outcome = await zcodeStructuredTurn(realm, id, prompt, execution, callbacks, workspace).then(
+    const running = zcodeStructuredTurn(realm, id, prompt, execution, callbacks, workspace).then(
       result => ({ result }),
       error => ({ error: error as { code?: string; message?: string } }),
     )
+    if (censusPhase === 'pre-exit') {
+      await assert.rejects(zcodeStructuredTurn(realm, id, prompt, execution, {
+        onThread: async () => assert.fail('duplicate thread'), onTurn: async () => assert.fail('duplicate turn'), onNative: async () => assert.fail('duplicate native plan'),
+      }, workspace), { code: 'cancellation_pending' })
+    }
+    const outcome = await running
+    if (censusPhase === 'managed-quota') {
+      assert('error' in outcome && outcome.error instanceof ZCodeNativeTurnFailedError)
+      assert.equal(outcome.error.code, 'provider_quota_exhausted')
+      assert.equal(outcome.error.message, 'ZCode provider returned HTTP 429')
+      assert.equal(outcome.error.threadId, replayExecution.zcodeNative?.sessionId)
+      assert.equal(outcome.error.turnId, 'fixture-turn')
+      assert.equal(existsSync(join(root, 'messages.json')), false)
+      assert.equal(existsSync(completedPath), false)
+      return
+    }
     if (censusPhase === 'mixed-message-protocol') {
       assert('error' in outcome, 'legacy aliases must not authenticate a mixed Native message history')
       assert.deepEqual({ code: outcome.error.code, message: outcome.error.message }, { code: 'stale_result', message: 'ZCode worktree original native user/input differs' })
