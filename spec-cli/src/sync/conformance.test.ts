@@ -1,18 +1,19 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
-import test from 'node:test'
+import { delimiter, dirname, join } from 'node:path'
+import test, { type TestContext } from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { parseFrontmatter, parseParts } from '@spexcode/spec-core/contracts'
 import { runConformance } from './conformance.js'
-import type { ConformanceInput } from './conformance.js'
+import type { ConformanceInput, ConformanceResult } from './conformance.js'
 import type { ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import type { GenerationReview } from './generation-types.js'
 import { INTENT_AUTHORIZATION_PATH } from './intent-authorization.js'
 import type { IntentAuthorization, IntentAuthorizationCheck, RawIntentChange } from './intent-authorization.js'
 import { contentHash } from './snapshot.js'
+import { FROZEN_PROMPT_THRESHOLD_BYTES } from '../frozen-context.js'
 
 const specPath = '.spec/product/greeting/spec.md'
 const image = 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392'
@@ -88,6 +89,138 @@ function reviewer(change?: (review: GenerationReview, value: ReviewContext, requ
 }
 const noDocker = async (): Promise<never> => { throw new Error('fixture: Docker unavailable') }
 const evidence = (name: string): Pick<ConformanceInput, 'evidenceDirectory'> => process.env.SPEX_VERIFICATION_EVIDENCE_DIR ? { evidenceDirectory: mkdtempSync(join(process.env.SPEX_VERIFICATION_EVIDENCE_DIR, `${name}-`)) } : {}
+
+function publicCheck(t: TestContext, input: ConformanceInput, config: string): { status: number | null; result: ConformanceResult } {
+  const host = dirname(config), evidenceDirectory = mkdtempSync(join(tmpdir(), 'spex-conformance-public-'))
+  const callerDatabase = join(host, 'caller-sessions.sqlite')
+  t.after(() => {
+    const candidate = join(evidenceDirectory, 'candidate')
+    if (existsSync(candidate)) execFileSync('chmod', ['-R', 'u+w', candidate])
+    rmSync(evidenceDirectory, { recursive: true, force: true, maxRetries: 3 })
+  })
+  const cli = spawnSync(process.execPath, [
+    '--import', fileURLToPath(new URL('../../../scripts/test-home.mjs', import.meta.url)), '--import', import.meta.resolve('tsx'),
+    fileURLToPath(new URL('../cli.ts', import.meta.url)), 'sync', 'check', '--base', input.baseCommit, '--candidate', input.candidateCommit, '--policy', input.policyCommit, '--repository', input.repository, '--evidence-directory', evidenceDirectory,
+  ], { cwd: input.repository, env: { ...process.env, PATH: [host, '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(delimiter), SPEX_SESSION_DATABASE_PATH: callerDatabase, SPEX_LLM_MANAGER_CONFIG: config, SPEX_LLM_MANAGER_PYTHON: join(host, 'bridge'), SPEX_VERIFICATION_SSH_ALIAS: undefined, SPEX_VERIFICATION_SSH_ROOT: undefined, SPEX_VERIFICATION_SSH_DOCKER_ENDPOINT: undefined }, encoding: 'utf8', timeout: 30000 })
+  assert.ifError(cli.error)
+  assert.ok(cli.stdout, cli.stderr)
+  assert.equal(existsSync(callerDatabase), false, '公开命令不接触调用方会话数据库')
+  return { status: cli.status, result: JSON.parse(cli.stdout) as ConformanceResult }
+}
+
+function managerFixture(t: TestContext, selection: ConformanceResult['reviewRoute'] | null, settle = true) {
+  const host = mkdtempSync(join(tmpdir(), 'spex-conformance-manager-fixture-')), config = join(host, 'config.json'), log = join(host, 'calls.jsonl')
+  t.after(() => rmSync(host, { recursive: true, force: true }))
+  writeFileSync(config, JSON.stringify(selection))
+  writeFileSync(join(host, 'docker'), '#!/bin/sh\nexit 127\n', { mode: 0o700 })
+  writeFileSync(join(host, 'bridge'), `#!${process.execPath}
+const { appendFileSync, readFileSync } = require('node:fs')
+const message = JSON.parse(readFileSync(0, 'utf8'))
+appendFileSync('calls.jsonl', JSON.stringify(message) + '\\n')
+const value = message.action === 'resolve' ? JSON.parse(readFileSync(process.argv[5], 'utf8')) : message.action === 'reserve' ? {} : { outcome: message.outcome }
+process.stdout.write(JSON.stringify(message.action === 'settle' && !${settle} ? { ok: false, code: 'llm_manager_host_unavailable' } : { ok: true, value }))
+`, { mode: 0o700 })
+  return { host, config, calls: (): { action: string; route?: unknown; sessionId?: string; outcome?: string }[] => readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line)) }
+}
+
+test('公开 sync check 在 Manager 功能组没有就绪路线时拒绝使用旧默认模型', t => {
+  const repo = fixture(), manager = managerFixture(t, null)
+  t.after(() => rmSync(repo.root, { recursive: true, force: true }))
+  put(repo.root, 'src/greet.mjs', `${implementation}\n// reference refactor\n`)
+  const { result, status } = publicCheck(t, repo.input(save(repo.root)), manager.config)
+  assert.equal(status, 2, JSON.stringify(result.diagnostics))
+  assert.equal(result.status, 'unsupported')
+  assert.deepEqual(result.diagnostics.map(({ code }) => code), ['unsupported_llm_manager_no_ready_route'])
+  assert.equal(result.reviewExecution, 'native')
+  assert.equal(result.review, null)
+  assert.deepEqual(result.runs, [])
+  assert.equal(git(repo.root, ['worktree', 'list', '--porcelain']).match(/^worktree /gm)?.length, 1)
+  assert.deepEqual(manager.calls(), [{ action: 'resolve' }])
+})
+
+const cursorRoute = { routeId: 'a'.repeat(64), vendor: 'cursor', model: 'default', kind: 'cli' } as const
+
+for (const settle of [true, false]) test(`公开 sync check 的模拟 Manager 与 Cursor CLI ${settle ? '成功结算并回收' : '保留未能结算的回收原件'}`, t => {
+  const repo = fixture(), manager = managerFixture(t, cursorRoute, settle)
+  t.after(() => rmSync(repo.root, { recursive: true, force: true }))
+  const candidateSource = `${implementation}\n/* ${'x'.repeat(400 * 1024)} candidate content */\n`
+  put(repo.root, 'src/greet.mjs', candidateSource)
+  const candidate = save(repo.root)
+  git(repo.root, ['checkout', '-q', '--detach', repo.base])
+  put(repo.root, 'src/greet.mjs', 'uncommitted source must never be read\n')
+  const project = ['worktree list --porcelain', 'show-ref', 'status --porcelain'].map(command => git(repo.root, command.split(' ')))
+  writeFileSync(join(manager.host, 'cursor-agent'), String.raw`#!${process.execPath}
+const assert = require('node:assert/strict')
+const { execFileSync } = require('node:child_process')
+const { readFileSync } = require('node:fs')
+const { createInterface } = require('node:readline')
+if (process.argv[2] === '--version') { console.log('cursor-conformance-fixture'); process.exit(0) }
+assert.deepEqual(process.argv.slice(2), ['--workspace', process.cwd(), '--sandbox', 'enabled', '--trust', '--mode', 'ask', 'acp'])
+const sessionId = 'cursor-conformance-native'
+const send = packet => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...packet }) + '\n')
+createInterface({ input: process.stdin, crlfDelay: Infinity }).on('line', line => {
+  const { id, method, params } = JSON.parse(line)
+  if (method === 'initialize') send({ id, result: { protocolVersion: 1, authMethods: [] } })
+  else if (method === 'session/new') send({ id, result: { sessionId, modes: { currentModeId: 'ask', availableModes: [{ id: 'ask' }] } } })
+  else if (method === 'session/prompt') {
+    assert.equal(params.sessionId, sessionId)
+    const full = params.prompt[0].text.split('\n冻结完整输入:\n')[1].split('\n\nWork in the current Git worktree')[0]
+    const ctx = JSON.parse(full)
+    assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), ctx.identities.candidateCommit)
+    assert.equal(execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).trim(), ctx.identities.candidateTree)
+    assert.equal(ctx.identities.baseCommit, ${JSON.stringify(repo.base)})
+    assert.equal(ctx.identities.policyCommit, ${JSON.stringify(repo.base)})
+    assert.deepEqual(ctx.readSet.find(file => file.path === 'src/greet.mjs'), { path: 'src/greet.mjs', before: ${JSON.stringify(implementation)}, candidate: ${JSON.stringify(candidateSource)} })
+    assert.equal(readFileSync('src/greet.mjs', 'utf8'), ${JSON.stringify(candidateSource)})
+    const output = { inputId: ctx.inputId, candidateDigest: ctx.candidateDigest, checkedIds: ctx.scope.itemIds, verdict: 'accept', findings: [] }
+    send({ method: 'session/update', params: { sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: JSON.stringify(output) } } } })
+    send({ id, result: { stopReason: 'end_turn' } })
+  } else assert.fail('unexpected native ACP request ' + method)
+})
+`, { mode: 0o700 })
+  const { status, result } = publicCheck(t, repo.input(candidate), manager.config)
+  assert.equal(result.reviewExecution, 'native')
+  assert.deepEqual(result.reviewRoute, cursorRoute)
+  const realm = join(result.evidenceDirectory, readdirSync(result.evidenceDirectory).find(path => path.startsWith('review-'))!)
+  assert.ok(existsSync(join(realm, 'runtime', 'sessions.sqlite')))
+  assert.deepEqual(['worktree list --porcelain', 'show-ref', 'status --porcelain'].map(command => git(repo.root, command.split(' '))), project)
+  const calls = manager.calls(), sessionId = calls.find(call => call.action === 'reserve')?.sessionId
+  assert.ok(sessionId)
+  const reserve = { action: 'reserve', route: cursorRoute, sessionId }, complete = { action: 'settle', route: cursorRoute, sessionId, outcome: 'completed' }
+  const raw = JSON.parse(readFileSync(join(realm, 'native-result.json'), 'utf8'))
+  if (!settle) {
+    assert.equal(status, 1, JSON.stringify(result.diagnostics))
+    assert.deepEqual(calls, [{ action: 'resolve' }, reserve, complete, { ...complete, outcome: 'stopped' }])
+    assert.equal(result.status, 'recovery_required')
+    assert.deepEqual(result.diagnostics, [raw.diagnostic])
+    assert.equal(raw.diagnostic.code, 'native_review_recovery_required')
+    assert.deepEqual(result.runs, [])
+    assert.equal(git(join(realm, 'source'), ['worktree', 'list', '--porcelain']).match(/^worktree /gm)?.length, 2)
+    return
+  }
+  assert.equal(result.review?.verdict, 'accept', JSON.stringify(result.diagnostics))
+  assert.equal(result.trace?.threadId, 'cursor-conformance-native')
+  assert.equal(result.trace.sessionId, sessionId)
+  assert.deepEqual(calls, [{ action: 'resolve' }, reserve, complete])
+  assert.equal(existsSync(raw.result.worktree.worktreePath), false)
+  assert.equal(raw.result.worktree.headCommit, candidate)
+  assert.equal(status, 2, JSON.stringify(result.diagnostics))
+  assert.deepEqual(result.diagnostics.map(({ code }) => code), ['verification'], '模拟环境明确阻断 Docker 执行')
+})
+
+test('Manager 大正文缺少逐字读取证明时保留完整冻结输入并阻断派发', t => {
+  const repo = fixture(), manager = managerFixture(t, cursorRoute)
+  t.after(() => rmSync(repo.root, { recursive: true, force: true }))
+  const large = `${implementation}\n/* ${'x'.repeat(FROZEN_PROMPT_THRESHOLD_BYTES)} END-FROZEN-CONTEXT */\n`
+  put(repo.root, 'src/greet.mjs', large)
+  const { status, result } = publicCheck(t, repo.input(save(repo.root)), manager.config)
+  assert.equal(status, 2, JSON.stringify(result.diagnostics))
+  assert.deepEqual(result.diagnostics.map(({ code }) => code), ['unsupported_managed_frozen_reader'])
+  const frozen = JSON.parse(readFileSync(join(result.evidenceDirectory, 'input.json'), 'utf8')) as ReviewContext
+  assert.deepEqual(frozen.readSet.find(file => file.path === 'src/greet.mjs'), { path: 'src/greet.mjs', before: implementation, candidate: large })
+  assert.deepEqual(manager.calls(), [{ action: 'resolve' }])
+  assert.deepEqual(result.runs, [])
+})
 
 for (const mode of ['finite', 'unlimited', 'configured'] as const) test(`unlimited CI独审单次timeout ${mode} 保持有限且不依赖总cap`, async () => {
   const repo = fixture()

@@ -24,7 +24,9 @@ CI 不能依赖开发机数据库或候选自行提交的通过记录，也不�
 
 影响闭包中原始需求的新增、修改和删除必须通过 [[sync-intent-authorization]]，缺失或摘要不匹配在模型和容器执行前拒绝；结果保留每条路径与前后摘要。候选自带授权文件不能自批。匹配的受信登记、完整旧新原意、授权文件摘要及 policyCommit 进入独审冻结输入及其摘要。授权只证明所选政策批准精确意图差量，不证明实现正确，也不豁免结构、旧稳定测试、固定命令或 oracle。
 
-每次新建独立 native 请求，不回放先前会话通过结果。V2 使用 [[sync-candidate-review]] 与既有 readonly native structured adapter，完整绑定 base/candidate/policy/tree、范围和读集合摘要。完整上下文超过2MiB时复用 [[frozen-context-reader]] 无损读取与精确native history覆盖证明，不因内联大小unsupported或截断；不存在已验证语义/读取能力仍明确unsupported。测试可注入 runner，结果明确标记 injected；产品入口不接受传入 passed JSON。V3 仅复用 [[verification-executor]]，基线和候选 AC 分别按可信固定政策计划，再合并全部必需稳定 test ID；候选导出无 Git 和宿主认证依赖。旧命令与新政策命令均执行，无法登记的新政策变更明确阻塞。Docker 不可用、测试缺失/跳过/失败、独审拒绝与绑定不匹配都不能通过。
+每次新建独立 native 请求，不回放先前会话通过结果。V2 使用 [[sync-candidate-review]] 与既有 readonly native structured adapter，完整绑定 base/candidate/policy/tree、范围和读集合摘要。未启用 Manager 时沿用原默认模型，超过内联阈值的上下文复用 [[frozen-context-reader]] 无损读取和精确 native history 覆盖证明。测试可注入 runner，结果明确标记 injected，且不派发宿主选路；产品入口不接受传入 passed JSON。V3 仅复用 [[verification-executor]]，基线和候选 AC 分别按可信固定政策计划，再合并全部必需稳定 test ID；候选导出无 Git 和宿主认证依赖。旧命令与新政策命令均执行，无法登记的新政策变更明确阻塞。Docker 不可用、测试缺失/跳过/失败、独审拒绝与绑定不匹配都不能通过。
+
+独审的工作树、会话数据库与停止和归档原件留在本次独立证据目录，按原生停止与回收流程结算；无法证实结算时返回 `recovery_required`。宿主启用 [[sync-model-selection]] 的 LLM Manager 时，新独审从同一功能组选择并冻结路线，返回公开的 `reviewRoute`。托管独审使用 v6 只读原生工作树，固定实际 candidate commit/tree，并提交完整 base∪candidate 冻结输入。Manager 无就绪路线则 `unsupported`。超过 [[frozen-context-reader]] 的既有 512 KiB 内联阈值且当前 Manager 路线无法提供精确历史读取证明时，保留完整冻结输入并返回 `unsupported_managed_frozen_reader`。
 
 每次输出包含完整冻结输入身份、范围、真实审查 trace、容器结果与诊断；passed 只说明这次候选检查，不授予落盘或主分支同步状态。远端 required-check 必须由受保护目标版本 runner 启动，仓库 workflow 建议本身不证明保护设置已启用。
 
