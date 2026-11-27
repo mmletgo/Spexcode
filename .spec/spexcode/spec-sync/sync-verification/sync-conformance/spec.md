@@ -26,7 +26,7 @@ CI 不能依赖开发机数据库或候选自行提交的通过记录，也不�
 
 每次新建独立 native 请求，不回放先前会话通过结果。V2 使用 [[sync-candidate-review]] 与既有 readonly native structured adapter，完整绑定 base/candidate/policy/tree、范围和读集合摘要。未启用 Manager 时沿用原默认模型，超过内联阈值的上下文复用 [[frozen-context-reader]] 无损读取和精确 native history 覆盖证明。测试可注入 runner，结果明确标记 injected，且不派发宿主选路；产品入口不接受传入 passed JSON。V3 仅复用 [[verification-executor]]，基线和候选 AC 分别按可信固定政策计划，再合并全部必需稳定 test ID；候选导出无 Git 和宿主认证依赖。旧命令与新政策命令均执行，无法登记的新政策变更明确阻塞。Docker 不可用、测试缺失/跳过/失败、独审拒绝与绑定不匹配都不能通过。
 
-独审的工作树、会话数据库与停止和归档原件留在本次独立证据目录，按原生停止与回收流程结算；无法证实结算时返回 `recovery_required`。宿主启用 [[sync-model-selection]] 的 LLM Manager 时，新独审从同一功能组选择并冻结路线，返回公开的 `reviewRoute`。托管独审使用 v6 只读原生工作树，固定实际 candidate commit/tree，并提交完整 base∪candidate 冻结输入。Manager 无就绪路线则 `unsupported`。超过 [[frozen-context-reader]] 的既有 512 KiB 内联阈值且当前 Manager 路线无法提供精确历史读取证明时，保留完整冻结输入并返回 `unsupported_managed_frozen_reader`。
+独审的工作树、会话数据库与停止和归档原件留在本次独立证据目录，按原生停止与回收流程结算；无法证实结算时返回 `recovery_required`。宿主启用 [[sync-model-selection]] 的 LLM Manager 时，新独审从同一功能组选择并冻结路线，返回公开的 `reviewRoute`。托管独审固定实际 candidate commit/tree，并提交完整 base∪candidate 冻结输入。内联请求使用 v6 只读原生工作树。超过 [[frozen-context-reader]] 的既有 512 KiB 内联阈值时，原功能组以 `frozen-reader-v2` 能力选路，使用 [[structured-readonly-policy]] 的托管只读工作树和同轮完整可见性门禁。当前已可接入固定 Codex 原生能力；原组没有已验证能力的就绪路线时保留完整输入并返回 `unsupported_managed_frozen_reader`。
 
 托管独审收到正式额度失败时，先核对冻结创建载荷、原会话和轮次、精确只读停止及正式回收。沿原功能组和真实失败会话请求后继，由 Manager 核实该会话确已按额度结算。后继新建独立请求，保留原完整输入、候选 commit/tree、schema 和绑定。各次独审原件保存在各自证据目录，`reviewRoute` 记录最后选中的路线，trace 记录完成独审的实际会话。普通错误、身份漂移、未结算和待恢复均阻断续路。
 

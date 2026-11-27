@@ -1,10 +1,11 @@
 import { execFile, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { statSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { readFileSync, statSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { setTimeout as wait } from 'node:timers/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { readManagedRoute, type ManagedRoute } from './llm-manager-route.js'
-import type { NativeTokenUsage } from './session-structured-policy.js'
+import { managedFrozenCapability, readManagedRoute, type ManagedFrozenReader, type ManagedRoute } from './llm-manager-route.js'
+import type { FrozenReaderRuntime, NativeTokenUsage, StructuredExecution } from './session-structured-policy.js'
 
 const bridge = fileURLToPath(new URL('../llm-manager/host.py', import.meta.url))
 const installedSettingsPath = '/llm-manager/'
@@ -109,18 +110,66 @@ export function loadManagerNativeRuntime(): Promise<ManagerNativeRuntime> {
   return runtime
 }
 
+type NativeRecord = Record<string, unknown>
+export type ManagedPersistentCodexTurn = { id: string; status: string; error?: unknown }
+type PersistentCodexThread = { id: string; path?: string | null; turns?: Array<ManagedPersistentCodexTurn & { items?: NativeRecord[] }> }
+type ManagerPersistentCodex = {
+  initialize(clientName: string, version: string): Promise<void>
+  auditReadOnly(options: { cwd: string; readerRuntime?: FrozenReaderRuntime }): Promise<void>
+  startThread(options: { cwd: string; model?: string; dynamicTools?: readonly unknown[] }): Promise<PersistentCodexThread>
+  resumeThread(options: { threadId: string; cwd: string }): Promise<PersistentCodexThread>
+  startTurn(options: { threadId: string; cwd: string; prompt: string; schema: NativeRecord; model?: string; effort?: StructuredExecution['effort'] }): Promise<string>
+  readTurns(threadId: string, turnId?: string): Promise<ManagedPersistentCodexTurn[]>
+  readItems(threadId: string, turnId: string): Promise<NativeRecord[]>
+  readThread(threadId: string, includeTurns?: boolean): Promise<PersistentCodexThread>
+  refreshModels(): Promise<string[]>
+  listLoadedThreadIds(): Promise<string[]>
+  listThreads(cwd: string, archived: boolean): Promise<string[]>
+  archiveThread(threadId: string): Promise<void>
+  interrupt(threadId: string, turnId: string): Promise<void>
+  onCompleted(handler: (threadId: string, turn: ManagedPersistentCodexTurn) => void): void
+  onToolCall(handler: (call: NativeRecord) => Promise<unknown>): void
+  onFailure(handler: (error: Error & { code?: string }) => void): void
+  drainToolCalls(): Promise<void>
+  close(): void
+}
+type ManagerPersistentCodexModule = {
+  CodexPersistentAppServer: new (socketPath: string, requestTimeoutMs?: number) => ManagerPersistentCodex
+  codexPersistentAppServerArgs(socketPath: string): string[]
+  codexPersistentTerminalError(turn: ManagedPersistentCodexTurn): Error & { code?: string }
+}
+export type ManagedCodexFrozenRuntime = ManagerPersistentCodexModule & { executable: string; reader: ManagedFrozenReader }
+
+/** 运行时必须与原 Manager 选路认证的可执行文件一致。 */
+export async function loadManagedCodexFrozenRuntime(reader: ManagedFrozenReader): Promise<ManagedCodexFrozenRuntime> {
+  if (!llmManagerRequested()) throw new LlmManagerHostError('llm_manager_native_capability_unavailable')
+  const manager = await loadManagerNativeRuntime(), adapter = await manager.loadNativeAdapter('codex') as Partial<ManagerPersistentCodexModule>
+  const executable = manager.findNativeExecutable('codex')
+  if (!executable || createHash('sha256').update(readFileSync(executable)).digest('hex') !== reader.cliSha256
+    || typeof adapter.CodexPersistentAppServer !== 'function' || typeof adapter.codexPersistentAppServerArgs !== 'function' || typeof adapter.codexPersistentTerminalError !== 'function')
+    throw new LlmManagerHostError('llm_manager_native_capability_unavailable')
+  return { CodexPersistentAppServer: adapter.CodexPersistentAppServer, codexPersistentAppServerArgs: adapter.codexPersistentAppServerArgs,
+    codexPersistentTerminalError: adapter.codexPersistentTerminalError, executable, reader }
+}
+
 export function applyLlmManagerSettings(body: Record<string, unknown>): Promise<unknown> {
   return managerCall({ action: 'settings', body })
 }
 
-export async function resolveManagedRoute(nextAfter?: ManagedRoute, sameGroupAs?: ManagedRoute, failedSessionId?: string): Promise<ManagedRoute | null> {
+export async function resolveManagedRoute(nextAfter?: ManagedRoute, sameGroupAs?: ManagedRoute, failedSessionId?: string, capability?: typeof managedFrozenCapability): Promise<ManagedRoute | null> {
   const route = await managerCall({
     action: 'resolve',
     ...(nextAfter ? { nextAfter } : {}),
     ...(sameGroupAs ? { sameGroupAs } : {}),
     ...(failedSessionId ? { failedSessionId } : {}),
+    ...(capability ? { capability } : {}),
   })
-  return route === null ? null : readManagedRoute(route)
+  if (route === null) return null
+  let selected: ManagedRoute
+  try { selected = readManagedRoute(route) }
+  catch (error) { if (capability) throw new LlmManagerHostError('llm_manager_native_capability_mismatch'); throw error }
+  if (selected.frozenReader?.capability !== capability) throw new LlmManagerHostError('llm_manager_native_capability_mismatch')
+  return selected
 }
 
 export async function reserveManagedRoute(route: ManagedRoute, sessionId: string, signal: AbortSignal): Promise<void> {

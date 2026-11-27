@@ -7,7 +7,7 @@ import { execFileSync } from 'node:child_process'
 import { parse as parseToml } from 'smol-toml'
 import { codexSlashCommands } from './slash-commands.js'
 import { runtimeRoot, mainCheckout, harnessIdentity } from '@spexcode/spec-core'
-import { detachedRuntimeGenerationToken, migrateLegacyDetachedRuntimeReceipt, processStartToken, verifyDetachedRuntime, type VerifiedDetachedRuntime } from '@spexcode/spec-core'
+import { detachedRuntimeGenerationToken, detachedRuntimeIsGone, migrateLegacyDetachedRuntimeReceipt, processStartToken, verifyDetachedRuntime, type VerifiedDetachedRuntime } from '@spexcode/spec-core'
 import { codexGenerationEndpoints, codexGenerationSocketPath, currentCodexGeneration, legacyCodexGenerationEndpoint, readCodexGenerationLedger, prepareCodexGenerationClose, resolveCodexGenerationForClose, resolveCodexGenerationForResume, resolveCodexGenerationForSession, rebindCodexGeneration, type CodexGenerationEndpoint } from './codex-runtime-generations.js'
 import { spawnDetachedRuntime } from './runtime-ownership.js'
 import { assertFrozenReaderRuntime, frozenReaderDisabledFeatures, structuredExecutionTimer, StructuredSessionError, StructuredSessionTransportError, structuredRealmRoot, type StructuredExecution } from './session-structured-policy.js'
@@ -16,6 +16,9 @@ import { codexRolloutMetadata, codexRolloutPath, codexTranscript, exactCodexTran
 import { shQuote } from './sh.js'
 import { writeFileIfChanged } from './file-write.js'
 import type { Harness, HarnessLivenessRecord, HarnessDeliveryRecord, HarnessLaunchReadyRecord, SharedRuntimeDescriptor, SharedRuntimeMutationGuard, SharedRuntimeProbe, HarnessOrphanThreadQuarantine, DispatchResult, PaneProbe, TurnFailure, NativeIdentityChange, FailureSubscription } from './harness.js'
+import type { ManagedCodexFrozenRuntime, ManagedPersistentCodexTurn } from './llm-manager-host.js'
+import { loadManagedCodexFrozenRuntime } from './llm-manager-host.js'
+import { managedRoute } from './llm-manager-route.js'
 
 
 import { buildShim, cleanHarness, headlessTurnFailureShell, listenerAt, noLaunchEnv, paneTreeRuns, sessionIdentityEnvVars, SPEX } from './harness-shim.js'
@@ -2617,6 +2620,120 @@ function ephemeralWorktreeExecution(value: unknown): StructuredExecution | undef
     ? execution : undefined
 }
 
+const managedFrozenWorktreeExecution = (value: unknown): StructuredExecution | undefined => {
+  const execution = value as StructuredExecution | undefined
+  return execution?.version === 7 && execution.policy === 'codex-managed-frozen-worktree-v1' ? execution : undefined
+}
+
+async function managedFrozenColdProof(rec: Parameters<NonNullable<Harness['coldPreflight']>>[0], archive: boolean): Promise<{ ok: true; alreadyCold: boolean } | { ok: false; reason: string }> {
+  const execution = managedFrozenWorktreeExecution(rec.structuredExecution)!, threadId = rec.harnessSessionId
+  const reader = managedRoute(execution.model)?.frozenReader, scope = codexRecordScope(rec), dir = codexRuntimeDirForRecord(rec)
+  if (!reader || !threadId || threadId !== execution.threadId || !scope || !dir || execution.state !== 'completed' && !execution.cancellation?.nativeStopped)
+    return { ok: false, reason: 'managed frozen close lacks the original stopped thread, candidate or capability' }
+  const binding = resolveCodexGenerationForClose(dir, rec.session, threadId)
+  if (binding?.gone) {
+    const witness = codexRolloutWitness(threadId, join(dirname(dir), 'data/codex-home'))
+    return witness.ok && witness.archived && witness.cwd === scope.cwd && witness.parentThreadId === null
+      ? { ok: true, alreadyCold: true }
+      : { ok: false, reason: 'managed frozen generation is gone but its exact archived rollout is unproven' }
+  }
+  const endpoint = binding?.endpoint, generation = endpoint && codexRuntimeGeneration(dir, endpoint)
+  if (!endpoint || !generation) return { ok: false, reason: 'managed frozen close lacks its exact generation' }
+  try {
+    const hosted = await loadManagedCodexFrozenRuntime(reader), client = new hosted.CodexPersistentAppServer(endpoint.socketPath)
+    try {
+      await client.initialize('spexcode-structured-archive', '1')
+      const check = async (): Promise<boolean> => {
+        const [active, archived, loaded, thread, turns] = await Promise.all([
+          client.listThreads(scope.cwd, false), client.listThreads(scope.cwd, true), client.listLoadedThreadIds(),
+          client.readThread(threadId), client.readTurns(threadId),
+        ])
+        const turnId = execution.turnId
+        if (turns.length !== 1 || !turnId || turns[0].id !== turnId || !['completed', 'failed', 'interrupted'].includes(turns[0].status))
+          throw new Error('managed frozen archive requires one exact terminal source turn')
+        const witness = thread.id === threadId && thread.path ? codexRolloutWitness(threadId, undefined, thread.path) : null
+        const isArchived = archived.length === 1 && archived[0] === threadId && !active.length && !loaded.length
+        const isActive = !archived.length && active.length === 1 && active[0] === threadId && loaded.every(id => id === threadId)
+        if (!witness?.ok || witness.cwd !== scope.cwd || witness.parentThreadId !== null || witness.archived !== isArchived
+          || (!isArchived && !isActive) || codexRuntimeGeneration(dir, endpoint) !== generation)
+          throw new Error('managed frozen archive scope or original generation is unproven')
+        return isArchived
+      }
+      const cold = await check()
+      if (!archive || cold) return { ok: true, alreadyCold: cold }
+      await client.archiveThread(threadId)
+      if (await check()) return { ok: true, alreadyCold: true }
+      return { ok: false, reason: 'managed frozen thread remains active or loaded after archive' }
+    } finally { client.close() }
+  } catch (error) { return { ok: false, reason: error instanceof Error ? error.message : String(error) } }
+}
+
+/** 公开独审的单次证据库已经归档，复查零装载引用并释放它原先独占的进程。 */
+export async function releaseManagedFrozenReviewRealm(rec: HarnessLivenessRecord & { worktreePath: string }): Promise<void> {
+  const threadId = rec.harnessSessionId, root = codexRuntimeDirForRecord(rec)
+  if (!rec.archived || !threadId || !root || existsSync(rec.worktreePath))
+    throw new Error('managed frozen realm release requires its archived review and removed worktree')
+  const ledger = readCodexGenerationLedger(root), bindings = Object.keys(ledger.bindings)
+  const binding = resolveCodexGenerationForClose(root, rec.session, threadId)
+  if (!binding || bindings.length !== 1 || bindings[0] !== rec.session || ledger.pending || ledger.current !== binding.endpoint.id)
+    throw new Error('managed frozen realm does not have one exclusive generation and review owner')
+  const before = codexRuntimeGenerationProof(root, binding.endpoint)
+  const proof = await managedFrozenColdProof(rec, false)
+  if (!proof.ok || !proof.alreadyCold) throw new Error(proof.ok ? 'managed frozen review still has resident references' : proof.reason)
+  if (binding.gone) return
+  if (!before || codexRuntimeGeneration(root, binding.endpoint) !== codexRuntimeGenerationToken(before)
+    || readCodexGenerationLedger(root).revision !== ledger.revision)
+    throw new Error('managed frozen detached process or generation identity changed during release')
+  const pid = before.identity.pid, receipt = binding.endpoint.receiptFile
+  process.kill(pid, 'SIGTERM')
+  for (let retry = 0; retry < 100 && !detachedRuntimeIsGone(pid, receipt); retry++)
+    await new Promise<void>(resolve => setTimeout(resolve, 20))
+  if (!detachedRuntimeIsGone(pid, receipt)) throw new Error('managed frozen detached process group did not exit after exact archive')
+}
+
+function managedFrozenRuntimeDescriptors(runtimeDir: string, rec?: HarnessLivenessRecord): SharedRuntimeDescriptor[] {
+  const execution = managedFrozenWorktreeExecution(rec?.structuredExecution)
+  if (!execution || !rec) return codexRuntimeDescriptors(runtimeDir, rec)
+  const root = codexRuntimeDirForRecord(rec, runtimeDir), threadId = rec.harnessSessionId
+  if (!root || !threadId) return []
+  const binding = resolveCodexGenerationForClose(root, rec.session, threadId)
+  if (!binding) return []
+  const endpoint = binding.endpoint
+  const probe = async (): Promise<SharedRuntimeProbe> => {
+    if (binding.gone) return { healthy: true, references: [] }
+    const generation = codexRuntimeGeneration(root, endpoint)
+    const reader = managedRoute(execution.model)?.frozenReader
+    if (!generation || !reader) return { healthy: false, references: [], error: 'managed frozen generation is unproven' }
+    const hosted = await loadManagedCodexFrozenRuntime(reader), client = new hosted.CodexPersistentAppServer(endpoint.socketPath)
+    try {
+      await client.initialize('spexcode-structured-resources', '1')
+      const ids = await client.listLoadedThreadIds()
+      if (ids.some(id => id !== threadId) || codexRuntimeGeneration(root, endpoint) !== generation)
+        return { healthy: false, references: [], error: 'managed frozen generation loaded unexpected references or changed identity' }
+      if (!ids.length) return { healthy: true, references: [] }
+      const turns = await client.readTurns(threadId)
+      const latest = turns.at(-1)
+      if (turns.length > 1 || codexRuntimeGeneration(root, endpoint) !== generation)
+        return { healthy: false, references: [], error: 'managed frozen generation has unexpected turn history or changed identity' }
+      return { healthy: true, references: [{ referenceId: threadId, turnPresence: latest?.status === 'inProgress' ? 'active' : 'idle', turnId: latest?.id }] }
+    } finally { client.close() }
+  }
+  return [{
+    key: codexDescriptorKey(endpoint), label: 'Manager frozen reader', pidFile: endpoint.pidFile, receiptFile: endpoint.receiptFile,
+    probe,
+    residency: async () => {
+      const census = await probe()
+      return { healthy: census.healthy, referenceIds: census.references.map(ref => ref.referenceId), ...(binding.gone ? { rootAbsent: true } : {}), error: census.error }
+    },
+    mutationGuard: async (target, options) => {
+      if (target !== threadId) throw new Error('managed frozen guard target does not match the generation binding')
+      const proof = await managedFrozenColdProof({ ...rec, worktreePath: options?.targetCwd }, false)
+      return { healthy: proof.ok, referenceIds: proof.ok && !proof.alreadyCold ? [target] : [], descendantIds: [],
+        targetTurnPresence: proof.ok ? 'idle' : 'unknown', ...(proof.ok ? {} : { error: proof.reason }) }
+    },
+  }]
+}
+
 export const codexHeadlessHarness: Harness = {
   ...codexHarness,
   id: 'codex-headless',
@@ -2625,25 +2742,34 @@ export const codexHeadlessHarness: Harness = {
   headless: true,
   runtimeOwnership: 'adapter',
   targetDescriptorKey: (rec) => ephemeralWorktreeExecution(rec.structuredExecution) ? undefined : codexHarness.targetDescriptorKey!(rec),
+  sharedRuntimes: managedFrozenRuntimeDescriptors,
   coldPreflight: async (rec) => {
+    if (managedFrozenWorktreeExecution(rec.structuredExecution)) return managedFrozenColdProof(rec, false)
     const execution = ephemeralWorktreeExecution(rec.structuredExecution)
     if (!execution) return codexHarness.coldPreflight!(rec)
     const { codexNativeWorktreeIsStopped } = await import('./codex-native-worktree-structured.js')
     return await codexNativeWorktreeIsStopped(rec.session, rec.harnessSessionId, execution) ? { ok: true, alreadyCold: true } : { ok: false, reason: 'exact ephemeral Codex worktree stop is unproven' }
   },
   coldRuntime: async (rec, receipt) => {
+    if (managedFrozenWorktreeExecution(rec.structuredExecution)) return managedFrozenColdProof(rec, true)
     const execution = ephemeralWorktreeExecution(rec.structuredExecution)
     if (!execution) return codexHarness.coldRuntime!(rec, receipt)
     const { codexNativeWorktreeIsStopped } = await import('./codex-native-worktree-structured.js')
     return await codexNativeWorktreeIsStopped(rec.session, rec.harnessSessionId, execution) ? { ok: true } : { ok: false, reason: 'exact ephemeral Codex worktree stop is unproven' }
   },
   coldRetirementPreflight: async (rec) => {
+    if (managedFrozenWorktreeExecution(rec.structuredExecution)) {
+      const proof = await managedFrozenColdProof(rec, false)
+      if (!proof.ok) return proof
+      return proof.alreadyCold ? { ok: true, alreadyCold: true } : { ok: false, reason: 'managed frozen thread must be archived before retirement' }
+    }
     const execution = ephemeralWorktreeExecution(rec.structuredExecution)
     if (!execution) return codexHarness.coldRetirementPreflight!(rec)
     const { codexNativeWorktreeIsStopped } = await import('./codex-native-worktree-structured.js')
     return await codexNativeWorktreeIsStopped(rec.session, rec.harnessSessionId, execution) ? { ok: true, alreadyCold: true } : { ok: false, reason: 'exact ephemeral Codex worktree stop is unproven' }
   },
-  restoreRuntime: async (rec, receipt) => ephemeralWorktreeExecution(rec.structuredExecution) ? { ok: true } : codexHarness.restoreRuntime!(rec, receipt),
+  restoreRuntime: async (rec, receipt) => managedFrozenWorktreeExecution(rec.structuredExecution) ? { ok: false, reason: 'managed frozen archive recovery requires read-back of the original session' }
+    : ephemeralWorktreeExecution(rec.structuredExecution) ? { ok: true } : codexHarness.restoreRuntime!(rec, receipt),
   launchOneShot: true,
   launchCmd: (id, runtimeDir, cmd) => codexHeadlessLaunchCommandLocal(id, codexBaseCmd(cmd), runtimeDir ?? runtimeRoot()),
   // A headless thread has no pane to witness it. The shared app-server generation is therefore the adapter's
@@ -2677,17 +2803,123 @@ export const codexHeadlessHarness: Harness = {
 
 type StructuredNativeItem = FrozenNativeItem & { phase?: string; text?: string; content?: Array<{ type: string; text?: string }> }
 type StructuredNativeTurn = { id: string; status: string; error?: { message?: string } }
-
-// Subscribe before the first turn on this connection. Reconnect reads only the exact durable turn, or the
-// sole first turn whose user input equals the pinned prompt when its acceptance reply was lost.
-export async function codexStructuredTurn(sock: string, cwd: string, prompt: string, execution: StructuredExecution, callbacks: {
+type StructuredTurnCallbacks = {
   onThread(threadId: string): Promise<void>
   onTurn(turnId: string): Promise<void>
   onTurnStarting?(): Promise<void>
   onTimeout?(): Promise<void>
   onFrozenRead?(receipt: FrozenReadReceipt): Promise<void>
   signal?: AbortSignal
-}): Promise<{ threadId: string; turnId: string; text: string; frozenReadProof?: FrozenReadProof }> {
+}
+type StructuredTurnResult = { threadId: string; turnId: string; text: string; frozenReadProof?: FrozenReadProof }
+
+function codexFrozenVisibility(threadId: string, turnId: string, cwd: string, rolloutPath: string, toolOutputTokenLimit: number) {
+  const witness = codexRolloutWitness(threadId, undefined, rolloutPath)
+  if (!witness.ok || witness.cwd !== cwd) throw new StructuredSessionError('stale_result', 'frozen visible rollout does not witness the exact thread and working directory')
+  return { toolOutputTokenLimit, outputs: frozenVisibleOutputs(readFileSync(rolloutPath, 'utf8'), turnId) }
+}
+
+function managedCodexPersistentError(error: Error & { code?: string }): Error {
+  if (error instanceof StructuredSessionError) return error
+  if (error.code === 'transport' || error.code === 'not_materialized') return new StructuredSessionTransportError(error.message)
+  if (error.code === 'cancelled' || error.code === 'unsupported' || error.code === 'cancellation_pending' || error.code === 'stale_result' || error.code === 'provider_quota_exhausted')
+    return new StructuredSessionError(error.code, error.message)
+  return new StructuredSessionError('failed', error.message)
+}
+
+async function managedCodexFrozenTurn(sock: string, cwd: string, prompt: string, execution: StructuredExecution, callbacks: StructuredTurnCallbacks, hosted: ManagedCodexFrozenRuntime): Promise<StructuredTurnResult> {
+  const ref = execution.frozenContext, runtime = execution.readerRuntime
+  if (execution.version !== 7 || execution.policy !== 'codex-managed-frozen-worktree-v1' || execution.worktree?.mode !== 'read' || !ref || runtime?.version !== 2)
+    throw new StructuredSessionError('unsupported', 'managed Codex requires the fixed frozen worktree policy')
+  assertFrozenReaderRuntime(runtime, hosted.reader.model, frozenReadOutputTokenLimit(ref), hosted)
+  const client = new hosted.CodexPersistentAppServer(sock)
+  let fail!: (error: Error) => void
+  const failure = new Promise<never>((_, reject) => { fail = reject })
+  void failure.catch(() => {})
+  const wait = <T>(work: Promise<T>): Promise<T> => Promise.race([work, failure])
+  let threadId = execution.threadId, turnId = execution.turnId, wake = (): void => {}
+  let releaseIdentity!: () => void
+  const identity = new Promise<void>(resolve => { releaseIdentity = resolve })
+  const terminals = new Map<string, ManagedPersistentCodexTurn>()
+  client.onFailure(error => fail(managedCodexPersistentError(error)))
+  client.onCompleted((thread, turn) => { if (thread === threadId) { terminals.set(turn.id, turn); if (turn.id === turnId) wake() } })
+  client.onToolCall(async call => {
+    await wait(identity)
+    if (execution.threadId || call.threadId !== threadId || call.turnId !== turnId || typeof call.callId !== 'string' || !call.callId
+      || call.namespace != null || call.tool !== FROZEN_READ_TOOL) throw new StructuredSessionError('stale_result', 'managed frozen request differs from the original thread/turn/tool identity')
+    const { receipt, response } = persistFrozenRead(ref, { threadId: threadId!, turnId: turnId!, callId: call.callId }, call.arguments)
+    await wait(Promise.resolve(callbacks.onFrozenRead?.(receipt)))
+    return response
+  })
+  const abort = (): void => fail(new StructuredSessionError('cancelled', 'structured Agent execution was cancelled'))
+  callbacks.signal?.addEventListener('abort', abort, { once: true })
+  const timeout = structuredExecutionTimer(execution.timeoutMs, () => {
+    if (callbacks.onTimeout) void callbacks.onTimeout().catch(fail)
+    else fail(new StructuredSessionError('timeout', 'structured Agent execution exceeded its deadline'))
+  })
+  let poll: ReturnType<typeof setTimeout> | undefined
+  try {
+    if (callbacks.signal?.aborted) throw new StructuredSessionError('cancelled', 'structured Agent execution was cancelled')
+    await wait(client.initialize('spexcode-structured', '1'))
+    if (execution.state !== 'completed' || existsSync(cwd)) await wait(client.auditReadOnly({ cwd, readerRuntime: runtime }))
+    if (threadId) {
+      const thread = await wait(client.readThread(threadId))
+      if (thread.id !== threadId) throw new StructuredSessionError('stale_result', 'Codex returned a different frozen thread')
+    } else {
+      const thread = await wait(client.startThread({ cwd, model: hosted.reader.model, dynamicTools: [frozenReadTool] }))
+      threadId = thread.id
+      await callbacks.onThread(threadId)
+    }
+    if (execution.threadId) {
+      const turns = await wait(client.readTurns(threadId, turnId))
+      if (!turnId && turns.length === 1 && (await wait(client.readItems(threadId, turns[0].id)) as StructuredNativeItem[])
+        .some(item => item.type === 'userMessage' && item.content?.some(input => input.type === 'text' && input.text === prompt))) {
+        turnId = turns[0].id
+        await callbacks.onTurn(turnId)
+      }
+      const original = turns.find(turn => turn.id === turnId)
+      if (!original) throw new StructuredSessionError('stale_result', 'exact original frozen turn is missing')
+      if (original.status === 'inProgress') throw new StructuredSessionError('cancellation_pending', 'frozen reader recovery requires exact native stop before a new attempt')
+      terminals.set(original.id, original)
+    } else {
+      await callbacks.onTurnStarting?.()
+      turnId = await wait(client.startTurn({ threadId, cwd, prompt, schema: execution.schema, model: hosted.reader.model, effort: execution.effort }))
+      await callbacks.onTurn(turnId)
+    }
+    releaseIdentity()
+    while (!terminals.has(turnId!)) {
+      await wait(new Promise<void>(resolve => { wake = resolve; poll = setTimeout(resolve, 1000) }))
+      clearTimeout(poll)
+      if (!terminals.has(turnId!)) {
+        const turn = (await wait(client.readTurns(threadId, turnId))).find(item => item.id === turnId)
+        if (turn && turn.status !== 'inProgress') terminals.set(turn.id, turn)
+      }
+    }
+    await wait(client.drainToolCalls())
+    const terminal = (await wait(client.readTurns(threadId, turnId))).find(turn => turn.id === turnId)
+    if (!terminal || terminal.status === 'inProgress') throw new StructuredSessionError('stale_result', 'Codex original frozen terminal is missing')
+    if (terminal.status !== 'completed') throw hosted.codexPersistentTerminalError(terminal)
+    const items = await wait(client.readItems(threadId, turnId!)) as StructuredNativeItem[]
+    const final = items.filter(item => item.type === 'agentMessage' && item.phase === 'final_answer')
+    if (final.length !== 1 || !final[0].text) throw new StructuredSessionError('failed', 'exact structured turn did not return one final answer')
+    const thread = await wait(client.readThread(threadId))
+    if (thread.id !== threadId || !thread.path) throw new StructuredSessionTransportError('exact frozen rollout path is not materialized yet')
+    const frozenReadProof = proveFrozenReads(ref, { threadId, turnId: turnId! }, items, codexFrozenVisibility(threadId, turnId!, cwd, thread.path, runtime.toolOutputTokenLimit))
+    return { threadId, turnId: turnId!, text: final[0].text, frozenReadProof }
+  } catch (error) { throw managedCodexPersistentError(error as Error) }
+  finally {
+    client.close()
+    releaseIdentity()
+    clearTimeout(timeout)
+    clearTimeout(poll)
+    callbacks.signal?.removeEventListener('abort', abort)
+  }
+}
+
+// Subscribe before the first turn on this connection. Reconnect reads only the exact durable turn, or the
+// sole first turn whose user input equals the pinned prompt when its acceptance reply was lost.
+export async function codexStructuredTurn(sock: string, cwd: string, prompt: string, execution: StructuredExecution, callbacks: StructuredTurnCallbacks, hosted?: ManagedCodexFrozenRuntime): Promise<StructuredTurnResult> {
+  if (hosted) return managedCodexFrozenTurn(sock, cwd, prompt, execution, callbacks, hosted)
   const frozen = execution.frozenContext
   if (frozen ? execution.version !== (execution.timeoutMs === null ? 5 : 2) || execution.policy !== 'codex-frozen-read-only-v2' : execution.version !== (execution.timeoutMs === null ? 5 : 1) || execution.policy !== 'codex-read-only-v1')
     throw new StructuredSessionError('unsupported', 'frozen reader requires its exact fixed v2 policy')
@@ -2894,9 +3126,7 @@ export async function codexStructuredTurn(sock: string, cwd: string, prompt: str
     if (frozen && execution.readerRuntime?.version === 2) {
       const result = await request('thread/read', { threadId, includeTurns: false }) as { thread?: { id?: string; path?: string | null } }
       if (result.thread?.id !== threadId || !result.thread.path) throw new StructuredSessionTransportError('exact frozen rollout path is not materialized yet')
-      const witness = codexRolloutWitness(threadId, undefined, result.thread.path)
-      if (!witness.ok || witness.cwd !== cwd) throw new StructuredSessionError('stale_result', 'frozen visible rollout does not witness the exact thread and working directory')
-      visibility = { toolOutputTokenLimit: execution.readerRuntime.toolOutputTokenLimit, outputs: frozenVisibleOutputs(readFileSync(result.thread.path, 'utf8'), turnId) }
+      visibility = codexFrozenVisibility(threadId, turnId, cwd, result.thread.path, execution.readerRuntime.toolOutputTokenLimit)
     }
     const frozenReadProof = frozen ? proveFrozenReads(frozen, { threadId, turnId }, items, visibility) : undefined
     return { threadId, turnId, text: final[0].text, ...(frozenReadProof ? { frozenReadProof } : {}) }
@@ -2960,20 +3190,38 @@ async function codexReadStructuredTurn(sock: string, threadId: string, turnId: s
 
 // Reuse the existing acknowledged mutation primitive and generation fence, but target the pinned structured
 // turn, never whichever turn happens to be active later. Settlement is an exact native read, not a sent frame.
-export async function codexStopStructuredTurn(dir: string, endpoint: CodexGenerationEndpoint, threadId: string, turnId: string | undefined, prompt: string, budgetMs = 15_000): Promise<CodexStructuredStop> {
+export async function codexStopStructuredTurn(dir: string, endpoint: CodexGenerationEndpoint, threadId: string, turnId: string | undefined, prompt: string, budgetMs = 15_000, hosted?: ManagedCodexFrozenRuntime): Promise<CodexStructuredStop> {
   const generation = codexRuntimeGeneration(dir, endpoint)
   if (!generation) return { nativeStopped: false, acknowledged: false, error: 'structured generation identity is unproven' }
   const deadline = Date.now() + budgetMs
   let acknowledged = false, exactTurn = turnId
+  const withHostedClient = async <T>(action: (client: InstanceType<ManagedCodexFrozenRuntime['CodexPersistentAppServer']>) => Promise<T>): Promise<T> => {
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) throw new Error('exact structured stop exceeded its deadline')
+    const client = new hosted!.CodexPersistentAppServer(endpoint.socketPath, remaining)
+    const timer = setTimeout(() => client.close(), remaining)
+    try { await client.initialize('spexcode-structured-stop', '1'); return await action(client) }
+    finally { clearTimeout(timer); client.close() }
+  }
   // First-turn acceptance can precede native rollout materialization. Its explicit empty-rollout refusal
   // is transient, not evidence of no native work. Retry within the cancellation budget and generation fence.
   const readExact = async (): Promise<{ turnId: string; status: string }> => {
     for (;;) {
       if (codexRuntimeGeneration(dir, endpoint) !== generation) throw new Error('structured generation changed during cancellation read')
-      try { return await codexReadStructuredTurn(endpoint.socketPath, threadId, exactTurn, prompt, Math.max(1, Math.min(2000, deadline - Date.now()))) }
+      try {
+        if (!hosted) return await codexReadStructuredTurn(endpoint.socketPath, threadId, exactTurn, prompt, Math.max(1, Math.min(2000, deadline - Date.now())))
+        return await withHostedClient(async client => {
+          const turns = await client.readTurns(threadId, exactTurn)
+          const turn = exactTurn ? turns.find(item => item.id === exactTurn) : turns.length === 1
+            && (await client.readItems(threadId, turns[0].id) as StructuredNativeItem[]).some(item => item.type === 'userMessage' && item.content?.some(text => text.type === 'text' && text.text === prompt)) ? turns[0] : undefined
+          if (!turn || !['inProgress', 'completed', 'interrupted', 'failed'].includes(turn.status)) throw new Error('exact structured turn could not be proven; no other turn was interrupted')
+          return { turnId: turn.id, status: turn.status }
+        })
+      }
       catch (error) {
         const message = error instanceof Error ? error.message : String(error)
-        if (Date.now() >= deadline || !((message.includes('rollout at ') && message.includes(' is empty')) || message.includes('is not materialized yet'))) throw error
+        const pendingRollout = hosted ? (error as { code?: string }).code === 'not_materialized' : (message.includes('rollout at ') && message.includes(' is empty')) || message.includes('is not materialized yet')
+        if (Date.now() >= deadline || !pendingRollout) throw error
         await new Promise((resolve) => setTimeout(resolve, 100))
       }
     }
@@ -2983,9 +3231,14 @@ export async function codexStopStructuredTurn(dir: string, endpoint: CodexGenera
     exactTurn = before.turnId
     if (codexRuntimeGeneration(dir, endpoint) !== generation) throw new Error('structured generation changed before cancellation')
     if (before.status !== 'inProgress') return { nativeStopped: true, acknowledged, turnId: exactTurn, nativeStatus: before.status }
-    const result = await codexThreadMutation(endpoint.socketPath, 'turn/interrupt', threadId, { dir, endpoint, generation }, exactTurn, Math.max(1, deadline - Date.now()))
-    if (!result.ok) return { nativeStopped: false, acknowledged: false, turnId: exactTurn, error: `${result.error}; native mutation ${result.commit}` }
-    acknowledged = true
+    if (hosted) {
+      try { await withHostedClient(client => client.interrupt(threadId, exactTurn!)); acknowledged = true }
+      catch (error) { if ((error as { code?: string }).code !== 'transport') throw error }
+    } else {
+      const result = await codexThreadMutation(endpoint.socketPath, 'turn/interrupt', threadId, { dir, endpoint, generation }, exactTurn, Math.max(1, deadline - Date.now()))
+      if (!result.ok) return { nativeStopped: false, acknowledged: false, turnId: exactTurn, error: `${result.error}; native mutation ${result.commit}` }
+      acknowledged = true
+    }
     do {
       const after = await readExact()
       if (codexRuntimeGeneration(dir, endpoint) !== generation) throw new Error('structured generation changed during cancellation settlement')

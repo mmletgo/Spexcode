@@ -5,11 +5,12 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { runtimeRoot } from '@spexcode/spec-core'
 import { contractImpact, dependencyClosure, validateContractGraph } from '@spexcode/spec-core/contracts'
 import type { Acceptance, ContractGraph } from '@spexcode/spec-core/contracts'
-import { FROZEN_PROMPT_THRESHOLD_BYTES } from '../frozen-context.js'
+import { FROZEN_PROMPT_THRESHOLD_BYTES, prepareFrozenPrompt } from '../frozen-context.js'
 import { llmManagerRequested, LlmManagerHostError, resolveManagedRoute } from '../llm-manager-host.js'
-import { managedModel, managedRoute, type ManagedRoute } from '../llm-manager-route.js'
+import { managedFrozenCapability, managedModel, managedRoute, type ManagedRoute } from '../llm-manager-route.js'
 import { structuredExecutionPolicy } from '../session-structured-policy.js'
 import { DEFAULT_SYNC_MODEL } from './model-selection.js'
 import { actualTreeDiff, exportCandidate, isHostPrivatePath } from './candidate.js'
@@ -141,12 +142,14 @@ async function runNativeReviewWorker(request: NativeReviewRequest, signal: Abort
       return reply
     }
     const execution = record.structuredExecution!
-    if ('diagnostic' in reply && quota && request.worktree?.mode === 'read' && managedRoute(request.model)
+    const route = managedRoute(request.model)
+    if ('diagnostic' in reply && quota && request.worktree?.mode === 'read' && route
       && execution.state === 'failed' && execution.cancellation?.nativeStopped && execution.errorCode === quota.code && execution.error === quota.message
       && quota.sessionId === id && execution.threadId === quota.threadId && execution.turnId === quota.turnId) {
       const { pinSyncNativeRequest } = await import('./native-run.js')
-      const expected = structuredExecutionPolicy(pinSyncNativeRequest(request, null))
-      const payloadHash = digest({ prompt: nativeWorktreePrompt(request.prompt, request.worktree), parent: null, launcher: null, base: request.worktree.baseCommit, structuredExecution: expected })
+      const frozen = route.frozenReader ? prepareFrozenPrompt(request, { directory: join(runtimeRoot(), 'frozen-context-v2') }) : undefined
+      const expected = structuredExecutionPolicy(frozen ? { ...frozen, readerRuntime: execution.readerRuntime } : pinSyncNativeRequest(request, null))
+      const payloadHash = digest({ prompt: frozen?.prompt ?? nativeWorktreePrompt(request.prompt, request.worktree), parent: null, launcher: null, base: request.worktree.baseCommit, structuredExecution: expected })
       if (record.createRequestId === contentHash(request.requestKey) && record.createPayloadHash === payloadHash && digest(structuredExecutionPolicy(execution)) === digest(expected))
         reply.stoppedQuota = { sessionId: id, threadId: quota.threadId, turnId: quota.turnId }
     }
@@ -157,10 +160,17 @@ async function runNativeReviewWorker(request: NativeReviewRequest, signal: Abort
     }
     const worktree = 'result' in reply ? reply.result.worktree : undefined
     if ('result' in reply && (reply.result.sessionId !== id || request.worktree && !worktree)) throw new Error('独审结果缺少本次冻结 Git 身份')
+    if ('result' in reply && route?.frozenReader && reply.result.frozenReadProof?.version !== 2)
+      reply = { diagnostic: { code: 'stale_result', message: '独审结果缺少本次冻结内容的完整可见性证明' } }
     const settled = request.worktree && record.structuredExecution?.state !== 'timeout' ? { record, commonDir, ...(worktree ? { worktree } : {}) } : undefined
     if (!settled && request.worktree) nativeWorktreeResult(record.worktreePath, request.worktree)
     await withoutSessionApplicationExecutionWake(() => closeSession(id, undefined, { wakeQueue: false, ...(settled ? { settled } : {}) }))
-    if (!readRecord(id)?.archived || existsSync(record.worktreePath)) throw new Error('独审工作树尚未正式回收')
+    const closed = readRecord(id)
+    if (!closed?.archived || existsSync(record.worktreePath)) throw new Error('独审工作树尚未正式回收')
+    if (route?.frozenReader && closed.structuredExecution?.threadId) {
+      const { releaseManagedFrozenReviewRealm } = await import('../codex-harness.js')
+      await releaseManagedFrozenReviewRealm(closed)
+    }
     return reply
   } catch (error) {
     return { diagnostic: { code: 'native_review_recovery_required', message: `独审会话 ${id} 尚未结算，保留原件。${error instanceof Error ? error.message : String(error)}` } }
@@ -356,15 +366,16 @@ export async function runConformance(supplied: ConformanceInput, options: Confor
     const serialized = JSON.stringify(reviewContext)
     writeFileSync(join(evidenceDirectory, 'input.json'), serialized)
     const prompt = `${CANDIDATE_REVIEW_INSTRUCTIONS}\n这是从真实Git对象重建的独立CI候选检查，没有builder总结或本机passed证据。base∪candidate旧新完整契约和断言同入读集合。intentAuthorization仅来自外部可信调用者选定的policyCommit，程序已精确匹配intentChanges的path及旧新raw摘要；此登记批准该具体原意差量，source是来源说明而非身份签名，候选自带记录不提供权限。授权不证明实现正确；仍须核对完整旧新raw、实现、规则及断言。退役必须由授权raw或上层规则变更支持，旧AC保留原test路径、稳定ID与固定命令，改成验证移除后行为的真实负向断言。逐项核退役来源和负向断言，随意删schema/node/AC/test、弱化未授权raw或断言均repair。新旧所有itemIds均必须checkedIds，retiredIds仍是本次实际待审义务。没有裁决权限，不得用oracle-policy批准命令或oracle更新。缺少调用依赖必须repair。\n冻结完整输入:\n${serialized}`
+    const capability = Buffer.byteLength(prompt, 'utf8') > FROZEN_PROMPT_THRESHOLD_BYTES ? managedFrozenCapability : undefined
     if (!options.testReviewRunner && llmManagerRequested()) {
       if (signal?.aborted) fail('cancelled', '独审选路前已取消')
-      const route = await resolveManagedRoute().catch(error => {
+      const route = await resolveManagedRoute(undefined, undefined, undefined, capability).catch(error => {
+        if (capability && error instanceof LlmManagerHostError && ['llm_manager_invalid', 'llm_manager_native_capability_mismatch', 'llm_manager_native_capability_unavailable'].includes(error.code)) return null
         if (error instanceof LlmManagerHostError) return fail(`unsupported_${error.code}`, 'LLM Manager 无法为候选独审完成正式选路')
         throw error
       })
+      if (capability && !route) fail('unsupported_managed_frozen_reader', 'LLM Manager 功能组没有可证明完整冻结读取的就绪路线，已保留全部输入以供复验')
       result.reviewRoute = route ?? fail('unsupported_llm_manager_no_ready_route', 'LLM Manager 功能组没有可用于候选独审的就绪路线')
-      if (Buffer.byteLength(prompt, 'utf8') > FROZEN_PROMPT_THRESHOLD_BYTES)
-        fail('unsupported_managed_frozen_reader', '当前 Manager 原生路线无法证明超出内联阈值后的完整冻结读取，已保留全部输入以供复验')
     }
     const route = result.reviewRoute
     const keyPrefix = `conformance:${result.inputDigest}:`
@@ -377,7 +388,7 @@ export async function runConformance(supplied: ConformanceInput, options: Confor
         if ('result' in response) return response.result
         if (!current || !response.stoppedQuota) return fail(response.diagnostic.code, response.diagnostic.message)
         if (signal?.aborted) fail('cancelled', '独审续路前已取消')
-        const successor = await resolveManagedRoute(current, route, response.stoppedQuota.sessionId).catch(error => {
+        const successor = await resolveManagedRoute(current, route, response.stoppedQuota.sessionId, current.frozenReader?.capability).catch(error => {
           if (error instanceof LlmManagerHostError) return fail(`unsupported_${error.code}`, 'LLM Manager 无法确认原独审额度或完成正式续路')
           throw error
         })

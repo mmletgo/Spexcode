@@ -14,6 +14,7 @@ import { INTENT_AUTHORIZATION_PATH } from './intent-authorization.js'
 import type { IntentAuthorization, IntentAuthorizationCheck, RawIntentChange } from './intent-authorization.js'
 import { contentHash } from './snapshot.js'
 import { FROZEN_PROMPT_THRESHOLD_BYTES } from '../frozen-context.js'
+import { frozenReaderDisabledFeatures } from '../session-structured-policy.js'
 
 const specPath = '.spec/product/greeting/spec.md'
 const image = 'node@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392'
@@ -108,13 +109,16 @@ function publicCheck(t: TestContext, input: ConformanceInput, config: string): {
   return { status: cli.status, result: JSON.parse(cli.stdout) as ConformanceResult }
 }
 
-function managerFixture(t: TestContext, selection: ConformanceResult['reviewRoute'] | null, settle = true, successor?: ConformanceResult['reviewRoute']) {
+function managerFixture(t: TestContext, selection: ConformanceResult['reviewRoute'] | null, settle = true, successor?: ConformanceResult['reviewRoute'], nativeRuntime = fileURLToPath(new URL('../../llm-manager/native-runtime.mjs', import.meta.url))) {
   const host = mkdtempSync(join(tmpdir(), 'spex-conformance-manager-fixture-')), config = join(host, 'config.json'), log = join(host, 'calls.jsonl')
   t.after(() => rmSync(host, { recursive: true, force: true }))
   writeFileSync(config, JSON.stringify({ selection, successor }))
   writeFileSync(join(host, 'docker'), '#!/bin/sh\nexit 127\n', { mode: 0o700 })
   writeFileSync(join(host, 'bridge'), `#!${process.execPath}
 const { appendFileSync, readFileSync } = require('node:fs')
+if (process.argv[3] === '-m' && process.argv[4] === 'llm_manager.native_runtime') {
+  process.stdout.write(JSON.stringify({ version: 1, path: ${JSON.stringify(nativeRuntime)} })); process.exit(0)
+}
 const message = JSON.parse(readFileSync(0, 'utf8'))
 appendFileSync('calls.jsonl', JSON.stringify(message) + '\\n')
 const { selection, successor } = JSON.parse(readFileSync(process.argv[5], 'utf8'))
@@ -125,7 +129,8 @@ if (message.nextAfter) {
     process.stdout.write(JSON.stringify({ ok: false, code: 'llm_manager_quota_required' })); process.exit(0)
   }
 }
-const value = message.action === 'resolve' ? message.nextAfter ? successor ?? null : selection : message.action === 'reserve' ? {} : { outcome: message.outcome }
+const selected = message.nextAfter ? successor ?? null : selection
+const value = message.action === 'resolve' ? selected?.frozenReader?.capability === message.capability ? selected : null : message.action === 'reserve' ? {} : { outcome: message.outcome }
 process.stdout.write(JSON.stringify(message.action === 'settle' && !${settle} ? { ok: false, code: 'llm_manager_host_unavailable' } : { ok: true, value }))
 `, { mode: 0o700 })
   return { host, config, calls: (): { action: string; route?: unknown; sessionId?: string; outcome?: string }[] => readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line)) }
@@ -266,8 +271,160 @@ test('Manager 大正文缺少逐字读取证明时保留完整冻结输入并阻
   assert.deepEqual(result.diagnostics.map(({ code }) => code), ['unsupported_managed_frozen_reader'])
   const frozen = JSON.parse(readFileSync(join(result.evidenceDirectory, 'input.json'), 'utf8')) as ReviewContext
   assert.deepEqual(frozen.readSet.find(file => file.path === 'src/greet.mjs'), { path: 'src/greet.mjs', before: implementation, candidate: large })
-  assert.deepEqual(manager.calls(), [{ action: 'resolve' }])
+  assert.deepEqual(manager.calls(), [{ action: 'resolve', capability: 'frozen-reader-v2' }])
   assert.deepEqual(result.runs, [])
+})
+
+const managedFrozenTestRuntime = process.env.SPEX_MANAGER_FROZEN_TEST_RUNTIME
+for (const quota of [false, true]) test(`公开 sync check 由 Manager 持久 Codex 传输完整冻结候选并回收${quota ? '，已结算额度后在同组续审' : ''}`, { skip: !managedFrozenTestRuntime || process.platform !== 'darwin' }, t => {
+  const repo = fixture(), nativeModel = 'gpt-6.1-sol'
+  t.after(() => rmSync(repo.root, { recursive: true, force: true }))
+  const cliVersion = 'codex-cli 0.160.0', fixtureBin = String.raw`#!${process.execPath}
+const assert = require('node:assert/strict')
+const { mkdirSync, readFileSync, renameSync, writeFileSync } = require('node:fs')
+const { createServer } = require('node:net')
+const { createHash } = require('node:crypto')
+const { join, dirname, basename } = require('node:path')
+const { execFileSync } = require('node:child_process')
+if (process.argv[2] === '--version') { console.log(${JSON.stringify(cliVersion)}); process.exit(0) }
+const model = ${JSON.stringify(nativeModel)}, identity = '10000000-0000-4000-8000-000000000000', turn = { id: 'turn-frozen-original', status: 'inProgress' }
+const home = process.env.CODEX_HOME, settings = readFileSync(join(home, 'config.toml'), 'utf8')
+const catalog = settings.match(/^model_catalog_json = (.+)$/m), limit = Number(settings.match(/^tool_output_token_limit = (.+)$/m)?.[1])
+writeFileSync(join(home, 'models_cache.json'), JSON.stringify({ client_version: '0.160.0', models: [{ slug: model, apply_patch_tool_type: 'freeform', experimental_supported_tools: [] }] }))
+const disabled = Object.fromEntries(${JSON.stringify(frozenReaderDisabledFeatures)}.map(feature => [feature, false]))
+let cwd, path, archived = false, endpoint = false
+const items = [], ranges = new Map(), outputs = new Map()
+const socketPath = process.argv.find(arg => arg.startsWith('unix://')).slice(7)
+const server = createServer(socket => {
+  let buffer = Buffer.alloc(0), ready = false
+  const send = value => {
+    const bytes = Buffer.from(JSON.stringify(value)), header = bytes.length < 126 ? Buffer.from([0x81, bytes.length]) : Buffer.alloc(bytes.length < 65536 ? 4 : 10)
+    if (bytes.length >= 126) { header[0] = 0x81; header[1] = header.length === 4 ? 126 : 127; if (header.length === 4) header.writeUInt16BE(bytes.length, 2); else header.writeBigUInt64BE(BigInt(bytes.length), 2) }
+    socket.write(Buffer.concat([header, bytes]))
+  }
+  const methods = {
+    initialize: () => ({}), 'model/list': () => ({ data: [{ id: model, model, slug: model }], nextCursor: null }),
+    'config/read': () => ({ config: { sandbox_mode: 'read-only', approval_policy: 'never', model_catalog_json: JSON.parse(catalog[1]), tool_output_token_limit: limit,
+      features: { apps: false, plugins: false, hooks: false, shell_tool: false, code_mode: false, code_mode_host: true, ...disabled }, mcp_servers: {} } }),
+    'hooks/list': () => ({ data: [{ hooks: [], errors: [] }] }), 'mcpServerStatus/list': () => ({ data: [], nextCursor: null }),
+    'thread/start': p => {
+      writeFileSync(join(home, 'test-runtime.pid'), String(process.pid))
+      assert.equal(p.model, model); assert.equal(p.ephemeral, false); assert.deepEqual(p.dynamicTools.map(tool => tool.name), ['spex_read_frozen'])
+      cwd = p.cwd; path = join(home, 'sessions', 'rollout-2026-11-27T00-00-00-' + identity + '.jsonl'); mkdirSync(dirname(path), { recursive: true })
+      return { thread: { id: identity, cwd, path, ephemeral: false }, model }
+    },
+    'thread/read': p => { assert.equal(p.threadId, identity); return { thread: { id: identity, cwd, path, turns: p.includeTurns ? [{ ...turn, items }] : [] } } },
+    'thread/turns/list': p => { assert.equal(p.threadId, identity); return { data: [{ ...turn }], nextCursor: null } },
+    'thread/items/list': p => { assert.equal(p.threadId, identity); assert.equal(p.turnId, turn.id); return { data: items.map(item => ({ turnId: turn.id, item })), nextCursor: null } },
+    'thread/list': p => ({ data: cwd && p.archived === archived ? [{ id: identity, cwd }] : [], nextCursor: null }),
+    'thread/loaded/list': () => ({ data: cwd && !archived ? [identity] : [], nextCursor: null }),
+    'thread/archive': p => {
+      assert.equal(p.threadId, identity); assert.ok(['completed', 'failed'].includes(turn.status)); assert.equal(archived, false)
+      const archive = join(home, 'archived_sessions', basename(path)); mkdirSync(dirname(archive), { recursive: true }); renameSync(path, archive); path = archive; archived = true
+      return {}
+    },
+    'turn/start': p => {
+      assert.equal(p.threadId, identity); assert.equal(p.model, model); assert.equal(p.cwd, cwd)
+      const prompt = p.input[0].text, index = JSON.parse(prompt.split('\n').at(-1))
+      assert.equal(prompt.includes('candidate-body-ends'), false); items.push({ type: 'userMessage', content: p.input })
+      if (${quota} && home.includes('c'.repeat(64))) {
+        writeFileSync(path, [{ type: 'session_meta', payload: { id: identity, cwd } }, { type: 'turn_context', payload: { turn_id: turn.id } },
+          { type: 'event_msg', payload: { type: 'task_complete', turn_id: turn.id } }].map(row => JSON.stringify(row)).join('\n') + '\n')
+        turn.status = 'failed'; turn.error = { codexErrorInfo: 'usageLimitExceeded' }
+        setImmediate(() => send({ method: 'turn/completed', params: { threadId: identity, turn } }))
+        return { turn: { ...turn } }
+      }
+      let id = 100
+      setImmediate(() => { for (const batch of index.readBatches) for (const range of batch.ranges) {
+        const args = { contextDigest: index.contextDigest, entryId: batch.entryId, ...range }, next = id++
+        ranges.set(next, args); send({ id: next, method: 'item/tool/call', params: { threadId: identity, turnId: turn.id, callId: String(next), tool: 'spex_read_frozen', arguments: args } })
+      } })
+      return { turn: { ...turn } }
+    },
+  }
+  const handle = request => {
+    if (request.method && request.id !== undefined) { assert.ok(methods[request.method], request.method); send({ id: request.id, result: methods[request.method](request.params) }); return }
+    if (!ranges.has(request.id)) return
+    const args = ranges.get(request.id), text = request.result.contentItems[0].text, reply = JSON.parse(text)
+    outputs.set(request.id, { text, bytes: Buffer.from(reply.text).subarray(args.startByte - (reply.decodedStartByte ?? args.startByte), args.endByte - (reply.decodedStartByte ?? args.startByte)) })
+    items.push({ type: 'dynamicToolCall', id: String(request.id), tool: 'spex_read_frozen', status: 'completed', arguments: args, ...request.result })
+    if (outputs.size !== ranges.size || endpoint) return
+    endpoint = true
+    const full = Buffer.concat([...outputs].sort(([a], [b]) => a - b).map(([, output]) => output.bytes)).toString('utf8')
+    const context = JSON.parse(full.split('\n冻结完整输入:\n')[1])
+    const source = context.readSet.find(item => item.path === 'src/greet.mjs')
+    assert.ok(source.candidate.includes('candidate-body-ends')); assert.equal(readFileSync(join(cwd, source.path), 'utf8'), source.candidate)
+    assert.equal(execFileSync('git', ['-C', cwd, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), context.identities.candidateCommit)
+    assert.equal(execFileSync('git', ['-C', cwd, 'rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).trim(), context.identities.candidateTree)
+    writeFileSync(path, [{ type: 'session_meta', payload: { id: identity, cwd } }, { type: 'turn_context', payload: { turn_id: turn.id } },
+      ...[...outputs].flatMap(([id, output]) => [{ type: 'response_item', payload: { type: 'custom_tool_call', name: 'exec', call_id: String(id) } },
+        { type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: String(id), output: output.text }, metadata: { fallback_token_limit_override: Math.ceil(limit * 1.2) } }]),
+      { type: 'event_msg', payload: { type: 'task_complete', turn_id: turn.id } }].map(row => JSON.stringify(row)).join('\n') + '\n')
+    items.push({ type: 'agentMessage', phase: 'final_answer', text: JSON.stringify({ inputId: context.inputId, candidateDigest: context.candidateDigest, checkedIds: context.scope.itemIds, verdict: 'accept', findings: [] }) })
+    turn.status = 'completed'; send({ method: 'turn/completed', params: { threadId: identity, turn } })
+  }
+  socket.on('data', chunk => {
+    buffer = Buffer.concat([buffer, chunk])
+    if (!ready) {
+      const end = buffer.indexOf('\r\n\r\n'); if (end < 0) return
+      const key = buffer.subarray(0, end).toString().match(/^Sec-WebSocket-Key: (.+)$/im)?.[1]
+      const accept = createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64')
+      socket.write('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: ' + accept + '\r\n\r\n')
+      buffer = buffer.subarray(end + 4); ready = true
+    }
+    while (buffer.length >= 2) {
+      const opcode = buffer[0] & 15, masked = !!(buffer[1] & 128); let length = buffer[1] & 127, offset = 2
+      if (length === 126) { if (buffer.length < 4) return; length = buffer.readUInt16BE(2); offset = 4 }
+      else if (length === 127) { if (buffer.length < 10) return; length = Number(buffer.readBigUInt64BE(2)); offset = 10 }
+      const start = offset + (masked ? 4 : 0); if (buffer.length < start + length) return
+      const data = Buffer.from(buffer.subarray(start, start + length)); if (masked) for (let i = 0; i < length; i++) data[i] ^= buffer[offset + i % 4]
+      buffer = buffer.subarray(start + length); if (opcode === 1) handle(JSON.parse(data.toString()))
+    }
+  })
+})
+server.listen(socketPath)
+setTimeout(() => process.exit(1), 30_000).unref()
+`
+  const route = { routeId: 'c'.repeat(64), vendor: 'codex', model: nativeModel, kind: 'cli', frozenReader: { capability: 'frozen-reader-v2', protocol: 'codex-persistent-v2', model: nativeModel, cliVersion, cliSha256: contentHash(fixtureBin) } } as const
+  const successor = quota ? { ...route, routeId: 'd'.repeat(64) } : undefined
+  const manager = managerFixture(t, route, true, successor, managedFrozenTestRuntime)
+  writeFileSync(join(manager.host, 'codex'), fixtureBin, { mode: 0o700 })
+  put(repo.root, 'src/greet.mjs', `${implementation}\n/* ${'x'.repeat(FROZEN_PROMPT_THRESHOLD_BYTES)} candidate-body-ends */\n`)
+  const candidate = save(repo.root), original = git(repo.root, ['worktree', 'list', '--porcelain'])
+  const { status, result } = publicCheck(t, repo.input(candidate), manager.config)
+  assert.equal(result.review?.verdict, 'accept', JSON.stringify(result.diagnostics))
+  const accepted = successor ?? route
+  assert.deepEqual(result.reviewRoute, accepted)
+  const calls = manager.calls(), firstId = calls[1].sessionId
+  assert.ok(firstId)
+  if (quota) assert.notEqual(firstId, result.trace?.sessionId)
+  assert.deepEqual(calls, [{ action: 'resolve', capability: 'frozen-reader-v2' }, { action: 'reserve', route, sessionId: firstId },
+    ...(quota ? [{ action: 'settle', route, sessionId: firstId, outcome: 'quota' },
+      { action: 'resolve', nextAfter: route, sameGroupAs: route, failedSessionId: firstId, capability: 'frozen-reader-v2' },
+      { action: 'reserve', route: accepted, sessionId: result.trace?.sessionId }] : []),
+    { action: 'settle', route: accepted, sessionId: result.trace?.sessionId, outcome: 'completed' }])
+  const realms = readdirSync(result.evidenceDirectory).filter(name => name.startsWith('review-'))
+  assert.equal(realms.length, quota ? 2 : 1)
+  for (const realm of realms.map(name => join(result.evidenceDirectory, name))) {
+    const worker = JSON.parse(readFileSync(join(realm, 'native-result.json'), 'utf8'))
+    if (worker.result) {
+      assert.equal(worker.result.frozenReadProof.version, 2)
+      assert.deepEqual(worker.result.frozenReadProof.coveredEntryIds, ['task'])
+      assert.equal(worker.result.worktree.headCommit, candidate)
+      assert.equal(existsSync(worker.result.worktree.worktreePath), false)
+    } else {
+      assert.equal(worker.diagnostic.code, 'provider_quota_exhausted')
+      assert.equal(worker.stoppedQuota.sessionId, firstId)
+    }
+    const runtime = join(realm, 'runtime', 'projects')
+    const runtimePidPath = readdirSync(runtime, { recursive: true }).find(name => String(name).includes('/structured-managed-frozen-worktree-v1/') && String(name).endsWith('/test-runtime.pid'))
+    assert.ok(runtimePidPath)
+    const pid = Number(readFileSync(join(runtime, String(runtimePidPath)), 'utf8'))
+    assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, 'review process has exited before V2 publication')
+  }
+  assert.equal(git(repo.root, ['worktree', 'list', '--porcelain']), original)
+  assert.equal(status, 2, JSON.stringify(result.diagnostics))
+  assert.deepEqual(result.diagnostics.map(({ code }) => code), ['verification'], 'fixture stops at Docker availability')
 })
 
 for (const mode of ['finite', 'unlimited', 'configured'] as const) test(`unlimited CI独审单次timeout ${mode} 保持有限且不依赖总cap`, async () => {

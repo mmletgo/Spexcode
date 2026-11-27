@@ -9,7 +9,9 @@ import { join } from 'node:path'
 import { processStartToken } from '@spexcode/spec-core'
 import { codexStructuredTurn } from './codex-harness.js'
 import { frozenReaderDisabledFeatures, prepareStructuredRealm, structuredExecutionPolicy, structuredExecutionTimer, structuredRealmRoot, structuredObserverState, StructuredSessionError, StructuredSessionTransportError, type StructuredExecution, type FrozenReaderRuntime } from './session-structured-policy.js'
-import { freezeContext, frozenReadOutputTokenLimit, readFrozenRange, type FrozenNativeItem } from './frozen-context.js'
+import { FROZEN_READ_MAX_BYTES, freezeContext, frozenReadOutputTokenLimit, readFrozenRange, type FrozenNativeItem, type FrozenReadReceipt, type FrozenToolResponse } from './frozen-context.js'
+import type { ManagedCodexFrozenRuntime, ManagedPersistentCodexTurn } from './llm-manager-host.js'
+import { managedModel, type ManagedFrozenReader } from './llm-manager-route.js'
 
 type Rpc = { id?: number; method: string; params: Record<string, unknown> }
 const schema = { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'], additionalProperties: false }
@@ -291,6 +293,83 @@ test('frozen runtime audits the effective output budget while legacy exact-histo
       } finally { await f.close() }
     }
   } finally { process.env.PATH = previousPath; data.close() }
+})
+
+test('managed Codex keeps full large reader proof and replays only its original durable history', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'spex-managed-codex-proof-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const cwd = '/immutable-candidate', bytes = Buffer.alloc(2 * FROZEN_READ_MAX_BYTES + 111, 0x61)
+  const ref = freezeContext({ directory, sourceRoot: process.cwd(), binding: { requestKey: 'managed-request', inputDigest: 'immutable-input' },
+    entries: [{ id: 'task', label: 'complete original review task', kind: 'utf8', bytes }] })
+  const reader: ManagedFrozenReader = { capability: 'frozen-reader-v2', protocol: 'codex-persistent-v2', model: 'gpt-6.1-sol', cliVersion: 'codex-cli 0.160.0', cliSha256: 'a'.repeat(64) }
+  const model = managedModel({ routeId: 'b'.repeat(64), vendor: 'codex', kind: 'cli', model: reader.model, frozenReader: reader })
+  const catalogPath = join(directory, 'catalog.json'), catalog = JSON.stringify({ models: [{ slug: reader.model, apply_patch_tool_type: null, experimental_supported_tools: [] }] })
+  writeFileSync(catalogPath, catalog)
+  const limit = frozenReadOutputTokenLimit(ref), rolloutPath = join(directory, 'rollout-managed.jsonl')
+  const seed = { baseCommit: 'b'.repeat(40), tree: 'c'.repeat(40), mode: 'read' as const }
+  const request = { schema, inputDigest: 'immutable-input', purpose: 'code_review', timeoutMs: 3000, model, worktree: seed, frozenContext: ref,
+    readerRuntime: { version: 2 as const, cliVersion: reader.cliVersion, toolOutputTokenLimit: limit, catalogPath, catalogDigest: createHash('sha256').update(catalog).digest('hex') } }
+  assert.throws(() => structuredExecutionPolicy({ ...request, worktree: { ...seed, mode: 'edit' } }), { code: 'unsupported' })
+  assert.throws(() => structuredExecutionPolicy({ ...request, frozenContext: undefined }), { code: 'unsupported' })
+  const policy = structuredExecutionPolicy(request)
+  assert.equal(policy.version, 7)
+  const nativeReads: FrozenNativeItem[] = [], receipts: FrozenReadReceipt[] = [], operations: string[] = []
+  const turn = { id: 'turn-exact', status: 'completed' }
+  const rollout = (crop: boolean): void => writeFileSync(rolloutPath, [
+    { type: 'session_meta', payload: { id: 'thread-exact', cwd } },
+    { type: 'turn_context', payload: { turn_id: 'turn-exact' } },
+    ...nativeReads.flatMap((item, index) => {
+      const text = (item.contentItems as FrozenToolResponse['contentItems'])[0].text
+      return [{ type: 'response_item', payload: { type: 'custom_tool_call', name: 'exec', call_id: `outer-${index}` } },
+        { type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: `outer-${index}`, output: crop && index === 1 ? text.slice(1) : text },
+          metadata: { fallback_token_limit_override: Math.ceil(limit * 1.2) } }]
+    }),
+    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-exact' } },
+  ].map(row => JSON.stringify(row)).join('\n') + '\n')
+  class ControlledManagerTransport {
+    tool!: (call: Record<string, unknown>) => Promise<unknown>
+    completed!: (threadId: string, turn: ManagedPersistentCodexTurn) => void
+    fail!: (error: Error) => void
+    async initialize() {}
+    async auditReadOnly(input: { cwd: string; readerRuntime?: FrozenReaderRuntime }) { assert.deepEqual(input, { cwd, readerRuntime: request.readerRuntime }) }
+    async startThread(input: { cwd: string; model?: string; dynamicTools?: readonly unknown[] }) {
+      operations.push('thread'); assert.equal(input.cwd, cwd); assert.equal(input.model, reader.model); assert.equal(input.dynamicTools?.length, 1)
+      return { id: 'thread-exact' }
+    }
+    async startTurn(input: { threadId: string; cwd: string; prompt: string; model?: string }) {
+      operations.push('turn'); assert.deepEqual({ threadId: input.threadId, cwd: input.cwd, prompt: input.prompt, model: input.model }, { threadId: 'thread-exact', cwd, prompt: 'frozen index', model: reader.model })
+      const read = async (): Promise<void> => {
+        for (let startByte = 0; startByte < bytes.length; startByte += FROZEN_READ_MAX_BYTES) {
+          const callId = String(startByte), arguments_ = { contextDigest: ref.contextDigest, entryId: 'task', startByte, endByte: Math.min(bytes.length, startByte + FROZEN_READ_MAX_BYTES) }
+          const response = await this.tool({ threadId: 'thread-exact', turnId: 'turn-exact', callId, tool: 'spex_read_frozen', arguments: arguments_ }) as FrozenToolResponse
+          assert.equal(receipts.at(-1)?.callId, callId)
+          nativeReads.push({ id: callId, type: 'dynamicToolCall', tool: 'spex_read_frozen', arguments: arguments_, status: 'completed', ...response })
+        }
+        rollout(false); this.completed('thread-exact', turn)
+      }
+      void read().catch(this.fail)
+      return turn.id
+    }
+    async readThread() { return { id: 'thread-exact', path: rolloutPath } }
+    async readTurns() { return [turn] }
+    async readItems() { return [...finalTurn().items, ...nativeReads] }
+    onToolCall(handler: ControlledManagerTransport['tool']) { this.tool = handler }
+    onCompleted(handler: ControlledManagerTransport['completed']) { this.completed = handler }
+    onFailure(handler: ControlledManagerTransport['fail']) { this.fail = handler }
+    async drainToolCalls() {}
+    close() {}
+  }
+  const hosted = { reader, CodexPersistentAppServer: ControlledManagerTransport } as unknown as ManagedCodexFrozenRuntime
+  const first = await codexStructuredTurn('/fixture-manager', cwd, 'frozen index', policy, { ...callbacks, onFrozenRead: async receipt => { receipts.push(receipt) } }, hosted)
+  assert.equal(first.frozenReadProof?.version, 2)
+  assert.equal(receipts.length, 3)
+  const replay = { ...policy, state: 'completed' as const, threadId: first.threadId, turnId: first.turnId }
+  const refuse = async () => assert.fail('cold replay attempted a new provider effect')
+  const replayCallbacks = { onThread: refuse, onTurn: refuse, onFrozenRead: refuse }
+  assert.deepEqual(await codexStructuredTurn('/fixture-manager', cwd, 'frozen index', replay, replayCallbacks, hosted), first)
+  rollout(true)
+  await assert.rejects(codexStructuredTurn('/fixture-manager', cwd, 'frozen index', replay, replayCallbacks, hosted), /not returned verbatim/)
+  assert.deepEqual(operations, ['thread', 'turn'])
 })
 
 for (const mode of ['foreign-thread', 'foreign-turn', 'wrong-digest', 'path']) test(`frozen ${mode} request is refused before any successful response`, async () => {
