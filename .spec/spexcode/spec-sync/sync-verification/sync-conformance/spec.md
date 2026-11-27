@@ -28,6 +28,8 @@ CI 不能依赖开发机数据库或候选自行提交的通过记录，也不�
 
 独审的工作树、会话数据库与停止和归档原件留在本次独立证据目录，按原生停止与回收流程结算；无法证实结算时返回 `recovery_required`。宿主启用 [[sync-model-selection]] 的 LLM Manager 时，新独审从同一功能组选择并冻结路线，返回公开的 `reviewRoute`。托管独审使用 v6 只读原生工作树，固定实际 candidate commit/tree，并提交完整 base∪candidate 冻结输入。Manager 无就绪路线则 `unsupported`。超过 [[frozen-context-reader]] 的既有 512 KiB 内联阈值且当前 Manager 路线无法提供精确历史读取证明时，保留完整冻结输入并返回 `unsupported_managed_frozen_reader`。
 
+托管独审收到正式额度失败时，先核对冻结创建载荷、原会话和轮次、精确只读停止及正式回收。沿原功能组和真实失败会话请求后继，由 Manager 核实该会话确已按额度结算。后继新建独立请求，保留原完整输入、候选 commit/tree、schema 和绑定。各次独审原件保存在各自证据目录，`reviewRoute` 记录最后选中的路线，trace 记录完成独审的实际会话。普通错误、身份漂移、未结算和待恢复均阻断续路。
+
 每次输出包含完整冻结输入身份、范围、真实审查 trace、容器结果与诊断；passed 只说明这次候选检查，不授予落盘或主分支同步状态。远端 required-check 必须由受保护目标版本 runner 启动，仓库 workflow 建议本身不证明保护设置已启用。
 
 可信unlimited配置没有operation总期限，独立候选审查仍使用有限正数callTimeoutMs，未配置时默认120000ms；旧有限配置原timeout fallback保持。Docker固定验证timeout、政策及完整通过标准不变。

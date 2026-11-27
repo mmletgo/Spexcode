@@ -108,16 +108,24 @@ function publicCheck(t: TestContext, input: ConformanceInput, config: string): {
   return { status: cli.status, result: JSON.parse(cli.stdout) as ConformanceResult }
 }
 
-function managerFixture(t: TestContext, selection: ConformanceResult['reviewRoute'] | null, settle = true) {
+function managerFixture(t: TestContext, selection: ConformanceResult['reviewRoute'] | null, settle = true, successor?: ConformanceResult['reviewRoute']) {
   const host = mkdtempSync(join(tmpdir(), 'spex-conformance-manager-fixture-')), config = join(host, 'config.json'), log = join(host, 'calls.jsonl')
   t.after(() => rmSync(host, { recursive: true, force: true }))
-  writeFileSync(config, JSON.stringify(selection))
+  writeFileSync(config, JSON.stringify({ selection, successor }))
   writeFileSync(join(host, 'docker'), '#!/bin/sh\nexit 127\n', { mode: 0o700 })
   writeFileSync(join(host, 'bridge'), `#!${process.execPath}
 const { appendFileSync, readFileSync } = require('node:fs')
 const message = JSON.parse(readFileSync(0, 'utf8'))
 appendFileSync('calls.jsonl', JSON.stringify(message) + '\\n')
-const value = message.action === 'resolve' ? JSON.parse(readFileSync(process.argv[5], 'utf8')) : message.action === 'reserve' ? {} : { outcome: message.outcome }
+const { selection, successor } = JSON.parse(readFileSync(process.argv[5], 'utf8'))
+if (message.nextAfter) {
+  const calls = readFileSync('calls.jsonl', 'utf8').trim().split('\\n').map(line => JSON.parse(line))
+  const previous = calls.find(call => call.action === 'settle' && call.sessionId === message.failedSessionId && call.outcome === 'quota')
+  if (!${settle} || previous?.route.routeId !== message.nextAfter.routeId || message.sameGroupAs?.routeId !== selection.routeId) {
+    process.stdout.write(JSON.stringify({ ok: false, code: 'llm_manager_quota_required' })); process.exit(0)
+  }
+}
+const value = message.action === 'resolve' ? message.nextAfter ? successor ?? null : selection : message.action === 'reserve' ? {} : { outcome: message.outcome }
 process.stdout.write(JSON.stringify(message.action === 'settle' && !${settle} ? { ok: false, code: 'llm_manager_host_unavailable' } : { ok: true, value }))
 `, { mode: 0o700 })
   return { host, config, calls: (): { action: string; route?: unknown; sessionId?: string; outcome?: string }[] => readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line)) }
@@ -139,9 +147,11 @@ test('公开 sync check 在 Manager 功能组没有就绪路线时拒绝使用�
 })
 
 const cursorRoute = { routeId: 'a'.repeat(64), vendor: 'cursor', model: 'default', kind: 'cli' } as const
+const successorRoute = { ...cursorRoute, routeId: 'b'.repeat(64), model: 'cursor-successor-fixture' } as const
 
-for (const settle of [true, false]) test(`公开 sync check 的模拟 Manager 与 Cursor CLI ${settle ? '成功结算并回收' : '保留未能结算的回收原件'}`, t => {
-  const repo = fixture(), manager = managerFixture(t, cursorRoute, settle)
+for (const scenario of ['accept', 'accept-unsettled', 'quota', 'quota-unsettled', 'protocol'] as const) test(`公开 sync check 的模拟 Manager 与 Cursor CLI ${scenario}`, t => {
+  const settle = !scenario.endsWith('unsettled'), quota = scenario.startsWith('quota'), protocol = scenario === 'protocol'
+  const repo = fixture(), manager = managerFixture(t, cursorRoute, settle, successorRoute)
   t.after(() => rmSync(repo.root, { recursive: true, force: true }))
   const candidateSource = `${implementation}\n/* ${'x'.repeat(400 * 1024)} candidate content */\n`
   put(repo.root, 'src/greet.mjs', candidateSource)
@@ -155,8 +165,9 @@ const { execFileSync } = require('node:child_process')
 const { readFileSync } = require('node:fs')
 const { createInterface } = require('node:readline')
 if (process.argv[2] === '--version') { console.log('cursor-conformance-fixture'); process.exit(0) }
-assert.deepEqual(process.argv.slice(2), ['--workspace', process.cwd(), '--sandbox', 'enabled', '--trust', '--mode', 'ask', 'acp'])
-const sessionId = 'cursor-conformance-native'
+const successor = process.argv.includes(${JSON.stringify(successorRoute.model)})
+assert.deepEqual(process.argv.slice(2), ['--workspace', process.cwd(), '--sandbox', 'enabled', '--trust', '--mode', 'ask', ...(successor ? ['--model', ${JSON.stringify(successorRoute.model)}] : []), 'acp'])
+const sessionId = 'cursor-conformance-native' + (successor ? '-successor' : '')
 const send = packet => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...packet }) + '\n')
 createInterface({ input: process.stdin, crlfDelay: Infinity }).on('line', line => {
   const { id, method, params } = JSON.parse(line)
@@ -172,6 +183,14 @@ createInterface({ input: process.stdin, crlfDelay: Infinity }).on('line', line =
     assert.equal(ctx.identities.policyCommit, ${JSON.stringify(repo.base)})
     assert.deepEqual(ctx.readSet.find(file => file.path === 'src/greet.mjs'), { path: 'src/greet.mjs', before: ${JSON.stringify(implementation)}, candidate: ${JSON.stringify(candidateSource)} })
     assert.equal(readFileSync('src/greet.mjs', 'utf8'), ${JSON.stringify(candidateSource)})
+    if (${quota} && !successor) {
+      send({ id, error: { code: 429, message: 'fixture provider quota' } })
+      return
+    }
+    if (${protocol}) {
+      send({ id, error: { code: -32001, message: 'fixture ACP error' } })
+      return
+    }
     const output = { inputId: ctx.inputId, candidateDigest: ctx.candidateDigest, checkedIds: ctx.scope.itemIds, verdict: 'accept', findings: [] }
     send({ method: 'session/update', params: { sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: JSON.stringify(output) } } } })
     send({ id, result: { stopReason: 'end_turn' } })
@@ -180,15 +199,19 @@ createInterface({ input: process.stdin, crlfDelay: Infinity }).on('line', line =
 `, { mode: 0o700 })
   const { status, result } = publicCheck(t, repo.input(candidate), manager.config)
   assert.equal(result.reviewExecution, 'native')
-  assert.deepEqual(result.reviewRoute, cursorRoute)
-  const realm = join(result.evidenceDirectory, readdirSync(result.evidenceDirectory).find(path => path.startsWith('review-'))!)
-  assert.ok(existsSync(join(realm, 'runtime', 'sessions.sqlite')))
+  assert.deepEqual(result.reviewRoute, quota && settle ? successorRoute : cursorRoute)
+  const attempts = readdirSync(result.evidenceDirectory).filter(path => path.startsWith('review-')).map(path => {
+    const realm = join(result.evidenceDirectory, path)
+    assert.ok(existsSync(join(realm, 'runtime', 'sessions.sqlite')))
+    return { realm, raw: JSON.parse(readFileSync(join(realm, 'native-result.json'), 'utf8')) }
+  })
+  assert.equal(attempts.length, quota && settle ? 2 : 1)
   assert.deepEqual(['worktree list --porcelain', 'show-ref', 'status --porcelain'].map(command => git(repo.root, command.split(' '))), project)
   const calls = manager.calls(), sessionId = calls.find(call => call.action === 'reserve')?.sessionId
   assert.ok(sessionId)
-  const reserve = { action: 'reserve', route: cursorRoute, sessionId }, complete = { action: 'settle', route: cursorRoute, sessionId, outcome: 'completed' }
-  const raw = JSON.parse(readFileSync(join(realm, 'native-result.json'), 'utf8'))
+  const reserve = { action: 'reserve', route: cursorRoute, sessionId }, complete = { action: 'settle', route: cursorRoute, sessionId, outcome: protocol ? 'stopped' : quota ? 'quota' : 'completed' }
   if (!settle) {
+    const [{ realm, raw }] = attempts
     assert.equal(status, 1, JSON.stringify(result.diagnostics))
     assert.deepEqual(calls, [{ action: 'resolve' }, reserve, complete, { ...complete, outcome: 'stopped' }])
     assert.equal(result.status, 'recovery_required')
@@ -198,10 +221,35 @@ createInterface({ input: process.stdin, crlfDelay: Infinity }).on('line', line =
     assert.equal(git(join(realm, 'source'), ['worktree', 'list', '--porcelain']).match(/^worktree /gm)?.length, 2)
     return
   }
+  if (protocol) {
+    assert.equal(status, 1, JSON.stringify(result.diagnostics))
+    assert.deepEqual(calls, [{ action: 'resolve' }, reserve, complete])
+    assert.equal(result.status, 'failed')
+    assert.deepEqual(result.runs, [])
+    assert.equal(attempts[0].raw.stoppedQuota, undefined)
+    return
+  }
   assert.equal(result.review?.verdict, 'accept', JSON.stringify(result.diagnostics))
-  assert.equal(result.trace?.threadId, 'cursor-conformance-native')
-  assert.equal(result.trace.sessionId, sessionId)
-  assert.deepEqual(calls, [{ action: 'resolve' }, reserve, complete])
+  assert.equal(result.trace?.threadId, quota ? 'cursor-conformance-native-successor' : 'cursor-conformance-native')
+  if (quota) {
+    const first = attempts.find(attempt => attempt.raw.diagnostic?.code === 'provider_quota_exhausted')!
+    assert.equal(first.raw.stoppedQuota.sessionId, sessionId)
+    assert.equal(git(join(first.realm, 'source'), ['worktree', 'list', '--porcelain']).match(/^worktree /gm)?.length, 1)
+    assert.notEqual(result.trace.sessionId, sessionId)
+    const launches = attempts.map(({ realm, raw }) => {
+      const projects = join(realm, 'runtime', 'projects')
+      return readFileSync(join(projects, readdirSync(projects)[0], 'sessions', raw.stoppedQuota?.sessionId ?? raw.result.sessionId, 'launch'), 'utf8')
+    })
+    assert.ok(launches[0] === launches[1], '正式续路保持完整冻结提示原字节')
+    assert.deepEqual(calls, [{ action: 'resolve' }, reserve, complete,
+      { action: 'resolve', nextAfter: cursorRoute, sameGroupAs: cursorRoute, failedSessionId: sessionId },
+      { action: 'reserve', route: successorRoute, sessionId: result.trace.sessionId },
+      { action: 'settle', route: successorRoute, sessionId: result.trace.sessionId, outcome: 'completed' }])
+  } else {
+    assert.equal(result.trace.sessionId, sessionId)
+    assert.deepEqual(calls, [{ action: 'resolve' }, reserve, complete])
+  }
+  const { raw } = attempts.find(attempt => attempt.raw.result)!
   assert.equal(existsSync(raw.result.worktree.worktreePath), false)
   assert.equal(raw.result.worktree.headCommit, candidate)
   assert.equal(status, 2, JSON.stringify(result.diagnostics))

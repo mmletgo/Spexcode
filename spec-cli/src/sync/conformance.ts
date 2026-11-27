@@ -9,7 +9,8 @@ import { contractImpact, dependencyClosure, validateContractGraph } from '@spexc
 import type { Acceptance, ContractGraph } from '@spexcode/spec-core/contracts'
 import { FROZEN_PROMPT_THRESHOLD_BYTES } from '../frozen-context.js'
 import { llmManagerRequested, LlmManagerHostError, resolveManagedRoute } from '../llm-manager-host.js'
-import { managedModel, type ManagedRoute } from '../llm-manager-route.js'
+import { managedModel, managedRoute, type ManagedRoute } from '../llm-manager-route.js'
+import { structuredExecutionPolicy } from '../session-structured-policy.js'
 import { DEFAULT_SYNC_MODEL } from './model-selection.js'
 import { actualTreeDiff, exportCandidate, isHostPrivatePath } from './candidate.js'
 import { CANDIDATE_REVIEW_INSTRUCTIONS, GENERATION_REVIEW_SCHEMA, runCandidateReview } from './candidate-review.js'
@@ -81,10 +82,10 @@ function conformanceGitEnvironment(): NodeJS.ProcessEnv {
 }
 
 type NativeReviewRequest = Omit<ElaborationSessionRequest, 'signal'>
-type NativeReviewReply = { result: ElaborationSessionResult } | { diagnostic: ConformanceResult['diagnostics'][number] }
+type NativeReviewReply = { result: ElaborationSessionResult } | { diagnostic: ConformanceResult['diagnostics'][number]; stoppedQuota?: { sessionId: string; threadId?: string; turnId?: string } }
 
 /** 原生创建/回收以当前进程 Git 根和 session store 为权威，故每次检查使用独立进程和证据库。 */
-async function isolatedNativeReview(request: ElaborationSessionRequest, commonDir: string, evidenceDirectory: string): Promise<ElaborationSessionResult> {
+async function isolatedNativeReview(request: ElaborationSessionRequest, commonDir: string, evidenceDirectory: string): Promise<NativeReviewReply> {
   const { signal, ...frozen } = request
   if (signal?.aborted) fail('cancelled', '独审派发前已取消')
   const realm = mkdtempSync(join(evidenceDirectory, 'review-')), checkout = join(realm, 'source'), runtime = join(realm, 'runtime')
@@ -103,7 +104,7 @@ async function isolatedNativeReview(request: ElaborationSessionRequest, commonDi
   const cancel = (): void => { if (worker.connected) worker.send('cancel', () => {}) }
   signal?.addEventListener('abort', cancel, { once: true })
   try {
-    const response = await new Promise<NativeReviewReply>((resolve, reject) => {
+    return await new Promise<NativeReviewReply>((resolve, reject) => {
       worker.on('message', (message: NativeReviewReply) => { reply = message })
       worker.once('error', reject)
       worker.once('exit', (code, endingSignal) => {
@@ -113,21 +114,21 @@ async function isolatedNativeReview(request: ElaborationSessionRequest, commonDi
       worker.send({ ...frozen, root: checkout }, error => { if (error) reject(error) })
       if (signal?.aborted) cancel()
     }).catch((error: Error) => fail('native_review_recovery_required', `${error.message}，保留独审证据目录 ${realm}`))
-    if ('diagnostic' in response) return fail(response.diagnostic.code, response.diagnostic.message)
-    return response.result
   } finally { signal?.removeEventListener('abort', cancel) }
 }
 
 async function runNativeReviewWorker(request: NativeReviewRequest, signal: AbortSignal): Promise<NativeReviewReply> {
-  const { nativeWorktreeResult } = await import('../native-worktree-runtime.js')
+  const { nativeWorktreePrompt, nativeWorktreeResult } = await import('../native-worktree-runtime.js')
   const { readRecord } = await import('../session-record.js')
   const { withoutSessionApplicationExecutionWake } = await import('../session-application.js')
   const { closeSession, pendingSessionCreateWorktreePaths, readSessionCreateTermination, sessionIdForCreateKey } = await import('../sessions.js')
-  const { cancelStructuredSession, runStructuredSession } = await import('../session-structured.js')
+  const { cancelStructuredSession, runStructuredSession, StructuredSessionError } = await import('../session-structured.js')
   const id = sessionIdForCreateKey(request.requestKey), commonDir = join(request.root, '.git')
   let reply: NativeReviewReply
+  let quota: InstanceType<typeof StructuredSessionError> | undefined
   try { reply = { result: await runStructuredSession({ ...request, signal }) } }
   catch (error) {
+    if (error instanceof StructuredSessionError && error.code === 'provider_quota_exhausted') quota = error
     const cause = error as { code?: string; message?: string }
     reply = { diagnostic: { code: cause.code ?? 'native_review_failed', message: cause.message ?? String(error) } }
   }
@@ -140,6 +141,15 @@ async function runNativeReviewWorker(request: NativeReviewRequest, signal: Abort
       return reply
     }
     const execution = record.structuredExecution!
+    if ('diagnostic' in reply && quota && request.worktree?.mode === 'read' && managedRoute(request.model)
+      && execution.state === 'failed' && execution.cancellation?.nativeStopped && execution.errorCode === quota.code && execution.error === quota.message
+      && quota.sessionId === id && execution.threadId === quota.threadId && execution.turnId === quota.turnId) {
+      const { pinSyncNativeRequest } = await import('./native-run.js')
+      const expected = structuredExecutionPolicy(pinSyncNativeRequest(request, null))
+      const payloadHash = digest({ prompt: nativeWorktreePrompt(request.prompt, request.worktree), parent: null, launcher: null, base: request.worktree.baseCommit, structuredExecution: expected })
+      if (record.createRequestId === contentHash(request.requestKey) && record.createPayloadHash === payloadHash && digest(structuredExecutionPolicy(execution)) === digest(expected))
+        reply.stoppedQuota = { sessionId: id, threadId: quota.threadId, turnId: quota.turnId }
+    }
     if (execution.state !== 'completed' && !execution.cancellation?.nativeStopped) {
       const stop = await cancelStructuredSession(id, { wakeQueue: false })
       if (!stop.nativeStopped) throw new Error(stop.error ?? '精确原生停止未证实')
@@ -357,8 +367,27 @@ export async function runConformance(supplied: ConformanceInput, options: Confor
         fail('unsupported_managed_frozen_reader', '当前 Manager 原生路线无法证明超出内联阈值后的完整冻结读取，已保留全部输入以供复验')
     }
     const route = result.reviewRoute
-    const runner: ElaborationRunner = options.testReviewRunner ?? (request => isolatedNativeReview(request, commonDir, evidenceDirectory))
-    const reviewed = await runCandidateReview({ root, base: route ? candidate.commit : base.commit, requestKey: `conformance:${result.inputDigest}:${randomUUID()}`, inputDigest: result.inputDigest, purpose: 'code_review', timeoutMs: trusted.callTimeoutMs ?? finiteSyncBudget(trusted.budget)?.timeoutMs ?? 120_000, signal, schema: GENERATION_REVIEW_SCHEMA, prompt,
+    const keyPrefix = `conformance:${result.inputDigest}:`
+    const runner: ElaborationRunner = options.testReviewRunner ?? (async request => {
+      let current = route, dispatch = request
+      const usedRoutes = new Set<string>()
+      while (true) {
+        if (current) usedRoutes.add(current.routeId)
+        const response = await isolatedNativeReview(dispatch, commonDir, evidenceDirectory)
+        if ('result' in response) return response.result
+        if (!current || !response.stoppedQuota) return fail(response.diagnostic.code, response.diagnostic.message)
+        if (signal?.aborted) fail('cancelled', '独审续路前已取消')
+        const successor = await resolveManagedRoute(current, route, response.stoppedQuota.sessionId).catch(error => {
+          if (error instanceof LlmManagerHostError) return fail(`unsupported_${error.code}`, 'LLM Manager 无法确认原独审额度或完成正式续路')
+          throw error
+        })
+        current = successor ?? fail('unsupported_llm_manager_no_review_successor', 'LLM Manager 功能组没有可用于同一候选的额度后继')
+        if (usedRoutes.has(current.routeId)) fail('unsupported_llm_manager_review_route_reused', 'LLM Manager 为同一候选返回了已使用的路线')
+        result.reviewRoute = current
+        dispatch = { ...request, requestKey: `${keyPrefix}${randomUUID()}`, model: managedModel(current) }
+      }
+    })
+    const reviewed = await runCandidateReview({ root, base: route ? candidate.commit : base.commit, requestKey: `${keyPrefix}${randomUUID()}`, inputDigest: result.inputDigest, purpose: 'code_review', timeoutMs: trusted.callTimeoutMs ?? finiteSyncBudget(trusted.budget)?.timeoutMs ?? 120_000, signal, schema: GENERATION_REVIEW_SCHEMA, prompt,
       ...(route ? { model: managedModel(route), worktree: { baseCommit: candidate.commit, tree: candidate.tree, mode: 'read' as const } } : { model: DEFAULT_SYNC_MODEL, effort: 'high' as const }) }, runner, { inputId: result.inputDigest, candidateDigest, requiredIds: scope.itemIds, actualIds: scope.itemIds, priorIds: [...before.graph.items.keys()] })
     result.review = reviewed.review; result.trace = reviewed.trace
     if (reviewed.review.verdict !== 'accept') fail('review_rejected', JSON.stringify(reviewed.review.findings))
