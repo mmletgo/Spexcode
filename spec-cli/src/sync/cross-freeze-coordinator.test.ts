@@ -4,6 +4,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync,
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
+import { Ajv } from 'ajv'
 import { openProtocol } from '@spexcode/session-protocol'
 import { nativeWorktreePrompt, nativeWorktreeResult } from '../native-worktree-runtime.js'
 import { configuredSessionApplication } from '../session-application.js'
@@ -36,13 +37,17 @@ const scenarios = [
   { useBaseline: true, mainBranch: 'main', checkout: 'feature' },
   { useBaseline: true, mainBranch: 'stable', checkout: 'stable' },
   { useBaseline: true, mainBranch: 'main', checkout: 'main', hideCurrentReview: true },
+  { useBaseline: true, mainBranch: 'main', checkout: 'main', retryImpactFormat: true },
 ] as const
 
 for (const scenario of scenarios) test(
-  '跨冻结正式 P0 ' + ('hideCurrentReview' in scenario ? 'whole 冷恢复缺少当前独审原件' : `configured=${scenario.mainBranch} checkout=${scenario.checkout} baseline=${scenario.useBaseline}`),
+  '跨冻结正式 P0 ' + ('retryImpactFormat' in scenario ? '影响复核覆盖格式沿原稿续审'
+    : 'hideCurrentReview' in scenario ? 'whole 冷恢复缺少当前独审原件'
+    : `configured=${scenario.mainBranch} checkout=${scenario.checkout} baseline=${scenario.useBaseline}`),
   async t => {
   const { useBaseline, mainBranch, checkout } = scenario
   const hideCurrentReview = 'hideCurrentReview' in scenario
+  const retryImpactFormat = 'retryImpactFormat' in scenario
   const canonicalCheckout = mainBranch === checkout
   assert.ok(process.env.SPEXCODE_TEST_HOME, '必须通过 test-home 隔离正式会话夹具')
   assert.equal(process.env.SPEX_SESSION_DATABASE_PATH, join(process.env.SPEXCODE_TEST_HOME, 'sessions.sqlite'))
@@ -114,6 +119,7 @@ for (const scenario of scenarios) test(
     return wrapper.stage ? [[wrapper.stage, wrapper] as const] : []
   }))
   const calls: { freeze: string; purpose: string; owner: string; sessionId: string }[] = []
+  const impactMaterials = new Map<string, Buffer>()
   let active = await admit(oldInput, 'old-initial')
   const options: SyncCoordinatorOptions = {
     plan, readCurrentPlan: () => plan, managedRoot, artifactRoot,
@@ -136,11 +142,17 @@ for (const scenario of scenarios) test(
           assert.deepEqual(material.changes.map(change => change.path), [importSource, importTest])
           assert.match(readFileSync(join(workspace, dirname(materialPath), 'changes.diff'), 'utf8'), /H2 import dependency/)
           const affected = oldOwners.IMPORT === owner
-          output = { inputDigest: request.inputDigest, verdict: affected ? 'affected' : 'reuse',
+          const impact: CrossFreezeImpactOutput = { inputDigest: request.inputDigest, verdict: affected ? 'affected' : 'reuse',
             history: { previousCommit: material.previous.commit, currentCommit: active.input.headCommit, evidence: importSource, reason: 'Compare frozen call paths for this contract.' },
             paths: material.changes.map(({ path }) => ({ path, verdict: affected ? 'affected' : 'reuse',
               evidence: 'Read the complete frozen path and surrounding calls: ' + path, reason: 'Import dependency changes are material to ImportService only.' })),
-          } satisfies CrossFreezeImpactOutput
+          }
+          impactMaterials.set(sessionId, readFileSync(join(workspace, dirname(materialPath), 'candidate.json')))
+          if (retryImpactFormat && !affected && !calls.some(call => call.freeze === active.id && call.owner === owner && call.purpose === CROSS_FREEZE_IMPACT_PURPOSE)) {
+            impact.paths[1] = { ...impact.paths[0] }
+            assert.equal(new Ajv().validate(request.schema, impact), true, '重复路径须通过冻结 JSON schema，仅精确覆盖检查拒绝')
+          }
+          output = impact
         } else {
           assert.ok(request.purpose === 'code_behavior_analyze' || request.purpose === 'code_behavior_review', request.purpose)
           const { task, pendingAnalysis } = readCodeBehaviorContext(request, commonDir)
@@ -248,11 +260,14 @@ for (const scenario of scenarios) test(
     assert.equal(second.operation.phase, 'failed')
   }
   const attempts = store.listAttempts(active.id)
-  assert.equal(attempts.length, 1)
-  const [currentAttempt] = attempts, currentStages = stages(currentAttempt)
+  assert.equal(attempts.length, retryImpactFormat ? 2 : 1)
+  const currentAttempt = attempts.at(-1)!, currentStages = stages(currentAttempt)
   const currentCalls = calls.filter(call => call.freeze === active.id)
   if (canonicalCheckout) {
-    assert.deepEqual(currentCalls.filter(call => call.owner === unaffected).map(call => call.purpose), [CROSS_FREEZE_IMPACT_PURPOSE, 'code_behavior_review'])
+    const reusedCalls = currentCalls.filter(call => call.owner === unaffected)
+    assert.deepEqual(reusedCalls.map(call => call.purpose), [
+      ...(retryImpactFormat ? [CROSS_FREEZE_IMPACT_PURPOSE] : []), CROSS_FREEZE_IMPACT_PURPOSE, 'code_behavior_review',
+    ])
     assert.deepEqual(currentCalls.filter(call => call.owner === affected).map(call => call.purpose), [CROSS_FREEZE_IMPACT_PURPOSE, 'code_behavior_analyze', 'code_behavior_review'])
     assert.ok(second.operation.crossFreezeBinding)
     const binding = read<{ canonicalBranch: string; oldOperationId: string }>(second.operation.crossFreezeBinding.ref)
@@ -277,6 +292,30 @@ for (const scenario of scenarios) test(
     assert.deepEqual(newImpact.output.paths.map(path => path.path), [importSource, importTest])
     assert.equal(readEvidence(commonDir, newImpact.binding.prior.resultRef).toString('utf8'), readStageDraft(commonDir, originalDraft, originalDraft))
     assert.equal(newImpact.binding.prior.approvalRef?.sha256, oldStages.get('partition:' + unaffected + ':analysis')!.resultRef.sha256)
+    if (retryImpactFormat) {
+      const [rejected] = attempts
+      assert.equal(rejected.failure?.kind, 'repairable')
+      assert.equal(rejected.failure?.code, 'cross_freeze_impact_review_retry')
+      assert.equal(rejected.composedInput?.sourceInputId, currentInput.id)
+      assert.deepEqual(currentAttempt.composedInput, rejected.composedInput)
+      assert.deepEqual(second.operation.input, active.input)
+      assert.equal(second.operation.retryOf, undefined)
+      assert.equal(stages(rejected).has(impactKey), false)
+      assert.deepEqual(currentAttempt.dispatchPlans.map(dispatch => dispatch.purpose), [CROSS_FREEZE_IMPACT_PURPOSE, 'code_behavior_review'])
+      const brotherStage = 'partition:' + affected + ':analysis'
+      assert.deepEqual(currentStages.get(brotherStage)?.resultRef, stages(rejected).get(brotherStage)?.resultRef)
+      const [rejectedCall, approvedCall] = reusedCalls
+      assert.notEqual(rejectedCall.sessionId, approvedCall.sessionId)
+      const failedDispatch = rejected.dispatchPlans.find(dispatch => dispatch.session?.sessionId === rejectedCall.sessionId)!
+      const failedResource = store.findResource(rejected.id, failedDispatch.key)!
+      const checkpoint = read<NativeRunCheckpoint>(failedResource.checkpointRef)
+      assert.equal(failedResource.phase, 'removed')
+      assert.equal(checkpoint.status, 'completed')
+      assert.deepEqual((checkpoint.result?.output as CrossFreezeImpactOutput).paths.map(item => item.path), [importSource, importSource])
+      const draft = Buffer.from(readStageDraft(commonDir, originalDraft, originalDraft))
+      assert.deepEqual(impactMaterials.get(rejectedCall.sessionId), draft)
+      assert.deepEqual(impactMaterials.get(approvedCall.sessionId), draft)
+    }
   } else {
     assert.deepEqual(currentCalls.map(call => call.purpose), [
       'code_behavior_analyze', 'code_behavior_review', 'code_behavior_analyze', 'code_behavior_review',
@@ -324,7 +363,7 @@ for (const scenario of scenarios) test(
   }
   assert.deepEqual(store.readOperation(old.id), before.operation)
   assert.deepEqual(store.listAttempts(old.id), before.attempts)
-  for (const attempt of [oldAttempt, currentAttempt]) {
+  for (const attempt of [oldAttempt, ...attempts]) {
     const resources = store.listResources(attempt.id)
     assert.equal(resources.length, attempt.dispatchPlans.length)
     for (const resource of resources) {
