@@ -101,6 +101,10 @@ if (acp) {
         stderrQuota()
         return
       }
+      if (scenario === 'acp-mismatched-response') {
+        send({ id: String(id), error: { code: -32600, message: 'fixture private response' } })
+        return
+      }
       writeFileSync('draft.json', ${JSON.stringify(finalText)})
       for (const argv of [['add', 'draft.json'], ['commit', '-qm', 'native ACP draft']]) execFileSync('git', argv, { stdio: 'ignore' })
       send({ method: 'session/update', params: { sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ${JSON.stringify(nativeSchemaText)} } } } })
@@ -448,12 +452,16 @@ for (const scenario of ['acp-startup-quota', 'acp-startup-delayed-quota'] as con
   assert.equal(existsSync(join(f.sessionRoot, 'result.json')), false)
 })
 
-for (const scenario of ['acp-auth-quota', 'acp-auth-stderr-quota', 'acp-prompt-stderr-quota', 'acp-signal'] as const) {
+for (const scenario of ['acp-auth-quota', 'acp-auth-stderr-quota', 'acp-prompt-stderr-quota', 'acp-signal', 'acp-mismatched-response'] as const) {
   test(`Grok ACP rejects ${scenario} without publishing a result or manager quota`, async t => {
     const f = fixture(t, scenario, managedGrok)
     await assert.rejects(f.run(), error => {
       assert(error instanceof StructuredSessionError)
       assert.equal(error.code, 'failed')
+      if (scenario === 'acp-mismatched-response') {
+        assert.match(error.message, /stage=session\/prompt, id=expected-digit-string, result=false, error=true, params=false, rpcCode=-32600/)
+        assert.doesNotMatch(error.message, /fixture private response/)
+      }
       return true
     })
     assert.equal(f.state().turnId, undefined)
