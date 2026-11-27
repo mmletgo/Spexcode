@@ -11,14 +11,16 @@ import { configuredSessionApplication } from '../session-application.js'
 import { readRecord, writeRecord } from '../session-record.js'
 import { StructuredSessionError, structuredExecutionPolicy } from '../session-structured-policy.js'
 import { sessionIdForCreateKey } from '../sessions.js'
+import { p0ReviewDiagnosticEvidence } from './behavior-review-challenge.js'
 import { readCodeBehaviorContext, type CodeBehaviorContinuation } from './code-behavior.js'
-import { prepareSyncAdmission, runSyncOperation } from './coordinator.js'
+import { prepareP0ReviewChallenge, prepareSyncAdmission, readCurrentSyncAnalysis, runSyncOperation } from './coordinator.js'
 import type { SyncCoordinatorOptions, SyncCoordinatorPlan } from './coordinator-types.js'
+import type { ElaborationSessionRequest } from './elaboration-types.js'
 import { CROSS_FREEZE_IMPACT_PURPOSE, type CrossFreezeImpactEvidence, type CrossFreezeImpactOutput } from './cross-freeze-impact-review.js'
 import { migrateSyncStore } from './migrations.js'
 import type { NativeRunCheckpoint } from './native-run.js'
 import type { BlobRef, SyncAttempt } from './operation-types.js'
-import { captureInputSnapshot, contentHash, readEvidence } from './snapshot.js'
+import { captureInputSnapshot, contentHash, readEvidence, writeEvidence } from './snapshot.js'
 import { readStageDraft } from './stage-worktree.js'
 import { SyncStore, SyncStoreError } from './store.js'
 import type { CodeBehaviorAnalysis } from './writeback-types.js'
@@ -38,16 +40,19 @@ const scenarios = [
   { useBaseline: true, mainBranch: 'stable', checkout: 'stable' },
   { useBaseline: true, mainBranch: 'main', checkout: 'main', hideCurrentReview: true },
   { useBaseline: true, mainBranch: 'main', checkout: 'main', retryImpactFormat: true },
+  { useBaseline: true, mainBranch: 'main', checkout: 'main', challengeApproval: true },
 ] as const
 
 for (const scenario of scenarios) test(
   '跨冻结正式 P0 ' + ('retryImpactFormat' in scenario ? '影响复核覆盖格式沿原稿续审'
     : 'hideCurrentReview' in scenario ? 'whole 冷恢复缺少当前独审原件'
+    : 'challengeApproval' in scenario ? '正式质疑沿原稿派带诊断的独审'
     : `configured=${scenario.mainBranch} checkout=${scenario.checkout} baseline=${scenario.useBaseline}`),
   async t => {
   const { useBaseline, mainBranch, checkout } = scenario
   const hideCurrentReview = 'hideCurrentReview' in scenario
   const retryImpactFormat = 'retryImpactFormat' in scenario
+  const challengeApproval = 'challengeApproval' in scenario
   const canonicalCheckout = mainBranch === checkout
   assert.ok(process.env.SPEXCODE_TEST_HOME, '必须通过 test-home 隔离正式会话夹具')
   assert.equal(process.env.SPEX_SESSION_DATABASE_PATH, join(process.env.SPEXCODE_TEST_HOME, 'sessions.sqlite'))
@@ -155,7 +160,7 @@ for (const scenario of scenarios) test(
           output = impact
         } else {
           assert.ok(request.purpose === 'code_behavior_analyze' || request.purpose === 'code_behavior_review', request.purpose)
-          const { task, pendingAnalysis } = readCodeBehaviorContext(request, commonDir)
+          const { task, pendingAnalysis, requiredCheckedPaths } = readCodeBehaviorContext(request, commonDir)
           owner = (task.partition as { id: string }).id
           const paths = task.requiredChangedPaths as string[]
           const imports = paths.includes(importSource)
@@ -163,7 +168,7 @@ for (const scenario of scenarios) test(
           const rule = 'RULE-' + domain + '-05'
           const draft = pendingAnalysis ? {
             inputDigest: request.inputDigest, analysisDigest: pendingAnalysis.analysisDigest, verdict: 'accept',
-            checkedPaths: paths, checkedChangeIds: pendingAnalysis.analysis.changes.map(change => change.id), findings: [],
+            checkedPaths: requiredCheckedPaths ?? paths, checkedChangeIds: pendingAnalysis.analysis.changes.map(change => change.id), findings: [],
           } : {
             changes: paths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: [rule], ruleIds: [rule],
               originalIntent: '保留原业务', previousBehavior: '原业务行为', sourceBehavior: '现有重构不变更原业务语义',
@@ -197,6 +202,7 @@ for (const scenario of scenarios) test(
   const old = active, oldOwners: Partial<Record<'EXPORT' | 'IMPORT', string>> = {}
   let interruptAfterImpact: string | undefined
   let interruptAfterWhole = false
+  let pauseAfterWhole = false
   const impactWrites: string[] = []
   const runUntilP0 = async () => {
     const checkpoint = store.checkpoint.bind(store)
@@ -204,6 +210,10 @@ for (const scenario of scenarios) test(
       const saved = checkpoint(fence, ref)
       const stage = read<{ stage?: string }>(ref).stage
       if (stage === 'analysis') {
+        if (pauseAfterWhole) {
+          store.requestControl(fence.operationId, 'pause')
+          throw new StructuredSessionError('cancelled', '测试在当前 P0 whole 后正式暂停')
+        }
         if (interruptAfterWhole) throw new SyncStoreError('SYNC_FENCE_EXPIRED', '测试在当前 whole 持久化后首次冷停')
         throw new StructuredSessionError('unsupported', boundary)
       }
@@ -251,8 +261,12 @@ for (const scenario of scenarios) test(
     reopen()
   }
   interruptAfterWhole = hideCurrentReview
+  pauseAfterWhole = challengeApproval
   const second = await runUntilP0()
-  if (hideCurrentReview) {
+  if (challengeApproval) {
+    assert.equal(second.operation.phase, 'paused', JSON.stringify(second.failure))
+    assert.equal(second.operation.control, 'pause')
+  } else if (hideCurrentReview) {
     assert.equal(second.status, 'recovery_required', JSON.stringify(second.failure))
     assert.equal(second.failure?.code, 'SYNC_FENCE_EXPIRED')
   } else {
@@ -361,9 +375,51 @@ for (const scenario of scenarios) test(
     }
     assert.deepEqual(store.findResource(currentAttempt.id, currentReview.key), resource)
   }
+  if (challengeApproval) {
+    const paused = second.operation
+    assert.equal(store.listRecoverableResources().length, 0)
+    const analysisKey = 'partition:' + unaffected + ':analysis'
+    const analysisRef = currentStages.get(analysisKey)!.resultRef
+    const originalLocal = read<CodeBehaviorAnalysis>(analysisRef)
+    assert.ok(originalLocal.crossFreezeAuthor)
+    const request = { operationId: paused.id, expectedRevision: paused.revision, inputId: paused.input.id, partitionId: unaffected,
+      requestId: 'challenge-reused-p0', analysisRef, diagnostic: '请用冻结的导出测试独立检查原来批准的分类。',
+      evidencePaths: ['tests/export.test.mjs'] }
+    const challenge = await prepareP0ReviewChallenge(store, paused, plan, request)
+    const diagnosticRef = writeEvidence(commonDir, p0ReviewDiagnosticEvidence(request))
+    assert.deepEqual(challenge.diagnosticRef, diagnosticRef)
+    const accepted = store.authorizeP0ReviewChallenge(paused.id, challenge)
+    assert.equal(accepted.challenge.origin.attemptId, currentAttempt.id)
+    assert.equal(accepted.operation.phase, 'paused')
+    assert.equal(accepted.operation.callsUsed, paused.callsUsed)
+    assert.equal(readCurrentSyncAnalysis(store, accepted.operation), null)
+    assert.deepEqual(store.readAttempt(currentAttempt.id), currentAttempt)
+
+    reopen()
+    assert.equal(store.requestControl(paused.id, 'run').phase, 'queued')
+    pauseAfterWhole = false
+    const resumed = await runUntilP0()
+    assert.equal(resumed.failure?.message, boundary, JSON.stringify(resumed.failure))
+    assert.equal(resumed.operation.callsUsed, paused.callsUsed + 1)
+    assert.deepEqual(resumed.operation.input, paused.input)
+    const resumedAttempts = store.listAttempts(paused.id)
+    assert.equal(resumedAttempts.length, 2)
+    const reviewAttempt = resumedAttempts[1], reviewStages = stages(reviewAttempt)
+    assert.deepEqual(reviewAttempt.dispatchPlans.map(dispatch => dispatch.purpose), ['code_behavior_review'])
+    const continued = read<CodeBehaviorAnalysis>(reviewStages.get(analysisKey)!.resultRef)
+    assert.deepEqual(continued.crossFreezeAuthor, originalLocal.crossFreezeAuthor)
+    assert.deepEqual(continued.traces[0], originalLocal.traces[0])
+    assert.notEqual(continued.traces[1].sessionId, originalLocal.traces[1].sessionId)
+    assert.deepEqual(continued.reviewDiagnosticRef, diagnosticRef)
+    const continuation = read<CodeBehaviorContinuation>(reviewStages.get(analysisKey + ':continuation')!.resultRef)
+    const review = read<ElaborationSessionRequest>(continuation.reviewResult!.requestRef)
+    const context = readCodeBehaviorContext(review, commonDir)
+    assert.equal(context.pendingAnalysis?.analysisDigest, challenge.origin.analysisDigest)
+    assert.deepEqual(context.operatorReviewDiagnostic, { ref: diagnosticRef, text: request.diagnostic, evidencePaths: request.evidencePaths })
+  }
   assert.deepEqual(store.readOperation(old.id), before.operation)
   assert.deepEqual(store.listAttempts(old.id), before.attempts)
-  for (const attempt of [oldAttempt, ...attempts]) {
+  for (const attempt of [oldAttempt, ...store.listAttempts(active.id)]) {
     const resources = store.listResources(attempt.id)
     assert.equal(resources.length, attempt.dispatchPlans.length)
     for (const resource of resources) {
