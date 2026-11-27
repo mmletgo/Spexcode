@@ -23,6 +23,8 @@ Claude Code 或 ZCode 限流时，用户可以显式选择本机已配置的 Gro
 
 编辑任务在本机 CLI 声明支持 ACP stdio 时使用该协议，记录预先生成的 prompt ID，认证同一 session、workspace、prompt 终态和实际用量模型。Manager 在确认该 prompt 终态后关闭 stdin，再观察 stdout 至 EOF。仅原 prompt 的明确限额响应在完整停止和自然退出后可作为正式额度。握手后的缺失终态也须结算原进程。保留仅初始化前和原流式模式的明确启动诊断分类。ACP 初始化响应前已收到真实 EOF 时，沿同一有界观察窗口等待原 CLI 自然退出和 stderr 排空，再判断启动额度。取消或窗口耗尽仍精确清理。
 
+Grok ACP 的内嵌会话通知由 Manager 按原连接和已登记会话区分。只有父会话的文本和精确终态能进入 SpexCode 的正式结果；Manager 处理内嵌会话通知时，原进程归属、退出和独审证据继续按本节点的门禁核对。
+
 一轮只派发一次本机 CLI，使用实际托管工作树和预先绑定的会话 UUID。原生流必须以同一会话、同一工作目录且带唯一原生 request ID 的成功终态结束。终态的 request ID 是 turn 身份。
 
 当 CLI 帮助声明 `--json-schema` 且冻结 schema 的 UTF-8 参数不超过 64 KiB，新派发在既有原生流上启用该选项，并在原生计划记录 `native-schema-v1`。成功输出取自同一终态的原生 `structuredOutput`，并通过冻结 JSON schema。终态缺少该字段时，格式失败保留已结算原请求和最后一段原生文本，供返修时认证未批准草稿。未使用该选项的计划从最后一个工具之后的完整原生文本验证冻结 JSON schema。不同计划共用原生进程、停止与 EOF 证明。
