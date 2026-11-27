@@ -78,3 +78,5 @@ SyncCheckpointRef仅在attempt checkpoint引用上可选携artifacts:{kind:json|
 持久 `recordUnverifiedCoverage` 绑定手动请求与操作。其通过的 `VerificationResultBlob` 单列 `unexecutedContractIds`，实际 V3 运行原件由层引用保留。
 
 operation、admission 和 ingress 可保存 `automaticSourceAdoption: canonical-source-v1`，表示可信应用为新 initial/spec/code/combined 操作冻结的自动主来源采纳政策。它进入 payload 与规范语义身份，不是外部请求开关，也不证明 Git 已采纳。旧字段缺席保持显式采纳；同请求、alias 和正式 retry 保留原政策，重复观察不能给旧操作补权。
+
+新 initial 操作可在首轮派发前登记 `crossFreezeBinding`，绑定同一操作的选择记录及完整 Git 差量 CAS。它不参与原请求重放摘要，不修改旧操作或已有批准。

@@ -10,6 +10,7 @@ import { assertPublicationParentCurrent, verifyPublicationBase } from './publica
 import { baselineSelectionDigest, selectedRetiredIds } from './composition.js'
 import { authenticateP1ReviewDiagnostic } from './elaboration-review-challenge.js'
 import { proveUnadoptedDelivery } from './source-adoption.js'
+import type { CrossFreezeBinding } from './cross-freeze-binding.js'
 import type { SyncCoordinatorPlan } from './coordinator-types.js'
 import type { ElaborationResult } from './elaboration-types.js'
 import type { P0ReviewChallenge, P1ReviewChallenge, PublicationBase, PublicationHeads, SyncCheckpointRef } from './operation-types.js'
@@ -835,6 +836,26 @@ export class SyncStore {
     this.blob(ref)
     for (const artifact of ref.artifacts ?? []) this.blob(artifact.ref)
     return this.write(tx => { const { attempt } = this.checkFence(tx, fence, true); if (!attempt.checkpointRefs.some(prior => prior.sha256 === ref.sha256)) attempt.checkpointRefs.push(clone(ref)); this.saveAttempt(tx, attempt); return attempt })
+  }
+  /** 在首个正式派发前原子固定该操作的跨冻结来源决定。 */
+  lockCrossFreezeBinding(fence: WriteFence, ref: BlobRef): BlobRef {
+    const proposal = JSON.parse(this.blob(ref).toString('utf8')) as CrossFreezeBinding
+    if (proposal.kind === 'selected') this.blob(proposal.provenanceRef)
+    return this.write(tx => {
+      const { operation, attempt } = this.checkFence(tx, fence, true)
+      if (operation.crossFreezeBinding) return clone(operation.crossFreezeBinding.ref)
+      if (proposal.version !== 'cross-freeze-binding-v1' || proposal.operationId !== operation.id || proposal.inputId !== operation.input.id
+        || proposal.policyDigest !== operation.policyDigest || proposal.canonicalBranch !== operation.input.source.branch
+        || !['selected', 'no-source'].includes(proposal.kind)
+        || operation.origin !== 'initial' || operation.retryOf || operation.requestBlob || operation.input.captureKind !== 'commit'
+        || attempt.number !== 1 || attempt.dispatchPlans.length)
+        fail('SYNC_CROSS_FREEZE_BINDING_INVALID', '跨冻结来源必须随首次正式 committed initial 的固定输入登记')
+      operation.crossFreezeBinding = {
+        ref: clone(ref), ...(proposal.kind === 'selected' ? { provenanceRef: clone(proposal.provenanceRef) } : {}),
+      }
+      this.saveOperation(tx, operation)
+      return clone(ref)
+    })
   }
   renewLease(fence: WriteFence, leaseMs: number): SyncAttempt {
     if (!Number.isSafeInteger(leaseMs) || leaseMs <= 0) fail('SYNC_LEASE_INVALID', 'leaseMs must be positive')

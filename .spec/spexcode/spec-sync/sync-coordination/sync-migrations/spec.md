@@ -181,3 +181,5 @@ v16以无DDL SELECT 1登记 ZCode 固定命名空间、结构化策略与原生�
 v21以无DDL SELECT 1登记typed checkpoint artifacts与raw/stage权限边界；沿正常online backup与组件事务拒v20旧writer，v1–v20 checksum及旧记录/CAS原字节保持。升级前停稳全部旧服务/队列并结算或保留真实资源。回滚先停新writer，再恢复升级前一致备份及对应evidence，不删marker或改写历史raw refs。
 
 v22以无DDL SELECT 1登记按owner保留的Git JSON草稿续修及已证停止的原生RPC暂态失败准入。忽略这些持久身份与结算边界的v21及更旧writer必须拒绝；结构化执行仍复用v6 read/edit，不改写旧请求、输出、缺席字段或CAS。升级前停稳writer并结算或保留真实资源，沿既有online backup和组件事务保v1–v21 checksum与全部旧记录。回滚先停新writer，再恢复升级前一致DB备份、原enabled/continuity evidence及相应Git保活引用，保留未采纳的新草稿，禁止删marker降级。
+
+writer81 追加无 DDL 的标记，保护新的跨冻结分区来源决定和独立适用性证据。升级先停稳旧 writer，保存一致 writer80 SQLite online backup 与配套 enabled、Git/CAS，再恢复同一检查点。回滚先停稳新 writer，恢复同一套旧备份。
