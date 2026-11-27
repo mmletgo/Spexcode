@@ -46,6 +46,7 @@ export type PartitionCheckpoints = {
   auditP0Approvals?(plan: SyncPartitionPlan): P0ApprovalAudit | Promise<P0ApprovalAudit>
   authenticateAnalysisOnly?(plan: SyncPartitionPlan, evidence: CodeBehaviorEvidence, owners: readonly AnalysisOnlyPartitionEvidence[]): boolean
   loadCrossFreezeElaborationAuthor?(key: string, plan: SyncPartitionPlan, partition: SyncPartition, input: ElaborationInput, inputDigest: string, existing?: ElaborationCrossFreezeAuthorProof): Promise<ElaborationCrossFreezeAuthor | null>
+  authenticateCrossFreezeElaboration?(result: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>): boolean
   loadAcceptedElaboration?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'> | null
   loadAcceptedInterfaceSeed?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'> | null
   loadElaborationDraftMaterial?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, schemaDigest?: string, request?: StageDraftMaterialRequest): ElaborationDraftMaterial | null | Promise<ElaborationDraftMaterial | null>
@@ -579,7 +580,8 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
     const reusableCache = async (cachedInput: ElaborationInput, cached: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>): Promise<boolean> => {
       const proof = cached.rounds.find(round => round.crossFreezeAuthor)?.crossFreezeAuthor
       const source = proof ? await checkpoints.loadCrossFreezeElaborationAuthor?.(key, plan, partition, cachedInput, cached.inputDigest, proof) : undefined
-      if (proof && !source) reject(`已审细化草稿缺少同一跨冻结和原作者结算: ${partition.id}`)
+      if (proof && (!source || cached.reviewPassed && !checkpoints.authenticateCrossFreezeElaboration?.(cached)))
+        throw Object.assign(new Error(`跨冻结 P1 检查点缺少同一原稿、影响复核或当前正式独审: ${partition.id}`), { code: 'cross_freeze_p1_approval_binding' })
       const reusable = verifyElaborationDraftCache(cachedInput, cached, checkpoints.elaborationDraftTagged?.(key, cached), source ?? undefined)
       const draft = cached.rounds.at(-1)?.draft
       if (!reusable && !cacheDraft && draft) cacheDraft = { ...draft, errors: [...draft.errors, { code: 'rows_patch', message: '已审草稿超出本轮局部owner范围；恢复未受影响目标并重新独审' }] }

@@ -718,6 +718,8 @@ function authenticatedApprovedElaboration(store: SyncStore, owner: SyncOperation
   const source = reviewed && dispatch ? authenticatedDraftResult(store, owner, reviewed, dispatch.key, review.purpose) : null
   if (!generation?.request || !source?.request || !source.result || source.request.inputDigest !== review.inputDigest || source.result.resultDigest !== review.resultDigest || canonical(source.result.output) !== canonical(round.reviewOutput)
     || round.traces.some(trace => trace.purpose === 'elaboration_generate' && (trace.sessionId === review.sessionId || trace.threadId === review.threadId))) return false
+  if (result.rounds.some(item => item.crossFreezeAuthor) && (!store.findResource(reviewed!.id, dispatch!.key)
+    || !completedNativeStageResult(store, owner, reviewed!, source.request, review, round.reviewOutput, round.candidateDigest!, undefined, readRecord))) return false
   for (const request of [generation.request, source.request]) {
     const inputDigest = request.purpose === 'elaboration_generate' ? round.crossFreezeAuthor?.oldInputDigest ?? result.inputDigest : result.inputDigest
     const expected = elaborationNativeInputDigest(inputDigest, request)
@@ -1007,7 +1009,7 @@ function previousBehaviorContinuation(store: SyncStore, operation: SyncOperation
 }
 
 /** 续审analysis沿精确原件provenance回到实际Native提交；不借任意历史session授予已校验资格。 */
-function behaviorTraceBinding(store: SyncStore, operation: SyncOperation, origin: SyncAttempt, key: string, trace: ElaborationTrace, sourceSelection?: FrozenBaselineSelection, readCheckpoints?: (attempt: SyncAttempt) => SyncCheckpointStageView, bindModel = false, nativeOnly = false): boolean {
+function behaviorTraceBinding(store: SyncStore, operation: SyncOperation, origin: SyncAttempt, key: string, trace: ElaborationTrace, sourceSelection?: FrozenBaselineSelection, readCheckpoints?: (attempt: SyncAttempt) => SyncCheckpointStageView, bindModel = false, nativeOnly = false, readCompletedRecord?: (id: string) => NativeRunRecord | null): boolean {
   for (;;) {
     const dispatch = origin.dispatchPlans.find(dispatch => dispatch.purpose === trace.purpose && dispatch.session?.sessionId === trace.sessionId && dispatch.session.threadId === trace.threadId && dispatch.session.turnId === trace.turnId)
     if (trace.purpose !== 'code_behavior_analyze' && trace.purpose !== 'code_behavior_review') return false
@@ -1019,7 +1021,7 @@ function behaviorTraceBinding(store: SyncStore, operation: SyncOperation, origin
       if (request.requestKey !== `sync:${origin.id}:analysis${suffix}:${trace.purpose}` || source!.result.inputDigest !== trace.inputDigest || bindModel && request.model !== syncModel(operation) || nativeOnly && !store.findResource(origin.id, request.requestKey)) return false
       const ownerDigest = contentHash(JSON.stringify({ version: 'code-behavior-draft-v1', source: canonicalSnapshotSource(operation.input.source), partitionId: key === 'analysis' ? null : key.slice('partition:'.length, -':analysis'.length), purpose: trace.purpose }))
       readStageDraft(operation.input.source.commonDir, draft, { ownerDigest, sourceInputId: operation.input.id, schemaDigest: draft.schemaDigest, path: `.spex-sync-drafts/${ownerDigest}.json` })
-      const result = completedNativeStageResult(store, operation, origin, request, trace, ready.receipt, '', readCheckpoints?.(origin))
+      const result = completedNativeStageResult(store, operation, origin, request, trace, ready.receipt, '', readCheckpoints?.(origin), readCompletedRecord)
       return !!result?.worktree && canonical({ baseCommit: result.worktree.baseCommit, tree: result.worktree.baseTree, mode: 'edit' }) === canonical(draft.seed) && result.worktree.headCommit === draft.resultCommit && result.worktree.tree === draft.resultTree
     }
     if (trace.purpose !== 'code_behavior_analyze') return false
@@ -1662,7 +1664,7 @@ function behaviorCandidateDigest(analysis: CodeBehaviorAnalysis): string {
 }
 
 /** 批准只来自原局部分析与独审，未生成旧whole也可认证。 */
-function authenticateApprovedBehaviorPartition(store: SyncStore, source: SyncOperation, origin: SyncAttempt, key: string, local: CodeBehaviorAnalysis, changedPaths: readonly string[], selection: FrozenBaselineSelection | undefined, checkpoints: (attempt: SyncAttempt) => SyncCheckpointStageView, analysisSchemaDigest?: string, nativeOnly = false, authorization?: P0ReviewAuthorization): boolean {
+function authenticateApprovedBehaviorPartition(store: SyncStore, source: SyncOperation, origin: SyncAttempt, key: string, local: CodeBehaviorAnalysis, changedPaths: readonly string[], selection: FrozenBaselineSelection | undefined, checkpoints: (attempt: SyncAttempt) => SyncCheckpointStageView, analysisSchemaDigest?: string, nativeOnly = false, authorization?: P0ReviewAuthorization, readCompletedRecord?: (id: string) => NativeRunRecord | null): boolean {
   const original = checkpoints(origin), commonDir = source.input.source.commonDir
   const { reviewDiagnosticRef } = local
   const analysisDigest = behaviorCandidateDigest(local)
@@ -1674,8 +1676,8 @@ function authenticateApprovedBehaviorPartition(store: SyncStore, source: SyncOpe
   if (stage<{ version: string }>(store, source, origin, 'behavior-draft-protocol', 'automatic', original)?.version === 'code-behavior-draft-v1') {
     const continuation = partitionStage<CodeBehaviorContinuation>(store, source, origin, `${key}:continuation`, selection, original)?.result
     if (local.crossFreezeAuthor ? !authenticateCrossFreezeP0Author(store, source, origin, key, local, changedPaths, continuation)
-      || !behaviorTraceBinding(store, source, origin, key, local.traces[1], selection, checkpoints, true, true)
-      : !local.traces.every(trace => behaviorTraceBinding(store, source, origin, key, trace, selection, checkpoints, true, nativeOnly || !!authorizedDiagnostic))) return false
+      || !behaviorTraceBinding(store, source, origin, key, local.traces[1], selection, checkpoints, true, true, readCompletedRecord ?? readRecord)
+      : !local.traces.every(trace => behaviorTraceBinding(store, source, origin, key, trace, selection, checkpoints, true, nativeOnly || !!authorizedDiagnostic, readCompletedRecord))) return false
     const drafts = continuation?.drafts, draft = drafts?.code_behavior_review
     if (reviewDiagnosticRef) {
       const request = JSON.parse(readEvidence(commonDir, continuation!.reviewResult!.requestRef).toString('utf8')) as ElaborationSessionRequest
@@ -1970,7 +1972,7 @@ function historicalBehaviorAuthor(store: SyncStore, source: CrossFreezeSource, p
     const draft = continuation?.drafts.code_behavior_analyze, ready = continuation?.readyAnalysis
     if (!draft || !ready || ready.draftOid !== draft.oid || ready.resultCommit !== draft.resultCommit || ready.trace.purpose !== 'code_behavior_analyze'
         || canonical(ready.trace) !== canonical(local.result.traces[0]) || draft.sourceInputId !== old.input.id
-        || !authenticateApprovedBehaviorPartition(store, owner, origin, key, local.result, changedPaths, selection, indexFor, draft.schemaDigest, true)) return null
+        || !authenticateApprovedBehaviorPartition(store, owner, origin, key, local.result, changedPaths, selection, indexFor, draft.schemaDigest, true, undefined, readRecord)) return null
     return { old, origin, draft, authorTrace: ready.trace, reviewTrace: local.result.traces[1], analysisRef: local.resultRef, analysis: local.result }
   }
   return null
@@ -2258,6 +2260,40 @@ function requireChallengedWholeApproval(store: SyncStore, operation: SyncOperati
   })
   if (!withReadonlySnapshotQuery(() => finishApprovalProof(approvedBehaviorPartitionAuthentication(store, operation, attempt, plan, { ref, analysis: whole }, owners)))) {
     fail('sync_p0_challenge_binding', '全局P0复审批准缺少原精确分区、覆盖、schema或Native/Git证据')
+  }
+}
+
+/** 复用完整分析时仍需当前跨冻结 owner 的正式独审和两次原件。 */
+async function requireCrossFreezeWholeApproval(
+  store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, plan: SyncPartitionPlan | null | undefined,
+  evidence: CodeBehaviorEvidence, renew: () => Promise<void>,
+): Promise<void> {
+  const owners = evidence.analysis.partitionEvidence?.filter(owner => owner.analysis.crossFreezeAuthor)
+    .map(owner => ({ partitionId: owner.partitionId, analysisRef: owner.analysisRef, wholeAnalysisRef: evidence.ref })) ?? []
+  if (!owners.length) return
+  if (!plan || evidence.analysis.partitionCoverage?.planDigest !== plan.digest) fail('cross_freeze_approval_binding', '跨冻结 P0 全图缺少原分区计划')
+  const approved = await withReadonlySnapshotQuery(async () => {
+    const proof = approvedBehaviorPartitionAuthentication(store, operation, attempt, plan, evidence, owners)
+    let state = proof.next()
+    while (!state.done) {
+      await renew()
+      state = proof.next()
+    }
+    return state.value
+  })
+  if (!approved) fail('cross_freeze_approval_binding', '跨冻结 P0 全图缺少原作者、影响复核或当前正式独审原件', [evidence.ref])
+}
+
+/** 续验完整候选前，再核 P1 局部正式独审及其跨冻结来源。 */
+async function requireCrossFreezeElaborationApprovals(
+  store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, approved: SavedElaboration, renew: () => Promise<void>,
+): Promise<void> {
+  const commonDir = operation.input.source.commonDir
+  for (const member of approved.partitionEvidence ?? []) {
+    await renew()
+    const local = JSON.parse(readEvidence(commonDir, member.resultRef).toString('utf8')) as SavedElaboration
+    if (local.rounds.some(round => round.crossFreezeAuthor) && !authenticatedApprovedElaboration(store, operation, attempt, local, { allowDeferredImplementation: true }))
+      fail('cross_freeze_p1_approval_binding', `跨冻结 P1 续验缺少当前正式独审原件: ${member.partitionId}`, [member.resultRef])
   }
 }
 
@@ -3004,6 +3040,9 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
       if (retrySource) {
         if (attempt.dispatchPlans.length) fail('candidate_retry_binding', '本次重试已有模型派发，不能把原候选当作其新生成或独审结果')
         const { elaboration, analysis, generation, partitions } = retrySource, source = retrySource.operation
+        const renewProof = async () => { store.renewLease(fence!, leaseMs); await yieldToControl(); store.renewLease(fence!, leaseMs) }
+        await requireCrossFreezeWholeApproval(store, source, retrySource.attempt, partitions, analysis, renewProof)
+        await requireCrossFreezeElaborationApprovals(store, source, retrySource.attempt, elaboration, renewProof)
         const files = new Map(view.files)
         for (const change of elaboration.nodeChanges ?? []) if (change.action === 'retire' || change.from.path !== change.to.path) files.delete(change.from.path)
         for (const change of elaboration.changes) files.set(change.path, change.source)
@@ -4445,14 +4484,19 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           return null
         },
         loadCrossFreezeElaborationAuthor,
+        authenticateCrossFreezeElaboration: result => authenticatedApprovedElaboration(store, operation, store.readAttempt(attempt!.id), result, { allowDeferredImplementation: true }),
         loadAcceptedElaboration: (key, binding, inputDigest) => {
           const readonly = readonlyAccepted(key, binding, inputDigest)
           if (readonly) return readonly
           for (const prior of store.listAttempts(operation.id).filter(item => item.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(item.status))) {
             const source = partitionElaborationStage(store, operation, prior, key, binding, inputDigest)
             if (!source || !source.result.structurePassed || !source.result.reviewPassed || source.result.failure || source.result.phase !== undefined || !['complete', 'needs_input', 'conflict'].includes(source.result.status)) continue
-            if (source.result.rounds.at(-1)?.review?.verdict !== 'accept'
-              && !authenticatedApprovedElaboration(store, operation, prior, source.result, { allowDeferredImplementation: true })) continue
+            const crossFreeze = source.result.rounds.some(round => round.crossFreezeAuthor)
+            if ((crossFreeze || source.result.rounds.at(-1)?.review?.verdict !== 'accept')
+              && !authenticatedApprovedElaboration(store, operation, prior, source.result, { allowDeferredImplementation: true })) {
+              if (crossFreeze) fail('cross_freeze_p1_approval_binding', '跨冻结 P1 检查点缺少当前正式独审原件', [source.resultRef])
+              continue
+            }
             saveStage(store, fence!, `${key}:provenance`, { fromOperationId: operation.id, fromAttemptId: prior.id, resultRef: source.resultRef })
             partitionCheckpoints.save(key, source.result)
             return source.result
@@ -4785,6 +4829,9 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         const ref = writeEvidence(operation.input.source.commonDir, approved)
         if (!approved.reviewPassed || !behaviorChallengesAnswered(approved, p0ReviewChallenges) || !analysisStageBinding(store, operation, approved) || approved.inputId !== operation.input.id || approved.policyDigest !== operation.policyDigest || approved.composedDigest !== view.composed.contentDigest) fail('analysis_binding', '已审行为分析与冻结输入/基线/政策不一致')
         analysis = { ref, analysis: approved }
+        await requireCrossFreezeWholeApproval(store, operation, store.readAttempt(attempt.id), partitions, analysis, async () => {
+          store.renewLease(fence!, leaseMs); await yieldToControl(); store.renewLease(fence!, leaseMs)
+        })
         if (approved.findings.some(finding => finding.kind === 'conflict')) store.recordReviewedConflict(fence)
       }
       const effectiveFindings = analysis?.analysis.findings ?? []
