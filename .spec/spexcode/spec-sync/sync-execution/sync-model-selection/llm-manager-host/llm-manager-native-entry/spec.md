@@ -6,6 +6,7 @@ code:
 related:
   - spec-cli/llm-manager/requirements.txt
   - spec-cli/llm-manager/native-runtime.mjs
+  - spec-cli/llm-manager/native-runtime.d.mts
   - spec-cli/src/sync/model-settings.test.ts
 ---
 

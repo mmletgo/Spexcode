@@ -31,4 +31,4 @@ related:
 
 原生最后一条消息必须是终态 assistant，其 anchor.boundaryMessageId 等于自身，orderedMessageIds 逐项闭合完整原始模型可见消息 ID 序列，historyRoundCount 等于原生 assistant 与 ModelRequest 数。只从此边界消息的 text parts 重建终态正文并与 turn.completed.response 逐字相等；不能按正文搜索历史 assistant。同一 JSON 在工具前后合法重复时，仍只绑定最终边界。缺 anchor、错顺序、漏消息、外来边界或轮数不符均拒绝。
 
-最终输出只接受严格 JSON 或唯一完整外层 JSON 围栏。共用 decoder 仅移除合法外围空白或完整 `json` 围栏，不抽取片段、不修改正文、不补字段。携带结果的冷重放从权威 terminal response 重新解码与 JSON.parse，整值比对 output；额外 prose、多段围栏、非 JSON 或另一个 schema 合法结果均拒绝。
+最终输出只接受严格 JSON 或唯一完整外层 JSON 围栏。共用的 Manager decoder 仅移除合法外围空白或完整 `json` 围栏，不抽取片段、不修改正文、不补字段。携带结果的冷重放从权威 terminal response 重新解码与 JSON.parse，整值比对 output；额外 prose、多段围栏、非 JSON 或另一个 schema 合法结果均拒绝。

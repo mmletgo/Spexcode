@@ -15,7 +15,7 @@ SpexCode 优先使用本机 Cursor CLI 进行 Spec 与代码同步。用户沿�
 
 ## expanded spec
 
-新派发使用 [[llm-manager-host]] 对应 Manager 安装包中的原生 CLI 适配。Manager 通过 SpexCode 提供的工作树启动描述执行版本探测，SpexCode 核对固定工作树和原请求，持有进程归属与交付证据。
+新派发使用 [[llm-manager-host]] 对应 Manager 安装包中的原生 CLI 适配。Manager 通过 SpexCode 提供的工作树启动描述执行版本探测，SpexCode 核对固定工作树和原请求，持有进程归属与交付证据。冷复验用同源 Manager 重建原参数、核对原用量限制提示。
 
 [[llm-manager-host]] 管理的 Cursor 原生调用从绑定原会话和请求的 ACP prompt RPC 错误识别 429 或明确用量受限。Cursor ACP 也可能把固定用量提示作为整个 assistant 回复，再正常结束原 prompt。仅在精确 `end_turn` 和进程完全停止后、全轮没有工具或权限活动、Git 工作树干净且提交和树与冻结 seed 相同时，才把完整匹配的 `Upgrade your plan to continue` 或 `You've hit your usage limit` 作为用量限制。含非文本内容的回复与其他原 assistant 文本继续按冻结 JSON schema 校验。原 ACP 终态在 Git 读取前保存，分类收据绑定原请求、输出摘要和停止结算。冷读沿收据复核，旧格式拒稿保留原分类。迟到通知、候选和完成门沿原契约。
 
