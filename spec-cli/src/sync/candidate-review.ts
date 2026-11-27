@@ -15,6 +15,7 @@ export const GENERATION_REVIEW_SCHEMA = object({
   findings: { type: 'array', items: object({ kind: { type: 'string', enum: ['repair', 'missing_fact', 'conflict'] }, affectedIds: { ...strings, minItems: 1 }, ruleLocation: string, codeLocation: string, evidence: string, counterexample: string, message: string }) },
 })
 const validateReview = new Ajv({ allErrors: true, strict: true }).compile(GENERATION_REVIEW_SCHEMA)
+const missingReviewFinding = '拒绝结论必须有对应类型、位置、证据和反例的发现'
 
 export type CandidateReviewBinding = {
   inputId: string
@@ -53,8 +54,15 @@ export function candidateReviewError(output: unknown, binding: CandidateReviewBi
   if (review.verdict === 'accept' && review.findings.length) return 'accept 不能包含未解决发现'
   const kind = { repair: 'repair', needs_input: 'missing_fact', conflict: 'conflict' } as const
   const expectedKind = review.verdict === 'accept' ? null : kind[review.verdict]
-  if (expectedKind && !review.findings.some(finding => finding.kind === expectedKind)) return '拒绝结论必须有对应类型、位置、证据和反例的发现'
+  if (expectedKind && !review.findings.some(finding => finding.kind === expectedKind)) return missingReviewFinding
   return null
+}
+
+/** 仅识别原评审拒绝且未提交任何发现的协议失败。 */
+export function isEmptyCandidateReviewRejection(output: unknown, failure: { code: string; message: string } | null | undefined): boolean {
+  if (failure?.code !== 'review_invalid' || failure.message !== missingReviewFinding || !validateReview(output)) return false
+  const review = output as GenerationReview
+  return review.verdict !== 'accept' && review.findings.length === 0
 }
 
 /** 格式不合格的定位只允许续改原评审；真实路径、ID及owner绑定错误不能取得修复路由。 */

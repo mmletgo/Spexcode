@@ -38,6 +38,7 @@ type CursorAdapter = {
   cursorAcpInitialize(): RpcObject
   cursorAcpCancel(sessionId: string): RpcObject
   encodeCursorAcpPacket(packet: RpcObject): string
+  cursorTerminalCancelled<T extends { stopReason: string }>(output: T | undefined): output is T
   cursorTerminalCompleted(output: NativeOutput | undefined): output is NativeOutput
   cursorUsageLimitNotice(value: unknown): boolean
   observeCursorAcp(stdout: Readable, plan: Pick<NativePlan, 'workspace' | 'mode'> & { planDigest: string }, prompt: string, send: (packet: RpcObject) => void, hooks: {
@@ -50,7 +51,7 @@ type CursorAdapter = {
   }): Promise<{ output: NativeOutput; textOnlyWithoutTools: boolean }>
 }
 
-const cursorReplay = bundledCursor as Pick<CursorAdapter, 'CursorAcpError' | 'cursorLaunchArgs' | 'cursorModelArgument' | 'cursorTerminalCompleted' | 'cursorUsageLimitNotice'>
+const cursorReplay = bundledCursor as Pick<CursorAdapter, 'CursorAcpError' | 'cursorLaunchArgs' | 'cursorModelArgument' | 'cursorTerminalCancelled' | 'cursorTerminalCompleted' | 'cursorUsageLimitNotice'>
 
 function cursorHostError(provider: CursorAdapter, error: unknown): unknown {
   return error instanceof provider.CursorAcpError ? new StructuredSessionError(error.code, error.message, error.detail) : error
@@ -264,7 +265,7 @@ export async function stopCursorStructuredTurn(execution: CursorStructuredExecut
     if (existsSync(join(native.root, 'cancel-ack.json'))) {
       const ack = read<{ launchDigest: string; requestDigest: string; stopReason: string }>(native.root, 'cancel-ack.json')
       const cancel = read<{ launchDigest: string }>(native.root, 'cancel.json')
-      acknowledged = ack?.launchDigest === launchDigest && cancel?.launchDigest === launchDigest && ack.stopReason === 'cancelled' && ack.requestDigest === digest(readRequest(plan, execution))
+      acknowledged = ack?.launchDigest === launchDigest && cancel?.launchDigest === launchDigest && cursorReplay.cursorTerminalCancelled(ack) && ack.requestDigest === digest(readRequest(plan, execution))
     }
     return { nativeStopped: true, acknowledged, nativeStatus: 'stopped' }
   } catch (error) {
@@ -445,7 +446,7 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
     if (!ended) throw pending('Cursor native close and process-group stop remain unproven')
     const [exit, observation] = ended
     const output = observation?.output
-    if (interrupted && cancelSent && boundRequest && output?.stopReason === 'cancelled')
+    if (interrupted && cancelSent && boundRequest && provider.cursorTerminalCancelled(output))
       writeEvidence(root, 'cancel-ack.json', { launchDigest: digest(binding), requestDigest: digest(boundRequest), stopReason: output.stopReason })
     const success = !failure && provider.cursorTerminalCompleted(output) && closeMatches(exit, normalClose !== undefined) && !interrupted
     stopped = await waitForStop(owned, success ? Date.now() + STOP_MS : deadline!, !success || normalClose !== undefined)

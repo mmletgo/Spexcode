@@ -42,7 +42,7 @@ type Completed = { plan: NativePlan; witness: ZCodeFrozenWitness; result: Native
 type NativeServerSession = { sessionId: string; model?: NativeModel }
 type NativeSend = { sessionId: string; inputId: string; content: string; modelSelection: NativeModel; toolDenylist?: readonly string[] }
 type ManagerZCodeError = Error & { threadId?: string; turnId?: string; code: ConstructorParameters<typeof StructuredSessionError>[0]; detail: { threadId?: string; turnId?: string } }
-type ManagerZCodeAdapter = Pick<ZCodeFrozenNativeAdapter, 'observeZCodeFrozenReadTurn' | 'decodeZCodeJsonText'> & {
+type ManagerZCodeAdapter = Pick<ZCodeFrozenNativeAdapter, 'observeZCodeFrozenReadTurn' | 'decodeZCodeJsonText' | 'zcodeMcpClientMatches' | 'assertZCodeMcpRequestContext'> & {
   ZCodeProtocolError: abstract new (...args: never[]) => ManagerZCodeError
   ZCodeNativeTurnFailedError: new (sessionId: string, turnId: string, code: unknown, worktree: boolean, attribution?: unknown) => ManagerZCodeError
   zcodeCapability: ZCodeCapability
@@ -100,14 +100,16 @@ type ManagerZCodeReplay = ManagerZCodeErrors & Pick<ManagerZCodeAdapter,
   zcodeIsTerminal(event: NativeEvent): boolean
   zcodeWorktreeTurnMatches(plan: NativePlan, snapshot: { sessionId: string; model: NativeModel }, events: NativeEvent[], terminals: NativeEvent[], terminal: NativeEvent): plan is NativePlan & { model: NativeModel }
   isZCodeProviderRejection(failure?: { code: string; message: string } | null): boolean
-  isZCodeProviderPipeFailure(code: unknown, attribution: unknown): boolean
-  isZCodePublicHttp429(error: unknown): boolean
+  zcodeReplayTerminal(terminal: NativeEvent):
+    | { kind: 'failed'; pipeFailure: boolean; providerInputRejection: boolean; publicHttp429: boolean }
+    | { kind: 'completed'; result: 'success' | 'cancelled' | 'other'; hasResponse: boolean }
+    | { kind: 'other' }
   isZCodeEventsRpcTimeout(execution: Pick<StructuredExecution, 'state' | 'errorCode' | 'error'>): boolean
 }
 
 const replay = managerZCodeReplay as ManagerZCodeReplay
 export const { zcodeCapability, isZCodeProviderRejection, isZCodeEventsRpcTimeout } = replay
-const { isZCodeProviderPipeFailure, isZCodePublicHttp429, zcodeIsTerminal, zcodeWorktreeTurnMatches } = replay
+const { zcodeReplayTerminal, zcodeIsTerminal, zcodeWorktreeTurnMatches } = replay
 
 export async function loadZCodeNativeAdapter(runtime?: Awaited<ReturnType<typeof loadManagerNativeRuntime>>): Promise<ManagerZCodeAdapter> {
   const adapter = await (runtime ?? await loadManagerNativeRuntime()).loadNativeAdapter('zcode') as ManagerZCodeAdapter
@@ -301,10 +303,10 @@ export function assertZCodeSettledProviderFailure(sessionId: string, prompt: str
   if (plan.workspace !== worktreePath || !plan.pid || plan.receiptFile !== join(native.root, 'process.json') || !detachedRuntimeIsGone(plan.pid, plan.receiptFile))
     throw new StructuredSessionError('stale_result', 'ZCode provider failure differs from its original workspace or stopped process group')
   const terminals = events.filter(zcodeIsTerminal)
-  const error = terminal.payload.error as { code?: unknown; attribution?: unknown } | undefined
+  const observed = zcodeReplayTerminal(terminal)
   if (digest(send) !== digest(nativeSend(plan, prompt, execution)) || !zcodeWorktreeTurnMatches(plan, snapshot as { sessionId: string; model: NativeModel }, events, terminals, terminal)
-    || terminal.type !== 'turn.failed' || terminal.payload.turnPhase !== 'processing_input' || !isZCodeProviderPipeFailure(error?.code, error?.attribution)
-    || options?.crossProviderRetry && isZCodePublicHttp429(error)
+    || observed.kind !== 'failed' || !observed.providerInputRejection
+    || options?.crossProviderRetry && observed.publicHttp429
     || exit.stopped !== true || exit.code !== 0 || exit.signal !== null || exit.idle !== false || exit.closed !== false || exit.acknowledged !== execution.cancellation.acknowledged)
     throw new StructuredSessionError('stale_result', 'ZCode provider failure lacks its exact input, failure attribution or exit evidence')
 }
@@ -339,10 +341,11 @@ export function assertZCodeStoppedDraftSource(prompt: string, execution: ZCodeSt
     if (sealed) throw new StructuredSessionError('stale_result', 'ZCode unpublished completion lacks its original exit evidence')
     return null
   }
-  const nonSuccess = completedEventsRpc && (terminal.type !== 'turn.completed' || terminal.payload.resultType === 'cancelled' && typeof terminal.payload.response === 'string')
+  const observed = zcodeReplayTerminal(terminal)
+  const nonSuccess = completedEventsRpc && (observed.kind !== 'completed' || observed.result === 'cancelled' && observed.hasResponse)
   const exitMatches = nonSuccess ? exit.stopped === true && (exit.code === null || Number.isSafeInteger(exit.code) && exit.code >= 0)
     && (exit.signal === null || exit.code === null && typeof exit.signal === 'string' && Object.hasOwn(constants.signals, exit.signal)) : !!exit.stopped && exit.code === 0 && exit.signal === null
-  const unfinishedFailureExit = !sealed && execution.state === 'failed' && execution.errorCode === undefined && terminal.type === 'turn.failed'
+  const unfinishedFailureExit = !sealed && execution.state === 'failed' && execution.errorCode === undefined && observed.kind === 'failed'
     && exit.code === null && exit.signal === null && exit.stopped === false && exit.acknowledged === false && exit.idle === false && exit.closed === false
   if (digest(send) !== digest(nativeSend(plan, prompt, execution)) || !zcodeWorktreeTurnMatches(plan, snapshot, events, terminals, terminal) || !(exitMatches || unfinishedFailureExit))
     throw new StructuredSessionError('stale_result', 'stopped ZCode draft lost its original model/input/terminal/exit identity')
@@ -356,22 +359,22 @@ export function assertZCodeStoppedDraftSource(prompt: string, execution: ZCodeSt
   if (nonSuccess) return null
   const cancelledCommit = mode === 'cancelled-commit' && execution.state === 'cancelled' && execution.errorCode === undefined
     && execution.turnStartRequested === true && execution.cancellation.nativeStatus === 'stopped' && execution.cancellation.acknowledged === true
-    && terminal.type === 'turn.completed' && terminal.payload.resultType === 'cancelled'
+    && observed.kind === 'completed' && observed.result === 'cancelled'
   if (completedEventsRpc || cancelledCommit) {
     let idle: { sessionId: string; turnId: string; idle: boolean }
     try { idle = read('idle.json') as typeof idle }
     catch (error) { if (cancelledCommit && (error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error }
     const normalExit = idle.sessionId === plan.sessionId && idle.turnId === plan.turnId && idle.idle === true
-      && exit.idle === true && exit.closed === true && exit.stopped === true && typeof terminal.payload.response === 'string'
+      && exit.idle === true && exit.closed === true && exit.stopped === true && observed.kind === 'completed' && observed.hasResponse
     if (cancelledCommit) return normalExit && exit.acknowledged === true ? 'cancelled-commit' : false
-    if (!normalExit || terminal.payload.resultType !== 'success')
+    if (!normalExit || observed.result !== 'success')
       throw new StructuredSessionError('stale_result', 'ZCode events RPC draft has no exact completed terminal and idle/closed stop')
     return true
   }
-  if (execution.errorCode === 'native_turn_transport_failed' && (terminal.type !== 'turn.failed' || (terminal.payload.error as { code?: unknown } | undefined)?.code !== 'EPIPE')) throw new StructuredSessionError('stale_result', 'ZCode turn transport failure differs from the original EPIPE terminal')
+  if (execution.errorCode === 'native_turn_transport_failed' && (observed.kind !== 'failed' || !observed.pipeFailure)) throw new StructuredSessionError('stale_result', 'ZCode turn transport failure differs from the original EPIPE terminal')
   if (mode === 'p1-cross-provider-retry' && execution.purpose === 'elaboration_generate' && execution.state === 'failed' && execution.errorCode === undefined
-    && execution.cancellation.nativeStatus === 'stopped' && exit.stopped === true && terminal.type === 'turn.failed' && isZCodePublicHttp429(terminal.payload.error)) return null
-  return terminal.type === 'turn.failed'
+    && execution.cancellation.nativeStatus === 'stopped' && exit.stopped === true && observed.kind === 'failed' && observed.publicHttp429) return null
+  return observed.kind === 'failed'
 }
 
 function verifyWorktreeCompletion(plan: NativePlan, model: NativeModel, prompt: string, execution: ZCodeStructuredExecution, evidence: WorktreeCompletionEvidence, strictCompleted: boolean, adapter?: ManagerZCodeAdapter) {

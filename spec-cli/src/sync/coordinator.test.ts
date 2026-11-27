@@ -9828,9 +9828,13 @@ for (const [guidance, purpose, historicalProtocol] of [
   assert.deepEqual(readEvidence(commonDir, marker), markerBytes)
 })
 
-for (const precise of [false, true]) for (const mode of precise ? ['live', 'cold', 'review-live', 'review-cold', 'review-lineage', 'review-lineage-cold', 'review-lineage-native', 'review-identity', 'generation-request', 'missing-draft-ref'] as const : ['live', 'cold', 'business-repair'] as const) test(`P1 deferred implementation同operation仅续P2 precise=${precise} mode=${mode}`, async t => {
+for (const precise of [false, true]) for (const mode of precise ? ['live', 'cold', 'review-live', 'review-cold', 'review-missing-finding-cold', 'review-lineage', 'review-lineage-cold', 'review-lineage-native', 'review-identity', 'generation-request', 'missing-draft-ref'] as const : ['live', 'cold', 'business-repair'] as const) test(`P1 deferred implementation同operation仅续P2 precise=${precise} mode=${mode}`, async t => {
   const lineage = mode.startsWith('review-lineage'), reviewAttempt = lineage ? 2 : 1
-  const reviewFailure = lineage || mode === 'review-live' || mode === 'review-cold', cold = mode === 'cold' || mode === 'review-cold' || mode === 'review-lineage-cold'
+  const missingFinding = mode === 'review-missing-finding-cold'
+  const reviewFailure = lineage || mode === 'review-live' || mode === 'review-cold' || missingFinding
+  const cold = mode === 'cold' || mode === 'review-cold' || mode === 'review-lineage-cold' || missingFinding
+  const failedCode = missingFinding ? 'review_invalid' : 'structured_output_format_invalid'
+  let invalidReview: unknown
   const raw = parseParts(original)!.rawSource
   const f = await fixture(t, { maxAttempts: reviewAttempt + 1, maxCalls: lineage ? 18 : 12, maxRepairs: reviewAttempt, timeoutMs: 180_000 }, false, original, 'project', original, {
     version: 'sync-coordinator-v2', direction: 'spec_to_code', agentWorkflow: 'native-worktree-v1', sourcePaths: ['src'],
@@ -9864,7 +9868,7 @@ for (const precise of [false, true]) for (const mode of precise ? ['live', 'cold
       if (attempt.number > reviewAttempt) {
         assert.match(request.prompt, /完整原回答在草稿文件/)
         const draftPath = /草稿文件=([^\s；]+)/.exec(request.prompt)![1]
-        assert.equal(f.git('show', `${request.worktree!.baseCommit}:${draftPath}`), 'read ETIMEDOUT')
+        assert.equal(f.git('show', `${request.worktree!.baseCommit}:${draftPath}`), missingFinding ? JSON.stringify(invalidReview) : 'read ETIMEDOUT')
         throw Object.assign(new Error('fixture已到第二次P2独审，不运行Docker'), { code: 'unsupported' })
       }
       if (mode === 'review-lineage-native') {
@@ -9873,7 +9877,9 @@ for (const precise of [false, true]) for (const mode of precise ? ['live', 'cold
         const changed = { ...resource, checkpointRef: writeEvidence(commonDir, { ...checkpoint, result: { ...checkpoint.result!, threadId: 'foreign-source-p1-review' } }) }
         store.findResource = (attemptId, key) => attemptId === attempt.id && key === dispatch.key ? changed : findResource(attemptId, key)
       }
-      return rejectedReviewFixture(f, request, 'read ETIMEDOUT', '受控P2独审最终JSON失败')
+      if (!missingFinding) return rejectedReviewFixture(f, request, 'read ETIMEDOUT', '受控P2独审最终JSON失败')
+      const { inputId, candidateDigest, requiredIds } = JSON.parse(request.prompt.split('候选绑定:\n')[1].split('\n')[0]) as { inputId: string; candidateDigest: string; requiredIds: string[] }
+      invalidReview = { inputId, candidateDigest, verdict: 'repair', checkedIds: requiredIds, findings: [] }
     }
     if (request.purpose === 'code_generate') {
       if (attempt.number > reviewAttempt) {
@@ -9905,7 +9911,8 @@ for (const precise of [false, true]) for (const mode of precise ? ['live', 'cold
       if (!reviewFailure) throw new StructuredSessionError('structured_output_format_invalid', '受控P2最终JSON失败，沿原预算重试')
     }
     let output: unknown
-    if (request.purpose.startsWith('code_behavior_')) {
+    if (request.purpose === 'code_review') output = invalidReview
+    else if (request.purpose.startsWith('code_behavior_')) {
       const { task, pendingAnalysis } = readCodeBehaviorContext(request, commonDir)
       const paths = task.requiredChangedPaths as string[]
       output = pendingAnalysis
@@ -9952,7 +9959,7 @@ for (const precise of [false, true]) for (const mode of precise ? ['live', 'cold
   if (cold) {
     assert.equal(result.status, 'busy', JSON.stringify(result.failure))
     assert.equal(store.listAttempts(f.operation.id).length, reviewAttempt)
-    assert.equal(store.listAttempts(f.operation.id).at(-1)!.failure?.code, 'structured_output_format_invalid')
+    assert.equal(store.listAttempts(f.operation.id).at(-1)!.failure?.code, failedCode)
     f.closeForRestart()
     const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
     store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) }); f.store = store; f.useStore(store)
@@ -9973,7 +9980,7 @@ for (const precise of [false, true]) for (const mode of precise ? ['live', 'cold
     assert.deepEqual(JSON.parse(readEvidence(commonDir, provenance.resultRef).toString()), { fromOperationId: f.operation.id, fromAttemptId: first.id, resultRef: firstLocal.resultRef })
     assert.equal(approved.reviewPassed, true); assert.equal(approved.rounds.at(-1)!.review!.verdict, 'repair')
     assert.equal(hasApprovedElaborationReview(approved), true)
-    assert.equal(first.failure!.code, 'structured_output_format_invalid')
+    assert.equal(first.failure!.code, failedCode)
     assert.equal(result.failure?.code, 'unsupported')
     if (reviewFailure) {
       const generation = (attempt: SyncAttempt) => JSON.parse(readEvidence(commonDir, stages(attempt).find(value => value.stage === 'generation')!.resultRef).toString()) as import('./generation-types.js').GenerationResult

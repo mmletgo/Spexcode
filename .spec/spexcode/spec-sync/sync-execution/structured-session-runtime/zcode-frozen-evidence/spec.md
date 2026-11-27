@@ -19,6 +19,8 @@ related:
 
 ## expanded spec
 
+MCP 桥保留原 JSON-RPC、唯一 reader 与原回复配对。客户端身份和 ZCode 原生请求元数据由 Manager 适配核验，宿主核对业务字节与冻结范围。
+
 版本4证明绑定 provider `zcode`、精确 providerId/modelId、CLI version/SHA256、session/turn/inputId、prompt 摘要及完整原始见证摘要。从 `session/messages` 的原生 `info.id/sessionID` 与 `parts.id/messageID/sessionID/callID/tool/state` 建立关系，不接受声明 DTO 的 messageId/callId 冒充 core 字段。唯一原始 user 的正文、turn.started 的 input/messageId/inputId 和一次 send 的 session/content/inputId 必须一致，唯一初轮的原生零基 turnNumber 必须为0；唯一原始输入以 real_user/user_prompt、realUser anchor 和可见性识别。只允许初次 assistant 前的原生 environment/model/runtime_mode/date 四类 synthetic model-only 提醒，每类最多一条，以及已有 assistant 后的原生 silent_turn_reminder；后者正文必须逐字为固定 CLI 的 “The user hasn't heard from you in a while. As you continue, keep them updated when there's something to tell — a finding, a change of plan.”。所有提醒的 semantics、anchor、metadata 来源与单个 text part 必须相符，不能宽泛接受同源任意正文。额外真实或未知 synthetic user 输入、消息或调用身份重复、外来 session/turn 均拒绝。send 若显式包含原生 modelSelection，必须与唯一 real_user 的原始 modelSelection 全值相等；冷验证若指定 options.reasoningLevel，也必须匹配该真实输入，不能从未携 options 的 synthetic 提醒补证。
 
 唯一允许不参与模型输入的隐藏消息是原生 producer 生成的回合前 model_change 行政分隔线：仅能位于首条、无 anchor、自指 parent、system/timeline_event 与展示可见/模型隐藏语义、完成且零 token；唯一 part 只含 completed model_change separator、from/to ModelSelection 和同一时刻元数据，时间不得晚于原 user。info/toModel 必须为固定目标，fromModel 只接受合法模型选择展示元数据。未知字段、正文/工具 payload、回合内插入或伪造 anchor 均拒绝。该完整记录仍进入原始 witness 摘要，但从模型可见消息顺序、请求计数与覆盖中排除；不能宽泛跳过 hidden 消息。
