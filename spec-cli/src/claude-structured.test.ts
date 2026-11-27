@@ -10,7 +10,7 @@ import { basename, dirname, join } from 'node:path'
 import { prepareFrozenPrompt, readFrozenManifest, claudeFrozenContextPrompt, freezeContext, readFrozenRange, proveClaudeFrozenReads, verifyFrozenReadProof, claudeMessageDigest, readClaudeApiSourceMetadata, readClaudePublicHistory, type ClaudeFrozenWitness, type ClaudePublicMessage, type ClaudePublicRecord } from './frozen-context.js'
 import { StructuredSessionError, structuredExecutionPolicy, structuredRealmRoot, type StructuredExecution } from './session-structured-policy.js'
 import { sampleNativeWorktreeProcesses } from './native-worktree-runtime.js'
-import { claudeNativeModel, claudeWorktreeArgs, claudeStructuredArgs, claudeStructuredTurn, observeClaudeWorktreeMissingFinal, observeClaudeStoppedWorktreeFailure, assertClaudeStoppedDraftSource, prepareClaudeAuthenticationEnvironment } from './claude-structured.js'
+import { claudeNativeModel, loadClaudeNativeAdapter, claudeStructuredTurn, observeClaudeWorktreeMissingFinal, observeClaudeStoppedWorktreeFailure, assertClaudeStoppedDraftSource } from './claude-structured.js'
 
 const contentBlocks = (message: ClaudePublicMessage): Exclude<ClaudePublicMessage['content'], string> => {
   assert(Array.isArray(message.content))
@@ -341,17 +341,19 @@ test('Claude namespace creates its own fixed policy and bounded frozen prompt wh
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
 
-test('Claude policy accepts exact native IDs only and exposes no builtin tools or discovery', () => {
+test('Claude policy accepts exact native IDs only and exposes no builtin tools or discovery', async () => {
+  const { claudeStructuredArgs } = await loadClaudeNativeAdapter()
+  const readerPolicy = { allowedTools: ['StructuredOutput', 'mcp__frozen__spex_read_frozen'], systemPrompt: 'Read immutable context.' }
   assert.equal(claudeNativeModel('claude:MiniMax-M3'), 'MiniMax-M3')
   for (const value of ['claude:', 'claude:sonnet', 'claude:opus', 'claude:default', 'claude:MiniMax-M3[1m]', 'sol']) assert.throws(() => claudeNativeModel(value))
-  const args = claudeStructuredArgs({ sessionId: 'session', model: 'MiniMax-M3', mcpConfig: '/controlled/mcp.json', schema: { type: 'object' } })
+  const args = claudeStructuredArgs({ sessionId: 'session', model: 'MiniMax-M3', mcpConfig: '/controlled/mcp.json', ...readerPolicy, schema: { type: 'object' } })
   for (const flag of ['--restricted', '--strict-mcp-config', '--disable-slash-commands']) assert(args.includes(flag))
   assert.equal(args[args.indexOf('--tools') + 1], '')
   assert.equal(args.includes('--safe-mode'), false)
   assert.equal(args.includes('--dangerously-skip-permissions'), false)
-  const effortArgs = claudeStructuredArgs({ sessionId: 'session', model: 'MiniMax-M3', mcpConfig: '/controlled/mcp.json', schema: { type: 'object' }, effort: 'high' })
+  const effortArgs = claudeStructuredArgs({ sessionId: 'session', model: 'MiniMax-M3', mcpConfig: '/controlled/mcp.json', ...readerPolicy, schema: { type: 'object' }, effort: 'high' })
   assert.equal(effortArgs[effortArgs.indexOf('--effort') + 1], 'high')
-  assert.throws(() => claudeStructuredArgs({ sessionId: 'session', model: 'MiniMax-M3', mcpConfig: '/controlled/mcp.json', schema: { type: 'object' }, effort: 'minimal' }))
+  assert.throws(() => claudeStructuredArgs({ sessionId: 'session', model: 'MiniMax-M3', mcpConfig: '/controlled/mcp.json', ...readerPolicy, schema: { type: 'object' }, effort: 'minimal' }))
 })
 
 test('controlled Claude compact boundaries preserve one original turn without granting summary coverage', () => {
@@ -1018,7 +1020,8 @@ test('public tool inputs keep business signature/thinking keys while actual synt
   } finally { rmSync(directory, { recursive: true, force: true }) }
 })
 
-test('native authentication projection keeps only four keys and explicit process values own the whole group', () => {
+test('native authentication projection keeps only four keys and explicit process values own the whole group', async () => {
+  const { prepareClaudeAuthenticationEnvironment } = await loadClaudeNativeAdapter()
   const directory = mkdtempSync(join(tmpdir(), 'spex-claude-auth-projection-'))
   try {
     const path = join(directory, 'settings.json'), values = { ANTHROPIC_AUTH_TOKEN: 'PUBLIC_DUMMY_TOKEN', ANTHROPIC_API_KEY: 'PUBLIC_DUMMY_API_KEY', CLAUDE_CODE_OAUTH_TOKEN: 'PUBLIC_DUMMY_OAUTH', ANTHROPIC_BASE_URL: 'https://example.invalid/native' }
@@ -1033,7 +1036,8 @@ test('native authentication projection keeps only four keys and explicit process
 })
 
 
-test('native CLI configuration accepts opaque selections and omits --model for default', () => {
+test('native CLI configuration accepts opaque selections and omits --model for default', async () => {
+  const { claudeWorktreeArgs, claudeNativeModel } = await loadClaudeNativeAdapter()
   for (const model of ['sonnet', 'opus', 'haiku', 'provider/model[1m]', 'a model;$(never-shell)']) {
     assert.equal(claudeNativeModel(`claude:${model}`, 'cli-config-v1'), model)
     const args = claudeWorktreeArgs({ sessionId: 'session', model, schema: {}, nativeConfiguration: 'cli-config-v1' })

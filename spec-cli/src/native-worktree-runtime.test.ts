@@ -8,8 +8,8 @@ import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { hostProcessAdapter, processStartToken, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
 import { assertNativeWorktreeSeed, assertNativeWorktreeResult, nativeWorktreeResult, nativeWorktreePrompt, sampleNativeWorktreeProcesses, nativeWorktreeProcessesStopped, classifyNativeWorktreeOrphans } from './native-worktree-runtime.js'
-import { claudeWorktreeArgs, claudeStructuredArgs, claudeStructuredTurn, observeClaudeWorktreeMissingFinal, stopClaudeStructuredTurn } from './claude-structured.js'
-import { zcodeWorktreePermission, zcodeWorktreeConfiguration, zcodeRuntimeConfiguration, zcodeStructuredTurn, zcodeCapability, zcodeNativeSelection, type ZCodeStructuredExecution } from './zcode-structured.js'
+import { loadClaudeNativeAdapter, claudeStructuredTurn, observeClaudeWorktreeMissingFinal, stopClaudeStructuredTurn } from './claude-structured.js'
+import { zcodeWorktreePermission, loadZCodeNativeAdapter, zcodeStructuredTurn, zcodeCapability, zcodeNativeSelection, type ZCodeStructuredExecution } from './zcode-structured.js'
 import { spawnSync } from 'node:child_process'
 import { createRequire, syncBuiltinESMExports } from 'node:module'
 import { PassThrough } from 'node:stream'
@@ -283,18 +283,20 @@ test('read Git alias probe is a typed invalid result and preserves the actual HE
   } finally { f.close() }
 })
 
-test('normal worktree capabilities and prompt remain distinct from the frozen reader', () => {
+test('normal worktree capabilities and prompt remain distinct from the frozen reader', async () => {
+  const { claudeWorktreeArgs, claudeStructuredArgs } = await loadClaudeNativeAdapter()
+  const { zcodeRuntimeConfiguration, zcodeWorktreeConfiguration, zcodePermissionScope } = await loadZCodeNativeAdapter()
   const args = claudeWorktreeArgs({ sessionId: 'session', model: 'MiniMax-M3.1-Flash', schema: { type: 'object' } })
   assert.equal(args.includes('--restricted'), false); assert.equal(args.includes('--tools'), false); assert.equal(args.includes('--allowedTools'), false)
   assert.equal(args.includes('--json-schema'), true)
   const readArgs = claudeWorktreeArgs({ sessionId: 'session', model: 'MiniMax-M3.1-Flash', schema: {}, mode: 'read' })
   assert.equal(readArgs[readArgs.indexOf('--permission-mode') + 1], 'plan')
-  assert.equal(zcodeWorktreePermission({ sessionId: 'session', toolName: 'Read', input: { file_path: '/any/context' } }, 'session', '/worktree', 'read'), 'allow')
-  assert.equal(zcodeWorktreePermission({ sessionId: 'foreign', toolName: 'Bash' }, 'session', '/worktree', 'edit'), 'deny')
-  assert.equal(zcodeWorktreePermission({ sessionId: 'session', toolName: 'Edit', input: { file_path: 'src/file.ts' } }, 'session', '/worktree', 'read'), 'deny')
-  assert.equal(zcodeWorktreePermission({ sessionId: 'session', toolName: 'Edit', input: { file_path: 'src/file.ts' } }, 'session', '/worktree', 'edit'), 'allow')
-  assert.equal(zcodeWorktreePermission({ sessionId: 'session', toolName: 'Edit', input: { file_path: '../outside' } }, 'session', '/worktree', 'edit'), 'deny')
-  const old = claudeStructuredArgs({ sessionId: 'session', model: 'MiniMax-M3.1-Flash', schema: {}, mcpConfig: '/frozen' })
+  assert.equal(zcodeWorktreePermission(zcodePermissionScope({ sessionId: 'session', toolName: 'Read', input: { file_path: '/any/context' } }, 'session'), '/worktree', 'read'), 'allow')
+  assert.equal(zcodeWorktreePermission(zcodePermissionScope({ sessionId: 'foreign', toolName: 'Bash' }, 'session'), '/worktree', 'edit'), 'deny')
+  assert.equal(zcodeWorktreePermission(zcodePermissionScope({ sessionId: 'session', toolName: 'Edit', input: { file_path: 'src/file.ts' } }, 'session'), '/worktree', 'read'), 'deny')
+  assert.equal(zcodeWorktreePermission(zcodePermissionScope({ sessionId: 'session', toolName: 'Edit', input: { file_path: 'src/file.ts' } }, 'session'), '/worktree', 'edit'), 'allow')
+  assert.equal(zcodeWorktreePermission(zcodePermissionScope({ sessionId: 'session', toolName: 'Edit', input: { file_path: '../outside' } }, 'session'), '/worktree', 'edit'), 'deny')
+  const old = claudeStructuredArgs({ sessionId: 'session', model: 'MiniMax-M3.1-Flash', schema: {}, mcpConfig: '/frozen', allowedTools: ['StructuredOutput', 'mcp__frozen__spex_read_frozen'], systemPrompt: 'Read immutable context.' })
   assert(old.includes('--restricted')); assert(old.includes('--tools')); assert(old.includes('--allowedTools'))
   assert.equal((zcodeRuntimeConfiguration().features as { mcp: boolean }).mcp, true)
   assert.equal((zcodeWorktreeConfiguration().features as { mcp: boolean }).mcp, false)

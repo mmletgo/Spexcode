@@ -20,6 +20,8 @@ related:
 
 ## expanded spec
 
+新派发通过 [[llm-manager-host]] 的安装包启动 Claude CLI。原生模型参数、认证投影、stream-json 协议和兼容 Anthropic Messages 的中继由 LLM Manager 持有。SpexCode 固定任务工具面、工作树权限并核验原始见证。
+
 [[llm-manager-host]] 的 Claude API 路线沿原 native-worktree 固定执行策略，使用同轮临时 loopback 转发。原生进程只接收本轮临时授权，启动时禁用会覆盖路线的外部设置和 hooks。macOS 子进程同一次沙箱同时限制 Git 共享配置写入和 Manager 私有文件读取。原生 init、消息、schema、进程组和结果照原路径核验。可信终态只投影原 429 状态码，真实 API 转发额度失败仍须原生停止。
 
 原生 worktree 只从同一原生 CLI `result.modelUsage` 读取计数。按字段跨全部模型汇总安全非负整数，分别保留未缓存输入、输出、缓存读和缓存创建；缺值、非法值或超安全整数范围的分量缺席，明确的零保留。仅以该轮固定请求的首个原生会话计数范围解释，涵盖 Claude Code query pipeline 报告的模型调用。规范化计数随本轮 result 快照保存，在精确原生终态和停止认证后才交给 [[structured-session-runtime]]。不使用只含主循环的 usage、价格、单消息或旧历史推估，不保留原始 modelUsage、模型分组、价格或其它 provider 字段。
