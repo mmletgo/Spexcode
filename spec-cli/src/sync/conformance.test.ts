@@ -276,7 +276,7 @@ test('Manager 大正文缺少逐字读取证明时保留完整冻结输入并阻
 })
 
 const managedFrozenTestRuntime = process.env.SPEX_MANAGER_FROZEN_TEST_RUNTIME
-for (const mode of ['completed', 'quota', 'metadata-rejected', 'audit-rejected', 'audit-references-unknown']) test(`公开 sync check 的 Manager 持久 Codex 独占资源 ${mode}`, { skip: !managedFrozenTestRuntime || process.platform !== 'darwin' }, t => {
+for (const mode of ['completed', 'quota', 'metadata-rejected', 'audit-rejected', 'audit-references-unknown', 'cold-carrier-missing', 'cold-carrier-replaced']) test(`公开 sync check 的 Manager 持久 Codex 独占资源 ${mode}`, { skip: !managedFrozenTestRuntime || process.platform !== 'darwin' }, t => {
   const quota = mode === 'quota'
   const auditRejected = mode.startsWith('audit-')
 
@@ -284,7 +284,7 @@ for (const mode of ['completed', 'quota', 'metadata-rejected', 'audit-rejected',
   t.after(() => rmSync(repo.root, { recursive: true, force: true }))
   const cliVersion = 'codex-cli 0.160.0', fixtureBin = String.raw`#!${process.execPath}
 const assert = require('node:assert/strict')
-const { mkdirSync, readFileSync, renameSync, writeFileSync } = require('node:fs')
+const { appendFileSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } = require('node:fs')
 const { createServer } = require('node:net')
 const { createHash } = require('node:crypto')
 const { join, dirname, basename } = require('node:path')
@@ -299,7 +299,14 @@ const auditRejected = runtimeLabel === 'review' && mode.startsWith('audit-')
 const catalog = settings.match(/^model_catalog_json = (.+)$/m), limit = Number(settings.match(/^tool_output_token_limit = (.+)$/m)?.[1])
 writeFileSync(join(home, 'models_cache.json'), JSON.stringify({ client_version: '0.160.0', models: [{ slug: model, apply_patch_tool_type: 'freeform', experimental_supported_tools: [] }] }))
 const disabled = Object.fromEntries(${JSON.stringify(frozenReaderDisabledFeatures)}.map(feature => [feature, false]))
-let cwd, path, archived = false, endpoint = false
+let cwd, path, prompt, archived = false, endpoint = false
+process.on('SIGTERM', () => {
+  if (archived && mode === 'cold-carrier-missing') unlinkSync(path)
+  if (archived && mode === 'cold-carrier-replaced') {
+    writeFileSync(path + '.new', readFileSync(path)); renameSync(path + '.new', path)
+  }
+  process.exit(0)
+})
 const items = [], ranges = new Map(), outputs = new Map()
 const socketPath = process.argv.find(arg => arg.startsWith('unix://')).slice(7)
 const server = createServer(socket => {
@@ -332,10 +339,13 @@ const server = createServer(socket => {
     },
     'turn/start': p => {
       assert.equal(p.threadId, identity); assert.equal(p.model, model); assert.equal(p.cwd, cwd)
-      const prompt = p.input[0].text, index = JSON.parse(prompt.split('\n').at(-1))
+      appendFileSync(join(home, 'test-turn-starts'), 'start\n')
+      prompt = p.input[0].text
+      const index = JSON.parse(prompt.split('\n').at(-1))
       assert.equal(prompt.includes('candidate-body-ends'), false); items.push({ type: 'userMessage', content: p.input })
       if (${quota} && home.includes('c'.repeat(64))) {
         writeFileSync(path, [{ type: 'session_meta', payload: { id: identity, cwd } }, { type: 'turn_context', payload: { turn_id: turn.id } },
+          { type: 'event_msg', payload: { type: 'user_message', message: prompt } },
           { type: 'event_msg', payload: { type: 'task_complete', turn_id: turn.id } }].map(row => JSON.stringify(row)).join('\n') + '\n')
         turn.status = 'failed'; turn.error = { codexErrorInfo: 'usageLimitExceeded' }
         setImmediate(() => send({ method: 'turn/completed', params: { threadId: identity, turn } }))
@@ -363,11 +373,13 @@ const server = createServer(socket => {
     assert.ok(source.candidate.includes('candidate-body-ends')); assert.equal(readFileSync(join(cwd, source.path), 'utf8'), source.candidate)
     assert.equal(execFileSync('git', ['-C', cwd, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), context.identities.candidateCommit)
     assert.equal(execFileSync('git', ['-C', cwd, 'rev-parse', 'HEAD^{tree}'], { encoding: 'utf8' }).trim(), context.identities.candidateTree)
+    const final = JSON.stringify({ inputId: context.inputId, candidateDigest: context.candidateDigest, checkedIds: context.scope.itemIds, verdict: 'accept', findings: [] })
     writeFileSync(path, [{ type: 'session_meta', payload: { id: identity, cwd } }, { type: 'turn_context', payload: { turn_id: turn.id } },
+      { type: 'event_msg', payload: { type: 'user_message', message: prompt } },
       ...[...outputs].flatMap(([id, output]) => [{ type: 'response_item', payload: { type: 'custom_tool_call', name: 'exec', call_id: String(id) } },
         { type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: String(id), output: output.text }, metadata: { fallback_token_limit_override: Math.ceil(limit * 1.2) } }]),
-      { type: 'event_msg', payload: { type: 'task_complete', turn_id: turn.id } }].map(row => JSON.stringify(row)).join('\n') + '\n')
-    items.push({ type: 'agentMessage', phase: 'final_answer', text: JSON.stringify({ inputId: context.inputId, candidateDigest: context.candidateDigest, checkedIds: context.scope.itemIds, verdict: 'accept', findings: [] }) })
+      { type: 'event_msg', payload: { type: 'task_complete', turn_id: turn.id, last_agent_message: final } }].map(row => JSON.stringify(row)).join('\n') + '\n')
+    items.push({ type: 'agentMessage', phase: 'final_answer', text: final })
     turn.status = 'completed'; send({ method: 'turn/completed', params: { threadId: identity, turn } })
   }
   socket.on('data', chunk => {
@@ -423,6 +435,19 @@ setTimeout(() => process.exit(1), 30_000).unref()
     }
     return
   }
+  if (mode.startsWith('cold-carrier-')) {
+    assert.equal(status, 1, JSON.stringify(result.diagnostics))
+    assert.equal(result.status, 'recovery_required')
+    assert.equal(result.review, null)
+    assert.match(result.diagnostics[0].message, /cold|archive/u)
+    assert.deepEqual(manager.calls().map(call => [call.action, call.outcome]), [['resolve', undefined], ['reserve', undefined], ['settle', 'completed']])
+    const realm = readdirSync(result.evidenceDirectory).find(name => name.startsWith('review-'))!
+    const runtime = join(result.evidenceDirectory, realm, 'runtime')
+    const starts = readdirSync(runtime, { recursive: true }).filter(name => String(name).endsWith('/test-turn-starts'))
+    assert.equal(starts.length, 1)
+    assert.equal(readFileSync(join(runtime, String(starts[0])), 'utf8'), 'start\n')
+    return
+  }
   assert.equal(result.review?.verdict, 'accept', JSON.stringify(result.diagnostics))
   const accepted = successor ?? route
   assert.deepEqual(result.reviewRoute, accepted)
@@ -451,6 +476,7 @@ setTimeout(() => process.exit(1), 30_000).unref()
     const runtimePidPath = readdirSync(runtime, { recursive: true }).find(name => String(name).includes('/structured-managed-frozen-worktree-v1/') && String(name).endsWith('/test-runtime.pid'))
     assert.ok(runtimePidPath)
     const pid = Number(readFileSync(join(runtime, String(runtimePidPath)), 'utf8'))
+    assert.equal(readFileSync(join(dirname(join(runtime, String(runtimePidPath))), 'test-turn-starts'), 'utf8'), 'start\n')
     assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, 'review process has exited before V2 publication')
   }
   assert.equal(git(repo.root, ['worktree', 'list', '--porcelain']), original)

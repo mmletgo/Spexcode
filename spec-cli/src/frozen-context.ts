@@ -35,6 +35,7 @@ export type ClaudePublicRecord = { type: string; sessionId: string; uuid?: strin
 }
 export type ClaudeFrozenWitness = { version: 1; provider: 'claude-code'; cliVersion: string; model: string; sessionId: string; userUuid: string; promptId: string; prompt: string; nativeHistoryPath: string; history: ClaudePublicRecord[]; mcpHistory?: { path: string; toolNames: string[] }; echo: { uuid: string; session_id: string; message: ClaudePublicMessage }; result: { type: string; subtype: string; is_error: boolean; session_id: string; uuid: string; user_message_uuid: string; user_message_uuids: string[]; structured_output: unknown }; initTools: string[] }
 export type FrozenVisibleOutput = { callId: string; output: string | { type: 'input_text'; text: string }[]; historyTokenLimit: number }
+export type NormalizedFrozenRead = { callId: string; arguments: unknown; text: string }
 type FrozenVisibility = { toolOutputTokenLimit: number; outputs: FrozenVisibleOutput[] }
 export type FrozenNativeItem = { type: string; id?: string; namespace?: string | null; tool?: string; arguments?: unknown; status?: string; success?: boolean | null; contentItems?: unknown }
 export type FrozenToolResponse = { contentItems: { type: 'inputText'; text: string }[]; success: true }
@@ -325,13 +326,31 @@ export function proveFrozenReads(ref: FrozenContextRef, identity: { threadId: st
     const { receipt } = persistFrozenRead(ref, { ...identity, callId: item.id }, args)
     receipts.push(receipt)
   }
+  return commitFrozenReadProof(ref, identity, items, receipts, visibility, visibility && (() => checkFrozenVisibility(ref, visibility, responses)))
+}
+
+/** 管理端证实原生调用形态后，宿主仍把每个回复逐字重算并绑定原始历史。 */
+export function proveManagedFrozenReads(ref: FrozenContextRef, identity: { threadId: string; turnId: string }, items: readonly Record<string, unknown>[], reads: readonly NormalizedFrozenRead[], visibility: FrozenVisibility, verifyVisibility: (outputs: FrozenVisibleOutput[], limit: number, responses: string[]) => void): FrozenReadProof {
+  const responses: string[] = []
+  const receipts = reads.map(read => {
+    const { arguments: args, response } = readFrozenRange(ref, read.arguments)
+    const text = response.contentItems[0].text
+    if (read.text !== text) stale('native frozen read result bytes differ from the immutable entry')
+    responses.push(text)
+    return persistFrozenRead(ref, { ...identity, callId: read.callId }, args).receipt
+  })
+  if (visibility.toolOutputTokenLimit !== frozenReadOutputTokenLimit(ref)) stale('frozen visible history limit differs from the immutable manifest')
+  return commitFrozenReadProof(ref, identity, items, receipts, visibility, () => verifyVisibility(visibility.outputs, visibility.toolOutputTokenLimit, responses))
+}
+
+function commitFrozenReadProof(ref: FrozenContextRef, identity: { threadId: string; turnId: string }, items: readonly unknown[], receipts: FrozenReadReceipt[], visibility?: FrozenVisibility, auditVisibility?: () => void): FrozenReadProof {
   const coveredEntryIds = frozenReadCoverage(ref, receipts)
   const history = encode(items), historyDigest = sha(history), historyPath = join(dirname(ref.manifestPath), 'histories', historyDigest)
   if (!existsSync(historyPath)) writeFileSync(historyPath, history, { mode: 0o400 })
   else if (sha(readFileSync(historyPath)) !== historyDigest) stale('persisted native frozen history was modified')
   const proof = { contextDigest: ref.contextDigest, ...identity, receipts, coveredEntryIds, historyDigest }
   if (!visibility) return proof
-  checkFrozenVisibility(ref, visibility, responses)
+  auditVisibility!()
   const visible = encode({ ...identity, ...visibility }), visibilityDigest = sha(visible), visiblePath = join(dirname(ref.manifestPath), 'histories', visibilityDigest)
   if (!existsSync(visiblePath)) writeFileSync(visiblePath, visible, { mode: 0o400 })
   else if (sha(readFileSync(visiblePath)) !== visibilityDigest) stale('persisted frozen visible history was modified')

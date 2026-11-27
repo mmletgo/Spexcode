@@ -6,6 +6,7 @@ import { setTimeout as wait } from 'node:timers/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { managedFrozenCapability, readManagedRoute, type ManagedFrozenReader, type ManagedRoute } from './llm-manager-route.js'
 import type { FrozenReaderRuntime, NativeTokenUsage, StructuredExecution } from './session-structured-policy.js'
+import type { FrozenVisibleOutput, NormalizedFrozenRead } from './frozen-context.js'
 
 const bridge = fileURLToPath(new URL('../llm-manager/host.py', import.meta.url))
 const installedSettingsPath = '/llm-manager/'
@@ -112,44 +113,72 @@ export function loadManagerNativeRuntime(): Promise<ManagerNativeRuntime> {
 
 type NativeRecord = Record<string, unknown>
 export type ManagedPersistentCodexTurn = { id: string; status: string; error?: unknown }
-type PersistentCodexThread = { id: string; path?: string | null; turns?: Array<ManagedPersistentCodexTurn & { items?: NativeRecord[] }> }
+type PersistentCodexThread = { id: string; path?: string | null }
+type ExactPersistentTurn = { threadId: string; turnId?: string; prompt: string }
+export type ManagedFrozenArchiveOptions = { generation: string; home: string; cwd: string; threadId: string; turnId: string; prompt: string; toolName: string; expectedHistoryDigest?: string }
+export type ManagedFrozenArchiveReceipt = {
+  version: 1; generation: string; threadId: string; turnId: string; cwd: string; status: string; historySha256: string
+  carrier: { path: string; sha256: string; size: number; dev: string; ino: string }
+}
+type ManagedFrozenArchiveHistory = { status: string; items: NativeRecord[]; outputs: FrozenVisibleOutput[]; finalText?: string }
+
 type ManagerPersistentCodex = {
   initialize(clientName: string, version: string): Promise<void>
   auditReadOnly(options: { cwd: string; readerRuntime?: FrozenReaderRuntime }): Promise<void>
   startThread(options: { cwd: string; model?: string; dynamicTools?: readonly unknown[] }): Promise<PersistentCodexThread>
-  resumeThread(options: { threadId: string; cwd: string }): Promise<PersistentCodexThread>
   startTurn(options: { threadId: string; cwd: string; prompt: string; schema: NativeRecord; model?: string; effort?: StructuredExecution['effort'] }): Promise<string>
   readTurns(threadId: string, turnId?: string): Promise<ManagedPersistentCodexTurn[]>
+  readExactTurn(options: ExactPersistentTurn): Promise<ManagedPersistentCodexTurn>
   readItems(threadId: string, turnId: string): Promise<NativeRecord[]>
   readThread(threadId: string, includeTurns?: boolean): Promise<PersistentCodexThread>
   refreshModels(): Promise<string[]>
   listLoadedThreadIds(): Promise<string[]>
   listThreads(cwd: string, archived: boolean): Promise<string[]>
   archiveThread(threadId: string): Promise<void>
+  captureFrozenArchive(options: ManagedFrozenArchiveOptions): Promise<{ receipt: ManagedFrozenArchiveReceipt; historyBytes: Buffer }>
   interrupt(threadId: string, turnId: string): Promise<void>
   onCompleted(handler: (threadId: string, turn: ManagedPersistentCodexTurn) => void): void
-  onToolCall(handler: (call: NativeRecord) => Promise<unknown>): void
+  onFrozenToolCall(toolName: string, handler: (call: Omit<NormalizedFrozenRead, 'text'> & { threadId: string; turnId: string }) => Promise<string>): void
   onFailure(handler: (error: Error & { code?: string }) => void): void
   drainToolCalls(): Promise<void>
   close(): void
 }
-type ManagerPersistentCodexModule = {
+export type ManagerPersistentCodexModule = {
   CodexPersistentAppServer: new (socketPath: string, requestTimeoutMs?: number) => ManagerPersistentCodex
   codexPersistentAppServerArgs(socketPath: string): string[]
   codexPersistentTerminalError(turn: ManagedPersistentCodexTurn): Error & { code?: string }
+  codexPersistentConfig(readerRuntime?: FrozenReaderRuntime): string
+  codexPersistentHomePaths(home: string): { configPath: string; authPath: string }
+  codexPersistentSocketPaths(socketPath: string, uid: number): { rendezvous: string; daemonDirectory: string; physicalSocket: string; lockPath: string }
+  codexBuildFrozenCatalog(options: { home: string; cliVersion: string; model?: string }): { bytes: Buffer; beforeDigest: string; digest: string; changedFields: string[] }
+  codexAuditFrozenCatalog(options: { path: string; digest: string; model?: string }): void
+  codexFrozenToolDefinition(tool: { name: string; description: string; inputSchema: NativeRecord }): NativeRecord
+  codexDecodeFrozenItems(items: readonly NativeRecord[], toolName: string): { finalText: string; reads: NormalizedFrozenRead[] }
+  codexValidateFrozenVisibility(outputs: FrozenVisibleOutput[], toolOutputTokenLimit: number, expectedResponses: string[]): void
+  codexReadFrozenRollout(options: { path: string; threadId: string; turnId: string; cwd: string; requireCompleted?: boolean }): { archived: boolean; outputs: FrozenVisibleOutput[] }
+  verifyCodexFrozenArchive(options: ManagedFrozenArchiveOptions, receipt: ManagedFrozenArchiveReceipt, history: Uint8Array): ManagedFrozenArchiveHistory
+
 }
 export type ManagedCodexFrozenRuntime = ManagerPersistentCodexModule & { executable: string; reader: ManagedFrozenReader }
 
-/** 运行时必须与原 Manager 选路认证的可执行文件一致。 */
-export async function loadManagedCodexFrozenRuntime(reader: ManagedFrozenReader): Promise<ManagedCodexFrozenRuntime> {
+/** 冷复验只加载 Manager 的本地证据读取器。 */
+export async function loadManagerPersistentCodex(): Promise<ManagerPersistentCodexModule> {
   if (!llmManagerRequested()) throw new LlmManagerHostError('llm_manager_native_capability_unavailable')
   const manager = await loadManagerNativeRuntime(), adapter = await manager.loadNativeAdapter('codex') as Partial<ManagerPersistentCodexModule>
+  const exports: readonly (keyof ManagerPersistentCodexModule)[] = ['CodexPersistentAppServer', 'codexPersistentAppServerArgs', 'codexPersistentTerminalError',
+    'codexPersistentConfig', 'codexPersistentHomePaths', 'codexPersistentSocketPaths', 'codexBuildFrozenCatalog', 'codexAuditFrozenCatalog',
+    'codexFrozenToolDefinition', 'codexDecodeFrozenItems', 'codexValidateFrozenVisibility', 'codexReadFrozenRollout', 'verifyCodexFrozenArchive']
+  if (exports.some(name => typeof adapter[name] !== 'function')) throw new LlmManagerHostError('llm_manager_native_capability_unavailable')
+  return adapter as ManagerPersistentCodexModule
+}
+
+/** 实际启动必须使用原 Manager 选路认证的可执行文件。 */
+export async function loadManagedCodexFrozenRuntime(reader: ManagedFrozenReader): Promise<ManagedCodexFrozenRuntime> {
+  const adapter = await loadManagerPersistentCodex(), manager = await loadManagerNativeRuntime()
   const executable = manager.findNativeExecutable('codex')
-  if (!executable || createHash('sha256').update(readFileSync(executable)).digest('hex') !== reader.cliSha256
-    || typeof adapter.CodexPersistentAppServer !== 'function' || typeof adapter.codexPersistentAppServerArgs !== 'function' || typeof adapter.codexPersistentTerminalError !== 'function')
+  if (!executable || createHash('sha256').update(readFileSync(executable)).digest('hex') !== reader.cliSha256)
     throw new LlmManagerHostError('llm_manager_native_capability_unavailable')
-  return { CodexPersistentAppServer: adapter.CodexPersistentAppServer, codexPersistentAppServerArgs: adapter.codexPersistentAppServerArgs,
-    codexPersistentTerminalError: adapter.codexPersistentTerminalError, executable, reader }
+  return { ...adapter, executable, reader }
 }
 
 export function applyLlmManagerSettings(body: Record<string, unknown>): Promise<unknown> {

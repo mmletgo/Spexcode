@@ -13,7 +13,7 @@ import type { GrokNativeState } from './grok-structured.js'
 import type { CursorNativeState } from './cursor-structured.js'
 import type { NativeCodexWorktreeState } from './codex-native-worktree-structured.js'
 import { withDeliveryLocks } from './delivery-lock.js'
-import type { ManagedCodexFrozenRuntime } from './llm-manager-host.js'
+import type { ManagedCodexFrozenRuntime, ManagerPersistentCodexModule } from './llm-manager-host.js'
 import { managedRoute } from './llm-manager-route.js'
 
 export type FrozenReaderRuntime = { cliVersion: string; catalogDigest: string; catalogPath: string } & ({ version: 1 } | { version: 2; toolOutputTokenLimit: number })
@@ -232,12 +232,14 @@ export const frozenReaderDisabledFeatures = ['goals', 'view_image', 'image_gener
 const readerFlights = new Map<string, Promise<FrozenReaderRuntime>>()
 
 /** 固定原生版本和去工具目录共同构成v2的能力身份，不读取用户模型缓存。 */
-export function assertFrozenReaderRuntime(runtime: FrozenReaderRuntime, model?: string, toolOutputTokenLimit?: number, hosted?: ManagedCodexFrozenRuntime): void {
+export function assertFrozenReaderRuntime(runtime: FrozenReaderRuntime, model?: string, toolOutputTokenLimit?: number, hosted?: Pick<ManagedCodexFrozenRuntime, 'reader'> & Pick<ManagerPersistentCodexModule, 'codexAuditFrozenCatalog'>): void {
   const cliVersion = hosted?.reader.cliVersion ?? execFileSync('codex', ['--version'], { encoding: 'utf8' }).trim()
   if ((runtime.version !== 1 && runtime.version !== 2) || (runtime.version === 2 && (!Number.isSafeInteger(runtime.toolOutputTokenLimit) || runtime.toolOutputTokenLimit <= 0
     || (toolOutputTokenLimit !== undefined && runtime.toolOutputTokenLimit !== toolOutputTokenLimit)))
-    || (!hosted && cliVersion !== 'codex-cli 0.160.0') || runtime.cliVersion !== cliVersion || !/^[a-f0-9]{64}$/.test(runtime.catalogDigest)
-    || createHash('sha256').update(readFileSync(runtime.catalogPath)).digest('hex') !== runtime.catalogDigest)
+    || (!hosted && cliVersion !== 'codex-cli 0.160.0') || runtime.cliVersion !== cliVersion || !/^[a-f0-9]{64}$/.test(runtime.catalogDigest))
+    throw new StructuredSessionError('unsupported', 'frozen reader CLI version or immutable tool catalog identity differs')
+  if (hosted) return hosted.codexAuditFrozenCatalog({ path: runtime.catalogPath, digest: runtime.catalogDigest, model })
+  if (createHash('sha256').update(readFileSync(runtime.catalogPath)).digest('hex') !== runtime.catalogDigest)
     throw new StructuredSessionError('unsupported', 'frozen reader CLI version or immutable tool catalog identity differs')
   const catalog = JSON.parse(readFileSync(runtime.catalogPath, 'utf8')) as { models?: Array<{ slug?: string; apply_patch_tool_type?: unknown; experimental_supported_tools?: unknown[] }> }
   if (!catalog.models?.length || catalog.models.some(model => model.apply_patch_tool_type !== null || !Array.isArray(model.experimental_supported_tools) || model.experimental_supported_tools.length))
@@ -262,7 +264,7 @@ export async function prepareFrozenReaderRuntime(root: string, frozenContext: Fr
       mkdirSync(policyRoot, { recursive: true, mode: 0o700 })
       const metadataRoot = join(policyRoot, 'metadata')
       const { codexLoadedReferenceIds, codexRefreshStructuredModels, stopUnboundManagedFrozenRealm } = await import('./codex-harness.js')
-      const { endpoint, beforeDigest, runtime } = await (async () => {
+      const { endpoint, beforeDigest, changedFields, runtime } = await (async () => {
         try {
           const { endpoint } = await structuredGeneration(metadataRoot, undefined, hosted)
           if (hosted) {
@@ -272,12 +274,17 @@ export async function prepareFrozenReaderRuntime(root: string, frozenContext: Fr
               if (!(await client.refreshModels()).includes(hosted.reader.model)) throw new StructuredSessionError('unsupported', 'Manager model is absent from the isolated native catalog')
             } finally { client.close() }
           } else await codexRefreshStructuredModels(endpoint.socketPath)
-          const provider = JSON.parse(readFileSync(join(metadataRoot, 'data/codex-home/models_cache.json'), 'utf8')) as { client_version?: string; models?: Array<Record<string, unknown>> }
-          if (provider.client_version !== cliVersion.replace(/^codex-cli /u, '') || !provider.models?.length || provider.models.some(model => typeof model.slug !== 'string'))
-            throw new StructuredSessionError('unsupported', 'clean native provider catalog provenance is unavailable')
-          const catalog = Buffer.from(JSON.stringify({ models: provider.models.map(model => ({ ...model, apply_patch_tool_type: null, experimental_supported_tools: [] })) }))
-          const catalogDigest = createHash('sha256').update(catalog).digest('hex'), catalogPath = join(policyRoot, `${catalogDigest}.json`)
-          if (!existsSync(catalogPath)) writeFileSync(catalogPath, catalog, { mode: 0o400 })
+          const home = join(metadataRoot, 'data/codex-home')
+          const catalog = hosted ? hosted.codexBuildFrozenCatalog({ home, cliVersion, model: hosted.reader.model }) : (() => {
+            const provider = JSON.parse(readFileSync(join(home, 'models_cache.json'), 'utf8')) as { client_version?: string; models?: Array<Record<string, unknown>> }
+            if (provider.client_version !== cliVersion.replace(/^codex-cli /u, '') || !provider.models?.length || provider.models.some(model => typeof model.slug !== 'string'))
+              throw new StructuredSessionError('unsupported', 'clean native provider catalog provenance is unavailable')
+            const bytes = Buffer.from(JSON.stringify({ models: provider.models.map(model => ({ ...model, apply_patch_tool_type: null, experimental_supported_tools: [] })) }))
+            return { bytes, digest: createHash('sha256').update(bytes).digest('hex'), beforeDigest: createHash('sha256').update(JSON.stringify({ models: provider.models })).digest('hex'),
+              changedFields: ['apply_patch_tool_type', 'experimental_supported_tools'] }
+          })()
+          const catalogDigest = catalog.digest, catalogPath = join(policyRoot, `${catalogDigest}.json`)
+          if (!existsSync(catalogPath)) writeFileSync(catalogPath, catalog.bytes, { mode: 0o400 })
           const runtime: FrozenReaderRuntime = { version: 2, cliVersion, catalogDigest, catalogPath, toolOutputTokenLimit }
           assertFrozenReaderRuntime(runtime, hosted?.reader.model, toolOutputTokenLimit, hosted)
           if (!hosted) {
@@ -289,14 +296,14 @@ export async function prepareFrozenReaderRuntime(root: string, frozenContext: Fr
             for (let retry = 0; retry < 100 && processStartToken(pid) === proof.identity.startToken; retry++) await new Promise<void>(resolve => setTimeout(resolve, 20))
             if (processStartToken(pid) === proof.identity.startToken) throw new StructuredSessionError('unsupported', 'isolated metadata process did not stop after exact zero-thread cleanup')
           }
-          return { endpoint, runtime, beforeDigest: createHash('sha256').update(JSON.stringify({ models: provider.models })).digest('hex') }
+          return { endpoint, runtime, beforeDigest: catalog.beforeDigest, changedFields: catalog.changedFields }
         } finally {
           if (hosted) await stopUnboundManagedFrozenRealm(join(metadataRoot, 'control'), async () => hosted).catch((error: Error) => {
             throw new StructuredSessionError('cancellation_pending', `Manager metadata realm needs exact recovery: ${error.message}`)
           })
         }
       })()
-      writeFileSync(join(policyRoot, 'provenance.json'), JSON.stringify({ cliVersion, source: 'isolated native provider model/list + models_cache.models', beforeDigest, afterDigest: runtime.catalogDigest, changedFields: ['apply_patch_tool_type', 'experimental_supported_tools'], metadataEndpoint: endpoint, metadataStopped: true }), { mode: 0o400 })
+      writeFileSync(join(policyRoot, 'provenance.json'), JSON.stringify({ cliVersion, source: 'isolated native provider model/list + models_cache.models', beforeDigest, afterDigest: runtime.catalogDigest, changedFields, metadataEndpoint: endpoint, metadataStopped: true }), { mode: 0o400 })
       writeFileSync(descriptor, JSON.stringify(runtime), { mode: 0o400 })
       return runtime
     })
@@ -318,26 +325,26 @@ export function prepareStructuredRealm(root: string, readerRuntime?: FrozenReade
   mkdirSync(root, { recursive: true, mode: 0o700 })
   const writable = join(root, 'data'); mkdirSync(writable, { recursive: true, mode: 0o700 })
   const home = join(root, 'config'); mkdirSync(home, { recursive: true, mode: 0o700 })
-  const config = join(home, 'config.toml')
+  const auth = process.env.CODEX_HOME || join(homedir(), '.codex')
+  const paths = (path: string) => hosted?.codexPersistentHomePaths(path) ?? { configPath: join(path, 'config.toml'), authPath: join(path, 'auth.json') }
+  const config = paths(home).configPath
   if (readerRuntime) assertFrozenReaderRuntime(readerRuntime, hosted?.reader.model, undefined, hosted)
-  const trustedConfig = readerRuntime ? `model_catalog_json = ${JSON.stringify(readerRuntime.catalogPath)}\n` + (readerRuntime.version === 2 ? `tool_output_token_limit = ${readerRuntime.toolOutputTokenLimit}\n` : '') + configText.replace('code_mode_host = false', 'code_mode_host = true').replace('[features]', '[features]\n' + frozenReaderDisabledFeatures.map(feature => `${feature} = false`).join('\n')) : configText
+  const trustedConfig = hosted ? hosted.codexPersistentConfig(readerRuntime) : readerRuntime ? `model_catalog_json = ${JSON.stringify(readerRuntime.catalogPath)}\n` + (readerRuntime.version === 2 ? `tool_output_token_limit = ${readerRuntime.toolOutputTokenLimit}\n` : '') + configText.replace('code_mode_host = false', 'code_mode_host = true').replace('[features]', '[features]\n' + frozenReaderDisabledFeatures.map(feature => `${feature} = false`).join('\n')) : configText
   if (existsSync(config) && readFileSync(config, 'utf8') !== trustedConfig)
     throw new StructuredSessionError('unsupported', 'structured runtime configuration differs from the trusted fixed policy')
   writeFileSync(config, trustedConfig, { mode: 0o600 })
   // Auth remains an existing system-managed file. Do not read, copy or log its bytes. The outer sandbox
   // prevents refresh/overwrite of the original; an expired credential fails explicitly and needs login.
-  const auth = join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'auth.json')
-  const reference = join(home, 'auth.json')
-  if (existsSync(auth) && !existsSync(reference)) symlinkSync(realpathSync(auth), reference)
+  const authSource = paths(auth).authPath, reference = paths(home).authPath
+  if (existsSync(authSource) && !existsSync(reference)) symlinkSync(realpathSync(authSource), reference)
   // Codex writes state/cache files at CODEX_HOME, so use a clean writable home with only fixed config and
   // auth symlinks. Protect those exact paths in addition to the deny-by-default external write rule.
   const runtimeHome = join(writable, 'codex-home'); mkdirSync(runtimeHome, { recursive: true, mode: 0o700 })
-  for (const name of ['config.toml', 'auth.json']) {
-    const source = join(home, name)
-    if (existsSync(source) && !existsSync(join(runtimeHome, name))) symlinkSync(source, join(runtimeHome, name))
-  }
+  const homePaths = paths(home), runtimePaths = paths(runtimeHome)
+  for (const key of ['configPath', 'authPath'] as const)
+    if (existsSync(homePaths[key]) && !existsSync(runtimePaths[key])) symlinkSync(homePaths[key], runtimePaths[key])
   const profile = join(root, 'policy.sb')
-  const policy = structuredSeatbeltProfile(realpathSync(writable)) + `(deny file-write* (literal ${JSON.stringify(join(realpathSync(runtimeHome), 'config.toml'))}) (literal ${JSON.stringify(join(realpathSync(runtimeHome), 'auth.json'))}))\n`
+  const policy = structuredSeatbeltProfile(realpathSync(writable)) + `(deny file-write* (literal ${JSON.stringify(paths(realpathSync(runtimeHome)).configPath)}) (literal ${JSON.stringify(paths(realpathSync(runtimeHome)).authPath)}))\n`
   writeFileSync(profile, policy, { mode: 0o600 })
   const outside = join(root, 'write-probe'); writeFileSync(outside, 'unchanged', { mode: 0o600 })
   const probe = join(writable, 'write-probe')
@@ -354,14 +361,15 @@ export function prepareStructuredRealm(root: string, readerRuntime?: FrozenReade
     const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: homedir(), TMPDIR: join(writable, 'tmp'), CODEX_HOME: runtimeHome }
     mkdirSync(env.TMPDIR!, { recursive: true, mode: 0o700 })
     const endpointProfile = join(root, `${endpoint.id}.sb`)
-    const rendezvous = join(realpathSync(dirname(endpoint.socketPath)), basename(endpoint.socketPath))
-    // Codex 0.160 protects Unix RPC sockets in its fixed executor-local daemon directory; the advertised
-    // endpoint is a symlink. Grant only this generation's hashed socket/lock, never the shared directory.
-    const daemonDirectory = join('/private/tmp', `codex-daemon-${process.getuid!()}`)
-    const physicalSocket = join(daemonDirectory, createHash('sha256').update(rendezvous).digest('hex'))
+    const { rendezvous, daemonDirectory, physicalSocket, lockPath } = hosted ? hosted.codexPersistentSocketPaths(endpoint.socketPath, process.getuid!()) : (() => {
+      const rendezvous = join(realpathSync(dirname(endpoint.socketPath)), basename(endpoint.socketPath))
+      const daemonDirectory = join('/private/tmp', `codex-daemon-${process.getuid!()}`)
+      const physicalSocket = join(daemonDirectory, createHash('sha256').update(rendezvous).digest('hex'))
+      return { rendezvous, daemonDirectory, physicalSocket, lockPath: `${physicalSocket}.lock` }
+    })()
     writeFileSync(endpointProfile, policy
       + `(allow file-write-create (literal ${JSON.stringify(daemonDirectory)}) (literal ${JSON.stringify(dirname(rendezvous))}))\n`
-      + `(allow file-write* (literal ${JSON.stringify(rendezvous)}) (literal ${JSON.stringify(physicalSocket)}) (literal ${JSON.stringify(`${physicalSocket}.lock`)}) (literal ${JSON.stringify(join(realpathSync(dirname(endpoint.logFile)), basename(endpoint.logFile)))}))\n`, { mode: 0o600 })
+      + `(allow file-write* (literal ${JSON.stringify(rendezvous)}) (literal ${JSON.stringify(physicalSocket)}) (literal ${JSON.stringify(lockPath)}) (literal ${JSON.stringify(join(realpathSync(dirname(endpoint.logFile)), basename(endpoint.logFile)))}))\n`, { mode: 0o600 })
     const command = hosted ? [hosted.executable, ...hosted.codexPersistentAppServerArgs(endpoint.socketPath)] : ['codex', 'app-server', '--strict-config', '--listen', `unix://${endpoint.socketPath}`]
     spawnDetachedRuntime({ cwd: runtimeHome, logFile: endpoint.logFile, pidFile: endpoint.pidFile,
       receiptFile: endpoint.receiptFile, command: '/usr/bin/sandbox-exec',

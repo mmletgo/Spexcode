@@ -170,6 +170,10 @@ async function runNativeReviewWorker(request: NativeReviewRequest, signal: Abort
     if (route?.frozenReader) {
       const { releaseManagedFrozenReviewRealm } = await import('../codex-harness.js')
       await releaseManagedFrozenReviewRealm(closed)
+      if ('result' in reply) {
+        const replayed = await runStructuredSession({ ...request, signal })
+        if (digest(replayed) !== digest(reply.result)) throw new Error('独审冷复验结果与原生归档不一致')
+      }
     }
     return reply
   } catch (error) {
