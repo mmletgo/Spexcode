@@ -39,7 +39,7 @@ type GrokAdapter = {
   grokStreamingArguments(options: {
     cwd: string; sessionId: string; promptFile: string; mode: 'read' | 'edit'; model?: string; schemaArgument?: string
   }): string[]
-  grokInvocationEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv
+  grokInvocationEnvironment(env: NodeJS.ProcessEnv, useAcp: boolean): NodeJS.ProcessEnv
   grokInvocationFlags(args: string[], useAcp: boolean): ReadonlySet<string>
   observeGrokNativeStderr(stderr: Readable, flags: ReadonlySet<string>): () => GrokStderrDiagnostic
   grokStderrHasQuotaExhaustion(diagnostic: GrokStderrDiagnostic): boolean
@@ -319,7 +319,7 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
   if (callbacks.signal?.aborted) throw cancelled()
   await callbacks.onTurnStarting?.()
 
-  const env = provider.grokInvocationEnvironment({ ...process.env, TMPDIR: tmp })
+  const env = provider.grokInvocationEnvironment({ ...process.env, TMPDIR: tmp }, acp !== undefined)
   for (const key of sessionIdentityEnvVars()) delete env[key]
   const launchedAt = performance.now()
   const child = runtime.spawnGatedNativeProcess(launch.command, [...launch.args, ...args], { cwd: worktreePath, env }) as ChildProcessWithoutNullStreams

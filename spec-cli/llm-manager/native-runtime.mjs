@@ -1,4 +1,3 @@
-// Generated from LLM Manager f01031d48bd8637587b11c2b554dc86c6da670d0 by npm run build:native-runtime.
 var __defProp = Object.defineProperty;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __esm = (fn, res, err) => function __init() {
@@ -1742,8 +1741,12 @@ function grokStreamingArguments({ cwd, sessionId, promptFile, mode, model, schem
     ...schemaArgument === void 0 ? [] : ["--json-schema", schemaArgument]
   ];
 }
-function grokInvocationEnvironment(environment) {
-  return { ...environment, GROK_MCP_AUTO_RESTART: "0" };
+function grokInvocationEnvironment(environment, useAcp) {
+  return {
+    ...environment,
+    GROK_MCP_AUTO_RESTART: "0",
+    ...useAcp ? {} : { GROK_TELEMETRY_TRACE_UPLOAD: "false" }
+  };
 }
 function grokInvocationFlags(args, useAcp) {
   return new Set(useAcp ? [args[0], args[1], args[4]] : args.filter((_, index) => index % 2 === 0));
