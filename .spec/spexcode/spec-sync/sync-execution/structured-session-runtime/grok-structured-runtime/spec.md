@@ -15,7 +15,7 @@ Claude Code 或 ZCode 限流时，用户可以显式选择本机已配置的 Gro
 
 ## expanded spec
 
-[[llm-manager-host]] 使用 LLM Manager 安装包的 Grok 执行协议。SpexCode 提供绑定工作树的隔离启动描述。Manager 探测实际 CLI 版本、选择结构化传输并确定原生 Schema 能力。每个一次性 Grok 工作树进程照常初始化已配置的 MCP 服务，并在该进程内关闭 stdio MCP 自动重启。传输失败由原会话处理，避免终态后已停止的后代被反复重建。退出、流结束与进程归属的结算要求继续适用。
+[[llm-manager-host]] 使用 LLM Manager 安装包的 Grok 执行协议。SpexCode 提供绑定工作树的隔离启动描述。Manager 解释 CLI 模型选择，探测实际版本，选择结构化传输并确定原生 Schema 能力。ACP 与流式 JSON 的厂商终态、请求绑定和启动错误由 Manager 解释，返回同一结果结构。每个一次性 Grok 工作树进程照常初始化已配置的 MCP 服务，并在该进程内关闭 stdio MCP 自动重启。传输失败由原会话处理，避免终态后已停止的后代被反复重建。SpexCode 核对精确进程退出、流结束、进程归属和原任务证据。
 
 LLM Manager 为短时原生 streaming-json 执行关闭该子进程的厂商 trace 上传，避免终态后等待上传队列。本机原生会话和结算证据照常保存。ACP 沿用原 trace 设置。
 

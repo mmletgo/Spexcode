@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { claudeReplay } from '../llm-manager/native-runtime.mjs'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { StructuredSessionError, StructuredSessionTransportError } from './session-structured-policy.js'
@@ -474,17 +475,6 @@ function checkClaudeRequestRetry(retry: ClaudeRequestRetry | undefined): void {
     || !/^[a-f0-9]{64}$/.test(retry.errorDigest)) stale('Claude API error is not an exact native request retry')
 }
 
-/** 原生重试只保留链节点与诊断摘要，错误正文不成为模型输入或读取证据。 */
-function claudeRequestRetry(row: Record<string, unknown>): ClaudeRequestRetry {
-  const error = row.error as Record<string, unknown> | undefined
-  if (typeof row.uuid !== 'string' || !row.uuid || typeof row.parentUuid !== 'string' || !row.parentUuid
-    || row.agentId !== undefined || !error || typeof error !== 'object' || Array.isArray(error)
-    || typeof error.message !== 'string' || typeof error.formatted !== 'string') stale('Claude request retry has an unknown native error shape')
-  const retry = { source: row.source as string, level: row.level as string, retryInMs: row.retryInMs as number, retryAttempt: row.retryAttempt as number, maxRetries: row.maxRetries as number, errorDigest: claudeMessageDigest(error) }
-  checkClaudeRequestRetry(retry)
-  return retry
-}
-
 /** 连接重试须重发原完整输入，并由其后真实assistant消费；不增加公开投影字段。 */
 function checkClaudeConnectionRetries(history: readonly ClaudePublicRecord[], paramsDigests: ReadonlyMap<string, string>): void {
   if (!history.some(row => row.requestRetry?.source === 'connection_retry')) return
@@ -519,57 +509,24 @@ function checkClaudeConnectionRetries(history: readonly ClaudePublicRecord[], pa
   if (pending) stale('Claude connection retry has no subsequent API and assistant consumption')
 }
 
-/** 只提取本专属session的公开调用、回复、主链身份和实际API索引；推理正文与签名不进入证据。 */
-export function readClaudePublicHistory(path: string, sessionId: string): ClaudePublicRecord[] {
+export type ClaudeHistoryDecoder = {
+  ClaudeNativeProtocolError: new (...args: never[]) => Error & { code: 'unsupported' | 'stale_result' | 'history_pending' }
+  projectClaudePublicHistory(source: string, sessionId: string): { records: ClaudePublicRecord[]; paramsDigests: Map<string, string> }
+}
+
+/** 从宿主已绑定的历史文件读取原字节，逐条核对 Manager 投影后的请求链。 */
+export function readClaudePublicHistory(path: string, sessionId: string, decoder = claudeReplay as ClaudeHistoryDecoder): ClaudePublicRecord[] {
   const source = readFileSync(path, 'utf8')
-  if (!source.endsWith('\n')) throw new StructuredSessionTransportError('Claude native history has not flushed its final record')
-  const records: ClaudePublicRecord[] = []
-  const paramsDigests = new Map<string, string>()
-  let latestAssistant: { uuid: unknown; stopReason: unknown } | undefined
-  for (const line of source.split('\n').filter(Boolean)) {
-    const row = JSON.parse(line) as Record<string, unknown> & { message?: ClaudePublicMessage & { stop_reason?: unknown }; shape?: { tools: { name: string; description?: string; input_schema?: unknown; defer_loading?: boolean }[] }; params?: { model: string } }
-    const compact = row.type === 'system' && row.subtype === 'compact_boundary'
-    const retry = row.type === 'system' && row.subtype === 'api_error'
-    if (!compact && !retry && !['user', 'assistant', 'attachment', 'api-request', 'api-request-shape', 'api-request-blob'].includes(String(row.type))) continue // dead-words-ok: Claude CLI 原生公开事件类型，外部协议名称必须逐字匹配。
-    if (row.type === 'api-request-blob' && row.message?.role !== 'user') continue // dead-words-ok: Claude CLI 原生公开事件类型，外部协议名称必须逐字匹配。
-    if (row.sessionId !== sessionId || row.isSidechain === true) stale('Claude history contains a foreign session or sidechain')
-    if (row.type === 'user' && row.isMeta === true && row.turnCompanion === true && row.message?.role === 'user' && row.message.content === CLAUDE_OUTPUT_LIMIT_RECOVERY_TEXT
-      && (!row.parentUuid || row.parentUuid !== latestAssistant?.uuid || latestAssistant.stopReason !== 'max_tokens')) stale('Claude output-limit companion has no exact preceding max_tokens assistant')
-    const record = Object.fromEntries(['type', 'sessionId', 'uuid', 'parentUuid', 'promptId', 'requestRef', 'sourceToolAssistantUUID', 'isMeta', 'turnCompanion'].filter(key => key in row).map(key => [key, row[key]])) as ClaudePublicRecord
-    if (retry) Object.assign(record, { subtype: 'api_error', requestRetry: claudeRequestRetry(row) })
-    if (compact) {
-      const metadata = row.compactMetadata as ClaudeCompaction | undefined
-      Object.assign(record, { subtype: row.subtype, logicalParentUuid: row.logicalParentUuid, compactMetadata: metadata && { runningTurnSends: metadata.runningTurnSends, ...(metadata.preservedSegment !== undefined ? { preservedSegment: metadata.preservedSegment } : {}), ...(metadata.preservedMessages !== undefined ? { preservedMessages: metadata.preservedMessages } : {}) } })
-    }
-    if (row.type === 'user') {
-      if (row.isCompactSummary === true) {
-        const content: unknown = row.message?.content
-        record.compactSummary = { transcriptOnly: row.isVisibleInTranscriptOnly === true, promptUuids: row.summarizedTurnPromptUuids as string[] | undefined, messageDigest: claudeMessageDigest(row.message), textOnly: row.message?.role === 'user' && (typeof content === 'string' ? content.length > 0 : Array.isArray(content) && content.length > 0 && content.every(block => block?.type === 'text' && typeof block.text === 'string')) }
-      } else record.message = row.message
-    }
-    if (row.type === 'api-request-blob') { // dead-words-ok: Claude CLI 原生公开事件类型，外部协议名称必须逐字匹配。
-      const content: unknown = row.message!.content
-      record.message = typeof content === 'string' ? { ...row.message!, content: claudeMessageBlocks(row.message!) } : row.message
-      if (typeof content === 'string') record.compactSummaryDigest = claudeMessageDigest(row.message)
-      record.hash = String(row.hash)
-    }
-    if (row.type === 'assistant') {
-      record.message = { role: 'assistant', content: claudeMessageBlocks(row.message!).filter(block => block.type === 'tool_use') }
-      latestAssistant = { uuid: row.uuid, stopReason: row.message?.stop_reason }
-    }
-    if (row.type === 'api-request') {
-      Object.assign(record, { id: row.id, shapeHash: row.shapeHash, base: row.base, keep: row.keep, tail: row.tail, model: row.params!.model })
-      paramsDigests.set(record.id!, claudeMessageDigest(row.params))
-    }
-    if (row.type === 'api-request-shape') {
-      record.shapeHash = String(row.shapeHash)
-      record.toolNames = row.shape!.tools.map(tool => tool.name)
-      record.placeholderValid = row.shape!.tools.filter(tool => tool.name === 'DeferredToolPlaceholder').every(tool => tool.description === 'Reserved placeholder that keeps deferred tool loading active; never call this tool.' && tool.defer_loading === true && claudeMessageDigest(tool.input_schema) === claudeMessageDigest({ type: 'object', properties: {} }))
-    }
-    records.push(record)
+  try {
+    const { records, paramsDigests } = decoder.projectClaudePublicHistory(source, sessionId)
+    checkClaudeConnectionRetries(records, paramsDigests)
+    return records
+  } catch (error) {
+    if (!(error instanceof decoder.ClaudeNativeProtocolError)) throw error
+    if (error.code === 'history_pending') throw new StructuredSessionTransportError(error.message)
+    if (error.code === 'stale_result') stale(error.message)
+    throw error
   }
-  checkClaudeConnectionRetries(records, paramsDigests)
-  return records
 }
 
 export type ClaudeApiSourceMetadata = { digest: string; role: 'user' | 'assistant' | 'system'; kind: 'cas' | 'transcript-prefix'; sourceUuids: string[]; ordinal: number }

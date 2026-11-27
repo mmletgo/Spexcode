@@ -1,5 +1,6 @@
 import { loadManagerNativeRuntime } from './llm-manager-host.js'
 import { managedRoute, nativeModelValue } from './llm-manager-route.js'
+import { cursorReplay as bundledCursor } from '../llm-manager/native-runtime.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -48,6 +49,8 @@ type CursorAdapter = {
   }): Promise<{ output: NativeOutput; textOnlyWithoutTools: boolean }>
 }
 
+const cursorReplay = bundledCursor as Pick<CursorAdapter, 'CursorAcpError' | 'cursorLaunchArgs' | 'cursorModelArgument' | 'cursorUsageLimitNotice'>
+
 function cursorHostError(provider: CursorAdapter, error: unknown): unknown {
   return error instanceof provider.CursorAcpError ? new StructuredSessionError(error.code, error.message, error.detail) : error
 }
@@ -63,7 +66,6 @@ const failed = (message: string): StructuredSessionError => new StructuredSessio
 const cancelled = (timedOut = false): StructuredSessionError => new StructuredSessionError(timedOut ? 'timeout' : 'cancelled', timedOut ? 'Cursor native turn timed out' : 'Cursor native turn cancelled')
 const object = (value: unknown): RpcObject | undefined => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as RpcObject : undefined
 const nonempty = (value: unknown): value is string => typeof value === 'string' && !!value.trim()
-const usageLimitNotice = (value: unknown): boolean => typeof value === 'string' && /^(?:Upgrade your plan to continue|You've hit your usage limit)[.!]?$/iu.test(value.trim())
 const quotaFailure = (request: NativeRequest): StructuredSessionError => new StructuredSessionError('provider_quota_exhausted',
   'Cursor provider reported quota exhaustion for the original ACP prompt', { threadId: request.sessionId, turnId: request.requestId })
 const terminalQuotaReceipt = (request: NativeRequest, output: NativeOutput) => ({ requestDigest: digest(request), sessionId: request.sessionId,
@@ -86,14 +88,11 @@ function writeEvidence(root: string, name: string, value: unknown): void {
 }
 
 function cursorNativeModel(model: string | undefined): string | undefined {
-  const value = nativeModelValue(model, 'cursor')
-  if (!value.trim() || value.includes('\0'))
-    throw new StructuredSessionError('unsupported', 'Cursor CLI requires cursor:<model> or cursor:default')
-  return value === 'default' ? undefined : value
-}
-
-function recordedLaunchArgs(workspace: string, mode: NativePlan['mode'], model: string | undefined): string[] {
-  return ['--workspace', workspace, '--sandbox', 'enabled', '--trust', ...(mode === 'read' ? ['--mode', 'ask'] : []), ...(model === undefined ? [] : ['--model', model]), 'acp']
+  try { return cursorReplay.cursorModelArgument(nativeModelValue(model, 'cursor')) }
+  catch (error) {
+    if (!(error instanceof cursorReplay.CursorAcpError) || error.code !== 'unsupported') throw error
+    throw new StructuredSessionError('unsupported', error.message)
+  }
 }
 
 const nativePrompt = (prompt: string, execution: CursorStructuredExecution): string =>
@@ -104,7 +103,7 @@ function assertPlan(plan: NativePlan, root: string, execution: CursorStructuredE
   if (plan?.version !== 1 || native?.version !== 1 || plan.root !== root || native.root !== root
     || !nonempty(plan.workspace) || worktreePath !== undefined && worktreePath !== plan.workspace || plan.tmp !== join(root, 'tmp')
     || plan.mode !== execution.worktree?.mode || !nonempty(plan.cliPath) || !nonempty(plan.cliVersion)
-    || !Array.isArray(plan.args) || digest(plan.args) !== digest(recordedLaunchArgs(plan.workspace, plan.mode, cursorNativeModel(execution.model)))
+    || !Array.isArray(plan.args) || digest(plan.args) !== digest(cursorReplay.cursorLaunchArgs(plan.workspace, plan.mode, cursorNativeModel(execution.model)))
     || plan.policyDigest !== digest(structuredExecutionPolicy(execution))
     || prompt !== undefined && (plan.promptDigest !== sha256(nativePrompt(prompt, execution)) || plan.promptDigest !== sha256(readEvidence(root, 'prompt.txt'))))
     throw stale('Cursor original worktree, prompt or policy binding differs')
@@ -168,7 +167,7 @@ function readSettledOutput(root: string, prompt: string, execution: CursorStruct
   stopObservation(root, launch, settlement.stopDigest)
   const receipt = existsSync(join(root, 'provider-quota.json')) ? object(read<unknown>(root, 'provider-quota.json')) : undefined
   const quota = receipt?.source === 'acp_terminal'
-  if (quota !== (settlement.quotaDigest !== undefined) || quota && (!managedRoute(execution.model) || !usageLimitNotice(output.text)
+  if (quota !== (settlement.quotaDigest !== undefined) || quota && (!managedRoute(execution.model) || !cursorReplay.cursorUsageLimitNotice(output.text)
     || digest(receipt) !== settlement.quotaDigest || digest(terminalQuotaReceipt(request, output)) !== settlement.quotaDigest))
     throw stale('Cursor settled ACP usage notice does not match its original quota receipt')
   return { request, output, quota }

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { zcodeReplay } from '../llm-manager/native-runtime.mjs'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
@@ -255,10 +256,7 @@ export function proveZCodeFrozenReads(ref: FrozenContextRef, witness: ZCodeFroze
 }
 
 /** 仅去除外围空白或单一完整 JSON 围栏，正文仍由同一个 JSON/schema 校验入口处理。 */
-export function decodeZCodeJsonText(rawText: string): string {
-  const text = rawText.trim(), fenced = /^```json\r?\n([\s\S]*)\r?\n```$/.exec(text)
-  return fenced ? fenced[1] : text
-}
+export const { decodeZCodeJsonText } = zcodeReplay as { decodeZCodeJsonText(rawText: string): string }
 
 /** 冷恢复只重读内容寻址原始见证和标准化历史，绝不启动 CLI 或重发工具。 */
 export function verifyZCodeFrozenReadProof(ref: FrozenContextRef, proof: ZCodeFrozenReadProof, identity: ZCodeFrozenIdentity, expectedModel?: ZCodeFrozenModel, result?: { output: unknown }): void {
