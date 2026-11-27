@@ -3844,6 +3844,8 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         return null
       }
       const partitionCheckpoints: PartitionCheckpoints = {
+        continueAfterSettledGrokExit: error => error instanceof StructuredSessionError
+          && hasSettledGrokP0ExitFailure(store, operation, store.readAttempt(attempt!.id), error, 'native-session'),
         historicalCoverage: digest => {
           const proof = options.plan.historicalCoverage
           if (!proof || proof.digest !== digest) fail('historical_coverage_binding', '全图封口未绑定原历史覆盖证明')

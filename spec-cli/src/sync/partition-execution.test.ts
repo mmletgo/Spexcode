@@ -30,7 +30,9 @@ import { composeInputSnapshots } from './composition.js'
 import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence, writeObject, writeTree } from './snapshot.js'
 import { buildSyncApplicationPlan } from './planning.js'
 import { verifyCandidate } from './candidate.js'
+import { GROK_NATIVE_EXIT_DEADLINE_FAILURE } from '../grok-structured.js'
 import { nativeWorktreeResult } from '../native-worktree-runtime.js'
+import { StructuredSessionError } from '../session-structured-policy.js'
 import { readFrozenBehaviorContext } from '../../test/frozen-behavior-context.js'
 import { stageWorktree } from './stage-worktree.js'
 
@@ -706,6 +708,61 @@ test('分区分析保留全部在途失败及各自完整诊断，不让首错�
   const saved = checkpoints.load<{ planDigest: string; failures: { partitionId: string; code: string }[] }>('partition:analysis-failures')!
   assert.equal(saved.planDigest, plan.digest); assert.equal(saved.failures.length, plan.partitions.length)
   assert.ok(saved.failures.some(failure => failure.code === 'cancellation_pending'))
+})
+
+for (const [failedPurpose, settled] of [
+  ['code_behavior_analyze', true], ['code_behavior_review', true], ['code_behavior_review', false],
+] as const) test('P0 Grok 退出失败后按精确结算决定是否继续派发 ' + failedPurpose + ' settled=' + settled, async t => {
+  const { input, plan, checkpoints } = await fixture(t)
+  const [first, , second] = plan.partitions
+  plan.partitions = [first, second]
+  plan.expectedPaths = plan.partitions.flatMap(partition => partition.changedPaths)
+  plan.dependencies = []
+  const analysisInput: CodeBehaviorInput = {
+    snapshot: input.snapshot, baseline: null, composed: composeInputSnapshots(input.snapshot, null).composed!,
+    readSetDigest: 'readset', policyDigest: 'policy', requestKey: 'grok-p0-exit', timeoutMs: 30000, origin: 'initial',
+    plan: { version: 'sync-coordinator-v2', direction: 'code_to_spec', intentNodeId: 'export-contract',
+      targets: plan.partitions.flatMap(partition => partition.targets), sourcePaths: ['src'], readPaths: ['.spec', 'src', 'tests'],
+      writePaths: ['.spec'], facts: [], verifications: [], mandatoryTests: [],
+      partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524288, maxParallel: 1 } },
+  }
+  const exitFailure = new StructuredSessionError('failed', GROK_NATIVE_EXIT_DEADLINE_FAILURE, { sessionId: 'grok-exit-session' })
+  const scopedCheckpoints = { ...checkpoints, continueAfterSettledGrokExit: (error: unknown) => settled && error === exitFailure }
+  const dispatched: string[] = []
+  const runner: ElaborationRunner = async request => {
+    const { partition: { id }, changedPaths } = readFrozenBehaviorContext<{ partition: { id: string }; changedPaths: string[] }>(request)
+    const ordinal = dispatched.push(id + ':' + request.purpose)
+    if (id === first.id && request.purpose === failedPurpose) throw exitFailure
+    let output: unknown
+    if (request.purpose === 'code_behavior_analyze') {
+      output = { changes: changedPaths.map(path => ({ kind: 'refactor', paths: [path], affectedIds: [], ruleIds: [],
+        originalIntent: '保留任务状态', previousBehavior: '已实现的任务状态', sourceBehavior: '保留任务状态',
+        deliveryBehavior: '首次纳管', evidence: '冻结源码', counterexample: '状态变化需有明确证据',
+      })), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
+    } else {
+      const reviewed = JSON.parse(request.prompt.split('待审分析:\n')[1]) as { analysisDigest: string; analysis: CodeBehaviorAnalysis }
+      output = { inputDigest: request.inputDigest, analysisDigest: reviewed.analysisDigest, verdict: 'accept',
+        checkedPaths: changedPaths, checkedChangeIds: reviewed.analysis.changes.map(change => change.id), findings: [] }
+    }
+    return { sessionId: 'session-' + ordinal, threadId: 'thread-' + ordinal, turnId: 'turn', output, resultDigest: contentHash(JSON.stringify(output)) }
+  }
+
+  await assert.rejects(analyzeSyncPartitions(analysisInput, plan, 1, runner, scopedCheckpoints), (error: unknown) => error === exitFailure)
+  assert.deepEqual(checkpoints.load('partition:analysis-failures'), { planDigest: plan.digest, failures: [
+    { partitionId: first.id, code: 'failed', message: GROK_NATIVE_EXIT_DEADLINE_FAILURE },
+  ] })
+  assert.equal(checkpoints.load('partition:' + first.id + ':analysis'), null)
+  const expected = [first.id + ':code_behavior_analyze']
+  if (failedPurpose === 'code_behavior_review') expected.push(first.id + ':code_behavior_review')
+  if (settled) expected.push(second.id + ':code_behavior_analyze', second.id + ':code_behavior_review')
+  assert.deepEqual(dispatched, expected)
+  const approved = checkpoints.load<CodeBehaviorAnalysis>('partition:' + second.id + ':analysis')
+  if (settled) {
+    assert.equal(approved?.reviewPassed, true)
+    assert.deepEqual(approved?.changes.flatMap(change => change.paths), second.changedPaths)
+  } else {
+    assert.equal(approved, null)
+  }
 })
 
 for (const mode of ['business-repair', 'invalid-review-binding', 'repair-then-cancellation'] as const) {

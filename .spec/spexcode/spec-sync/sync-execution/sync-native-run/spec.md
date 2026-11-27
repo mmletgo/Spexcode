@@ -27,6 +27,8 @@ ZCode 原生工作树 native_turn_transport_failed 须绑定精确非空 thread/
 
 Grok 原生工作树的 P0 `code_behavior_review` 在收到 `end_turn` 后未按期观察到进程退出，只有固定原失败、当前写 fence、剩余预算和全部派发资源正式 removed 均已认证时，才可进入同 operation、同模型的新独审尝试。旧 review 的 dispatch 须已绑定精确 session，thread/turn 尚未发布，checkpoint 与 canonical Grok record 保留同一 failed 错误和已确认停止。原创建请求、工作树 seed 及模型按冻结计划逐项核对，已归档记录沿原身份读取。旧轮次及其草稿保持未批准，成功、拒稿和 failed-worktree 证据均不属于此资格。
 
+在当前 P0 尝试内为 [[sync-partition-execution]] 认证 Grok 原生退出逾期时，以失败会话的正式派发和已结算资源为边界。按原要求核对有效写 fence、预算、冻结请求、精确停止与 canonical 失败记录。局部认证仅允许本轮继续处理其余独立分区。下一尝试仍须全部派发资源正式结算。
+
 P0 `code_behavior_analyze` 的原生退出故障按相同结算与会话证据准入分析重跑。未批准的原 Git 草稿只能走独立的材料认证接缝，须产生新分析及独审证据才可批准。
 
 原生错误携rejectedOutput时，仅在本资源精确record为failed、证据与错误相同且固定创建请求/schema/input/purpose/thread/turn逐项一致后，经现有blobIO保存完整被拒final原文字节，并携原文ref/SHA传回；不读取provider协议目录。原error/code/身份保持，资源停止仍走原正式结算，不因诊断取得成功或removed。旧无证据不扫描补读。

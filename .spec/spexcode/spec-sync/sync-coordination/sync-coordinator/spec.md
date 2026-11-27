@@ -161,6 +161,8 @@ Grok P0 独审达到原生退出期限后，按 [[sync-native-run]] 认证失败
 
 Grok P0 分析在相同退出故障及停止资格下，沿同一 operation 的新 attempt 重新执行该 owner 的分析。原归档提交只有通过现有完整 Git 草稿认证才作为未批准输入。新分析正常提交、校验后才发送独立审查，同批已批准分区保持原件。
 
+Grok P0 的分析或独审在任一分区逾期退出，经认证该派发已结算后，[[sync-partition-execution]] 继续调度本轮独立分区。失败原件保留并阻断全树 P0 聚合。协调器在本轮全部派发资源结算后，才按原故障分类和预算进入下一尝试。
+
 P0 分析结果精确返回已有草稿的冻结 seed、没有新提交时，以可返修失败留存，沿同一 operation 和原预算重派该分析。原 JSON、原提交保护及独审门照常执行。diff 越权、原 seed 或工作树身份失配继续终止该结果。
 
 P0仅续独审后得到合法业务repair时，最新continuation清除readyAnalysis，但继承的原分析Git稿仍沿已有continuation-provenance逐跳认证真实analyze来源，不能要求本轮存在未派发的analyze。每跳核同operation、已结算且严格较早attempt、完整input/readSet/selection/composed、原分区plan、来源resultRef与完整draft身份，终点保留原Native及Git/schema认证；恢复和保存仍采用最新语义状态与完整finding，不返回祖先ready。review草稿始终要求所属当前attempt的真实产出，只有旧稿搬运且新review cancelled/removed、没有新结果的较新attempt不能遮蔽已认证语义repair；不改变stage排序、历史字段或权限。
