@@ -14,7 +14,7 @@ import type { CodeBehaviorCheckpoints, CodeBehaviorContinuation, CodeBehaviorMat
 import type { CrossFreezeSource } from './cross-freeze-source.js'
 import { lockCrossFreezeSource } from './cross-freeze-binding.js'
 import { frozenSyncCanonicalBranch } from './settings.js'
-import { prepareCrossFreezeImpactReview, restoreCrossFreezeImpactReview, verifyCrossFreezeImpactReview, type CrossFreezeImpactEvidence, type CrossFreezeImpactReview } from './cross-freeze-impact-review.js'
+import { CrossFreezeImpactVerdictError, prepareCrossFreezeImpactReview, restoreCrossFreezeImpactReview, verifyCrossFreezeImpactReview, type CrossFreezeImpactEvidence, type CrossFreezeImpactReview } from './cross-freeze-impact-review.js'
 import { analyzeCodeBehavior, authoredContractChanges, CODE_BEHAVIOR_DRAFT_COMMIT_MISSING, CODE_BEHAVIOR_FAILURE_STATUS, CODE_BEHAVIOR_GUIDANCE_VERSION, CODE_BEHAVIOR_REVIEW_COVERAGE_MISSING, LEGACY_CODE_BEHAVIOR_GUIDANCE_VERSION, codeBehaviorReviewSchema, codeBehaviorContinuationStatus, codeBehaviorDraftStatus, deriveBehaviorAuthorization, isCodeBehaviorContextTransport, readCodeBehaviorContext, type CodeBehaviorContextTransport, type CodeBehaviorCrossFreezeAuthor, type CodeBehaviorReviewReference } from './code-behavior.js'
 import type { CodeBehaviorAnalysis, CodeBehaviorCrossFreezeAuthorProof, CodeBehaviorEvidence, SyncDecisionInput } from './writeback-types.js'
 import { adoptedDeliveryPaths, baselineResourceKey, baselineSelectionDigest, extendsWithUninitializedResources, isUtf8Text, readCompositionEvidence, selectedRetiredIds, verifyBaselineSelection } from './composition.js'
@@ -81,7 +81,7 @@ export const freezeSyncPlanEvidence = (commonDir: string, plan: SyncCoordinatorP
 const within = (path: string, paths: readonly string[]): boolean => paths.some(parent => path === parent || path.startsWith(`${parent}/`))
 const overlap = (a: string, b: string): boolean => within(a, [b]) || within(b, [a])
 const unique = (ids: readonly string[]): string[] => [...new Set(ids)].sort()
-const behaviorAnalysisRepairCodes = new Set(['behavior_analysis_invalid', 'behavior_author_evidence_invalid', 'behavior_review_failed', 'behavior_output_json', 'behavior_output_schema', CODE_BEHAVIOR_REVIEW_COVERAGE_MISSING])
+const behaviorAnalysisRepairCodes = new Set(['behavior_analysis_invalid', 'behavior_author_evidence_invalid', 'behavior_review_failed', 'behavior_output_json', 'behavior_output_schema', 'cross_freeze_impact_review_retry', CODE_BEHAVIOR_REVIEW_COVERAGE_MISSING])
 const structuredAnalysisRepairCodes = new Set(['structured_output_retries_exhausted', 'structured_output_format_invalid', 'native_worktree_result_invalid'])
 const reviewFormatRepairCodes = new Set(['structured_output_retries_exhausted', 'structured_output_format_invalid'])
 const completedReviewRepairCodes = new Set(['review_location_format'])
@@ -1775,7 +1775,8 @@ export async function prepareP0ReviewChallenge(store: SyncStore, operation: Sync
     if (stage<BehaviorContinuationProvenance>(store, source, origin, `${key}:provenance`, 'automatic', index)) continue
     const continuation = partitionStage<CodeBehaviorContinuation>(store, source, origin, `${key}:continuation`, selection, index)
     const protocol = stage<{ contextTransport?: CodeBehaviorContextTransport }>(store, source, origin, 'behavior-draft-protocol', 'automatic', index)
-    if (protocol?.contextTransport !== 'git-json-v6' || !continuation?.result.readyAnalysis || !continuation.result.reviewResult
+    if (protocol?.contextTransport !== 'git-json-v6' || !continuation?.result.reviewResult
+      || !continuation.result.readyAnalysis && !continuation.result.crossFreezeAuthor
       || !authenticateApprovedBehaviorPartition(store, source, origin, key, local.result, owner.changedPaths, selection, checkpoints, undefined, true)) {
       reject('原局部批准缺少当前原生协议、独立审查或精确 Git 草稿')
     }
@@ -1829,11 +1830,12 @@ function p1ChallengedReviewSource(store: SyncStore, owner: SyncOperation, prior:
   verifyStageResult(owner.input.source.commonDir, reviewed.request.worktree, reviewed.result)
   for (const request of [generation.request, reviewed.request]) {
     const isAuthor = request.purpose === 'elaboration_generate'
+    const expectedDigest = isAuthor ? round.crossFreezeAuthor?.oldInputDigest ?? result.inputDigest : result.inputDigest
     const origin = isAuthor ? generation.attempt : prior
     if (!matchesAttemptNativeModel(isAuthor ? generation.owner : owner, origin, request)
       || request.root !== owner.input.source.canonicalRoot || request.frozenContext || !request.worktree
       || request.base !== request.worktree.baseCommit || request.worktree.mode !== (isAuthor ? 'edit' : 'read')
-      || request.inputDigest !== elaborationNativeInputDigest(result.inputDigest, request)
+      || request.inputDigest !== elaborationNativeInputDigest(expectedDigest, request)
       || !request.requestKey.startsWith(`sync:${origin.id}:elaborate:partition:${binding.partitionId}:`)) return null
   }
   return { round, request: reviewed.request, failure: result.failure }
@@ -2002,6 +2004,37 @@ function authenticateCrossFreezeImpact(
   return verifyCrossFreezeImpactReview(prepared, result, { request, result })
 }
 
+/** 影响复核失败仅在同一正式原件已经结算时进入同稿续审。 */
+async function runCrossFreezeImpact(
+  runner: ElaborationRunner, store: SyncStore, operation: SyncOperation, attemptId: string,
+  prepared: CrossFreezeImpactReview, signal: AbortSignal, assertFence: () => void,
+  readNativeRecord: (id: string) => NativeRunRecord | null = readRecord,
+): Promise<CrossFreezeImpactEvidence> {
+  const key = prepared.request.requestKey
+  let result: ElaborationSessionResult
+  try { result = await runner({ ...prepared.request, signal }) }
+  catch (error) {
+    if (!(error instanceof StructuredSessionError) || !reviewFormatRepairCodes.has(error.code) || signal.aborted) throw error
+    assertFence()
+    const resource = store.findResource(attemptId, key)
+    if (!resource || resource.phase !== 'removed' || !error.sessionId) throw error
+    authenticateNativeFailure(store, operation, store.readAttempt(attemptId), key, {
+      code: error.code, message: error.message, sessionId: error.sessionId, threadId: error.threadId, turnId: error.turnId,
+    })
+    return fail('cross_freeze_impact_review_retry', '影响复核格式失败，保留原 Git 稿并续同一材料的独审', [resource.checkpointRef])
+  }
+  const trace: ElaborationTrace = { purpose: prepared.request.purpose, sessionId: result.sessionId, threadId: result.threadId,
+    turnId: result.turnId, resultDigest: result.resultDigest, inputDigest: prepared.request.inputDigest }
+  assertFence()
+  try { return authenticateCrossFreezeImpact(store, operation, store.readAttempt(attemptId), prepared, trace, result.output, readNativeRecord) }
+  catch (error) {
+    if (!(error instanceof CrossFreezeImpactVerdictError)) throw error
+    const resource = store.findResource(attemptId, key)
+    if (!resource || resource.phase !== 'removed') throw error
+    return fail('cross_freeze_impact_review_retry', error.message, [resource.checkpointRef])
+  }
+}
+
 function readLockedCrossFreezeSource(store: SyncStore, operation: SyncOperation) {
   if (!operation.crossFreezeBinding) return null
   const selected = lockCrossFreezeSource(store, operation, {
@@ -2011,6 +2044,16 @@ function readLockedCrossFreezeSource(store: SyncStore, operation: SyncOperation)
   if (!selected.source || !selected.binding || !selected.bindingRef
     || operation.crossFreezeBinding.provenanceRef?.sha256 !== selected.binding.provenanceRef.sha256) return null
   return selected
+}
+
+function findLockedCrossFreezeSource(store: SyncStore, operation: SyncOperation, bindingRef: BlobRef) {
+  for (const owner of retryOperationLineage(store, operation)) {
+    if (owner.input.id !== operation.input.id) break
+    if (owner.crossFreezeBinding?.ref.sha256 !== bindingRef.sha256) continue
+    const selected = readLockedCrossFreezeSource(store, owner)
+    if (selected) return { owner, selected }
+  }
+  return null
 }
 
 function crossFreezeP0ImpactInput(
@@ -2068,13 +2111,13 @@ function authenticateCrossFreezeP0Author(
   const marker = local.crossFreezeAuthor
   if (!marker || canonical(continuation?.crossFreezeAuthor) !== canonical(marker) || continuation?.readyAnalysis
     || local.traces[0]?.inputDigest !== marker.oldInputDigest) return false
-  const selected = readLockedCrossFreezeSource(store, operation)
-  if (!selected || selected.bindingRef.sha256 !== marker.bindingRef.sha256) return false
-  const author = historicalBehaviorAuthor(store, selected.source, marker.oldPartitionId, changedPaths)
+  const locked = findLockedCrossFreezeSource(store, operation, marker.bindingRef)
+  if (!locked) return false
+  const author = historicalBehaviorAuthor(store, locked.selected.source, marker.oldPartitionId, changedPaths)
   if (!author || canonical(author.authorTrace) !== canonical(local.traces[0])) return false
-  for (const attempt of store.listAttempts(operation.id).reverse()) {
-    if (attempt.number > owner.number) continue
-    const impact = readCrossFreezeP0Impact(store, operation, attempt, key, local.inputDigest, selected, author)
+  for (const attempt of store.listAttempts(locked.owner.id).reverse()) {
+    if (locked.owner.id === owner.operationId && attempt.number > owner.number) continue
+    const impact = readCrossFreezeP0Impact(store, locked.owner, attempt, key, local.inputDigest, locked.selected, author)
     if (impact?.resultRef.sha256 !== marker.impactReviewRef.sha256 || canonical(impact.proof) !== canonical(marker)) continue
     const currentReviewer = local.traces[1]
     return impact.result.evidence.verdict === 'reuse' && [author.reviewTrace, impact.result.evidence.trace].every(trace =>
@@ -4063,6 +4106,16 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           if (challenge ? source?.result.reviewDiagnosticRef?.sha256 !== challenge.diagnosticRef.sha256
             : !source && !prior.dispatchPlans.some(dispatch => dispatch.key.startsWith(`sync:${prior.id}:analysis${suffix}:code_behavior_`))) continue
           const ready = source?.result.readyAnalysis, draft = source?.result.drafts.code_behavior_analyze
+          if (source?.result.crossFreezeAuthor && !source.result.crossFreezeAuthorReviewRepair) {
+            if (source.result.inputDigest !== inputDigest || source.result.version !== 'code-behavior-draft-v1')
+              fail('behavior_continuation_binding', '正式重试的跨冻结原作者与当前输入不一致')
+            assertMaterialFence()
+            const continuation: CodeBehaviorContinuation = { version: source.result.version, inputDigest, drafts: {},
+              crossFreezeAuthor: source.result.crossFreezeAuthor,
+              ...(challenge ? { reviewDiagnosticRef: challenge.diagnosticRef, challengedAnalysisDigest: source.result.challengedAnalysisDigest } : {}) }
+            saveStage(store, fence!, `${key}:continuation`, continuation, !operation.baselineSelection ? { readSetDigest: operation.readSetDigest } : undefined)
+            return continuation
+          }
           if (!source || source.result.version !== 'code-behavior-draft-v1' || !draft || ready && draft.errors.length || draft.schemaDigest !== analysisSchemaDigest || source.result.inputDigest !== inputDigest
             || stage<{ version: string }>(store, owner, prior, 'behavior-draft-protocol', 'automatic', checkpoints)?.version !== 'code-behavior-draft-v1'
             || (ready ? !behaviorTraceBinding(store, owner, prior, key, ready.trace, undefined, previousCheckpoints, true, !!challenge)
@@ -4084,18 +4137,26 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         const original = historyCheckpoints(owner, origin)
         const source = partitionStage<CodeBehaviorContinuation>(store, owner, origin, `${key}:continuation`, undefined, original)
         const ready = source?.result.readyAnalysis, draft = source?.result.drafts.code_behavior_analyze
+        const carried = source?.result.crossFreezeAuthor
+        const priorApproval = carried && partitionStage<CodeBehaviorAnalysis>(store, owner, origin, key, undefined, original)
+        const partition = partitions?.partitions.find(item => item.id === challenge.partitionId)
+        const authorMatches = carried
+          ? priorApproval && partition && priorApproval.resultRef.sha256 === challenge.analysisRef.sha256
+            && authenticateApprovedBehaviorPartition(store, owner, origin, key, priorApproval.result, partition.changedPaths, undefined, previousCheckpoints, undefined, true)
+          : ready && draft && !draft.errors.length && draft.schemaDigest === analysisSchemaDigest
+            && behaviorTraceBinding(store, owner, origin, key, ready.trace, undefined, previousCheckpoints, true, true)
         if (!partitions || contentHash(JSON.stringify(partitions)) !== challenge.origin.partitionPlanRef.sha256 || scopeDigest !== challenge.scopeDigest
           || owner.id !== operation.id && ![...behaviorContinuationLineage(store, operation, scopeDigest)].some(ancestor => ancestor.id === owner.id)
           || origin.operationId !== owner.id || canonical(origin.composedInput) !== canonical(view.composed)
           || !original.json.some(item => item.ref.sha256 === challenge.origin.approvalCheckpointRef.sha256)
-          || source?.resultRef.sha256 !== challenge.origin.continuationRef.sha256 || !ready || !draft || draft.errors.length
-          || source.result.inputDigest !== inputDigest || draft.schemaDigest !== analysisSchemaDigest
-          || !behaviorTraceBinding(store, owner, origin, key, ready.trace, undefined, previousCheckpoints, true, true)) {
+          || source?.resultRef.sha256 !== challenge.origin.continuationRef.sha256 || !authorMatches
+          || source.result.inputDigest !== inputDigest) {
           fail('sync_p0_challenge_binding', '复审只能从授权的原计划、范围、Git 草稿及作者身份恢复')
         }
         assertMaterialFence()
         saveStage(store, fence!, `${key}:continuation-provenance`, { fromOperationId: owner.id, fromAttemptId: origin.id, resultRef: source.resultRef, scopeDigest } satisfies BehaviorContinuationProvenance)
-        const continuation: CodeBehaviorContinuation = { version: source.result.version, inputDigest, drafts: { code_behavior_analyze: draft }, readyAnalysis: ready,
+        const continuation: CodeBehaviorContinuation = { version: source.result.version, inputDigest,
+          ...(carried ? { drafts: {}, crossFreezeAuthor: carried } : { drafts: { code_behavior_analyze: draft! }, readyAnalysis: ready! }),
           reviewDiagnosticRef: challenge.diagnosticRef, challengedAnalysisDigest: challenge.origin.analysisDigest }
         saveStage(store, fence!, `${key}:continuation`, continuation)
         return continuation
@@ -4182,52 +4243,49 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         }
         return null
       }
-      const loadCrossFreezeBehaviorAuthor: NonNullable<PartitionCheckpoints['loadCrossFreezeBehaviorAuthor']> = async (key, plan, partition, currentInputDigest, binding) => {
-        if (!crossFreezeSource) return null
+      const loadCrossFreezeBehaviorAuthor: NonNullable<PartitionCheckpoints['loadCrossFreezeBehaviorAuthor']> = async (key, plan, partition, currentInputDigest, binding, existing) => {
+        const locked = existing ? findLockedCrossFreezeSource(store, operation, existing.bindingRef) : crossFreezeSource && { owner: operation, selected: crossFreezeSource }
+        if (!locked) return null
+        const { owner, selected } = locked
         assertMaterialFence()
-        const author = historicalBehaviorAuthor(store, crossFreezeSource.source, partition.id, binding.changedPaths)
+        const author = historicalBehaviorAuthor(store, selected.source, partition.id, binding.changedPaths)
         if (!author) return null
         const commonDir = operation.input.source.commonDir
         const current = store.readAttempt(fence!.attemptId)
-        const history = store.listAttempts(operation.id).reverse()
+        const history = store.listAttempts(owner.id).reverse()
         for (const prior of history) {
-          if (prior.number > current.number || prior.id !== current.id && !['failed', 'superseded', 'settled'].includes(prior.status)) continue
+          if (prior.operationId === current.operationId && prior.number > current.number || prior.id !== current.id && !['failed', 'superseded', 'settled'].includes(prior.status)) continue
           await yieldToControl()
           assertMaterialFence()
-          const index = readSyncCheckpointStageIndex(store, operation, prior)
-          if (stage(store, operation, prior, `${key}:cross-freeze-structure-rejection`, 'automatic', index)) return null
-          const previous = partitionStage<CodeBehaviorContinuation>(store, operation, prior, `${key}:continuation`, undefined, index)?.result
+          const index = readSyncCheckpointStageIndex(store, owner, prior)
+          if (stage(store, owner, prior, `${key}:cross-freeze-structure-rejection`, 'automatic', index)) return null
+          const previous = partitionStage<CodeBehaviorContinuation>(store, owner, prior, `${key}:continuation`, undefined, index)?.result
           if (previous?.inputDigest === currentInputDigest && previous.crossFreezeAuthorReviewRepair) return null
-          const impact = readCrossFreezeP0Impact(store, operation, prior, key, currentInputDigest, crossFreezeSource, author, options.nativeExecution?.runtime?.readRecord, index)
-          if (impact) return impact.result.evidence.verdict === 'reuse'
+          const impact = readCrossFreezeP0Impact(store, owner, prior, key, currentInputDigest, selected, author, options.nativeExecution?.runtime?.readRecord, index)
+          if (impact && (!existing || canonical(existing) === canonical(impact.proof))) return impact.result.evidence.verdict === 'reuse'
             ? { draft: author.draft, trace: author.authorTrace, proof: impact.proof, independentOf: [author.reviewTrace, impact.result.evidence.trace] } : null
         }
+        if (existing || owner.id !== operation.id) return null
         const sizing = stage<{ minimumCalls: number; remainingCalls: number | null }>(store, operation, current, 'partition-budget')
         if (budget && (!sizing || sizing.remainingCalls === null || sizing.remainingCalls < sizing.minimumCalls + 2 * plan.partitions.length)) return null
         const original = readStageDraft(commonDir, author.draft, author.draft)
         const rawRef = writeEvidenceBytes(commonDir, Buffer.from(original, 'utf8'))
         const seed = stageWorktree(commonDir, operation.input.headCommit, view.composed.tree)
-        const prepared = prepareCrossFreezeImpactReview(crossFreezeP0ImpactInput(operation, current.id, crossFreezeSource.source,
+        const prepared = prepareCrossFreezeImpactReview(crossFreezeP0ImpactInput(operation, current.id, selected.source,
           partition.id, author, seed, partition.readPaths, callTimeoutMs, rawRef))
-        const result = await runner({ ...prepared.request, signal })
-        const trace: ElaborationTrace = { purpose: prepared.request.purpose, sessionId: result.sessionId, threadId: result.threadId,
-          turnId: result.turnId, resultDigest: result.resultDigest, inputDigest: prepared.request.inputDigest }
-        assertMaterialFence()
-        const evidence = authenticateCrossFreezeImpact(store, operation, store.readAttempt(current.id), prepared, trace, result.output, options.nativeExecution?.runtime?.readRecord)
+        const evidence = await runCrossFreezeImpact(runner, store, operation, current.id, prepared, signal, assertMaterialFence, options.nativeExecution?.runtime?.readRecord)
         const impactReviewRef = saveStage(store, fence!, `${key}:cross-freeze-impact`, {
-          version: 'cross-freeze-p0-impact-v1', sourceRef: crossFreezeSource.bindingRef, currentInputDigest,
+          version: 'cross-freeze-p0-impact-v1', sourceRef: selected.bindingRef, currentInputDigest,
           checkedPaths: [...partition.readPaths].sort(), worktree: prepared.request.worktree, timeoutMs: callTimeoutMs, evidence,
         } satisfies SavedCrossFreezeP0Impact, operation.baselineSelection ? undefined : { readSetDigest: operation.readSetDigest })
         return evidence.verdict === 'reuse' ? {
-          draft: author.draft, trace: author.authorTrace, proof: crossFreezeP0AuthorProof(author, partition.id, crossFreezeSource.bindingRef, impactReviewRef),
+          draft: author.draft, trace: author.authorTrace, proof: crossFreezeP0AuthorProof(author, partition.id, selected.bindingRef, impactReviewRef),
           independentOf: [author.reviewTrace, evidence.trace],
         } satisfies CodeBehaviorCrossFreezeAuthor : null
       }
       const loadCrossFreezeElaborationAuthor: NonNullable<PartitionCheckpoints['loadCrossFreezeElaborationAuthor']> = async (key, plan, partition, input, inputDigest, existing) => {
         const selected = existing
-          ? [...retryOperationLineage(store, operation)].filter(owner => owner.input.id === operation.input.id)
-            .map(owner => ({ owner, selected: readLockedCrossFreezeSource(store, owner) }))
-            .find(candidate => candidate.selected?.bindingRef.sha256 === existing.bindingRef.sha256)
+          ? findLockedCrossFreezeSource(store, operation, existing.bindingRef)
           : crossFreezeSource && { owner: operation, selected: crossFreezeSource }
         if (!selected?.selected || !input.worktree || input.phase || input.refinement || input.gapRepair || input.readonlySpecRepair) return null
         assertMaterialFence()
@@ -4249,11 +4307,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         const seed = stageWorktree(commonDir, operation.input.headCommit, overlayStageTree(commonDir, input.worktree.tree, input.context ?? []))
         const prepared = prepareCrossFreezeImpactReview(crossFreezeP1ImpactInput(operation, current.id, selected.selected.source,
           partition.id, author, seed, partition.readPaths, callTimeoutMs, rawRef))
-        const result = await runner({ ...prepared.request, signal })
-        const trace: ElaborationTrace = { purpose: prepared.request.purpose, sessionId: result.sessionId, threadId: result.threadId,
-          turnId: result.turnId, resultDigest: result.resultDigest, inputDigest: prepared.request.inputDigest }
-        assertMaterialFence()
-        const evidence = authenticateCrossFreezeImpact(store, operation, store.readAttempt(current.id), prepared, trace, result.output, options.nativeExecution?.runtime?.readRecord)
+        const evidence = await runCrossFreezeImpact(runner, store, operation, current.id, prepared, signal, assertMaterialFence, options.nativeExecution?.runtime?.readRecord)
         const reviewRef = saveStage(store, fence!, `${key}:cross-freeze-impact`, {
           version: 'cross-freeze-p1-impact-v1', sourceRef: selected.selected.bindingRef, currentInputDigest: inputDigest,
           composedDigest: view.composed.contentDigest, checkedPaths: [...partition.readPaths].sort(),
@@ -5338,7 +5392,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
       ? managedQuotaFailureRef(store, operation, store.readAttempt(fence.attemptId), error) : undefined
     if (quotaRef) refs.push(quotaRef)
     const settledRpc = !!fence && !signal.aborted && hasSettledNativeRpcFailure(store, operation, store.readAttempt(fence.attemptId), error as StructuredSessionError)
-    const kind: SyncFailure['kind'] = settledRpc ? 'repairable' : code === 'SYNC_BUDGET_EXHAUSTED' ? 'budget' : ['input_changed', 'policy_changed', 'readset_changed', 'composition_conflict', 'request_conflict'].includes(code) ? 'conflict' : code === 'missing_intent' || code === 'no_ready_acceptance' ? 'missing_input' : code === 'export_recovery' || code === 'candidate_stage_missing' ? 'environment' : 'unsupported'
+    const kind: SyncFailure['kind'] = settledRpc || code === 'cross_freeze_impact_review_retry' ? 'repairable' : code === 'SYNC_BUDGET_EXHAUSTED' ? 'budget' : ['input_changed', 'policy_changed', 'readset_changed', 'composition_conflict', 'request_conflict'].includes(code) ? 'conflict' : code === 'missing_intent' || code === 'no_ready_acceptance' ? 'missing_input' : code === 'export_recovery' || code === 'candidate_stage_missing' ? 'environment' : 'unsupported'
     const issue = failure(code, statusOnlyAnalysisFailure !== undefined && statusOnlyAnalysisFailure === error ? CODE_BEHAVIOR_FAILURE_STATUS : error instanceof Error ? error.message : String(error), kind, refs)
     if (code === 'SYNC_FENCE_EXPIRED') return current('recovery_required', issue)
     if (code === 'SYNC_BUDGET_EXHAUSTED') { store.recordBudgetExhaustion(operationId); return current(undefined, issue) }

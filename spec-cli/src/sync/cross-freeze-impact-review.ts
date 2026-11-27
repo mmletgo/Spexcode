@@ -10,6 +10,8 @@ import { overlayStageTree, STAGE_READING_INSTRUCTIONS, stageWorktree, verifyStag
 const version = 'cross-freeze-impact-review-v1' as const
 export const CROSS_FREEZE_IMPACT_PURPOSE = 'cross_freeze_impact_review'
 
+export class CrossFreezeImpactVerdictError extends Error {}
+
 export type CrossFreezeImpactPrior = {
   attemptId: string
   candidateDigest: string
@@ -194,11 +196,11 @@ export function verifyCrossFreezeImpactReview(
     throw new Error('影响复核未绑定本次独立 Native 派发或实际结果')
 
   const validate = new Ajv().compile<CrossFreezeImpactOutput>(schema), output = result.output
-  if (!validate(output)) throw new Error('影响复核结果不符合冻结 schema')
+  if (!validate(output)) throw new CrossFreezeImpactVerdictError('影响复核结果不符合冻结 schema')
   const reviewedPaths = new Set(output.paths.map(path => path.path))
   if (reviewedPaths.size !== changedPaths.length || changedPaths.some(path => !reviewedPaths.has(path))
     || output.verdict === 'reuse' && output.paths.some(path => path.verdict === 'affected'))
-    throw new Error('影响复核未逐项覆盖精确 Git 差量或结论矛盾')
+    throw new CrossFreezeImpactVerdictError('影响复核未逐项覆盖精确 Git 差量或结论矛盾')
 
   verifyStageResult(prepared.commonDir, request.worktree, result)
   const trace: ElaborationTrace = { purpose, sessionId: result.sessionId, threadId: result.threadId, turnId: result.turnId, resultDigest: result.resultDigest, inputDigest }

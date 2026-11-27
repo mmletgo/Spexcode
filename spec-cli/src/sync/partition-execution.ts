@@ -37,7 +37,7 @@ export type PartitionCheckpoints = {
   loadCompletedCandidateReview?(key: string, plan: SyncPartitionPlan, input: GenerationInput, candidate: NonNullable<GenerationResult['candidate']>, builders: readonly ElaborationTrace[], current: Omit<GenerationResult, 'candidateFiles'> | undefined, cache: GenerationReadCache): Omit<GenerationResult, 'candidateFiles'> | null
   elaborationDraftTagged?(key: string, result: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>): boolean
   loadBehaviorDraftMaterial?(key: string, planDigest: string, purpose: string, schemaDigest: string, inputDigest: string, request: CodeBehaviorMaterialRequest, existingDraft?: ElaborationDraft): ElaborationDraftMaterial | null | Promise<ElaborationDraftMaterial | null>
-  loadCrossFreezeBehaviorAuthor?(key: string, plan: SyncPartitionPlan, partition: SyncPartition, inputDigest: string, binding: CodeBehaviorApprovalBinding): ReturnType<NonNullable<CodeBehaviorCheckpoints['loadCrossFreezeAuthor']>>
+  loadCrossFreezeBehaviorAuthor?(key: string, plan: SyncPartitionPlan, partition: SyncPartition, inputDigest: string, binding: CodeBehaviorApprovalBinding, existing?: CodeBehaviorAnalysis['crossFreezeAuthor']): ReturnType<NonNullable<CodeBehaviorCheckpoints['loadCrossFreezeAuthor']>>
   replayBehaviorDraft?: CodeBehaviorCheckpoints['replayDraft']
   loadBehaviorContinuation?(key: string, planDigest: string, inputDigest: string, analysisSchemaDigest: string): CodeBehaviorContinuation | null
   loadBehaviorReviewFeedback?(key: string, planDigest: string, inputDigest: string): CodeBehaviorReviewReference | null
@@ -345,7 +345,7 @@ export async function analyzeSyncPartitions(input: CodeBehaviorInput, plan: Sync
           : checkpoints.loadAcceptedAnalysis?.(key, plan, inputDigest, binding) ?? null
       const continuation: CodeBehaviorCheckpoints = {
         replayDraft: checkpoints.replayBehaviorDraft,
-        loadCrossFreezeAuthor: (inputDigest, binding) => checkpoints.loadCrossFreezeBehaviorAuthor?.(key, plan, partition, inputDigest, binding) ?? null,
+        loadCrossFreezeAuthor: (inputDigest, binding, existing) => checkpoints.loadCrossFreezeBehaviorAuthor?.(key, plan, partition, inputDigest, binding, existing) ?? null,
         loadReviewFeedback: inputDigest => checkpoints.loadBehaviorReviewFeedback?.(key, plan.digest, inputDigest) ?? null,
         loadMaterial: (purpose, schemaDigest, inputDigest, request, existingDraft) => checkpoints.loadBehaviorDraftMaterial?.(key, plan.digest, purpose, schemaDigest, inputDigest, request, existingDraft) ?? null,
         load: (inputDigest, analysisSchemaDigest) => checkpoints.loadBehaviorContinuation?.(key, plan.digest, inputDigest, analysisSchemaDigest) ?? null,
@@ -367,7 +367,7 @@ export async function analyzeSyncPartitions(input: CodeBehaviorInput, plan: Sync
     } catch (error) {
       const issue = error as { code?: string; message?: string }
       failures.push({ partitionId: partition.id, code: issue.code ?? 'behavior_analysis_failed', message: issue.message ?? String(error), error })
-      if (error instanceof CodeBehaviorReviewRepairError || error instanceof CodeBehaviorAuthorEvidenceError || checkpoints.continueAfterSettledGrokExit?.(error)) return null
+      if (error instanceof CodeBehaviorReviewRepairError || error instanceof CodeBehaviorAuthorEvidenceError || issue.code === 'cross_freeze_impact_review_retry' || checkpoints.continueAfterSettledGrokExit?.(error)) return null
       throw error
     }
   })

@@ -112,7 +112,7 @@ export type CodeBehaviorCrossFreezeAuthor = {
 }
 export type CodeBehaviorCheckpoints = {
   replayDraft?(requestKey: string, purpose: BehaviorPurpose): { request: ElaborationSessionRequest; result: ElaborationSessionResult } | null
-  loadCrossFreezeAuthor?(inputDigest: string, binding: CodeBehaviorApprovalBinding): CodeBehaviorCrossFreezeAuthor | null | Promise<CodeBehaviorCrossFreezeAuthor | null>
+  loadCrossFreezeAuthor?(inputDigest: string, binding: CodeBehaviorApprovalBinding, existing?: CodeBehaviorCrossFreezeAuthorProof): CodeBehaviorCrossFreezeAuthor | null | Promise<CodeBehaviorCrossFreezeAuthor | null>
   loadReviewFeedback?(inputDigest: string): CodeBehaviorReviewReference | null
   loadMaterial?(purpose: BehaviorPurpose, schemaDigest: string, inputDigest: string, request: CodeBehaviorMaterialRequest, existingDraft?: ElaborationDraft): ElaborationDraftMaterial | null | Promise<ElaborationDraftMaterial | null>
   load(inputDigest: string, analysisSchemaDigest: string): CodeBehaviorContinuation | null
@@ -700,13 +700,13 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
   }
   const savedCrossFreezeAuthor = continuation?.crossFreezeAuthor
   const canLoadCrossFreezeAuthor = input.origin === 'initial' && input.contextTransport === 'git-json-v6' && input.partition
-    && !input.operatorReviewDiagnostic && !input.postGateReview?.length && !input.decision
+    && (savedCrossFreezeAuthor || !input.operatorReviewDiagnostic) && !input.postGateReview?.length && !input.decision
     && !continuation?.readyAnalysis && !continuation?.drafts.code_behavior_analyze && !continuation?.errors?.code_behavior_analyze
     && (savedCrossFreezeAuthor || !continuation?.drafts.code_behavior_review && !continuation?.reviewResult && !continuation?.errors?.code_behavior_review)
   let crossFreezeAuthor: CodeBehaviorCrossFreezeAuthor | null = null
   if (canLoadCrossFreezeAuthor && checkpoints?.loadCrossFreezeAuthor) {
     if (signal?.aborted) throw Object.assign(new Error('行为分析已停止'), { code: 'cancelled' })
-    crossFreezeAuthor = await checkpoints.loadCrossFreezeAuthor(inputDigest, binding)
+    crossFreezeAuthor = await checkpoints.loadCrossFreezeAuthor(inputDigest, binding, savedCrossFreezeAuthor)
   }
   if (savedCrossFreezeAuthor && !isDeepStrictEqual(savedCrossFreezeAuthor, crossFreezeAuthor?.proof)) {
     throw Object.assign(new Error('P0跨冻结续审缺少同一已认证的原作者及影响复核证明'), { code: 'behavior_continuation_binding' })
