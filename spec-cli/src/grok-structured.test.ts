@@ -13,9 +13,12 @@ import { StructuredSessionError, structuredExecutionPolicy } from './session-str
 
 const schema = { type: 'object', properties: { marker: { type: 'string' } }, required: ['marker'], additionalProperties: false }
 const finalText = '{"marker":"终态"}'
+const nativeSchemaText = '{"marker":"TEXT_CANARY"}'
+const nativeSchemaValue = { marker: '原生终态' }
 const sha256 = (text: string): string => createHash('sha256').update(text).digest('hex')
 
 type Scenario = 'startup-error' | 'success' | 'wrong-session' | 'wrong-cwd' | 'missing-request' | 'duplicate-terminal' | 'missing-terminal' | 'wrong-format' | 'bad-schema' | 'hang' | 'read' | 'periodic' | 'split-settlement-window' | 'cancel-during-settlement' | 'inherited-stdout' | 'inherited-stdout-trailing' | 'parent-awaits-owned-child' | 'parent-restarts-owned-child' | 'mcp-transport-reconnect' | 'natural-child-shutdown' | 'short-lived-terminal-parent' | 'unowned-stdout' | 'terminal-exit-timeout' | 'terminal-timeout-unowned-stdout'
+  | 'native-schema-success' | 'native-schema-trailing' | 'native-schema-missing' | 'native-schema-mismatch'
 
 function fixture(t: TestContext, scenario: Scenario, model = 'grok:default', purpose = 'grok-fixture', stderrChunks: readonly string[] = []) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'spex-grok-fixture-')))
@@ -41,12 +44,19 @@ const { execFileSync, spawn } = require('node:child_process')
 const { existsSync, readFileSync, writeFileSync } = require('node:fs')
 const { dirname, join } = require('node:path')
 const args = process.argv.slice(2)
-if (args[0] === '--version') { console.log('grok 1.0.77 (fixture) [stable]'); process.exit(0) }
 const scenario = ${JSON.stringify(scenario)}
-const [cwdFlag, cwd, sessionFlag, sessionId, promptFlag, promptFile, outputFlag, outputFormat, ...extra] = args
-assert.deepEqual([cwdFlag, sessionFlag, promptFlag, outputFlag, outputFormat], ['--cwd', '--session-id', '--prompt-file', '--output-format', 'streaming-json'])
-if (scenario === 'read') assert.deepEqual(extra, ['--permission-mode', 'plan', '--disallowed-tools', 'enter_plan_mode,exit_plan_mode'])
-else assert.deepEqual(extra.slice(0, 2), ['--permission-mode', 'bypassPermissions'])
+const nativeSchema = scenario.startsWith('native-schema-')
+if (args[0] === '--version') { console.log(nativeSchema ? 'grok 1.0.92 (fixture) [stable]' : 'grok 1.0.77 (fixture) [stable]'); process.exit(0) }
+if (args[0] === '--help') {
+  console.log('Options:\n    --output-format <FORMAT>')
+  if (nativeSchema) console.log('    --json-schema <SCHEMA>  JSON Schema for structured output')
+  process.exit(0)
+}
+const option = key => args[args.indexOf(key) + 1]
+const cwd = option('--cwd'), sessionId = option('--session-id'), promptFile = option('--prompt-file')
+assert.equal(option('--output-format'), 'streaming-json')
+assert.equal(option('--permission-mode'), scenario === 'read' ? 'plan' : 'bypassPermissions')
+if (scenario === 'read') assert.equal(option('--disallowed-tools'), 'enter_plan_mode,exit_plan_mode')
 assert.equal(cwd, process.cwd())
 assert.match(sessionId, /^[0-9a-f-]{36}$/)
 assert.equal(process.env.TMPDIR, join(dirname(promptFile), 'tmp'))
@@ -58,7 +68,8 @@ const terminal = {
   modelUsage: { 'fixture-native-model': { inputTokens: 100, outputTokens: 20 } },
 }
 function finish() {
-  const text = scenario === 'wrong-format' ? '\x60\x60\x60json\n{}\n\x60\x60\x60' : scenario === 'bad-schema' ? '{"marker":1}' : ${JSON.stringify(finalText)}
+  const text = nativeSchema ? ${JSON.stringify(nativeSchemaText)}
+    : scenario === 'wrong-format' ? '\x60\x60\x60json\n{}\n\x60\x60\x60' : scenario === 'bad-schema' ? '{"marker":1}' : ${JSON.stringify(finalText)}
   emit({ type: 'text', data: 'PRE_TOOL_CANARY' })
   emit({ type: 'tool_call', rawInput: 'RAW_TOOL_INPUT_CANARY' })
   emit({ type: 'text', data: 'IN_TOOL_CANARY' })
@@ -67,10 +78,20 @@ function finish() {
   emit({ type: 'text', data: text.slice(0, 9) })
   emit({ type: 'text', data: text.slice(9) })
   emit({ type: 'usage', signature: 'SIGNATURE_CANARY' })
+  if (nativeSchema && scenario !== 'native-schema-missing') {
+    terminal.structuredOutput = scenario === 'native-schema-mismatch' ? null : ${JSON.stringify(nativeSchemaValue)}
+  }
+  if (scenario === 'native-schema-success') {
+    const line = Buffer.from(JSON.stringify(terminal) + '\n')
+    const split = line.indexOf(Buffer.from('原')) + 1
+    process.stdout.write(line.subarray(0, split), () => setTimeout(() => process.stdout.write(line.subarray(split)), 30))
+    return
+  }
   if (scenario !== 'missing-terminal') emit(terminal)
   if (scenario === 'duplicate-terminal') emit(terminal)
+  if (scenario === 'native-schema-trailing') emit({ type: 'text', data: 'LATE_TEXT_CANARY' })
 }
-if (['success', 'wrong-format', 'bad-schema'].includes(scenario)) {
+if (nativeSchema || ['success', 'wrong-format', 'bad-schema'].includes(scenario)) {
   writeFileSync(join(cwd, 'draft.json'), ${JSON.stringify(finalText)})
   for (const argv of [['add', 'draft.json'], ['commit', '-qm', 'native draft']]) execFileSync('git', argv, { stdio: 'ignore' })
 }
@@ -282,6 +303,63 @@ test('Grok runs once in the exact worktree and replays original result and stop 
   rmSync(join(f.sessionRoot, 'process-stop-observations.jsonl'))
   await assert.rejects(f.run(f.state(), replayCallbacks), { code: 'stale_result' })
 })
+
+test('Grok native schema uses the split terminal value and replays it without the CLI', async t => {
+  const f = fixture(t, 'native-schema-success', 'grok:grok-4.7-build')
+  const result = await f.run()
+  assert.equal(result.threadId, f.state().grokNative?.sessionId)
+  assert.equal(result.turnId, f.requestId)
+  assert.deepEqual(JSON.parse(result.text), nativeSchemaValue)
+  const { args } = JSON.parse(readFileSync(f.started, 'utf8')) as { args: string[] }
+  assert.equal(args[args.indexOf('--output-format') + 1], 'streaming-json')
+  assert.equal(args[args.indexOf('--model') + 1], 'grok-4.7-build')
+  assert.equal(args[args.indexOf('--json-schema') + 1], JSON.stringify(schema))
+  assert.equal(JSON.parse(readFileSync(join(f.sessionRoot, 'plan.json'), 'utf8')).structuredOutput, 'native-schema-v1')
+  assert.deepEqual(JSON.parse(readFileSync(join(f.sessionRoot, 'settlement.json'), 'utf8')).exit, { code: 0, signal: null })
+
+  const gitResult = nativeWorktreeResult(f.workspace, f.worktree)
+  assert.notEqual(gitResult.headCommit, f.worktree.baseCommit)
+  assert.equal(f.git('show', `${gitResult.headCommit}:draft.json`), finalText)
+  f.update({ state: 'completed', output: JSON.parse(result.text), resultDigest: sha256(result.text), resultWorktree: gitResult })
+  f.git('worktree', 'remove', f.workspace)
+  renameSync(f.cli, f.cli + '.unavailable')
+  assert.deepEqual(await f.run(f.state(), replayCallbacks), result)
+})
+
+test('Grok native schema rejects another event after the original terminal', async t => {
+  const f = fixture(t, 'native-schema-trailing')
+  await assert.rejects(f.run(), { code: 'cancellation_pending' })
+  assert.equal(f.state().turnId, undefined)
+  assert.equal(existsSync(join(f.sessionRoot, 'settlement.json')), false)
+  assert.equal(existsSync(join(f.sessionRoot, 'result.json')), false)
+  assert.deepEqual(await stopGrokStructuredTurn(f.state()), { nativeStopped: true, acknowledged: false, nativeStatus: 'stopped' })
+})
+
+for (const [scenario, representation, rejectedText] of [
+  ['native-schema-missing', 'text', nativeSchemaText],
+  ['native-schema-mismatch', 'native_json', 'null'],
+] as const) {
+  test(`Grok native schema binds ${scenario} evidence to the exact stopped draft`, async t => {
+    const f = fixture(t, scenario)
+    await assert.rejects(f.run(), error => {
+      assert(error instanceof StructuredSessionError)
+      assert.equal(error.code, 'structured_output_format_invalid')
+      assert.equal(error.threadId, f.state().threadId)
+      assert.equal(error.turnId, f.requestId)
+      assert.equal(error.rejectedOutput?.inputDigest, 'fixed-input')
+      assert.equal(error.rejectedOutput?.representation, representation)
+      assert.equal(error.rejectedOutput?.text, rejectedText)
+      f.update({ rejectedOutput: error.rejectedOutput, errorCode: error.code })
+      return true
+    })
+    const stop = await stopGrokStructuredTurn(f.state())
+    assert.equal(stop.nativeStopped, true)
+    f.update({ state: 'failed', cancellation: { reason: 'cancelled', requestedAt: Date.now(), ...stop }, failedWorktree: nativeWorktreeResult(f.workspace, f.worktree) })
+    renameSync(f.cli, f.cli + '.unavailable')
+    assertGrokRejectedFinalSource(f.prompt, f.state(), f.workspace)
+    assert.throws(() => assertGrokRejectedFinalSource(f.prompt + '\n', f.state(), f.workspace), { code: 'stale_result' })
+  })
+}
 
 test('Grok gives a closed successful terminal a full independent process settlement window', { timeout: 30_000 }, async t => {
   const f = fixture(t, 'split-settlement-window')
