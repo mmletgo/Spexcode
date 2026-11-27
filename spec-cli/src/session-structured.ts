@@ -8,7 +8,7 @@ import { readRecord, withRecordLock, writeRecord } from './session-record.js'
 import { codexStructuredTurn, codexStopStructuredTurn, readManagedFrozenArchivedTurn, stopUnboundManagedFrozenRealm } from './codex-harness.js'
 import { commitCodexGenerationRegistration, prepareCodexGenerationRegistration, readCodexGenerationLedger, resolveCodexGenerationForClose } from './codex-runtime-generations.js'
 import { assertRejectedOutput, structuredGeneration, prepareStructuredRealm, prepareFrozenReaderRuntime, assertFrozenReaderRuntime, StructuredSessionError, StructuredSessionTransportError, structuredObserverState, structuredExecutionPolicy, structuredRealmRoot, pinNativeConfiguration, pinZCodeToolPolicy, type StructuredExecution, type FrozenReaderRuntime } from './session-structured-policy.js'
-import { assertFrozenBinding, prepareFrozenPrompt, readFrozenManifest, type FrozenContextRef, type FrozenEntryJson, type FrozenReadProof, type FrozenReadReceipt } from './frozen-context.js'
+import { assertFrozenBinding, prepareFrozenPrompt, prepareManagedFrozenPrompt, readFrozenManifest, type FrozenContextRef, type FrozenEntryJson, type FrozenReadProof, type FrozenReadReceipt } from './frozen-context.js'
 import { verifyStructuredFrozenReadProof as verifyFrozenReadProof } from './structured-frozen-evidence.js'
 import { configuredSessionApplication } from './session-application.js'
 import { withDeliveryLocks } from './delivery-lock.js'
@@ -286,6 +286,8 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
   const existing = (claude || zcode || grok || cursor || codex || managedReader) && request.worktree ? readRecord(sessionIdForCreateKey(request.sessionCreateKey ?? request.requestKey)) : null
   const saved = existing?.structuredExecution
   const coldAdapter = managedReader && existing?.archived && saved?.state === 'completed' ? await loadManagerPersistentCodex() : undefined
+  if (coldAdapter && (!saved?.frozenContext || !saved.readerRuntime))
+    throw new StructuredSessionError('stale_result', 'managed frozen cold replay is missing the original input or runtime identity')
   const hosted = managedReader && !coldAdapter ? await hostedFrozenRuntime(managedReader) : undefined
   const original = saved ?? (request.sessionCreateKey ? request : null)
   const nativeConfiguration = managedReader ? undefined : pinNativeConfiguration(request, original)
@@ -297,7 +299,10 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
     if (request.base && request.base !== request.worktree.baseCommit) throw new StructuredSessionError('failed', 'native worktree base differs from immutable seed')
     request = { ...request, base: request.worktree.baseCommit, prompt: managedReader ? request.prompt : nativeWorktreePrompt(request.prompt, request.worktree) }
   }
-  if ((!request.worktree || managedReader) && !request.frozenContext) request = prepareFrozenPrompt(request, { directory: join(runtimeRoot(), 'frozen-context-v2') })
+  const frozenDirectory = join(runtimeRoot(), 'frozen-context-v2')
+  const builder = coldAdapter ?? hosted
+  if (builder) request = prepareManagedFrozenPrompt(request, { directory: frozenDirectory, builder, ...(coldAdapter ? { pinned: saved!.frozenContext } : {}) })
+  else if (!request.worktree && !request.frozenContext) request = prepareFrozenPrompt(request, { directory: frozenDirectory })
   const deadline = request.timeoutMs === null ? null : Date.now() + request.timeoutMs
   if (request.frozenContext) assertFrozenBinding(request.frozenContext, { ...readFrozenManifest(request.frozenContext).binding, requestKey: request.requestKey, inputDigest: request.inputDigest })
   const validate = new Ajv().compile(request.schema)

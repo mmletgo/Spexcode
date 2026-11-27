@@ -362,7 +362,8 @@ test('managed Codex keeps full large reader proof and replays only its original 
   const hosted = {
     reader, CodexPersistentAppServer: ControlledManagerTransport,
     codexAuditFrozenCatalog: ({ path, digest }: { path: string; digest: string }) => assert.equal(createHash('sha256').update(readFileSync(path)).digest('hex'), digest),
-    codexFrozenToolDefinition: (tool: unknown) => tool,
+    codexFrozenToolDefinition: () => ({ name: 'spex_read_frozen' }),
+    codexFrozenToolOutputTokenLimit: () => limit,
     codexDecodeFrozenItems: () => ({
       finalText: finalTurn().items[0].text,
       reads: nativeReads.map(read => ({ callId: read.id, arguments: read.arguments, text: (read.contentItems as FrozenToolResponse['contentItems'])[0].text })),

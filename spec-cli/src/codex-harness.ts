@@ -11,7 +11,7 @@ import { detachedRuntimeGenerationToken, detachedRuntimeIsGone, migrateLegacyDet
 import { codexGenerationEndpoints, codexGenerationSocketPath, currentCodexGeneration, legacyCodexGenerationEndpoint, readCodexGenerationLedger, prepareCodexGenerationClose, resolveCodexGenerationForClose, resolveCodexGenerationForResume, resolveCodexGenerationForSession, rebindCodexGeneration, withCodexGenerationMutex, type CodexGenerationEndpoint } from './codex-runtime-generations.js'
 import { spawnDetachedRuntime } from './runtime-ownership.js'
 import { assertFrozenReaderRuntime, frozenReaderDisabledFeatures, structuredExecutionTimer, StructuredSessionError, StructuredSessionTransportError, structuredRealmRoot, type StructuredExecution } from './session-structured-policy.js'
-import { FROZEN_READ_TOOL, frozenReadOutputTokenLimit, frozenReadTool, frozenVisibleOutputs, persistFrozenRead, proveFrozenReads, proveManagedFrozenReads, type FrozenNativeItem, type FrozenReadProof, type FrozenReadReceipt } from './frozen-context.js'
+import { FROZEN_READ_TOOL, frozenReadMaximumResponseBytes, frozenReadOutputTokenLimit, frozenReadTool, frozenVisibleOutputs, persistFrozenRead, proveFrozenReads, proveManagedFrozenReads, type FrozenNativeItem, type FrozenReadProof, type FrozenReadReceipt } from './frozen-context.js'
 import { codexRolloutMetadata, codexRolloutPath, codexTranscript, exactCodexTranscript } from '@spexcode/transcript'
 import { shQuote } from './sh.js'
 import { writeFileIfChanged } from './file-write.js'
@@ -2659,7 +2659,7 @@ export async function readManagedFrozenArchivedTurn(rec: HarnessLivenessRecord &
     const { reads } = adapter.codexDecodeFrozenItems(recovered.items, FROZEN_READ_TOOL)
     const identity = { threadId, turnId: options.turnId }
     const frozenReadProof = proveManagedFrozenReads(execution.frozenContext, identity, recovered.items, reads,
-      { toolOutputTokenLimit: execution.readerRuntime.toolOutputTokenLimit, outputs: recovered.outputs }, adapter.codexValidateFrozenVisibility, 'verify')
+      { toolOutputTokenLimit: execution.readerRuntime.toolOutputTokenLimit, outputs: recovered.outputs }, adapter, 'verify')
     return { ...identity, text: recovered.finalText, frozenReadProof }
   } catch (error) {
     throw new StructuredSessionError('stale_result', `managed frozen native archive proof is unavailable: ${error instanceof Error ? error.message : String(error)}`)
@@ -2922,7 +2922,7 @@ async function managedCodexFrozenTurn(sock: string, cwd: string, prompt: string,
   const ref = execution.frozenContext, runtime = execution.readerRuntime
   if (execution.version !== 7 || execution.policy !== 'codex-managed-frozen-worktree-v1' || execution.worktree?.mode !== 'read' || !ref || runtime?.version !== 2)
     throw new StructuredSessionError('unsupported', 'managed Codex requires the fixed frozen worktree policy')
-  assertFrozenReaderRuntime(runtime, hosted.reader.model, frozenReadOutputTokenLimit(ref), hosted)
+  assertFrozenReaderRuntime(runtime, hosted.reader.model, hosted.codexFrozenToolOutputTokenLimit(frozenReadMaximumResponseBytes(ref)), hosted)
   const client = new hosted.CodexPersistentAppServer(sock)
   let fail!: (error: Error) => void
   const failure = new Promise<never>((_, reject) => { fail = reject })
@@ -2957,7 +2957,7 @@ async function managedCodexFrozenTurn(sock: string, cwd: string, prompt: string,
       const thread = await wait(client.readThread(threadId))
       if (thread.id !== threadId) throw new StructuredSessionError('stale_result', 'Codex returned a different frozen thread')
     } else {
-      const thread = await wait(client.startThread({ cwd, model: hosted.reader.model, dynamicTools: [hosted.codexFrozenToolDefinition(frozenReadTool)] }))
+      const thread = await wait(client.startThread({ cwd, model: hosted.reader.model, dynamicTools: [hosted.codexFrozenToolDefinition()] }))
       threadId = thread.id
       await callbacks.onThread(threadId)
     }
@@ -2990,7 +2990,7 @@ async function managedCodexFrozenTurn(sock: string, cwd: string, prompt: string,
     if (!thread.path) throw new StructuredSessionTransportError('exact frozen rollout path is not materialized yet')
     const visibility = hosted.codexReadFrozenRollout({ path: thread.path, threadId, turnId: terminal.id, cwd })
     const frozenReadProof = proveManagedFrozenReads(ref, { threadId, turnId: terminal.id }, items, decoded.reads,
-      { toolOutputTokenLimit: runtime.toolOutputTokenLimit, outputs: visibility.outputs }, hosted.codexValidateFrozenVisibility, execution.state === 'completed' ? 'verify' : 'record')
+      { toolOutputTokenLimit: runtime.toolOutputTokenLimit, outputs: visibility.outputs }, hosted, execution.state === 'completed' ? 'verify' : 'record')
     return { threadId, turnId: terminal.id, text: decoded.finalText, frozenReadProof }
   } catch (error) { throw managedCodexPersistentError(error as Error) }
   finally {

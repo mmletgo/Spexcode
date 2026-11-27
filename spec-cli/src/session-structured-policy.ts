@@ -252,8 +252,8 @@ export function assertFrozenReaderRuntime(runtime: FrozenReaderRuntime, model?: 
 export async function prepareFrozenReaderRuntime(root: string, frozenContext: FrozenContextRef, hosted?: ManagedCodexFrozenRuntime): Promise<FrozenReaderRuntime> {
   const cliVersion = hosted?.reader.cliVersion ?? execFileSync('codex', ['--version'], { encoding: 'utf8' }).trim()
   if (!hosted && cliVersion !== 'codex-cli 0.160.0') throw new StructuredSessionError('unsupported', 'this native CLI has no verified frozen-reader host capability evidence')
-  const { frozenReadOutputTokenLimit } = await import('./frozen-context.js')
-  const toolOutputTokenLimit = frozenReadOutputTokenLimit(frozenContext)
+  const { frozenReadMaximumResponseBytes, frozenReadOutputTokenLimit } = await import('./frozen-context.js')
+  const toolOutputTokenLimit = hosted ? hosted.codexFrozenToolOutputTokenLimit(frozenReadMaximumResponseBytes(frozenContext)) : frozenReadOutputTokenLimit(frozenContext)
   const policyRoot = join(root, 'reader-policy', createHash('sha256').update(JSON.stringify({ cliVersion, toolOutputTokenLimit, ...(hosted ? { capability: hosted.reader } : {}) })).digest('hex').slice(0, 16))
   const descriptor = join(policyRoot, 'runtime.json')
   if (existsSync(descriptor)) { const runtime = JSON.parse(readFileSync(descriptor, 'utf8')) as FrozenReaderRuntime; assertFrozenReaderRuntime(runtime, hosted?.reader.model, toolOutputTokenLimit, hosted); return runtime }

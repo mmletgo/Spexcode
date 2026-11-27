@@ -6,7 +6,7 @@ import { setTimeout as wait } from 'node:timers/promises'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { managedFrozenCapability, readManagedRoute, type ManagedFrozenReader, type ManagedRoute } from './llm-manager-route.js'
 import type { FrozenReaderRuntime, NativeTokenUsage, StructuredExecution } from './session-structured-policy.js'
-import type { FrozenVisibleOutput, NormalizedFrozenRead } from './frozen-context.js'
+import type { FrozenVisibleOutput, ManagedFrozenPromptInput, NormalizedFrozenRead } from './frozen-context.js'
 
 const bridge = fileURLToPath(new URL('../llm-manager/host.py', import.meta.url))
 const installedSettingsPath = '/llm-manager/'
@@ -152,7 +152,9 @@ export type ManagerPersistentCodexModule = {
   codexPersistentSocketPaths(socketPath: string, uid: number): { rendezvous: string; daemonDirectory: string; physicalSocket: string; lockPath: string }
   codexBuildFrozenCatalog(options: { home: string; cliVersion: string; model?: string }): { bytes: Buffer; beforeDigest: string; digest: string; changedFields: string[] }
   codexAuditFrozenCatalog(options: { path: string; digest: string; model?: string }): void
-  codexFrozenToolDefinition(tool: { name: string; description: string; inputSchema: NativeRecord }): NativeRecord
+  codexFrozenPrompt(input: ManagedFrozenPromptInput): { prompt: string; toolOutputTokenLimit: number }
+  codexFrozenToolOutputTokenLimit(maxResponseBytes: number): number
+  codexFrozenToolDefinition(): NativeRecord
   codexDecodeFrozenItems(items: readonly NativeRecord[], toolName: string): { finalText: string; reads: NormalizedFrozenRead[] }
   codexValidateFrozenVisibility(outputs: FrozenVisibleOutput[], toolOutputTokenLimit: number, expectedResponses: string[]): void
   codexReadFrozenRollout(options: { path: string; threadId: string; turnId: string; cwd: string; requireCompleted?: boolean }): { archived: boolean; outputs: FrozenVisibleOutput[] }
@@ -167,7 +169,7 @@ export async function loadManagerPersistentCodex(): Promise<ManagerPersistentCod
   const manager = await loadManagerNativeRuntime(), adapter = await manager.loadNativeAdapter('codex') as Partial<ManagerPersistentCodexModule>
   const exports: readonly (keyof ManagerPersistentCodexModule)[] = ['CodexPersistentAppServer', 'codexPersistentAppServerArgs', 'codexPersistentTerminalError',
     'codexPersistentConfig', 'codexPersistentHomePaths', 'codexPersistentSocketPaths', 'codexBuildFrozenCatalog', 'codexAuditFrozenCatalog',
-    'codexFrozenToolDefinition', 'codexDecodeFrozenItems', 'codexValidateFrozenVisibility', 'codexReadFrozenRollout', 'verifyCodexFrozenArchive']
+    'codexFrozenPrompt', 'codexFrozenToolOutputTokenLimit', 'codexFrozenToolDefinition', 'codexDecodeFrozenItems', 'codexValidateFrozenVisibility', 'codexReadFrozenRollout', 'verifyCodexFrozenArchive']
   if (exports.some(name => typeof adapter[name] !== 'function')) throw new LlmManagerHostError('llm_manager_native_capability_unavailable')
   return adapter as ManagerPersistentCodexModule
 }

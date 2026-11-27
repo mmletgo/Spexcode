@@ -8,8 +8,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { runtimeRoot } from '@spexcode/spec-core'
 import { contractImpact, dependencyClosure, validateContractGraph } from '@spexcode/spec-core/contracts'
 import type { Acceptance, ContractGraph } from '@spexcode/spec-core/contracts'
-import { FROZEN_PROMPT_THRESHOLD_BYTES, prepareFrozenPrompt } from '../frozen-context.js'
-import { llmManagerRequested, LlmManagerHostError, resolveManagedRoute } from '../llm-manager-host.js'
+import { FROZEN_PROMPT_THRESHOLD_BYTES, prepareManagedFrozenPrompt } from '../frozen-context.js'
+import { llmManagerRequested, LlmManagerHostError, loadManagerPersistentCodex, resolveManagedRoute } from '../llm-manager-host.js'
 import { managedFrozenCapability, managedModel, managedRoute, type ManagedRoute } from '../llm-manager-route.js'
 import { structuredExecutionPolicy } from '../session-structured-policy.js'
 import { DEFAULT_SYNC_MODEL } from './model-selection.js'
@@ -147,7 +147,9 @@ async function runNativeReviewWorker(request: NativeReviewRequest, signal: Abort
       && execution.state === 'failed' && execution.cancellation?.nativeStopped && execution.errorCode === quota.code && execution.error === quota.message
       && quota.sessionId === id && execution.threadId === quota.threadId && execution.turnId === quota.turnId) {
       const { pinSyncNativeRequest } = await import('./native-run.js')
-      const frozen = route.frozenReader ? prepareFrozenPrompt(request, { directory: join(runtimeRoot(), 'frozen-context-v2') }) : undefined
+      const frozen = route.frozenReader && execution.frozenContext ? prepareManagedFrozenPrompt(request, {
+        directory: join(runtimeRoot(), 'frozen-context-v2'), builder: await loadManagerPersistentCodex(), pinned: execution.frozenContext,
+      }) : undefined
       const expected = structuredExecutionPolicy(frozen ? { ...frozen, readerRuntime: execution.readerRuntime } : pinSyncNativeRequest(request, null))
       const payloadHash = digest({ prompt: frozen?.prompt ?? nativeWorktreePrompt(request.prompt, request.worktree), parent: null, launcher: null, base: request.worktree.baseCommit, structuredExecution: expected })
       if (record.createRequestId === contentHash(request.requestKey) && record.createPayloadHash === payloadHash && digest(structuredExecutionPolicy(execution)) === digest(expected))

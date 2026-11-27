@@ -4,7 +4,8 @@ import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { assertFrozenBinding, freezeContext, frozenContextPrompt, frozenReadOutputTokenLimit, frozenReadTool, frozenVisibleOutputs, persistFrozenRead, prepareFrozenPrompt, proveFrozenReads, proveManagedFrozenReads, readFrozenManifest, readFrozenRange, verifyFrozenReadProof, claudeMessageDigest, readClaudePublicHistory, readClaudeApiSourceMetadata, FROZEN_READ_MAX_BYTES, type FrozenContextInput, type FrozenNativeItem, type FrozenVisibleOutput } from './frozen-context.js'
+import { pathToFileURL } from 'node:url'
+import { assertFrozenBinding, freezeContext, frozenContextPrompt, frozenReadOutputTokenLimit, frozenReadTool, frozenVisibleOutputs, persistFrozenRead, prepareFrozenPrompt, prepareManagedFrozenPrompt, proveFrozenReads, proveManagedFrozenReads, readFrozenManifest, readFrozenRange, verifyFrozenReadProof, claudeMessageDigest, readClaudePublicHistory, readClaudeApiSourceMetadata, FROZEN_READ_MAX_BYTES, type FrozenContextInput, type ManagedFrozenPromptInput, type FrozenNativeItem, type FrozenVisibleOutput } from './frozen-context.js'
 
 const binding = { requestKey: 'exact-request', inputDigest: 'exact-input' }
 function fixture(entries: FrozenContextInput[] = [{ id: 'a', label: 'frozen source', kind: 'utf8', bytes: Buffer.from('首abc尾') }]) {
@@ -90,7 +91,8 @@ test('managed cold evidence requires the original response, native history and v
   const visibility = { toolOutputTokenLimit: limit, outputs: [{ callId: 'outer', output: text, historyTokenLimit: Math.ceil(limit * 1.2) }] }
   const derive = (mode: 'record' | 'verify') => proveManagedFrozenReads(f.ref, identity, [item],
     [{ callId: 'exact-read', arguments: args, text }], visibility,
-    (outputs, _limit, responses) => assert.deepEqual(outputs.map(output => output.output), responses), mode)
+    { codexFrozenToolOutputTokenLimit: () => limit,
+      codexValidateFrozenVisibility: (outputs, _limit, responses) => assert.deepEqual(outputs.map(output => output.output), responses) }, mode)
   const proof = derive('record')
   assert.equal(proof.version, 2)
   assert.deepEqual(derive('verify'), proof)
@@ -100,6 +102,38 @@ test('managed cold evidence requires the original response, native history and v
     assert.throws(() => derive('verify'), { code: 'stale_result' })
     assert.equal(existsSync(path), false)
     writeFileSync(path, original, { mode: 0o400 })
+  }
+})
+
+const managerPromptRuntime = process.env.SPEX_MANAGER_FROZEN_TEST_RUNTIME
+test('managed prompt uses only frozen range metadata and keeps exact prompt bytes, including for read-only replay', { skip: !managerPromptRuntime }, async t => {
+  const { loadNativeAdapter } = await import(pathToFileURL(managerPromptRuntime!).href)
+  const adapter = await loadNativeAdapter('codex')
+  for (const prompt of ['keep the inline task', ` ${'字🙂'.repeat(FROZEN_READ_MAX_BYTES)} tail`]) {
+    const f = fixture()
+    t.after(f.close)
+    const request = { root: process.cwd(), ...binding, prompt, frozenEntries: [
+      { id: 'bin', label: 'binary entry', kind: 'binary' as const, base64: 'AAEC/w==' },
+      { id: 'opt', label: 'optional input', kind: 'utf8' as const, text: 'required:false', required: false },
+      { id: 'empty', label: 'empty input', kind: 'absent' as const },
+    ] }
+    const directory = join(f.directory, 'frozen'), expected = prepareFrozenPrompt(request, { directory })
+    const options = { directory, builder: { codexFrozenPrompt(input: ManagedFrozenPromptInput) {
+      if (input.taskIsFrozen) assert.equal(input.prompt, '')
+      assert.ok(!JSON.stringify(input).includes(directory))
+      assert.ok(input.plans.flatMap(plan => plan.ranges).every(range => range.responseBytes <= input.maxResponseBytes))
+      return adapter.codexFrozenPrompt(input)
+    } } }
+    const actual = prepareManagedFrozenPrompt(request, options)
+    assert.equal(actual.prompt, expected.prompt)
+    assert.deepEqual(actual.frozenContext, expected.frozenContext)
+    const pinned = actual.frozenContext!
+    assert.deepEqual(prepareManagedFrozenPrompt(request, { ...options, pinned }), actual)
+    assert.throws(() => prepareManagedFrozenPrompt({ ...request, frozenEntries: [] }, { ...options, pinned }), { code: 'stale_result' })
+    const manifestPath = pinned.manifestPath
+    rmSync(manifestPath)
+    assert.throws(() => prepareManagedFrozenPrompt(request, { ...options, pinned }), { code: 'ENOENT' })
+    assert.equal(existsSync(manifestPath), false)
   }
 })
 
