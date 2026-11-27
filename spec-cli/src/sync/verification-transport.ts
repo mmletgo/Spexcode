@@ -4,7 +4,9 @@ import { lstat, readdir, readFile, readlink } from 'node:fs/promises'
 import { join, posix } from 'node:path'
 import { once } from 'node:events'
 import { performance } from 'node:perf_hooks'
-import { gunzipSync, gzipSync } from 'node:zlib'
+import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
+import { constants as zlib, createBrotliCompress, gunzipSync, gzipSync } from 'node:zlib'
 import { verificationEffectDigest, verificationExportDigest } from './verification-remote-helper.mjs'
 import type { VerificationCheckpoint, VerificationCommandResult, VerificationDriver, VerificationEffect, VerificationRequest, VerificationRpcDiagnostics, VerificationTransportConfiguration, VerificationTransportPlan, VerificationTransportState } from './verification-executor-types.js'
 
@@ -38,11 +40,11 @@ export function configuredVerificationTransport(): VerificationTransportConfigur
 export function sshVerificationRpc(configuration: VerificationTransportConfiguration): VerificationRpc {
   return async (request, frames, maxBytes = 1024 * 1024) => {
     const preparingAt = performance.now()
+    const materializing = request.action === 'effect' && (request.effect as VerificationEffect).kind === 'materialize'
     const source = await readFile(new URL('./verification-remote-helper.mjs', import.meta.url))
-    const command = `exec node --input-type=module -e 'import{gunzipSync}from"node:zlib";import("data:text/javascript;base64,"+gunzipSync(Buffer.from("${gzipSync(source).toString('base64')}","base64")).toString("base64")).then(m=>m.verificationSshMain())'`
+    const command = `exec node --input-type=module -e 'import{gunzipSync}from"node:zlib";import("data:text/javascript;base64,"+gunzipSync(Buffer.from("${gzipSync(source).toString('base64')}","base64")).toString("base64")).then(m=>m.verificationSshMain(${materializing ? '{brotliFrames:true}' : ''}))'`
     return new Promise((fulfil, reject) => {
-      const materializing = request.action === 'effect' && (request.effect as VerificationEffect).kind === 'materialize'
-      const child = spawn('ssh', ['-T', ...(materializing ? ['-C'] : []), '-o', 'BatchMode=yes', '--', configuration.sshAlias, command], { shell: false, stdio: ['pipe', 'pipe', 'pipe'] })
+      const child = spawn('ssh', ['-T', ...(materializing ? ['-o', 'Compression=no'] : []), '-o', 'BatchMode=yes', '--', configuration.sshAlias, command], { shell: false, stdio: ['pipe', 'pipe', 'pipe'] })
       const startedAt = performance.now(), preparationMs = startedAt - preparingAt, loopAtStart = performance.eventLoopUtilization()
       let output = Buffer.alloc(0), diagnostics = Buffer.alloc(0), excessive = false
       let stdoutBytes = 0, stderrBytes = 0, firstOutputAtMs: number | null = null, lastOutputAtMs: number | null = null
@@ -85,6 +87,10 @@ export function sshVerificationRpc(configuration: VerificationTransportConfigura
       child.stdin.on('error', error => { if ((error as NodeJS.ErrnoException).code !== 'EPIPE') reject(error) })
       void (async () => {
         if (!child.stdin.write(JSON.stringify(request) + '\n')) await once(child.stdin, 'drain')
+        if (materializing) {
+          await pipeline(Readable.from(frames ?? []), createBrotliCompress({ params: { [zlib.BROTLI_PARAM_QUALITY]: 8 } }), child.stdin)
+          return
+        }
         if (frames) for await (const frame of frames) if (!child.stdin.write(frame)) await once(child.stdin, 'drain')
         child.stdin.end()
       })().catch(error => { child.stdin.destroy(); reject(error) })

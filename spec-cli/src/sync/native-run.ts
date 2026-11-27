@@ -5,7 +5,7 @@ import { getBlob, putBlob, runtimeRoot } from '@spexcode/spec-core'
 import { LlmManagerHostError, resolveManagedRoute } from '../llm-manager-host.js'
 import { managedModel, managedRoute, type ManagedRoute } from '../llm-manager-route.js'
 import { readRecord, type SessRec } from '../session-record.js'
-import { GROK_NATIVE_EXIT_DEADLINE_FAILURE } from '../grok-structured.js'
+import { isGrokNativeExitFailure } from '../grok-structured.js'
 import { closeSession, sessionIdForCreateKey, readSessionCreateTermination, recoverSessionCreateTermination, verifyPreservedSessionCreateTermination, type SessionCreateTermination } from '../sessions.js'
 import { cancelStructuredSession, runStructuredSession, SettledSessionCreateTimeoutError, StructuredSessionError, type StructuredCancellationResult } from '../session-structured.js'
 import { assertRejectedOutput, prepareFrozenReaderRuntime, structuredExecutionPolicy, pinNativeConfiguration, pinZCodeToolPolicy, type FrozenReaderRuntime, type StructuredExecution } from '../session-structured-policy.js'
@@ -79,7 +79,7 @@ export function hasSettledNativeTurnTransportFailure(store: SyncStore, operation
 
 /** 认证 Grok P0 退出失败，分别供本轮继续调度和整轮结算后重试。 */
 export function hasSettledGrokP0ExitFailure(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, failure: NativeFailureIdentity & Pick<StructuredSessionError, 'rejectedOutput' | 'failedWorktree'>, settlement: 'attempt' | 'native-session' = 'attempt'): boolean {
-  if (failure.code !== 'failed' || failure.message !== GROK_NATIVE_EXIT_DEADLINE_FAILURE || !failure.sessionId
+  if (!isGrokNativeExitFailure(failure) || !failure.sessionId
     || failure.rejectedOutput !== undefined || failure.failedWorktree !== undefined) return false
   try {
     const current = store.assertWriteFence({ operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, sourceFingerprint: operation.input.source.physicalFingerprint, leaseToken: attempt.leaseToken })

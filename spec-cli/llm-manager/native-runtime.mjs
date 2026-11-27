@@ -41,19 +41,25 @@ __export(claude_exports, {
   claudeApiSourceDigest: () => claudeApiSourceDigest,
   claudeApiToolResultIds: () => claudeApiToolResultIds,
   claudeAuthenticationArgs: () => claudeAuthenticationArgs,
+  claudeControlledTerminalExit: () => claudeControlledTerminalExit,
   claudeMcpToolNames: () => claudeMcpToolNames,
   claudeMessageBlocks: () => claudeMessageBlocks,
   claudeMessageDigest: () => claudeMessageDigest,
   claudeNativeModel: () => claudeNativeModel,
+  claudeNaturalSuccessExit: () => claudeNaturalSuccessExit,
   claudeOriginalReplayMismatch: () => claudeOriginalReplayMismatch,
   claudeOutputLimitCompanions: () => claudeOutputLimitCompanions,
   claudeProcessEnvironment: () => claudeProcessEnvironment,
   claudeProtocolObservation: () => claudeProtocolObservation,
   claudeRecoveryCompanion: () => claudeRecoveryCompanion,
+  claudeSchemaExhaustionExit: () => claudeSchemaExhaustionExit,
   claudeSchemaRetryDiagnostics: () => claudeSchemaRetryDiagnostics,
+  claudeStoppedAnalysisFailureMatches: () => claudeStoppedAnalysisFailureMatches,
+  claudeStoppedErrorExit: () => claudeStoppedErrorExit,
   claudeStructuredArgs: () => claudeStructuredArgs,
   claudeStructuredOutputError: () => claudeStructuredOutputError,
   claudeTerminalMatchesIdentity: () => claudeTerminalMatchesIdentity,
+  claudeUnsuccessfulExitMessage: () => claudeUnsuccessfulExitMessage,
   claudeWorktreeArgs: () => claudeWorktreeArgs,
   claudeWorktreeTerminal: () => claudeWorktreeTerminal,
   consumeClaudeRecoveryRequest: () => consumeClaudeRecoveryRequest,
@@ -1206,6 +1212,24 @@ function claudeWorktreeTerminal(result) {
     output: result.structured_output
   };
 }
+function claudeNaturalSuccessExit(exit) {
+  return exit.code === 0 && exit.signal === null;
+}
+function claudeControlledTerminalExit(exit) {
+  return exit.code === 143 && exit.signal === null || exit.code === null && exit.signal === "SIGTERM";
+}
+function claudeSchemaExhaustionExit(exit, terminalSignalSent) {
+  return terminalSignalSent ? exit.code === null && exit.signal === "SIGTERM" : exit.code === 1 && exit.signal === null;
+}
+function claudeStoppedErrorExit(exit) {
+  return exit.code === 1 && exit.signal === null && exit.stopped === true;
+}
+function claudeUnsuccessfulExitMessage(exit, reportedError) {
+  return `Claude native execution exited unsuccessfully: code=${exit.code}, signal=${exit.signal}, result.is_error=${reportedError}`;
+}
+function claudeStoppedAnalysisFailureMatches(message) {
+  return message === claudeUnsuccessfulExitMessage({ code: 1, signal: null }, true);
+}
 function claudeTerminalMatchesIdentity(result, { sessionId, userUuid }) {
   return result.session_id === sessionId && result.user_message_uuid === userUuid && Array.isArray(result.user_message_uuids) && result.user_message_uuids.length === 1 && result.user_message_uuids[0] === userUuid;
 }
@@ -1781,6 +1805,7 @@ __export(codex_exports, {
   codexFrozenPromptIndex: () => codexFrozenPromptIndex,
   codexFrozenToolDefinition: () => codexFrozenToolDefinition,
   codexFrozenToolOutputTokenLimit: () => codexFrozenToolOutputTokenLimit,
+  codexLegacyFrozenCliVersion: () => codexLegacyFrozenCliVersion,
   codexNativeModel: () => codexNativeModel,
   codexNativeTokenUsage: () => codexNativeTokenUsage,
   codexNativeWorktreeArgs: () => codexNativeWorktreeArgs,
@@ -1796,6 +1821,7 @@ __export(codex_exports, {
   verifyCodexFrozenArchive: () => verifyCodexFrozenArchive
 });
 import { createHash as createHash3, randomBytes } from "node:crypto";
+import { execFileSync as execFileSync2 } from "node:child_process";
 import { createConnection } from "node:net";
 import { createInterface } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
@@ -1864,6 +1890,17 @@ function terminalError(turn) {
 function codexPersistentAppServerArgs(socketPath) {
   return ["app-server", "--strict-config", "--listen", `unix://${socketPath}`];
 }
+function codexLegacyFrozenCliVersion(executable = "codex") {
+  let version;
+  try {
+    version = execFileSync2(executable, ["--version"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {
+    throw new CodexNativeProtocolError("unsupported", "this native CLI has no verified frozen-reader host capability evidence");
+  }
+  if (version !== "codex-cli 0.160.0")
+    throw new CodexNativeProtocolError("unsupported", "this native CLI has no verified frozen-reader host capability evidence");
+  return version;
+}
 function encodeClientFrame(opcode, payload) {
   const length = payload.length;
   const header = Buffer.alloc(length < 126 ? 2 : length < 65536 ? 4 : 10);
@@ -1875,6 +1912,9 @@ function encodeClientFrame(opcode, payload) {
   const masked = Buffer.alloc(length);
   for (let i = 0; i < length; i++) masked[i] = payload[i] ^ mask[i % 4];
   return Buffer.concat([header, mask, masked]);
+}
+function legacyStructuredPromptMatches(items, prompt) {
+  return items.map(object2).some((item) => item.type === "userMessage" && Array.isArray(item.content) && item.content.some((input) => object2(input).type === "text" && object2(input).text === prompt));
 }
 var CONTROL_MS, nativeErrorKinds, nativeHttpErrorKinds, CodexNativeAppServer, persistentThreadSourceKinds, CodexPersistentAppServer;
 var init_codex = __esm({
@@ -2323,10 +2363,11 @@ Sec-WebSocket-Key: ${key}\r
         }
         this.#send({ id, error: { code: -32601, message: "Codex persistent transport grants no external tools or approvals" } });
       }
-      /** @param {string} method @param {Packet} params @returns {Promise<Packet>} */
-      async #request(method, params) {
+      /** @param {string} method @param {Packet} params @param {() => void} [beforeSend] @returns {Promise<Packet>} */
+      async #request(method, params, beforeSend) {
         await this.#ready;
         if (this.#failure) throw this.#failure;
+        beforeSend?.();
         const id = ++this.#requestId;
         const timer = setTimeout(() => this.#fail(new CodexNativeProtocolError("transport", `Codex persistent ${method} timed out`)), this.#requestTimeoutMs);
         try {
@@ -2344,6 +2385,14 @@ Sec-WebSocket-Key: ${key}\r
         await this.#request("initialize", { clientInfo: { name: clientName, version }, capabilities: { experimentalApi: true } });
         this.#send({ method: "initialized", params: {} });
       }
+      /** 历史 metadata 和 stop 使用原 app-server 控制连接握手。 */
+      async initializeLegacyControl() {
+        await this.#request("initialize", {
+          clientInfo: { name: "spexcode", title: "SpexCode", version: "0.0.0" },
+          capabilities: { experimentalApi: true, requestAttestation: false }
+        });
+        this.#send({ method: "initialized", params: {} });
+      }
       /** @param {{ cwd: string, readerRuntime?: ReaderConfiguration }} options */
       async auditReadOnly({ cwd, readerRuntime }) {
         const config = object2((await this.#request("config/read", { cwd, includeLayers: false })).config);
@@ -2359,20 +2408,20 @@ Sec-WebSocket-Key: ${key}\r
         if (!Array.isArray(servers.data) || servers.data.length || servers.nextCursor)
           throw new CodexNativeProtocolError("unsupported", "Effective Codex MCP servers are present or could not be audited");
       }
-      /** @param {{ cwd: string, model?: string, dynamicTools?: Packet[] }} options @returns {Promise<PersistentThread>} */
-      async startThread({ cwd, model, dynamicTools }) {
+      /** @param {{ cwd: string, model?: string, dynamicTools?: Packet[] }} options @param {boolean} [legacy] @returns {Promise<PersistentThread>} */
+      async startThread({ cwd, model, dynamicTools }, legacy = false) {
         const result = await this.#request("thread/start", {
           cwd,
           approvalPolicy: "never",
           sandbox: "read-only",
-          ephemeral: false,
+          ...!legacy ? { ephemeral: false } : {},
           ...model ? { model } : {},
           ...dynamicTools ? { dynamicTools } : {}
         });
         const thread = object2(result.thread);
         if (!nonempty(thread.id)) throw failed("Codex returned no persistent thread identity");
         if (thread.ephemeral === true) throw new CodexNativeProtocolError("unsupported", "Codex opened an ephemeral thread for a persistent request");
-        if (model && result.model !== model) throw new CodexNativeProtocolError("unsupported", "Codex did not confirm the requested persistent model");
+        if (!legacy && model && result.model !== model) throw new CodexNativeProtocolError("unsupported", "Codex did not confirm the requested persistent model");
         return (
           /** @type {PersistentThread} */
           thread
@@ -2450,7 +2499,7 @@ Sec-WebSocket-Key: ${key}\r
         return rows.map((row) => {
           const { turnId: owner, item } = object2(row);
           if (owner !== turnId || !nonempty(object2(item).type))
-            throw new CodexNativeProtocolError("stale_result", "Codex persistent item page does not belong to the exact turn");
+            throw new CodexNativeProtocolError("stale_result", "Codex persistent item page names a different turn or has no item type");
           return object2(item);
         });
       }
@@ -2464,6 +2513,135 @@ Sec-WebSocket-Key: ${key}\r
           throw new CodexNativeProtocolError("stale_result", "Codex frozen exact turn or pinned first prompt could not be proven");
         return turn;
       }
+      /**
+       * 在现有持久连接上恢复旧结构化策略。宿主保留身份发布、业务证据和取消边界。
+       * @param {LegacyStructuredRequest} request @param {LegacyStructuredCallbacks} callbacks
+       */
+      async runLegacyStructuredTurn(request, callbacks) {
+        const { cwd, prompt, schema, model, effort, readerRuntime, frozenTool } = request;
+        const { signal, onFrozenRead } = callbacks;
+        let fail = () => {
+        };
+        const failure = (
+          /** @type {Promise<never>} */
+          new Promise((_, reject) => {
+            fail = reject;
+          })
+        );
+        void failure.catch(() => {
+        });
+        const wait = (value) => Promise.race([value, failure]);
+        let { threadId, turnId } = request;
+        let notifyTerminal = () => {
+        };
+        const completed = new Promise((resolve2) => {
+          notifyTerminal = () => resolve2(void 0);
+        });
+        let poll;
+        let releaseIdentity = () => {
+        };
+        const identityReady = new Promise((resolve2) => {
+          releaseIdentity = () => resolve2(void 0);
+        });
+        const terminals = /* @__PURE__ */ new Map();
+        this.onFailure(fail);
+        this.onCompleted((thread, turn) => {
+          if (thread !== threadId) return;
+          terminals.set(turn.id, turn);
+          if (turn.id === turnId) notifyTerminal();
+        });
+        if (frozenTool && onFrozenRead) this.onFrozenToolCall(frozenTool.name, async (call) => {
+          await wait(identityReady);
+          if (call.threadId !== threadId || call.turnId !== turnId)
+            throw new CodexNativeProtocolError("stale_result", "Codex frozen request differs from the exact thread and turn");
+          return await wait(onFrozenRead(call));
+        });
+        const abort = () => {
+          fail(signal?.reason);
+          this.close();
+        };
+        signal?.addEventListener("abort", abort, { once: true });
+        try {
+          signal?.throwIfAborted();
+          await wait(this.initialize("spexcode-structured", "1"));
+          await wait(this.auditReadOnly({ cwd, readerRuntime }));
+          if (threadId) {
+            await wait(this.resumeThread({ threadId, cwd }));
+          } else {
+            if (readerRuntime?.version === 1)
+              throw new CodexNativeProtocolError("unsupported", "legacy frozen runtime can only recover an existing exact native turn");
+            threadId = (await wait(this.startThread({ cwd, model, dynamicTools: frozenTool && [frozenTool] }, true))).id;
+            await wait(callbacks.onThread(threadId));
+          }
+          const turns = request.threadId ? await wait(this.readTurns(threadId, turnId)) : [];
+          if (turnId && !turns.some((turn) => turn.id === turnId))
+            throw new CodexNativeProtocolError("stale_result", "exact structured turn is missing");
+          if (!turnId && turns.length) {
+            if (turns.length !== 1 || !legacyStructuredPromptMatches(await wait(this.readItems(threadId, turns[0].id)), prompt))
+              throw new CodexNativeProtocolError("stale_result", "unacknowledged structured turn cannot be matched to its exact pinned input");
+            turnId = turns[0].id;
+            await wait(callbacks.onTurn(turnId));
+          }
+          if (!turnId) {
+            if (readerRuntime?.version === 1)
+              throw new CodexNativeProtocolError("unsupported", "legacy frozen runtime cannot start a new native turn");
+            await wait(callbacks.onTurnStarting?.());
+            turnId = await wait(this.startTurn({ threadId, cwd, prompt, schema, model, effort }));
+            await wait(callbacks.onTurn(turnId));
+          }
+          const exactTurn = turnId;
+          const recorded = turns.find((turn) => turn.id === exactTurn);
+          if (recorded?.status === "inProgress" && frozenTool)
+            throw new CodexNativeProtocolError("cancellation_pending", "frozen reader recovery requires exact native stop before a new attempt; old RPC response identities cannot be replayed");
+          if (request.turnId && recorded?.status === "inProgress") await wait(callbacks.onTurn(exactTurn));
+          if (recorded && recorded.status !== "inProgress") terminals.set(exactTurn, recorded);
+          releaseIdentity();
+          while (!terminals.has(exactTurn)) {
+            await wait(Promise.race([completed, new Promise((resolve2) => {
+              poll = setTimeout(resolve2, 1e3);
+            })]));
+            clearTimeout(poll);
+            if (!terminals.has(exactTurn)) {
+              const observed = await wait(Promise.race([
+                completed.then(() => void 0),
+                this.readTurns(threadId, exactTurn).then((turns2) => turns2.find((turn) => turn.id === exactTurn))
+              ]));
+              if (observed && observed.status !== "inProgress") terminals.set(exactTurn, observed);
+            }
+          }
+          await wait(this.drainToolCalls());
+          const terminal = (await wait(this.readTurns(threadId, exactTurn))).find((turn) => turn.id === exactTurn);
+          if (!terminal) throw new CodexNativeProtocolError("stale_result", "exact structured turn is missing");
+          if (terminal.status !== "completed") throw terminalError(terminal);
+          const items = await wait(this.readItems(threadId, exactTurn));
+          const finals = items.filter((item) => item.type === "agentMessage" && item.phase === "final_answer");
+          if (finals.length !== 1 || typeof finals[0].text !== "string" || !finals[0].text)
+            throw failed("exact structured turn did not return one final answer");
+          const result = { threadId, turnId: exactTurn, text: finals[0].text, items };
+          if (!frozenTool || readerRuntime?.version !== 2) return result;
+          const thread = await wait(this.readThread(threadId));
+          if (!thread.path) throw new CodexNativeProtocolError("not_materialized", "exact frozen rollout path is not materialized yet");
+          return { ...result, rolloutPath: thread.path };
+        } finally {
+          signal?.removeEventListener("abort", abort);
+          clearTimeout(poll);
+          this.close();
+          releaseIdentity();
+        }
+      }
+      /** @param {{ threadId: string, turnId?: string, prompt: string }} options */
+      async readLegacyStructuredStopTarget({ threadId, turnId, prompt }) {
+        const turns = turnId ? await this.readTurns(threadId, turnId) : (await this.readThread(threadId, true)).turns;
+        if (!Array.isArray(turns)) throw new CodexNativeProtocolError("stale_result", "exact structured thread identity is missing");
+        const candidates = turnId ? turns.map(object2).filter((turn) => turn.id === turnId) : turns.map(object2);
+        const target = candidates[0];
+        if (candidates.length !== 1 || !nonempty(target.id) || typeof target.status !== "string" || !["inProgress", "completed", "interrupted", "failed"].includes(target.status) || !turnId && (!Array.isArray(target.items) || !legacyStructuredPromptMatches(target.items, prompt)))
+          throw new CodexNativeProtocolError("stale_result", "exact structured turn could not be proven; no other turn was interrupted");
+        return (
+          /** @type {{ id: string, status: string }} */
+          { id: target.id, status: target.status }
+        );
+      }
       /** @param {string} threadId @param {boolean} [includeTurns] @returns {Promise<PersistentThread>} */
       async readThread(threadId, includeTurns = false) {
         const result = await this.#request("thread/read", { threadId, includeTurns });
@@ -2474,9 +2652,9 @@ Sec-WebSocket-Key: ${key}\r
           thread
         );
       }
-      /** @param {string} threadId @param {string} turnId */
-      async interrupt(threadId, turnId) {
-        await this.#request("turn/interrupt", { threadId, turnId });
+      /** @param {string} threadId @param {string} turnId @param {() => void} [beforeSend] */
+      async interrupt(threadId, turnId, beforeSend) {
+        await this.#request("turn/interrupt", { threadId, turnId }, beforeSend);
       }
       async refreshModels() {
         const rows = await this.#pages("model/list", { includeHidden: true, limit: 100 });
@@ -2538,8 +2716,10 @@ __export(cursor_exports, {
   CursorAcpError: () => CursorAcpError,
   cursorAcpCancel: () => cursorAcpCancel,
   cursorAcpInitialize: () => cursorAcpInitialize,
+  cursorCloseMatches: () => cursorCloseMatches,
   cursorLaunchArgs: () => cursorLaunchArgs,
   cursorModelArgument: () => cursorModelArgument,
+  cursorPromptQuotaFailure: () => cursorPromptQuotaFailure,
   cursorTerminalCancelled: () => cursorTerminalCancelled,
   cursorTerminalCompleted: () => cursorTerminalCompleted,
   cursorUsageLimitNotice: () => cursorUsageLimitNotice,
@@ -2563,6 +2743,15 @@ function cursorTerminalCompleted(output) {
 }
 function cursorTerminalCancelled(output) {
   return output?.stopReason === "cancelled";
+}
+function cursorCloseMatches(exit, signalled) {
+  return exit?.code === 0 && exit.signal === null || signalled && (exit?.code === 143 && exit.signal === null || exit?.code === null && exit.signal === "SIGTERM");
+}
+function cursorPromptQuotaFailure(request) {
+  return new CursorAcpError("provider_quota_exhausted", "Cursor provider reported quota exhaustion for the original ACP prompt", {
+    threadId: request.sessionId,
+    turnId: request.requestId
+  });
 }
 function cursorModelArgument(value) {
   if (!value.trim() || value.includes("\0")) {
@@ -2676,10 +2865,7 @@ async function observeCursorAcp(stdout, plan, prompt, send, hooks) {
         const status = rpcError.code === 429 || object3(rpcError.data)?.statusCode === 429;
         if (status || cursorUsageLimitNotice(rpcError.message)) {
           hooks.onProviderQuota(request, status ? "http_429" : "usage_limit");
-          throw new CursorAcpError("provider_quota_exhausted", "Cursor provider reported quota exhaustion for the original ACP prompt", {
-            threadId: request.sessionId,
-            turnId: request.requestId
-          });
+          throw cursorPromptQuotaFailure(request);
         }
       }
       if (rpcError?.code === -32e3 && typeof rpcError.message === "string" && /^authentication required[.!]?$/i.test(rpcError.message.trim())) {
@@ -2767,20 +2953,28 @@ var grok_exports = {};
 __export(grok_exports, {
   GROK_MAX_SCHEMA_ARGUMENT_BYTES: () => GROK_MAX_SCHEMA_ARGUMENT_BYTES,
   GrokAcpProtocolError: () => GrokAcpProtocolError,
+  classifyGrokNativeExit: () => classifyGrokNativeExit,
   describeGrokStructuredError: () => describeGrokStructuredError,
   grokAcpArguments: () => grokAcpArguments,
+  grokAcpNativeFailure: () => grokAcpNativeFailure,
   grokAcpProbeArguments: () => grokAcpProbeArguments,
+  grokAcpProtocolFailure: () => grokAcpProtocolFailure,
+  grokCleanNativeExit: () => grokCleanNativeExit,
   grokCompletedTerminalEvidence: () => grokCompletedTerminalEvidence,
   grokInvocationEnvironment: () => grokInvocationEnvironment,
   grokInvocationFlags: () => grokInvocationFlags,
   grokNativeModel: () => grokNativeModel,
   grokSettledOutputMatches: () => grokSettledOutputMatches,
+  grokSettlementTiming: () => grokSettlementTiming,
   grokStderrHasQuotaExhaustion: () => grokStderrHasQuotaExhaustion,
   grokStreamingArguments: () => grokStreamingArguments,
+  grokStreamingQuotaFailure: () => grokStreamingQuotaFailure,
   grokSupportsAcp: () => grokSupportsAcp,
   grokSupportsStreamingSchema: () => grokSupportsStreamingSchema,
   grokTerminalCompleted: () => grokTerminalCompleted,
+  grokTerminalFailure: () => grokTerminalFailure,
   inspectGrokStructuredCli: () => inspectGrokStructuredCli,
+  isGrokNativeExitFailure: () => isGrokNativeExitFailure,
   observeGrokNativeAcp: () => observeGrokNativeAcp,
   observeGrokNativeStderr: () => observeGrokNativeStderr,
   observeGrokNativeStreaming: () => observeGrokNativeStreaming,
@@ -2796,6 +2990,28 @@ function grokNativeModel(value) {
 }
 function grokTerminalCompleted(terminal) {
   return terminal?.stopReason === "end_turn";
+}
+function classifyGrokNativeExit({ terminal, deadline, observedAt, interrupted, observationFailed }) {
+  const completed = grokTerminalCompleted(terminal);
+  if (observedAt !== void 0 && !(completed && observedAt >= deadline)) return "accepted";
+  return completed && !interrupted && !observationFailed ? { code: "failed", message: exitDeadlineMessage, kind: "exit_deadline" } : "unproven";
+}
+function isGrokNativeExitFailure({ code, message }) {
+  return code === "failed" && message === exitDeadlineMessage;
+}
+function grokCleanNativeExit(terminal, exit) {
+  return grokTerminalCompleted(terminal) && exit?.code === 0 && exit.signal === null;
+}
+function grokTerminalFailure(terminal, exit) {
+  if (grokCleanNativeExit(terminal, exit)) return void 0;
+  return { code: "failed", message: "Grok native turn did not complete successfully" };
+}
+function grokAcpNativeFailure(failure, exit, managed) {
+  return failure.kind === "rate_limited" && managed && exit.code === 0 && exit.signal === null ? { code: "provider_quota_exhausted", message: "Grok ACP reported HTTP 429 in the stopped native prompt" } : { code: "failed", message: "Grok native ACP prompt did not complete successfully" };
+}
+function grokAcpProtocolFailure(code, message) {
+  if (code === "cancellation_pending") return { code: "failed", message };
+  return void 0;
 }
 function grokCompletedTerminalEvidence(terminal) {
   return grokTerminalCompleted(terminal) && Array.isArray(terminal.models) && terminal.models.length > 0 && terminal.models.every((model) => typeof model === "string" && !!model.trim());
@@ -3148,11 +3364,17 @@ function observeGrokNativeStderr(stderr, flags) {
 function grokStderrHasQuotaExhaustion({ ended, readError, oversizedLine, usageBalanceExhausted, httpStatuses }) {
   return ended && !readError && !oversizedLine && (usageBalanceExhausted || httpStatuses.includes(429));
 }
-var GROK_MAX_SCHEMA_ARGUMENT_BYTES, GrokAcpProtocolError, requestIds, stopReasons;
+function grokStreamingQuotaFailure(stderr, exit) {
+  if (exit.signal !== null || exit.code === null || exit.code === 0 || !grokStderrHasQuotaExhaustion(stderr)) return void 0;
+  return { code: "provider_quota_exhausted", message: "Grok provider reported quota exhaustion in the stopped native invocation" };
+}
+var GROK_MAX_SCHEMA_ARGUMENT_BYTES, grokSettlementTiming, exitDeadlineMessage, GrokAcpProtocolError, requestIds, stopReasons;
 var init_grok = __esm({
   "src/llm_manager/native/grok.mjs"() {
     init_cli_probe();
     GROK_MAX_SCHEMA_ARGUMENT_BYTES = 64 * 1024;
+    grokSettlementTiming = Object.freeze({ stopMs: 15e3, nativeShutdownGraceMs: 5e3 });
+    exitDeadlineMessage = "Grok native exit was not observed before the settlement deadline";
     GrokAcpProtocolError = class extends Error {
       /** @param {string} message @param {GrokProtocolErrorCode} code */
       constructor(message, code = "invalid_protocol") {
@@ -4057,7 +4279,7 @@ init_zcode();
 import { spawn, spawnSync as spawnSync2 } from "node:child_process";
 import { realpathSync as realpathSync2 } from "node:fs";
 var nativeRuntimeVersion = 1;
-var nativeAdapterContract = 3;
+var nativeAdapterContract = 4;
 var commands = Object.freeze({
   claude: "claude",
   codex: "codex",

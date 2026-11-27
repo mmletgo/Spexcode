@@ -9828,12 +9828,14 @@ for (const [guidance, purpose, historicalProtocol] of [
   assert.deepEqual(readEvidence(commonDir, marker), markerBytes)
 })
 
-for (const precise of [false, true]) for (const mode of precise ? ['live', 'cold', 'review-live', 'review-cold', 'review-missing-finding-cold', 'review-lineage', 'review-lineage-cold', 'review-lineage-native', 'review-identity', 'generation-request', 'missing-draft-ref'] as const : ['live', 'cold', 'business-repair'] as const) test(`P1 deferred implementation同operation仅续P2 precise=${precise} mode=${mode}`, async t => {
+for (const precise of [false, true]) for (const mode of precise ? ['live', 'cold', 'review-live', 'review-cold', 'review-missing-finding-cold', 'review-unknown-path', 'review-location-unbound-native', 'review-location-no-aggregate', 'review-lineage', 'review-lineage-cold', 'review-lineage-native', 'review-identity', 'generation-request', 'missing-draft-ref'] as const : ['live', 'cold', 'business-repair'] as const) test(`P1 deferred implementation同operation仅续P2 precise=${precise} mode=${mode}`, async t => {
   const lineage = mode.startsWith('review-lineage'), reviewAttempt = lineage ? 2 : 1
   const missingFinding = mode === 'review-missing-finding-cold'
-  const reviewFailure = lineage || mode === 'review-live' || mode === 'review-cold' || missingFinding
-  const cold = mode === 'cold' || mode === 'review-cold' || mode === 'review-lineage-cold' || missingFinding
-  const failedCode = missingFinding ? 'review_invalid' : 'structured_output_format_invalid'
+  const invalidLocation = mode === 'review-unknown-path' || mode.startsWith('review-location-')
+  const completedRejection = missingFinding || invalidLocation
+  const reviewFailure = lineage || mode === 'review-live' || mode === 'review-cold' || completedRejection
+  const cold = mode === 'cold' || mode === 'review-cold' || mode === 'review-lineage-cold' || completedRejection
+  const failedCode = missingFinding ? 'review_invalid' : invalidLocation ? 'review_location_binding' : 'structured_output_format_invalid'
   let invalidReview: unknown
   const raw = parseParts(original)!.rawSource
   const f = await fixture(t, { maxAttempts: reviewAttempt + 1, maxCalls: lineage ? 18 : 12, maxRepairs: reviewAttempt, timeoutMs: 180_000 }, false, original, 'project', original, {
@@ -9868,7 +9870,7 @@ for (const precise of [false, true]) for (const mode of precise ? ['live', 'cold
       if (attempt.number > reviewAttempt) {
         assert.match(request.prompt, /完整原回答在草稿文件/)
         const draftPath = /草稿文件=([^\s；]+)/.exec(request.prompt)![1]
-        assert.equal(f.git('show', `${request.worktree!.baseCommit}:${draftPath}`), missingFinding ? JSON.stringify(invalidReview) : 'read ETIMEDOUT')
+        assert.equal(f.git('show', `${request.worktree!.baseCommit}:${draftPath}`), completedRejection ? JSON.stringify(invalidReview) : 'read ETIMEDOUT')
         throw Object.assign(new Error('fixture已到第二次P2独审，不运行Docker'), { code: 'unsupported' })
       }
       if (mode === 'review-lineage-native') {
@@ -9877,9 +9879,12 @@ for (const precise of [false, true]) for (const mode of precise ? ['live', 'cold
         const changed = { ...resource, checkpointRef: writeEvidence(commonDir, { ...checkpoint, result: { ...checkpoint.result!, threadId: 'foreign-source-p1-review' } }) }
         store.findResource = (attemptId, key) => attemptId === attempt.id && key === dispatch.key ? changed : findResource(attemptId, key)
       }
-      if (!missingFinding) return rejectedReviewFixture(f, request, 'read ETIMEDOUT', '受控P2独审最终JSON失败')
+      if (!completedRejection) return rejectedReviewFixture(f, request, 'read ETIMEDOUT', '受控P2独审最终JSON失败')
       const { inputId, candidateDigest, requiredIds } = JSON.parse(request.prompt.split('候选绑定:\n')[1].split('\n')[0]) as { inputId: string; candidateDigest: string; requiredIds: string[] }
-      invalidReview = { inputId, candidateDigest, verdict: 'repair', checkedIds: requiredIds, findings: [] }
+      invalidReview = { inputId, candidateDigest, verdict: 'repair', checkedIds: requiredIds, findings: invalidLocation ? [{
+        kind: 'repair', affectedIds: ['RULE-EXPORT-05'], ruleLocation: '.spec/project/unknown/spec.md#RULE-EXPORT-05', codeLocation: 'src/export.js#ExportService',
+        evidence: '原实现的重复完成条件', counterexample: '重复完成仍保首次结果', message: '核对候选的同一契约',
+      }] : [] }
     }
     if (request.purpose === 'code_generate') {
       if (attempt.number > reviewAttempt) {
@@ -9963,6 +9968,21 @@ for (const precise of [false, true]) for (const mode of precise ? ['live', 'cold
     f.closeForRestart()
     const protocol = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => protocol.close())
     store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) }); f.store = store; f.useStore(store)
+    if (mode === 'review-location-unbound-native') {
+      const originalAttempt = store.listAttempts(f.operation.id).at(-1)!
+      const dispatch = originalAttempt.dispatchPlans.find(item => item.purpose === 'code_review')!
+      const readResource = store.findResource.bind(store), resource = readResource(originalAttempt.id, dispatch.key)!
+      const checkpoint = JSON.parse(readEvidence(commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
+      assert.deepEqual(checkpoint.result?.output, invalidReview)
+      const altered = { ...resource, checkpointRef: writeEvidence(commonDir, { ...checkpoint, result: { ...checkpoint.result!, turnId: 'different-native-turn' } }) }
+      store.findResource = (attemptId, key) => attemptId === originalAttempt.id && key === dispatch.key ? altered : readResource(attemptId, key)
+    }
+    if (mode === 'review-location-no-aggregate') {
+      const readAttempts = store.listAttempts.bind(store)
+      store.listAttempts = id => readAttempts(id).map(attempt => id === f.operation.id && attempt.number === 1
+        ? { ...attempt, checkpointRefs: attempt.checkpointRefs.filter(ref => JSON.parse(readEvidence(commonDir, ref).toString()).stage !== 'generation') }
+        : attempt)
+    }
     result = await runSyncOperation(store, f.operation.id, f.options)
   }
   const attempts = store.listAttempts(f.operation.id), first = attempts[reviewAttempt - 1], second = attempts[reviewAttempt]
@@ -9970,7 +9990,7 @@ for (const precise of [false, true]) for (const mode of precise ? ['live', 'cold
   const later = calls.filter(call => call.attempt === reviewAttempt + 1).map(call => call.purpose)
   t.diagnostic(JSON.stringify({ precise, mode, calls, failure: result.failure, firstP1: firstLocal.resultRef, firstP1Failure: approved.failure, firstFindings: approved.rounds.at(-1)?.findings.filter(finding => finding.severity === 'error'), secondP1: second && local(second)?.resultRef }))
   if (mode !== 'business-repair') assert.equal(approved.reviewPassed, true, '反例也必须先形成合法deferred P1，再改变其原件')
-  if (mode === 'review-lineage-native') {
+  if (mode === 'review-lineage-native' || mode === 'review-location-unbound-native' || mode === 'review-location-no-aggregate') {
     assert.deepEqual(later, [], '当前候选的原P1认证失败，不能回退旧P1或重派模型')
     assert.equal(result.failure?.code, 'review_source_binding')
   } else if (mode === 'live' || mode === 'cold' || reviewFailure) {
@@ -9986,6 +10006,8 @@ for (const precise of [false, true]) for (const mode of precise ? ['live', 'cold
       const generation = (attempt: SyncAttempt) => JSON.parse(readEvidence(commonDir, stages(attempt).find(value => value.stage === 'generation')!.resultRef).toString()) as import('./generation-types.js').GenerationResult
       const before = generation(first), after = generation(second)
       assert.equal(before.candidateValidated, true)
+      assert.equal(before.reviewPassed, false)
+      assert.equal(after.reviewPassed, false)
       assert.deepEqual(after.candidate, before.candidate)
       assert.deepEqual(after.traces.filter(trace => trace.purpose === 'code_generate'), before.traces.filter(trace => trace.purpose === 'code_generate'))
       assert.equal(calls.filter(call => call.purpose === 'code_generate').length, reviewAttempt)
@@ -12076,7 +12098,8 @@ for (const invalidity of ['syntax', 'schema'] as const) for (const formalRetry o
   assert.equal(f.store.listJournals(f.operation.id).length, 0)
 })
 
-for (const legacy of [false, true]) test(`Native completed评审位置字段续改保同candidate/兄弟accept并回原P1：${legacy ? '旧成功原件' : '新早验拒绝'}`, async t => {
+for (const location of ['format', 'legacy-format', 'unknown-id', 'unknown-affected-id', 'wrong-owner'] as const) test(`Native completed评审位置字段续改保同candidate/兄弟accept并回原P1：${location}`, async t => {
+  const legacy = location === 'legacy-format'
   const importPath = '.spec/project/import/import-contract/spec.md', importSpec = original.replaceAll('export-job', 'import-job').replaceAll('EXPORT', 'IMPORT').replaceAll('export-contract', 'import-contract').replaceAll('src/export.js', 'src/import/import.js').replaceAll('tests/export.test.mjs', 'tests/import.test.mjs')
   const definitions = [original, importSpec].map((source, index) => {
     const item = parseContract({ nodeId: index ? 'import-contract' : 'export-contract', path: index ? importPath : contractPath, source }).contract!.items.find(item => item.kind === 'VERIFY')!
@@ -12123,7 +12146,11 @@ for (const legacy of [false, true]) test(`Native completed评审位置字段续�
       output = { inputId: identity.inputId, candidateDigest: identity.candidateDigest, verdict: 'accept', checkedIds: identity.requiredIds, findings: [] }
       if (attempt.number === 1 && identity.requiredIds.includes('AC-EXPORT-03')) {
         badKey = request.requestKey
-        bad = { ...output as import('./generation-types.js').GenerationReview, verdict: 'repair', findings: [{ kind: 'repair', affectedIds: ['AC-EXPORT-03'], ruleLocation: `${contractPath}#AC-EXPORT-03（同一冲突亦见同文件）`, codeLocation: 'src/export.js#ExportService', evidence: '原独审证据必须完整保留', counterexample: '原边界反例', message: '沿原raw及源码复核，不增加授权' }] }
+        const ruleLocation = location === 'unknown-id' ? `${contractPath}#AC-NOT-IN-CANDIDATE`
+          : location === 'wrong-owner' ? `${contractPath} — expanded spec 原边界`
+          : location === 'unknown-affected-id' ? `${contractPath}#AC-EXPORT-03` : `${contractPath}#AC-EXPORT-03（同一冲突亦见同文件）`
+        const affectedIds = [location === 'wrong-owner' ? 'AC-IMPORT-03' : location === 'unknown-affected-id' ? 'AC-NOT-IN-CANDIDATE' : 'AC-EXPORT-03']
+        bad = { ...output as import('./generation-types.js').GenerationReview, verdict: 'repair', findings: [{ kind: 'repair', affectedIds, ruleLocation, codeLocation: 'src/export.js#ExportService', evidence: '原独审证据必须完整保留', counterexample: '原边界反例', message: '沿原raw及源码复核，不增加授权' }] }
         output = bad
       }
       if (attempt.number === 2 || attempt.number === 3) {
@@ -12133,7 +12160,12 @@ for (const legacy of [false, true]) test(`Native completed评审位置字段续�
         f.git('worktree', 'add', '--detach', workspace, seed.baseCommit)
         assert.equal(readFileSync(join(workspace, path), 'utf8'), JSON.stringify(bad))
         assert.match(readFileSync(join(workspace, path.replace(/\.json$/, '.errors.json')), 'utf8'), /ruleLocation/)
-        output = structuredClone(bad); if (attempt.number === 3) (output as typeof bad).findings[0].ruleLocation = `${contractPath}#AC-EXPORT-03`
+        const revised = structuredClone(bad)
+        if (attempt.number === 3) {
+          revised.findings[0].ruleLocation = `${contractPath}#AC-EXPORT-03`
+          revised.findings[0].affectedIds = ['AC-EXPORT-03']
+        }
+        output = revised
         writeFileSync(join(workspace, path), JSON.stringify(output)); execFileSync('git', ['-C', workspace, 'add', path], { stdio: 'pipe' }); execFileSync('git', ['-C', workspace, 'commit', '--allow-empty', '-m', 'continue authenticated review'], { stdio: 'pipe' })
         const actual = nativeWorktreeResult(workspace, seed)
         const fence = { operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }

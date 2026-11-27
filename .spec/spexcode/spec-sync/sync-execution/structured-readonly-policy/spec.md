@@ -21,6 +21,8 @@ related:
 
 原生工作树策略接收 Codex 的固定模型或原生默认值，并保留 [[llm-manager-host]] 已冻结的路线标识。新增 Codex 原生只读和编辑由其独立控制域执行。历史 Codex 冻结读取、工具范围和原证据的验证行为保持。
 
+LLM Manager 提供历史 Codex 的 CLI 版本能力探测、原生模型目录请求及编码、固定配置和启动参数。原生配置和目录的字节保持一致。SpexCode 持有只读边界、冻结描述和实际进程归属，确认原 metadata 进程无装载线程并已退出后才写入冻结描述。
+
 可选 nativeTokenUsage 归 [[structured-session-runtime]] 的版本6终态观测，独立于固定策略、请求摘要及成功证据。已报告计数按真实来源和输入口径解释，缺席保持未知。
 
 可选rejectedOutput明确标记untrusted_final，仅携已认证被拒final与SHA、原请求/schema/input/purpose及原生thread/turn绑定；不进入成功output或固定策略，不授予新权限。错误透传/重放须核原绑定，旧缺席保持；不读取thinking或以任意末条消息猜final。

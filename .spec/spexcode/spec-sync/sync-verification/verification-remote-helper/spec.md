@@ -26,4 +26,6 @@ planned先持久，再创建owned控制历史与staging。每run固定lock inode
 
 materialize的完整帧/半帧EOF、JSON错误、已结束的只读inspect前置失败及文件写入失败，均须在持锁且自身FS操作排空后保存uploaded:false/settled的真实失败receipt，供同资源新序号续传；不能与未知create/start混同。上传受原冻结deadline约束；bootstrap在输入EOF后才启动有限回执等待，超时或worker退出无reply返回pending并关闭自身stdin管道，不杀worker/CLI、不假称停止，不永久驻留。
 
+物化 worker 等待 Brotli 流完整结束，再认证解压后目录。即使已收到末帧，Brotli 解码失败或尾部截断也只产生已排空的上传失败回执。
+
 Docker只接本机实际Unix socket，每次显式绑定原endpoint并核原daemonId，不继承可换主机的DOCKER_HOST/DOCKER_CONTEXT。endpoint为TCP/SSH或非socket时明确unsupported，FS物化/摘要与实际Docker挂载必须处于同一SSH主机。

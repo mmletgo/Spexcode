@@ -8,7 +8,7 @@ import { join, resolve, sep } from 'node:path'
 import { dependencyClosure, parseContract, parseParts } from '@spexcode/spec-core/contracts'
 import { parseCodeEntry, relationClaimsPath } from '@spexcode/spec-core'
 import type { Contract, ContractFinding } from '@spexcode/spec-core/contracts'
-import { candidateReviewError, isEmptyCandidateReviewRejection, candidateReviewLocationError } from './candidate-review.js'
+import { candidateReviewError, isEmptyCandidateReviewRejection, candidateReviewLocationError, candidateReviewLocationBindingRejection } from './candidate-review.js'
 import { actualTreeDiff, exportCandidate, isHostPrivatePath, verifyCandidate } from './candidate.js'
 import type { CodeBehaviorCheckpoints, CodeBehaviorContinuation, CodeBehaviorMaterialRequest, CodeBehaviorPostGateReview } from './code-behavior.js'
 import type { CrossFreezeSource } from './cross-freeze-source.js'
@@ -54,7 +54,7 @@ import { withoutSessionApplicationExecutionWake } from '../session-application.j
 import { assertFrozenBinding, readFrozenManifest, readFrozenRange } from '../frozen-context.js'
 import { verifyStructuredFrozenReadProof } from '../structured-frozen-evidence.js'
 import { assertClaudeStoppedDraftSource, isClaudeFailedAnalysisDraftSource, observeClaudeStoppedWorktreeFailure } from '../claude-structured.js'
-import { assertGrokUnpublishedExitSource, GROK_NATIVE_EXIT_DEADLINE_FAILURE, isGrokNativeExitFailure } from '../grok-structured.js'
+import { assertGrokUnpublishedExitSource, isGrokNativeExitFailure } from '../grok-structured.js'
 import { assertZCodeSettledProviderFailure, assertZCodeStoppedDraftSource, isZCodeEventsRpcTimeout, isZCodeProviderRejection, type ZCodeStructuredExecution } from '../zcode-structured.js'
 import { NATIVE_PERIODIC_OBSERVATION_FAILURE, NATIVE_PROCESS_OBSERVATION_PENDING, nativeWorktreePrompt, nativeWorktreeResult } from '../native-worktree-runtime.js'
 import { readRecord } from '../session-record.js'
@@ -84,7 +84,7 @@ const unique = (ids: readonly string[]): string[] => [...new Set(ids)].sort()
 const behaviorAnalysisRepairCodes = new Set(['behavior_analysis_invalid', 'behavior_author_evidence_invalid', 'behavior_review_failed', 'behavior_output_json', 'behavior_output_schema', 'cross_freeze_impact_review_retry', CODE_BEHAVIOR_REVIEW_COVERAGE_MISSING])
 const structuredAnalysisRepairCodes = new Set(['structured_output_retries_exhausted', 'structured_output_format_invalid', 'native_worktree_result_invalid'])
 const reviewFormatRepairCodes = new Set(['structured_output_retries_exhausted', 'structured_output_format_invalid'])
-const completedReviewRepairCodes = new Set(['review_location_format'])
+const completedReviewRepairCodes = new Set(['review_location_format', 'review_location_binding'])
 const analysisRepairDiagnosticCodes = new Set([...behaviorAnalysisRepairCodes, ...structuredAnalysisRepairCodes])
 const nativeObservationFailures = new Set<string>([NATIVE_PROCESS_OBSERVATION_PENDING, ...Object.values(NATIVE_PERIODIC_OBSERVATION_FAILURE)])
 const isNativeObservationFailure = (failure: Pick<SyncFailure, 'code' | 'message'> | null): boolean =>
@@ -1200,7 +1200,8 @@ export function failedCandidateReviewSource(store: SyncStore, operation: SyncOpe
   const writable = aggregate.p2SpecWritePaths ?? (savedPlan.version === 'sync-coordinator-v2' && savedPlan.direction === 'code_to_spec' ? [] : undefined)
   const completed = result.reviewOutput !== null
   const emptyRejection = result.review === null && isEmptyCandidateReviewRejection(result.reviewOutput, result.failure)
-  if (completed && !emptyRejection) {
+  const locationBindingRejection = result.review === null && result.failure?.code === 'review_location_binding'
+  if (completed && !emptyRejection && !locationBindingRejection) {
     const output = result.reviewOutput as NonNullable<GenerationResult['review']>
     if (!writable || result.failure && !completedReviewRepairCodes.has(result.failure.code) || result.review !== null && canonical(result.review) !== canonical(output)
       || candidateReviewError(output, { inputId: operation.input.id, candidateDigest: candidate.digest, requiredIds: [], actualIds: [], priorIds: [] })?.startsWith('评审 schema')
@@ -1225,9 +1226,9 @@ export function failedCandidateReviewSource(store: SyncStore, operation: SyncOpe
     const state = authenticateNativeRejectedFinal(store, operation, origin, requestKey, result.failure, packet, readNativeRecord)
     if (state.cancellation?.nativeStopped !== true || checkpoint.stop.nativeStatus !== state.cancellation.nativeStatus || checkpoint.requestDigest !== native.requestDigest || checkpoint.operationId !== operation.id || checkpoint.attemptId !== origin.id || checkpoint.inputId !== operation.input.id || checkpoint.expectedSessionId !== result.failure.sessionId || checkpoint.session.sessionId !== result.failure.sessionId || checkpoint.session.threadId !== result.failure.threadId || checkpoint.session.turnId !== result.failure.turnId) return null
   }
-  if (input || emptyRejection) {
+  if (input || emptyRejection || locationBindingRejection) {
     const savedInput = partitionStage<ReturnType<typeof freezeGenerationInput>['inputEvidence']>(store, operation, origin, `${key}:input`, undefined, checkpoints)?.result
-    if (emptyRejection && !savedInput) return null
+    if ((emptyRejection || locationBindingRejection) && !savedInput) return null
     const previous = savedInput ? restoreGenerationInput(savedInput) : { ...input!, requestKey: requestKey.slice(0, -':code_review'.length), reviewRepair: undefined }
     if (input) {
       const base = { ...previous, requestKey: input.requestKey, reviewRepair: undefined }
@@ -1237,6 +1238,10 @@ export function failedCandidateReviewSource(store: SyncStore, operation: SyncOpe
     const dispatch = origin.dispatchPlans.find(item => item.key === requestKey && item.purpose === 'code_review')
     if (!dispatch || !matchesScheduledNativeReview(operation, origin, dispatch, native.request, expected.request)) return null
     if (emptyRejection && candidateReviewError(result.reviewOutput, expected.binding) !== result.failure?.message) return null
+    if (locationBindingRejection) {
+      if (!candidateReviewLocationBindingRejection(result.reviewOutput, result.failure, expected.binding, expected.candidateFiles, writable) || !checkpoint.result) return null
+      verifyGenerationReviewDraft(operation.input.source.commonDir, expected.request, checkpoint.result, expected.draftBinding)
+    }
   }
   return { resultRef: source.resultRef, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef }
 }
@@ -3237,10 +3242,23 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         historicalStageIndexes.set(prior.id, checkpoints)
         return checkpoints
       }
-      const reviewSources = store.listAttempts(operation.id).filter(prior => prior.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(prior.status)).reverse().map(prior => ({ owner: operation, prior }))
+      const reviewHistory = store.listAttempts(operation.id).filter(prior => prior.number < attempt!.number && ['failed', 'superseded', 'settled'].includes(prior.status)).reverse().map(prior => ({ owner: operation, prior }))
         .concat(handoffParent ? store.listAttempts(handoffParent.id).filter(prior => ['failed', 'superseded', 'settled'].includes(prior.status)).reverse().map(prior => ({ owner: handoffParent, prior })) : [])
-        .filter(({ owner, prior }) => reuseBehaviorDependentStages(store, owner, prior, historyCheckpoints(owner, prior)))
+      const reviewSources = reviewHistory.filter(({ owner, prior }) => reuseBehaviorDependentStages(store, owner, prior, historyCheckpoints(owner, prior)))
       let reviewContinuation: { operation: SyncOperation; attempt: SyncAttempt; plan: SyncPartitionPlan; generation: SavedGeneration; failedReviewKeys: string[]; elaboration?: ApprovedElaborationSource } | undefined
+      let locationFailureAttempt: string | undefined
+      if (options.plan.version === 'sync-coordinator-v2') for (const { owner, prior } of reviewHistory) {
+        const checkpoints = historyCheckpoints(owner, prior)
+        const generation = partitionStage<SavedGeneration>(store, owner, prior, 'generation', undefined, checkpoints)?.result
+        const bindingFailure = generation?.failure?.code === 'review_location_binding' || !generation?.reviewPassed && checkpoints.json.some(({ value }) => {
+          const key = (value as Stage).stage
+          if (!key?.endsWith(':candidate-review')) return false
+          const result = partitionStage<SavedGeneration>(store, owner, prior, key, undefined, checkpoints)?.result
+          return result?.candidateValidated && result.failure?.code === 'review_location_binding'
+        })
+        if (bindingFailure) locationFailureAttempt = prior.id
+        if (bindingFailure || generation) break
+      }
       if (readonlyBase && !readonlyOwnerRepair && !refinement && options.plan.version === 'sync-coordinator-v2') {
         for (const { owner, prior } of reviewSources) {
           const checkpoints = historyCheckpoints(owner, prior)
@@ -3302,6 +3320,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           break
         }
       }
+      if (locationFailureAttempt && reviewContinuation?.attempt.id !== locationFailureAttempt) fail('review_source_binding', '原独审引用错误缺少相同候选与真实已结算审查原件')
       if (handoffParent && !reviewContinuation && !store.listAttempts(operation.id).some(prior => stage<SavedGeneration>(store, operation, prior, 'generation')?.candidate)) fail('review_handoff_binding', '显式交接未认证原候选的可续审分区，不能重做P0/P1')
       const runner = options.runner ? injectedRunner(store, fence, options.runner) : createAttemptRunner(store, fence, { retireSettledWorktrees: true, ...options.nativeExecution })
       if (options.plan.version === 'sync-coordinator-v2' && options.plan.agentWorkflow === 'native-worktree-v1'
@@ -3497,7 +3516,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
               const providerDraft = providerFailure && (providerRetry || owner.id === operation.id && prior.status === 'superseded')
               const priorGuidance = grok && allowCommitted ? stage<{ generationGuidance?: ElaborationGenerationGuidance }>(store, owner, prior, 'elaboration-draft-protocol', 'automatic', checkpoints)?.generationGuidance : undefined
               const grokDraft = grok && allowCommitted && !binding?.interfaceSeed && request.binding.sourceInputId === operation.input.id
-                && record?.archived && state?.state === 'failed' && state.error === GROK_NATIVE_EXIT_DEADLINE_FAILURE
+                && record?.archived && state?.state === 'failed' && isGrokNativeExitFailure({ code: 'failed', message: state.error })
                 && source.result.status === 'failed' && failure?.code === 'failed' && failure.message === state.error && failure.sessionId === native.expectedSessionId
                 && (priorGuidance === ELABORATION_GENERATION_GUIDANCE_V2 || priorGuidance === ELABORATION_GENERATION_GUIDANCE_V3 || priorGuidance === ELABORATION_GENERATION_GUIDANCE_V4 || priorGuidance === ELABORATION_GENERATION_GUIDANCE)
                 && canonical(source.result.partitionBinding) === canonical(binding) && priorElaborationInputMatches(prior, binding, owner, checkpoints)
@@ -4040,7 +4059,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
             const claudeFailed = !zcode && !grok && purpose === 'code_behavior_analyze' && isClaudeFailedAnalysisDraftSource(state)
             if (claudeFailed && !unreservedAnalysis && !frozenClaude || frozenClaude && !claudeFailed) continue
             if (grok) {
-              if (!unreservedAnalysis || !record?.archived || state.state !== 'failed' || state.error !== GROK_NATIVE_EXIT_DEADLINE_FAILURE
+              if (!unreservedAnalysis || !record?.archived || state.state !== 'failed' || !isGrokNativeExitFailure({ code: 'failed', message: state.error })
                 || owner.id !== operation.id && !settledApprovalSource(store, owner)) continue
             } else if (state.state !== 'cancelled' && !(zcode && state.state === 'failed') && !claudeFailed || !(zcode ? state.zcodeNative : state.claudeNative) || !state.threadId || !state.turnId || !checkpoint.session.threadId || !checkpoint.session.turnId || state.failedWorktree || state.resultWorktree || state.rejectedOutput || state.errorCode && !completedEventsRpc && !stoppedTransport) continue
             const proof = authenticateNativeFailure(store, owner, prior, requestKey, { code: completedEventsRpc ? 'native_rpc_timeout' : stoppedTransport ? 'native_turn_transport_failed' : 'failed', message: state.state === 'failed' ? state.error! : prior.failure?.message ?? '', sessionId: checkpoint.session.sessionId, threadId: checkpoint.session.threadId ?? undefined, turnId: checkpoint.session.turnId ?? undefined }, readRecord, true)

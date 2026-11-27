@@ -1,6 +1,6 @@
 import { Ajv } from 'ajv'
 import { isDeepStrictEqual } from 'node:util'
-import { candidateReviewError, candidateReviewLocationError, candidateReviewSchema, isEmptyCandidateReviewRejection, contractOmissionBound, CANDIDATE_REVIEW_INSTRUCTIONS } from './candidate-review.js'
+import { candidateReviewContracts, candidateReviewError, candidateReviewLocationBindingRejection, candidateReviewLocationError, candidateReviewSchema, isEmptyCandidateReviewRejection, contractOmissionBound, CANDIDATE_REVIEW_INSTRUCTIONS } from './candidate-review.js'
 import type { CandidateReviewBinding } from './candidate-review.js'
 export { contractOmissionBound, GENERATION_REVIEW_SCHEMA } from './candidate-review.js'
 import type { Contract } from '@spexcode/spec-core/contracts'
@@ -178,9 +178,10 @@ export function generationReviewRequest(input: GenerationInput, candidate: Candi
       const originalTrace = prior.traces.find(trace => trace.purpose === 'code_review')
       const schemaError = candidateReviewError(prior.reviewOutput, reviewBinding)
       const emptyRejection = prior.review === null && prior.failure && isEmptyCandidateReviewRejection(prior.reviewOutput, prior.failure) && schemaError === prior.failure.message
-      if (schemaError && !emptyRejection) throw new StructuredSessionError('stale_result', schemaError)
-      const protocolError = emptyRejection ? prior.failure : candidateReviewLocationError(prior.reviewOutput as GenerationReview, [...candidateFiles].filter(([path]) => path.startsWith('.spec/') && path.endsWith('/spec.md')).flatMap(([path, source]) => parseContract({ nodeId: path.split('/').at(-2)!, path, source }).contract ?? []), specWritePaths)
-      if (!originalTrace || !protocolError || !emptyRejection && protocolError.code !== 'review_location_format' || checkpoint.status !== 'completed' || checkpoint.phase !== 'removed' || !checkpoint.result || checkpoint.result.sessionId !== originalTrace.sessionId || checkpoint.result.threadId !== originalTrace.threadId || checkpoint.result.turnId !== originalTrace.turnId || checkpoint.result.resultDigest !== originalTrace.resultDigest || originalTrace.inputDigest !== prior.inputDigest || originalTrace.resultDigest !== contentHash(JSON.stringify(prior.reviewOutput)) || JSON.stringify(checkpoint.result.output) !== JSON.stringify(prior.reviewOutput)) throw new StructuredSessionError('stale_result', 'review draft material differs from authenticated completed Native output')
+      const bindingRejection = prior.review === null && candidateReviewLocationBindingRejection(prior.reviewOutput, prior.failure, reviewBinding, candidateFiles, specWritePaths)
+      if (schemaError && !emptyRejection && !bindingRejection) throw new StructuredSessionError('stale_result', schemaError)
+      const protocolError = emptyRejection || bindingRejection ? prior.failure : candidateReviewLocationError(prior.reviewOutput as GenerationReview, candidateReviewContracts(candidateFiles), specWritePaths)
+      if (!originalTrace || !protocolError || !emptyRejection && !bindingRejection && protocolError.code !== 'review_location_format' || checkpoint.status !== 'completed' || checkpoint.phase !== 'removed' || !checkpoint.result || checkpoint.result.sessionId !== originalTrace.sessionId || checkpoint.result.threadId !== originalTrace.threadId || checkpoint.result.turnId !== originalTrace.turnId || checkpoint.result.resultDigest !== originalTrace.resultDigest || originalTrace.inputDigest !== prior.inputDigest || originalTrace.resultDigest !== contentHash(JSON.stringify(prior.reviewOutput)) || JSON.stringify(checkpoint.result.output) !== JSON.stringify(prior.reviewOutput)) throw new StructuredSessionError('stale_result', 'review draft material differs from authenticated completed Native output')
       if (!request.worktree) throw new StructuredSessionError('unsupported', 'review draft repair requires the original native worktree workflow')
       text = JSON.stringify(prior.reviewOutput); error = { code: protocolError.code, message: protocolError.message }; trace = originalTrace
     } else {
@@ -314,7 +315,7 @@ export async function runGeneration(supplied: GenerationInput, options: Generati
     const commonReviewError = candidateReviewError(reviewOutput, { inputId: input.snapshot.id, candidateDigest: result.candidate.digest, requiredIds: [], actualIds: [], priorIds: [] })
     if (commonReviewError?.startsWith('评审 schema')) throw Object.assign(new Error(commonReviewError), { code: 'review_schema' })
     const review = reviewOutput as GenerationReview
-    const candidateContracts = [...candidateFiles].filter(([path]) => path.startsWith('.spec/') && path.endsWith('/spec.md')).flatMap(([path, source]) => parseContract({ nodeId: path.split('/').at(-2)!, path, source }).contract ?? [])
+    const candidateContracts = candidateReviewContracts(candidateFiles)
     const locationError = input.nativeWorktree && options.reviewSpecWritePaths !== undefined ? candidateReviewLocationError(review, candidateContracts, options.reviewSpecWritePaths) : null
     if (locationError) throw Object.assign(new Error(locationError.message), { code: locationError.code })
     const error = reviewError(input, review, reviewBinding, candidateContracts, options.reviewSpecWritePaths)

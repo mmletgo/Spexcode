@@ -63,6 +63,12 @@ from the record and still require its exact session/thread generation binding; a
 falls through to the project's legacy endpoint. The close contract is [[archive]], and structured execution owns
 the policy identity in [[structured-session-runtime]].
 
+Old structured read-only records also use the installed LLM Manager's Codex app-server adapter. Manager owns
+the legacy request and tool frames, turn and terminal interpretation, and exact read and interrupt RPCs. The
+host binds the original runtime generation, frozen bytes, read receipts, and result coverage. Legacy frozen
+runtime version 1 may only observe its original turn. An interrupt acknowledgement alone cannot settle a
+turn. The host rechecks the generation immediately before the request and verifies the original turn after it.
+
 Manager-owned native worktree turns use the per-turn runtime owned by [[codex-native-worktree-structured]].
 The shared descriptor resolver emits no generation for those records. Their exact stopped-process evidence
 governs stop, close and retirement.

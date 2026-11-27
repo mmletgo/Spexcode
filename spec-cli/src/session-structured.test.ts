@@ -560,7 +560,8 @@ test('outer runtime realm permits rollout writes and rejects source/config write
     const inside = join(root, 'realm/data/probe'); mkdirSync(inside)
     const config = join(root, 'realm/data/codex-home/config.toml')
     execFileSync('/usr/bin/sandbox-exec', ['-f', join(root, 'realm/policy.sb'), '/bin/sh', '-c', 'printf allowed > "$1/result"; printf forbidden > "$2" 2>/dev/null; rm "$3" 2>/dev/null; test -f "$1/result"', 'probe', inside, protectedFile, config], { stdio: 'ignore' })
-    assert.equal(readFileSync(protectedFile, 'utf8'), 'original'); assert.ok(readFileSync(config, 'utf8').includes('sandbox_mode = "read-only"'))
+    assert.equal(readFileSync(protectedFile, 'utf8'), 'original')
+    assert.equal(readFileSync(config, 'utf8'), 'approval_policy = "never"\nsandbox_mode = "read-only"\nweb_search = "disabled"\n[features]\napps = false\nplugins = false\nhooks = false\nmulti_agent = false\nshell_tool = false\ncode_mode = false\ncode_mode_host = false\nunified_exec = false\n[mcp_servers]\n')
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 

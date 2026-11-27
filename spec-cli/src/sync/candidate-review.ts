@@ -1,5 +1,5 @@
 import { Ajv } from 'ajv'
-import type { Contract } from '@spexcode/spec-core/contracts'
+import { parseContract, type Contract } from '@spexcode/spec-core/contracts'
 import type { ElaborationRunner, ElaborationSessionRequest, ElaborationTrace } from './elaboration-types.js'
 import type { GenerationFinding, GenerationReview } from './generation-types.js'
 import { contentHash } from './snapshot.js'
@@ -65,7 +65,13 @@ export function isEmptyCandidateReviewRejection(output: unknown, failure: { code
   return review.verdict !== 'accept' && review.findings.length === 0
 }
 
-/** 格式不合格的定位只允许续改原评审；真实路径、ID及owner绑定错误不能取得修复路由。 */
+/** 评审定位以实际 Git 候选上可解析的契约为准。 */
+export function candidateReviewContracts(files: ReadonlyMap<string, string>): Contract[] {
+  return [...files].filter(([path]) => path.startsWith('.spec/') && path.endsWith('/spec.md'))
+    .flatMap(([path, source]) => parseContract({ nodeId: path.split('/').at(-2)!, path, source }).contract ?? [])
+}
+
+/** 格式与绑定错误属于独审协议拒绝，不取得业务写权限。 */
 export function candidateReviewLocationError(review: GenerationReview, contracts: readonly Contract[], writablePaths: readonly string[] = []): { code: 'review_location_format' | 'review_location_binding'; message: string } | null {
   if (review.verdict !== 'repair') return null
   const items = contracts.flatMap(contract => contract.items)
@@ -93,6 +99,17 @@ export function candidateReviewLocationError(review: GenerationReview, contracts
     return { code: 'review_location_binding', message: `findings[${index}].ruleLocation没有唯一实际候选path/ID：${JSON.stringify(finding.ruleLocation)}` }
   }
   return format
+}
+
+/** 冷复现原引用拒因，保留已验证的候选身份与覆盖；错误引用只作为复审诊断。 */
+export function candidateReviewLocationBindingRejection(output: unknown, failure: { code: string; message: string } | null, binding: CandidateReviewBinding, files: ReadonlyMap<string, string>, writablePaths: readonly string[] | undefined): boolean {
+  if (failure?.code !== 'review_location_binding' || !writablePaths || !validateReview(output)) return false
+  const review = output as GenerationReview
+  const checked = new Set(review.checkedIds), actual = new Set(binding.actualIds)
+  if (review.inputId !== binding.inputId || review.candidateDigest !== binding.candidateDigest || checked.size !== review.checkedIds.length
+    || review.checkedIds.some(id => !actual.has(id)) || binding.requiredIds.some(id => !checked.has(id))) return false
+  const rejection = candidateReviewLocationError(review, candidateReviewContracts(files), writablePaths)
+  return rejection?.code === failure.code && rejection.message === failure.message
 }
 
 /** 只读独立审查经既有 runner 派发，绑定完整输入和真实 native 身份。 */

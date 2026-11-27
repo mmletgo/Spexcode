@@ -17,7 +17,7 @@ related:
 
 ## expanded spec
 
-P2 候选机械检查通过、原 Native 已完成而拒绝结论无 finding 时，核验原冻结局部请求、候选和真实已移除资源，以原候选续派该独审。可复用的兄弟审查和已审 P1 沿各自原检查点，后续获取的合格审查按原门禁处理。
+P2 候选机械检查通过、原 Native 已完成而拒绝结论无 finding 或存在 [[sync-candidate-review]] 的引用绑定错误时，核验原冻结局部请求、候选和真实已移除资源，以原候选续派该独审。引用绑定错误缺少原候选、冻结请求或已结算审查证明时，以 review_source_binding 停止，保留原失败和候选。可复用的兄弟审查和已审 P1 沿各自原检查点，后续获取的合格审查按原门禁处理。
 
 新 Code→Spec 普通 `candidate_review` 接续在原已审 owner、局部输入和冻结候选认证后，把 `reviewed-owner-v1` 随该 owner 的返修来源记录保存，再派发 [[sync-partition-execution]]。原来源的 marker 和 CAS 引用随冷恢复复验；既有记录或已保留请求无版本时原样重放。升级与回滚沿 [[sync-migrations]]。
 
