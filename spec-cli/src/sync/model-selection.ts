@@ -1,21 +1,11 @@
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
-import { llmManagerRequested, llmManagerSettingsPath, LlmManagerHostError, resolveManagedRoute } from '../llm-manager-host.js'
+import { llmManagerRequested, llmManagerSettingsPath, LlmManagerHostError, loadManagerNativeRuntime, resolveManagedRoute } from '../llm-manager-host.js'
 import { managedModel, managedRoute, type ManagedRoute } from '../llm-manager-route.js'
 import { SyncApplicationError } from './settings.js'
 
 export const DEFAULT_SYNC_MODEL = 'gpt-6.1-sol'
 export const DEFAULT_NATIVE_SYNC_MODEL = 'claude:default'
 const MANAGED_SYNC_MODEL = 'llm-manager'
-const WORKTREE_PROGRAMS = { cursor: 'cursor-agent', claude: 'claude', zcode: 'zcode', grok: 'grok', codex: 'codex' }
-const WORKTREE_VENDORS = Object.keys(WORKTREE_PROGRAMS)
-const run = promisify(execFile)
-
-function installed(program: string): Promise<boolean> {
-  return run('/usr/bin/which', [program], {
-    encoding: 'utf8', env: { PATH: process.env.PATH }, timeout: 1000, maxBuffer: 4096,
-  }).then(({ stdout }) => Boolean(stdout.trim()), () => false)
-}
+const WORKTREE_VENDORS = ['cursor', 'claude', 'zcode', 'grok', 'codex'] as const
 
 /** 网页只显示宿主的公开选路能力，实际设置经同源管理入口。 */
 export async function readSyncModelSettings() {
@@ -26,13 +16,16 @@ export async function readSyncModelSettings() {
       throw error
     })
     : Promise.resolve(null)
-  const [nativeVendors, selection] = await Promise.all([
-    Promise.all(Object.entries(WORKTREE_PROGRAMS).map(async ([id, program]) => ({ id, installed: await installed(program) }))),
+  const [runtime, selection] = await Promise.all([
+    Promise.resolve().then(loadManagerNativeRuntime).catch(error => {
+      if (error instanceof LlmManagerHostError) return null
+      throw error
+    }),
     resolveManager,
   ])
   const settingsPath = llmManagerSettingsPath()
   return {
-    nativeVendors,
+    nativeVendors: WORKTREE_VENDORS.map(id => ({ id, installed: Boolean(runtime?.findNativeExecutable(id)) })),
     llmManager: { configured: authoritative, ...(authoritative ? { authoritative: true } : {}), ...(settingsPath ? { settingsPath } : {}),
       ...(selection ? { selection: selection.vendor + ':' + selection.model } : {}) },
   }
