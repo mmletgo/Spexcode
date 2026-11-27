@@ -378,9 +378,10 @@ function authenticatedDraftResult(store: SyncStore, owner: SyncOperation, prior:
   if (resource) {
     const native = JSON.parse(readEvidence(owner.input.source.commonDir, resource.plan.planBlob).toString()) as NativeRunPlan
     const checkpoint = JSON.parse(readEvidence(owner.input.source.commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
-    if (!draft && inlineV1RepairScope(owner)) {
+    const edit = draft !== undefined || readCompletedRecord !== undefined
+    if (!edit && inlineV1RepairScope(owner)) {
       if (native.request.worktree || native.request.model !== syncModel(owner)) return null
-    } else if (native.request.worktree?.mode !== (draft ? 'edit' : 'read') || native.request.frozenContext) return null
+    } else if (native.request.worktree?.mode !== (edit ? 'edit' : 'read') || native.request.frozenContext) return null
     if (!checkpoint.result || checkpoint.nativeState !== 'completed') {
       if (readCompletedRecord) return null
       const failure = checkpoint.failure, packet = failure?.rejectedOutput, witness = failure?.failedWorktree
@@ -3670,17 +3671,17 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         if (frozenClaude) fail('behavior_draft_material_binding', '已冻结的Claude物理稿缺少仍可认证的原owner和停止来源')
         return null
       }
-      const replayBehaviorDraft: NonNullable<CodeBehaviorCheckpoints['replayDraft']> = (requestKey, purpose, draft) => {
-        assertMaterialFence()
-        const current = store.readAttempt(fence!.attemptId)
-        const resource = store.findResource(current.id, requestKey)
+      const replayBehaviorDraft: NonNullable<CodeBehaviorCheckpoints['replayDraft']> = (requestKey, purpose) => {
+        const resource = store.findResource(fence!.attemptId, requestKey)
         if (resource?.phase !== 'removed') return null
         const checkpoint = JSON.parse(readEvidence(operation.input.source.commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
         if (checkpoint.status !== 'completed') return null
-        const authenticated = authenticatedDraftResult(store, operation, current, requestKey, purpose, draft, options.nativeExecution?.runtime?.readRecord ?? readRecord)
+        assertMaterialFence()
+        const current = store.readAttempt(fence!.attemptId)
+        const authenticated = authenticatedDraftResult(store, operation, current, requestKey, purpose, undefined, options.nativeExecution?.runtime?.readRecord ?? readRecord)
         const request = authenticated?.request, result = authenticated?.result
-        if (draft.sourceInputId !== operation.input.id || !request || !result || !matchesAttemptNativeModel(operation, current, request)) {
-          fail('behavior_continuation_binding', 'P0 同次回放缺少可认证的原 Native 完成结果或对应 Git 稿', [resource.checkpointRef])
+        if (!request || !result?.worktree || !matchesAttemptNativeModel(operation, current, request)) {
+          fail('behavior_continuation_binding', 'P0 同次回放缺少可认证的原 Native 完成结果', [resource.checkpointRef])
         }
         return { request, result }
       }

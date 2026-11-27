@@ -11300,7 +11300,8 @@ for (const mode of ['analysis', 'review-execution', 'review-format', 'review-the
   assert.deepEqual(JSON.parse(readEvidence(commonDir, carried.find(stage => stage.stage === `${key}:provenance`)!.resultRef).toString()), { fromOperationId: old.id, fromAttemptId: prior.id, resultRef: accepted.resultRef })
 })
 
-for (const missingCanonical of [false, true]) test(`Native P0同次尝试冷重进回放结算作者稿并保留独立批准${missingCanonical ? '（原会话缺席）' : ''}`, async t => {
+for (const mode of ['已捕获', '原会话缺席', '承接稿未替换', '首次稿未捕获'] as const) test(`Native P0同次尝试冷重进回放结算作者稿并保留独立批准（${mode}）`, async t => {
+  const missingCanonical = mode === '原会话缺席'
   const importPath = '.spec/project/import-contract/spec.md'
   const importSpec = original.replaceAll('export-job', 'import-job').replaceAll('EXPORT', 'IMPORT').replaceAll('export-contract', 'import-contract').replaceAll('src/export.js', 'src/import.js').replaceAll('tests/export.test.mjs', 'tests/import.test.mjs')
   const f = await fixture(t, { maxAttempts: 2, maxCalls: 12, maxRepairs: 1, timeoutMs: 120_000 }, false, original, 'project', original, {
@@ -11358,17 +11359,28 @@ for (const missingCanonical of [false, true]) test(`Native P0同次尝试冷重�
       throw interrupted
     }
   }
-  interruptBeforeSettlement(f.store)
+  const interruptBeforeCapture = (store: SyncStore, callCount: number) => {
+    const checkpoint = store.checkpoint.bind(store)
+    store.checkpoint = (fence, ref) => {
+      const wrapper = JSON.parse(readEvidence(commonDir, ref).toString()) as { stage: string }
+      if (wrapper.stage.endsWith(':analysis:continuation') && nativeCalls.length === callCount) {
+        throw new SyncStoreError('SYNC_FENCE_EXPIRED', '夹具在 Native 结算后、保存本次草稿检查点前中断')
+      }
+      return checkpoint(fence, ref)
+    }
+  }
+  if (mode === '首次稿未捕获') interruptBeforeCapture(f.store, 3)
+  else interruptBeforeSettlement(f.store)
   const first = await runSyncOperation(f.store, operationId, f.options)
   assert.equal(first.status, 'recovery_required', JSON.stringify(first.failure))
-  assert.deepEqual(failures, ['behavior_author_evidence_invalid'])
+  assert.deepEqual(failures, mode === '首次稿未捕获' ? [] : ['behavior_author_evidence_invalid'])
   const [attempt] = f.store.listAttempts(operationId)
   assert.equal(attempt.status, 'running')
   assert.deepEqual(nativeCalls.map(call => call.purpose), ['code_behavior_analyze', 'code_behavior_review', 'code_behavior_analyze'])
   const originalResources = f.store.listResources(attempt.id)
   assert.equal(originalResources.length, 3)
   assert.ok(originalResources.every(resource => resource.phase === 'removed'))
-  const stages = (store: SyncStore) => readSyncCheckpointStageIndex(store, store.readOperation(operationId), store.readAttempt(attempt.id)).json.map(item => item.value as { stage: string; resultRef: BlobRef })
+  const stages = (store: SyncStore, attemptId = attempt.id) => readSyncCheckpointStageIndex(store, store.readOperation(operationId), store.readAttempt(attemptId)).json.map(item => item.value as { stage: string; resultRef: BlobRef })
   const originalStages = stages(f.store), approved = originalStages.find(stage => /^partition:[^:]+:analysis$/.test(stage.stage))!
   const rejected = originalStages.find(stage => stage.stage === 'partition:analysis-failures')!
   assert.ok(approved)
@@ -11381,8 +11393,28 @@ for (const missingCanonical of [false, true]) test(`Native P0同次尝试冷重�
   rejectedBytes = readObject(commonDir, readTree(commonDir, originalResult.result!.worktree!.tree).find(entry => entry.path === draftPath)!.oid)
   assert.equal(readRecord(originalRequest.expectedSessionId)?.archived, true)
   f.closeForRestart()
+  if (mode === '首次稿未捕获') {
+    const part = nativeCalls[2].key.split(':partition:')[1].split(':')[0]
+    const continuationKey = `partition:${part}:analysis:continuation`
+    assert.equal(originalStages.some(stage => stage.stage === continuationKey), false)
+    const protocol = openProtocol(join(f.parent, 'sync.sqlite'))
+    t.after(() => protocol.close())
+    const store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) })
+    interruptBeforeSettlement(store)
+    canonicalReads.clear()
+    const outcome = await runSyncOperation(store, operationId, f.options)
+    assert.equal(outcome.status, 'recovery_required', JSON.stringify(outcome.failure))
+    assert.deepEqual(failures, ['behavior_author_evidence_invalid'])
+    assert.ok(canonicalReads.has(originalRequest.expectedSessionId))
+    const saved = stages(store).find(stage => stage.stage === continuationKey)!
+    const continuation = JSON.parse(readEvidence(commonDir, saved.resultRef).toString()) as CodeBehaviorContinuation
+    assert.equal(continuation.drafts.code_behavior_analyze?.resultCommit, originalResult.result!.worktree!.headCommit)
+    assert.equal(store.readOperation(operationId).callsUsed, 3)
+    assert.deepEqual(store.listResources(attempt.id), originalResources)
+    return
+  }
   const statuses: string[] = []
-  const reentries = missingCanonical ? 0 : 2
+  const reentries = mode === '已捕获' ? 2 : 0
   for (let ordinal = 1; ordinal <= reentries; ordinal++) {
     const protocol = openProtocol(join(f.parent, 'sync.sqlite'))
     try {
@@ -11409,14 +11441,17 @@ for (const missingCanonical of [false, true]) test(`Native P0同次尝试冷重�
   assert.equal(nativeCalls.length, 3)
   let protocol = openProtocol(join(f.parent, 'sync.sqlite'))
   t.after(() => protocol.close())
-  const store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) })
+  let store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) })
   assert.equal(store.requestControl(operationId, 'pause').phase, 'paused')
   assert.equal(store.requestControl(operationId, 'run').phase, 'queued')
-  if (missingCanonical) {
-    interruptBeforeSettlement(store)
+  let settledAuthor: NativeRunCheckpoint['result']
+  if (mode !== '已捕获') {
+    if (missingCanonical) interruptBeforeSettlement(store)
+    else interruptBeforeCapture(store, 4)
     const second = await runSyncOperation(store, operationId, f.options)
     assert.equal(second.status, 'recovery_required', JSON.stringify(second.failure))
-    assert.equal(failures.at(-1), 'behavior_author_evidence_invalid')
+    if (missingCanonical) assert.equal(failures.at(-1), 'behavior_author_evidence_invalid')
+    else assert.match(second.failure?.message ?? '', /保存本次草稿检查点前中断/)
     const [, carried] = store.listAttempts(operationId)
     assert.equal(carried.status, 'running')
     const resources = store.listResources(carried.id)
@@ -11428,27 +11463,50 @@ for (const missingCanonical of [false, true]) test(`Native P0同次尝试冷重�
     assert.equal(checkpoint.status, 'completed')
     const worktree = checkpoint.result!.worktree!
     assert.notEqual(worktree.baseCommit, worktree.headCommit)
-    assert.equal(worktree.baseTree, worktree.tree, '正常空提交后原种子与结果字节完全一致')
+    if (missingCanonical) assert.equal(worktree.baseTree, worktree.tree, '正常空提交后原种子与结果字节完全一致')
+    else {
+      assert.notEqual(worktree.baseTree, worktree.tree)
+      assert.equal(readRecord(plan.expectedSessionId)?.archived, true)
+      const saved = stages(store, carried.id).find(stage => stage.stage.endsWith(':analysis:continuation'))!
+      const continuation = JSON.parse(readEvidence(commonDir, saved.resultRef).toString()) as CodeBehaviorContinuation
+      assert.equal(continuation.drafts.code_behavior_analyze?.resultCommit, originalResult.result!.worktree!.headCommit)
+      assert.notEqual(continuation.drafts.code_behavior_analyze?.resultCommit, worktree.headCommit)
+      settledAuthor = checkpoint.result
+    }
     protocol.close()
     protocol = openProtocol(join(f.parent, 'sync.sqlite'))
-    const restarted = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) })
-    unavailableSession = plan.expectedSessionId
+    store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) })
     canonicalReads.clear()
-    const outcome = await runSyncOperation(restarted, operationId, f.options)
-    const rejected = restarted.readAttempt(carried.id).failure?.code
-    t.diagnostic(JSON.stringify({ attempt: carried.id, seedAndResultTree: worktree.tree, canonicalRead: canonicalReads.has(unavailableSession), rejected, nativeCalls: nativeCalls.length }))
-    assert.ok(canonicalReads.has(unavailableSession))
-    assert.equal(nativeCalls.length, 4)
-    assert.equal(restarted.readOperation(operationId).callsUsed, 4)
-    assert.deepEqual(restarted.listResources(carried.id), resources)
-    assert.deepEqual(stages(restarted).filter(stage => stage.stage === approved.stage).at(-1), approved)
-    assert.equal(rejected, 'behavior_continuation_binding', JSON.stringify(outcome.failure))
-    return
+    if (missingCanonical) {
+      unavailableSession = plan.expectedSessionId
+      const outcome = await runSyncOperation(store, operationId, f.options)
+      const rejected = store.readAttempt(carried.id).failure?.code
+      t.diagnostic(JSON.stringify({ attempt: carried.id, seedAndResultTree: worktree.tree, canonicalRead: canonicalReads.has(unavailableSession), rejected, nativeCalls: nativeCalls.length }))
+      assert.ok(canonicalReads.has(unavailableSession))
+      assert.equal(nativeCalls.length, 4)
+      assert.equal(store.readOperation(operationId).callsUsed, 4)
+      assert.deepEqual(store.listResources(carried.id), resources)
+      assert.deepEqual(stages(store).filter(stage => stage.stage === approved.stage).at(-1), approved)
+      assert.equal(rejected, 'behavior_continuation_binding', JSON.stringify(outcome.failure))
+      return
+    }
   }
   store.startElaboration = () => { throw new StructuredSessionError('unsupported', '已完成 P0，夹具停止于 P1 入口') }
   const repaired = await runSyncOperation(store, operationId, f.options)
+  if (settledAuthor) {
+    t.diagnostic(JSON.stringify({ carriedBeforeCapture: true, canonicalRead: canonicalReads.has(settledAuthor.sessionId), failure: repaired.failure?.code, nativeCalls: nativeCalls.length }))
+    assert.ok(canonicalReads.has(settledAuthor.sessionId))
+  }
   assert.equal(repaired.failure?.message, '已完成 P0，夹具停止于 P1 入口', JSON.stringify(repaired.failure))
   const [, next] = store.listAttempts(operationId)
+  if (settledAuthor) {
+    const saved = stages(store, next.id).find(stage => stage.stage.endsWith(':analysis:continuation'))!
+    const continuation = JSON.parse(readEvidence(commonDir, saved.resultRef).toString()) as CodeBehaviorContinuation
+    assert.equal(continuation.readyAnalysis?.trace.sessionId, settledAuthor.sessionId)
+    assert.equal(continuation.readyAnalysis?.resultCommit, settledAuthor.worktree?.headCommit)
+    assert.ok(continuation.reviewResult)
+    assert.notEqual(continuation.reviewResult.trace.sessionId, settledAuthor.sessionId)
+  }
   assert.deepEqual(nativeCalls.slice(3), [
     { key: nativeCalls[2].key.replace(attempt.id, next.id), purpose: 'code_behavior_analyze' },
     { key: nativeCalls[2].key.replace(attempt.id, next.id).replace('code_behavior_analyze', 'code_behavior_review'), purpose: 'code_behavior_review' },

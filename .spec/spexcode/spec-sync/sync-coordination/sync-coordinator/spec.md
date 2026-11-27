@@ -101,7 +101,7 @@ Grok 完整 P1 细化若在成功终态后逾期退出并正式失败，未 rese
 
 P0 只在本次 attempt 尚无阶段检查点和 code_behavior saved/reserved 派发时冻结 git-json-v6。已冻结的 git-json-v1/v2/v3/v4/v5、缺席字段及原请求保持精确恢复，未知传输在派发前拒绝。新运输沿 v2 正文和失败状态策略以及 [[sync-code-behavior]] 的只读自检，并在分析自检定位非 user:raw 验收变更的未变化只读来源；新 v6 另冻结真实方向并向分析和独审共享作者当前意图规则。新指导重新分析与独审，旧请求、原草稿及原批准对象保持。已审 wrapper 的指导从程序 analysis 原字段读取，历史字段缺席保持 v7；原 v8 字段不补签为当前 v9。真实草稿、审查结果、source/tests 保护及资源结算仍依原门核验。
 
-P0 同次回放由当前运行 fence 授权。沿既有冻结材料规则重验原来源，按当前 operation、attempt、输入、派发键和阶段认证原 removed Native 结果与 canonical 会话，再交 [[sync-code-behavior]] 核对原 Git 稿与当前冻结任务。已捕获稿遇到同键已移除的完成检查点时，canonical 会话缺席或绑定失配立即拒绝回放，即使原 seed 与正常空提交的结果树相同。新 attempt 未登记完成原件时沿原续稿流程。请求证据保留操作模型与原派发的实际托管模型各自的身份。
+P0 同次回放由当前运行 fence 授权。沿既有冻结材料规则重验原来源，按当前 operation、attempt、输入、派发键和阶段认证原 removed Native 编辑请求、结果与 canonical 会话，再交 [[sync-code-behavior]] 核对原 Git 与当前冻结任务。认证直接取当前完成的 Native 原件，也覆盖本次草稿保存前的中断。canonical 会话缺席或绑定失配立即拒绝回放，即使原 seed 与正常空提交的结果树相同。新 attempt 未登记完成原件时沿原续稿流程。请求证据保留操作模型与原派发的实际托管模型各自的身份。
 
 新 Native P0 attempt 首次冻结 `behavior-draft-protocol` 时登记 `reviewCoveragePreflight`，供 [[sync-code-behavior]] 的独审现场自检沿原候选与当前 Git 评审稿核必审路径与变化 ID。历史已冻结协议及已有派发保持原提示。
 

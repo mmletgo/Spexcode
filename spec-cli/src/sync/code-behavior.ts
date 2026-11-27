@@ -98,7 +98,7 @@ export function codeBehaviorContinuationStatus(continuation: CodeBehaviorContinu
 export type CodeBehaviorReviewReference = { commit: string; path: string }
 export type CodeBehaviorMaterialRequest = Pick<ElaborationSessionRequest, 'prompt' | 'worktree'> & { previousInstructions?: string }
 export type CodeBehaviorCheckpoints = {
-  replayDraft?(requestKey: string, purpose: BehaviorPurpose, draft: ElaborationDraft): { request: ElaborationSessionRequest; result: ElaborationSessionResult } | null
+  replayDraft?(requestKey: string, purpose: BehaviorPurpose): { request: ElaborationSessionRequest; result: ElaborationSessionResult } | null
   loadReviewFeedback?(inputDigest: string): CodeBehaviorReviewReference | null
   loadMaterial?(purpose: BehaviorPurpose, schemaDigest: string, inputDigest: string, request: CodeBehaviorMaterialRequest, existingDraft?: ElaborationDraft): ElaborationDraftMaterial | null | Promise<ElaborationDraftMaterial | null>
   load(inputDigest: string, analysisSchemaDigest: string): CodeBehaviorContinuation | null
@@ -720,7 +720,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     }
     const requestKey = `${input.requestKey}:${purpose}`
     const material = draftMode ? await checkpoints?.loadMaterial?.(purpose, binding.schemaDigest, inputDigest, { prompt, worktree: base, previousInstructions }, prior) : undefined
-    const replay = input.contextTransport === 'git-json-v6' && prior ? checkpoints?.replayDraft?.(requestKey, purpose, prior) : null
+    const replay = input.contextTransport === 'git-json-v6' && draftMode ? checkpoints?.replayDraft?.(requestKey, purpose) : null
     const repairErrors = statusOnly ? [] : material?.errors ?? prior?.errors ?? continuation?.errors?.[purpose] ?? []
     const repairDiagnostics = statusOnly ? [] : material?.repairDiagnostics ? [...new Map([...material.repairDiagnostics, ...input.repairDiagnostics ?? []].map(item => [JSON.stringify(item), item])).values()] : input.repairDiagnostics ?? []
     const contextPath = binding.path.replace(/\.json$/, '.context.json')
@@ -772,19 +772,25 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
       return output
     }
     if (replay) {
-      const original = replay.request, seed = original.worktree!
+      const original = replay.request, seed = original.worktree!, resultTree = replay.result.worktree!
       const originalPointer = original.prompt.split('\n任务:\n')[1]?.split('\n草稿文件=', 1)[0]
-      const overlayPaths = [binding.path, contextPath, binding.path.replace(/\.json$/, '.schema.json')]
+      const schemaPath = binding.path.replace(/\.json$/, '.schema.json')
+      const overlayPaths = [schemaPath, contextPath, ...(material || prior ? [binding.path] : [])]
       const seedEntries = readTree(commonDir, seed.tree, undefined, trees)
+      const seedDraft = seedEntries.find(entry => entry.path === binding.path && entry.mode === '100644')
+      const captured = prior?.seed.baseCommit === seed.baseCommit && prior.seed.tree === seed.tree
+        && prior.resultCommit === resultTree.headCommit && prior.resultTree === resultTree.tree
+      const matchesSeedDraft = material ? seedDraft?.digest === contentHash(material.source) : !prior || captured || seedDraft?.oid === prior.oid
       if (original.root !== input.snapshot.source.canonicalRoot || original.base !== seed.baseCommit || original.inputDigest !== inputDigest
         || originalPointer !== contextPointer || JSON.stringify(original.schema) !== JSON.stringify(DRAFT_RECEIPT_SCHEMA)
-        || material && !seedEntries.some(entry => entry.path === binding.path && entry.mode === '100644' && entry.digest === contentHash(material.source))
+        || !seedEntries.some(entry => entry.path === schemaPath && entry.mode === '100644' && entry.digest === binding.schemaDigest)
+        || !matchesSeedDraft || prior && prior.sourceInputId !== input.snapshot.id
         || objectGit(commonDir, ['rev-parse', `${seed.baseCommit}^@`]).toString().trim() !== input.snapshot.headCommit
         || actualTreeDiff(readTree(commonDir, base!.tree, undefined, trees), seedEntries).some(change => !overlayPaths.includes(change.path))) {
         throw Object.assign(new Error('P0 回放原请求与当前冻结任务、schema 或 Git seed 不匹配'), { code: 'behavior_continuation_binding' })
       }
       readCodeBehaviorContext(original, commonDir)
-      readStageDraft(commonDir, prior!, binding)
+      if (prior) readStageDraft(commonDir, prior, binding)
       return consumeResult({ root: original.root, base: original.base, worktree: seed, requestKey, inputDigest, purpose, prompt: original.prompt,
         schema: original.schema, timeoutMs: original.timeoutMs, signal, model: syncModel(input), effort: 'high' }, replay.result)
     }
