@@ -15,17 +15,18 @@ export type GrokNativeState = { version: 1; root: string; sessionId: string; pid
 export type GrokStructuredExecution = StructuredExecution
 type Callbacks = { onNative(state: GrokNativeState): Promise<void>; onThread(id: string): Promise<void>; onTurn(id: string): Promise<void>; onTurnStarting?(): Promise<void>; onTimeout?(): Promise<void>; signal?: AbortSignal }
 type NativeResult = { threadId: string; turnId: string; text: string; frozenReadProof?: never }
-type NativePlan = { version: 1; readGuidance?: 'direct-git-read-v1' | 'native-file-read-v2' | 'native-candidate-read-v3' | 'native-review-table-read-v4' | 'native-behavior-evidence-v5'; root: string; sessionId: string; workspace: string; promptDigest: string; policyDigest: string; cliPath: string; cliVersion: string }
+type NativePlan = { version: 1; readGuidance?: 'direct-git-read-v1' | 'native-file-read-v2' | 'native-candidate-read-v3' | 'native-review-table-read-v4' | 'native-behavior-evidence-v5'; structuredOutput?: 'native-schema-v1'; root: string; sessionId: string; workspace: string; promptDigest: string; policyDigest: string; cliPath: string; cliVersion: string }
 type NativeLaunch = { planDigest: string; pid: number; receiptFile: string; receiptDigest: string }
 type OwnedLaunch = NativePlan & NativeLaunch
 type Terminal = { sessionId: string; requestId: string; cwd: string; stopReason: string; models: string[] }
-type NativeOutput = { terminal: Terminal; text: string }
+type NativeOutput = { terminal: Terminal; text: string; structuredOutput?: 'present' | 'missing' }
 type Exit = { code: number | null; signal: NodeJS.Signals | null }
 type NativeSettlement = { launchDigest: string; outputDigest: string; stopDigest: string; exit: Exit }
 type StopResult = { nativeStopped: boolean; acknowledged: false; nativeStatus?: string; error?: string }
 
 const STOP_MS = 15_000
 const NATIVE_SHUTDOWN_GRACE_MS = 5_000
+const MAX_SCHEMA_ARGUMENT_BYTES = 64 * 1024
 const STDERR_LINE_LIMIT = 4_096
 const MISSING_TERMINAL = 'Grok native stream closed without its original terminal'
 export const GROK_NATIVE_EXIT_DEADLINE_FAILURE = 'Grok native exit was not observed before the settlement deadline'
@@ -82,7 +83,8 @@ function assertPlan(plan: NativePlan, root: string, execution: GrokStructuredExe
     ? execution.worktree?.mode === 'edit' && behaviorDraftPurposes.has(execution.purpose)
     : Object.hasOwn(readGuidanceText, guidance) && execution.worktree?.mode === 'read' && (
       guidance === 'direct-git-read-v1' || guidance === 'native-file-read-v2' || candidateReviewPurposes.has(execution.purpose)))
-  if (plan?.version !== 1 || !guidanceMatches || native?.version !== 1 || plan.root !== root || native.root !== root || plan.sessionId !== native.sessionId
+  if (plan?.version !== 1 || !guidanceMatches || plan.structuredOutput !== undefined && plan.structuredOutput !== 'native-schema-v1'
+    || native?.version !== 1 || plan.root !== root || native.root !== root || plan.sessionId !== native.sessionId
     || execution.threadId && execution.threadId !== plan.sessionId || execution.turnId && execution.turnId !== native.turnId || worktreePath !== undefined && worktreePath !== plan.workspace
     || plan.policyDigest !== digest(structuredExecutionPolicy(execution)) || !plan.cliPath || !plan.cliVersion
     || prompt !== undefined && (plan.promptDigest !== sha256(nativePrompt(prompt, execution, plan.readGuidance)) || plan.promptDigest !== sha256(readEvidence(root, 'prompt.txt'))))
@@ -163,6 +165,7 @@ async function observeNativeOutput(stdout: Readable, plan: NativePlan, onEnd: (t
   const lines = createInterface({ input: stdout, crlfDelay: Infinity })
   const chunks: string[] = []
   let terminal: Terminal | undefined
+  let structuredOutput: string | undefined
   try {
     for await (const line of lines) {
       if (!line.trim()) continue
@@ -178,20 +181,27 @@ async function observeNativeOutput(stdout: Readable, plan: NativePlan, onEnd: (t
         const models = event.modelUsage && typeof event.modelUsage === 'object' && !Array.isArray(event.modelUsage) ? Object.keys(event.modelUsage) : []
         terminal = { sessionId: event.sessionId as string, requestId: event.requestId as string, cwd: event.cwd as string, stopReason: event.stopReason as string, models }
         if (!terminalMatches(terminal, plan) || terminal.stopReason === 'end_turn' && !models.length) throw pending('Grok native terminal lacks the original session, worktree, request or actual model identity')
+        if (plan.structuredOutput === 'native-schema-v1' && Object.hasOwn(event, 'structuredOutput')) {
+          structuredOutput = JSON.stringify(event.structuredOutput)
+        }
         onEnd(terminal)
       }
     }
   } finally { lines.close() }
   if (!terminal) throw pending(MISSING_TERMINAL)
-  return { terminal, text: chunks.join('') }
+  return {
+    terminal, text: structuredOutput ?? chunks.join(''),
+    ...(plan.structuredOutput === 'native-schema-v1' ? { structuredOutput: structuredOutput === undefined ? 'missing' : 'present' } : {}),
+  }
 }
 
 function verifyFinal(native: NativeOutput, prompt: string, execution: GrokStructuredExecution): NativeResult {
   const identity = { threadId: native.terminal.sessionId, turnId: native.terminal.requestId }
   let output: unknown
   const invalid = (message: string): StructuredSessionError => new StructuredSessionError('structured_output_format_invalid', message, {
-    ...identity, rejectedOutput: rejectedFinalOutput(native.text, prompt, execution, identity),
+    ...identity, rejectedOutput: rejectedFinalOutput(native.text, prompt, execution, identity, native.structuredOutput === 'present' ? 'native_json' : 'text'),
   })
+  if (native.structuredOutput === 'missing') throw invalid('Grok native terminal did not provide structured output')
   try { output = JSON.parse(native.text) as unknown }
   catch (error) { if (!(error instanceof SyntaxError)) throw error; throw invalid('Grok final output is not one complete JSON value') }
   if (!new Ajv({ allErrors: true }).compile(execution.schema)(output)) throw invalid('Grok final JSON does not match the fixed schema')
@@ -217,7 +227,10 @@ function readSettledOutput(root: string, prompt: string, execution: GrokStructur
     || settlement.exit?.code !== 0 || settlement.exit.signal !== null || existsSync(join(root, 'cancel.json'))
     || !output?.terminal || !terminalMatches(output.terminal, plan) || output.terminal.stopReason !== 'end_turn' || !output.terminal.models.length
     || output.terminal.requestId !== execution.turnId || output.terminal.requestId !== execution.grokNative?.turnId
-    || output.terminal.sessionId !== execution.threadId || typeof output.text !== 'string')
+    || output.terminal.sessionId !== execution.threadId || typeof output.text !== 'string'
+    || (plan.structuredOutput === 'native-schema-v1'
+      ? output.structuredOutput !== 'present' && output.structuredOutput !== 'missing'
+      : output.structuredOutput !== undefined))
     throw stale('Grok settled native terminal or stopped process evidence differs')
   stopObservation(root, launch, settlement.stopDigest)
   return output
@@ -231,7 +244,11 @@ export function assertGrokRejectedFinalSource(prompt: string, execution: GrokStr
   assertRejectedOutput(execution.rejectedOutput, prompt, execution, execution)
   if (execution.rejectedOutput.text !== native.text) throw stale('Grok stopped draft output differs from its native terminal')
   try { verifyFinal(native, prompt, execution) }
-  catch (error) { if (error instanceof StructuredSessionError && error.code === 'structured_output_format_invalid') return; throw error }
+  catch (error) {
+    if (!(error instanceof StructuredSessionError) || error.code !== 'structured_output_format_invalid') throw error
+    if (error.rejectedOutput?.representation !== execution.rejectedOutput.representation) throw stale('Grok stopped draft output representation differs from its native terminal')
+    return
+  }
   throw stale('Grok stopped draft unexpectedly passes its original schema')
 }
 
@@ -325,16 +342,24 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
   const version = spawnSync(launch.command, [...launch.args, '--version'], { cwd: worktreePath, encoding: 'utf8', timeout: 10_000 })
   const cliVersion = version.stdout?.trim()
   if (version.status !== 0 || !cliVersion) throw new StructuredSessionError('unsupported', 'Grok Build CLI did not report a version')
+  const schemaArgument = JSON.stringify(execution.schema)
+  const help = Buffer.byteLength(schemaArgument) <= MAX_SCHEMA_ARGUMENT_BYTES
+    ? spawnSync(launch.command, [...launch.args, '--help'], { cwd: worktreePath, encoding: 'utf8', timeout: 10_000 })
+    : undefined
+  const nativeSchema = help?.status === 0 && /^[\t ]*--json-schema(?:[\t ]|\r?$)/m.test(help.stdout)
 
   const native = { version: 1 as const, root, sessionId: randomUUID() }
   const readGuidance = execution.worktree.mode === 'read'
     ? candidateReviewPurposes.has(execution.purpose) ? 'native-review-table-read-v4' : 'native-file-read-v2'
     : behaviorDraftPurposes.has(execution.purpose) ? 'native-behavior-evidence-v5' : undefined
   const promptPath = join(root, 'prompt.txt'), promptBytes = nativePrompt(prompt, execution, readGuidance), receiptFile = join(root, 'process.json'), tmp = join(root, 'tmp')
-  const plan: NativePlan = { ...native, ...(readGuidance ? { readGuidance } : {}), workspace: worktreePath, cliPath, cliVersion, promptDigest: sha256(promptBytes), policyDigest: digest(structuredExecutionPolicy(execution)) }
+  const plan: NativePlan = {
+    ...native, ...(readGuidance ? { readGuidance } : {}), ...(nativeSchema ? { structuredOutput: 'native-schema-v1' } : {}),
+    workspace: worktreePath, cliPath, cliVersion, promptDigest: sha256(promptBytes), policyDigest: digest(structuredExecutionPolicy(execution)),
+  }
   const args = ['--cwd', worktreePath, '--session-id', native.sessionId, '--prompt-file', promptPath, '--output-format', 'streaming-json',
     ...(execution.worktree.mode === 'read' ? ['--permission-mode', 'plan', '--disallowed-tools', 'enter_plan_mode,exit_plan_mode'] : ['--permission-mode', 'bypassPermissions']),
-    ...(model === undefined ? [] : ['--model', model])]
+    ...(model === undefined ? [] : ['--model', model]), ...(nativeSchema ? ['--json-schema', schemaArgument] : [])]
   mkdirSync(realm, { recursive: true, mode: 0o700 })
   try { mkdirSync(root, { mode: 0o700 }) }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw pending('Grok original dispatch is already reserved'); throw error }
