@@ -11,7 +11,7 @@ import { StructuredSessionError, rejectedFinalOutput } from '../session-structur
 import { nativeWorktreePrompt, nativeWorktreeResult } from '../native-worktree-runtime.js'
 import { draftVerificationOwnershipMatches, elaborate, elaborationMaterialContext, elaborationDigest, freezeElaborationInput, incrementalDraftCommand, matchesProviderDraftSeed, sealPartitionedElaboration, verifyElaborationDraftCache, withDraftVerificationRows } from './elaboration.js'
 import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE } from './elaboration-types.js'
-import type { ElaborationInput, ElaborationRepairDiagnostics, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
+import type { ElaborationCrossFreezeAuthor, ElaborationInput, ElaborationRepairDiagnostics, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence, writeObject, writeTree } from './snapshot.js'
 import { captureStageDraft, overlayStageTree, readStageDraft, readStoppedPhysicalDraft, stageDraftEditorPath, stageWorktree, type StageDraftMaterialRequest } from './stage-worktree.js'
 import { syncCheckpointArtifacts } from './checkpoint-evidence.js'
@@ -575,6 +575,171 @@ test('跨source/父上下文只迁移同owner草稿；新seed保留新父Spec、
   assert.equal(readTree(f.commonDir, resultTree).find(entry => entry.path === 'src/new-source.mjs')!.mode, '100755')
   assert.deepEqual(readTree(f.commonDir, resultTree).filter(entry => !entry.path.startsWith('.spex-sync-drafts/')), readTree(f.commonDir, snapshot.immutableTree))
   assert.equal(readStageDraft(f.commonDir, oldDraft, oldDraft), invalid)
+})
+
+async function crossFreezeAuthorFixture(t: test.TestContext, replaceTarget = false) {
+  const f = await fixture(t), partitionId = 'export-owner'
+  const oldInput: ElaborationInput = { ...f.input, partitionBinding: { planDigest: 'old-plan', partitionId }, maxRepairs: 0 }
+  const old = await elaborate(oldInput, { runner: f.run(() => JSON.stringify(rows)) })
+  assert.equal(old.status, 'complete', JSON.stringify({ failure: old.failure, findings: old.rounds[0].findings }))
+  const { draft, output: receipt, traces } = old.rounds[0]
+  const oldResultRef = writeEvidence(f.commonDir, old)
+  for (const workspace of f.workspaces) git(f.root, 'worktree', 'remove', workspace)
+  f.workspaces.length = 0
+  f.requests.length = 0
+  const nextSource = replaceTarget ? `---
+title: 本轮首次细化
+---
+
+## raw source
+
+${f.input.intent.rawSource}
+` : f.input.targets[0].source!
+  if (replaceTarget) writeFileSync(join(f.root, path), nextSource)
+  const newPath = 'src/changed-on-second-freeze.js'
+  const newCode = 'export const frozenInSecondVersion = true\n'
+  writeFileSync(join(f.root, newPath), newCode)
+  git(f.root, 'add', '.'); git(f.root, 'commit', '-m', 'second freeze')
+  const snapshot = await captureInputSnapshot(f.root)
+  const current: ElaborationInput = { ...oldInput, requestKey: 'second-freeze', historyInput: snapshot, partitionBinding: { planDigest: 'new-plan', partitionId },
+    targets: [{ ...oldInput.targets[0], source: nextSource, sourceDigest: elaborationDigest(nextSource) }],
+    worktree: stageWorktree(f.commonDir, snapshot.headCommit, snapshot.immutableTree) }
+  const impact = { sessionId: 'impact-session', threadId: 'impact-thread' }
+  const author: ElaborationCrossFreezeAuthor = { draft: draft!, trace: traces[0], receipt, independentOf: [traces[1], impact],
+    proof: { version: 'elaboration-cross-freeze-author-v1', oldOperationId: 'old-operation', oldAttemptId: 'old-attempt',
+      oldPartitionId: partitionId, oldResultRef, oldInputId: f.snapshot.id, oldInputDigest: old.inputDigest, oldAuthorRequestDigest: traces[0].inputDigest,
+      bindingRef: writeEvidence(f.commonDir, { old: f.snapshot.id, current: snapshot.id }), impactReviewRef: writeEvidence(f.commonDir, impact) } }
+  const runner: ElaborationRunner = async request => {
+    const next = await f.run((_request, workspace, draftPath) => {
+      assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), JSON.stringify(rows), '本轮有效业务返修沿旧原稿在新Git seed继续')
+      return JSON.stringify(rows)
+    })(request)
+    return { ...next, sessionId: `second-${next.sessionId}`, threadId: `second-${next.threadId}` }
+  }
+  return { ...f, current, snapshot, old, author, oldResultRef, newPath, newCode, runner }
+}
+
+test('跨冻结P1只派发当前只读独审并保持旧Git原稿、回执、trace和影响引用', async t => {
+  const f = await crossFreezeAuthorFixture(t)
+  const old = JSON.stringify(f.old)
+  const result = await elaborate(f.current, {
+    loadCrossFreezeAuthor: (inputDigest, binding) => {
+      assert.equal(inputDigest, freezeElaborationInput(f.current).inputDigest)
+      assert.equal(binding.sourceInputId, f.snapshot.id)
+      assert.equal(binding.ownerDigest, f.author.draft.ownerDigest)
+      return f.author
+    },
+    runner: async request => {
+      assert.equal(request.purpose, 'elaboration_review')
+      const native = await f.runner(request)
+      assert.equal(readFileSync(join(f.workspaces[0], f.newPath), 'utf8'), f.newCode)
+      return native
+    },
+  })
+  assert.equal(result.status, 'complete', JSON.stringify({ failure: result.failure, findings: result.rounds[0].findings }))
+  const round = result.rounds[0]
+  assert.deepEqual(f.requests.map(request => request.purpose), ['elaboration_review'])
+  assert.deepEqual(round.draft, f.author.draft); assert.deepEqual(round.output, f.author.receipt)
+  assert.deepEqual(round.crossFreezeAuthor, f.author.proof); assert.deepEqual(round.traces[0], f.author.trace)
+  assert.notEqual(round.traces[1].inputDigest, f.author.trace.inputDigest)
+  assert.notEqual(result.inputDigest, f.author.proof.oldInputDigest)
+  assert.equal(round.review!.inputDigest, result.inputDigest)
+  assert.equal(round.review!.candidateDigest, result.candidateDigest)
+  assert.equal(round.traces[1].inputDigest, f.requests[0].inputDigest)
+  assert.equal(JSON.stringify(f.old), old); assert.deepEqual(JSON.parse(readEvidence(f.commonDir, f.oldResultRef).toString()), JSON.parse(old))
+  assert.equal(verifyElaborationDraftCache(f.current, result, true, f.author), true)
+  assert.throws(() => verifyElaborationDraftCache(f.current, result, true), /精确跨冻结作者原件/)
+  const forged = structuredClone(result)
+  forged.rounds[0].traces[1].threadId = f.author.independentOf[1].threadId
+  assert.equal(verifyElaborationDraftCache(f.current, forged, true, f.author), false)
+  await assert.rejects(elaborate(f.current, { loadCrossFreezeAuthor: () => ({ ...f.author, receipt: { summary: '被替换的回执' } }), runner: async () => assert.fail('原回执摘要失配不能派发') }), /缺少同一已认证的旧作者及回执/)
+})
+
+test('跨冻结P1的原稿缺少当前必建目标时从正常作者开始', async t => {
+  const f = await crossFreezeAuthorFixture(t, true)
+  const run = f.run((_request, workspace, draftPath) => {
+    assert.throws(() => readFileSync(join(workspace, draftPath), 'utf8'), { code: 'ENOENT' })
+    const fullDraft = draftRows(f.input.targets[0].source!)
+    fullDraft.changes[0].tables.RULE = fullDraft.changes[0].tables.RULE.map(rule => ({ ...rule, source: 'user:raw' }))
+    return JSON.stringify(fullDraft)
+  })
+  const result = await elaborate(f.current, { loadCrossFreezeAuthor: () => f.author, runner: async request => {
+    const response = await run(request)
+    return { ...response, sessionId: 'current-' + response.sessionId, threadId: 'current-' + response.threadId }
+  } })
+  assert.equal(result.status, 'complete', JSON.stringify({ failure: result.failure, findings: result.rounds[0].findings }))
+  assert.deepEqual(f.requests.map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
+  assert.equal(result.rounds[0].crossFreezeAuthor, undefined)
+  assert.equal(result.rounds[0].draft?.sourceInputId, f.snapshot.id)
+})
+
+test('跨冻结P1独审引用或独立身份错误时保留同一Git原稿续审', async t => {
+  const f = await crossFreezeAuthorFixture(t)
+  const decisions = [
+    { verdict: 'accept', checkedBoundaries: [], findings: [] },
+    { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] },
+  ]
+  let reviews = 0
+  const result = await elaborate({ ...f.current, maxRepairs: 2 }, { loadCrossFreezeAuthor: () => f.author, runner: async request => {
+    assert.equal(request.purpose, 'elaboration_review')
+    const native = await f.runner(request)
+    const output = decisions[reviews++]
+    return output ? { ...native, output, resultDigest: contentHash(JSON.stringify(output)), ...(reviews === 2 ? { threadId: f.author.independentOf[0].threadId } : {}) } : native
+  } })
+  assert.equal(result.status, 'complete', JSON.stringify({ failure: result.failure, findings: result.rounds.map(round => round.findings) }))
+  assert.deepEqual(f.requests.map(request => request.purpose), Array(3).fill('elaboration_review'))
+  assert.ok(result.rounds[0].findings.some(issue => issue.code === 'review_schema'))
+  assert.ok(result.rounds[1].findings.some(issue => issue.code === 'review_not_independent'))
+  for (const round of result.rounds) {
+    assert.deepEqual(round.draft, f.author.draft)
+    assert.deepEqual(round.crossFreezeAuthor, f.author.proof)
+    assert.equal(round.candidateDigest, result.candidateDigest)
+  }
+  assert.equal(verifyElaborationDraftCache(f.current, result, true, f.author), true)
+})
+
+test('跨冻结P1有效业务返修沿原字节由当前真实Git作者提交后重新独审', async t => {
+  const f = await crossFreezeAuthorFixture(t)
+  let reviews = 0
+  const result = await elaborate({ ...f.current, maxRepairs: 1 }, { loadCrossFreezeAuthor: () => f.author, runner: async request => {
+    const native = await f.runner(request)
+    if (request.purpose === 'elaboration_review' && ++reviews === 1) {
+      const output = { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [
+        { code: 'review-business', kind: 'repair', affectedIds: ['REQ-EXPORT-01'], message: '核对实际业务边界', evidence: f.newPath, decision: '保留原意并补此场景说明' },
+      ] }
+      return { ...native, output, resultDigest: contentHash(JSON.stringify(output)) }
+    }
+    return native
+  } })
+  assert.equal(result.status, 'complete', JSON.stringify({ failure: result.failure, findings: result.rounds.map(round => round.findings) }))
+  assert.deepEqual(f.requests.map(request => request.purpose), ['elaboration_review', 'elaboration_generate', 'elaboration_review'])
+  assert.deepEqual(result.rounds[0].crossFreezeAuthor, f.author.proof)
+  assert.equal(result.rounds[0].review?.verdict, 'repair')
+  assert.equal(result.rounds[1].draft?.sourceInputId, f.snapshot.id)
+  assert.equal(result.rounds[1].crossFreezeAuthor, undefined)
+  assert.equal(verifyElaborationDraftCache(f.current, result, true, f.author), true)
+})
+
+test('跨冻结P1正式续审须冷验相同原作者和影响复核，保留同一候选', async t => {
+  const f = await crossFreezeAuthorFixture(t)
+  const stopped = await elaborate(f.current, { loadCrossFreezeAuthor: () => f.author, runner: async request => {
+    f.requests.push(request)
+    throw Object.assign(new Error('已结算的独审失败'), { code: 'fixture_settled_review', sessionId: 'old-failed-current', threadId: 'old-failed-thread', turnId: 'old-failed-turn' })
+  } })
+  assert.equal(stopped.failure?.code, 'fixture_settled_review')
+  const firstRequest = f.requests[0], firstRound = stopped.rounds[0]
+  const repairDiagnostics: ElaborationRepairDiagnostics = { requestKey: f.current.requestKey, inputDigest: stopped.inputDigest,
+    resultRef: writeEvidence(f.commonDir, stopped), failure: stopped.failure!, round: firstRound,
+    settledReview: { prompt: firstRequest.prompt, schema: firstRequest.schema, worktree: firstRequest.worktree } }
+  const current = { ...f.current, requestKey: 'same-current-candidate-formal-retry' }
+  await assert.rejects(elaborate(current, { repairDiagnostics, runner: async () => assert.fail('缺证据不能续审') }), /同一已认证原作者及影响复核/)
+  const result = await elaborate(current, { repairDiagnostics, loadCrossFreezeAuthor: () => f.author, runner: f.runner })
+  assert.equal(result.status, 'complete', JSON.stringify({ failure: result.failure, findings: result.rounds[0].findings }))
+  assert.deepEqual(f.requests.map(request => request.purpose), ['elaboration_review', 'elaboration_review'])
+  assert.deepEqual(result.rounds[0].crossFreezeAuthor, f.author.proof)
+  assert.deepEqual(result.rounds[0].draft, f.author.draft)
+  assert.equal(result.candidateDigest, stopped.candidateDigest)
+  assert.deepEqual(f.requests[1].worktree, f.requests[0].worktree)
 })
 
 test('历史失败原件仅复制为非权威草稿材料，不在prompt重答JSON、不改旧证据', async t => {
