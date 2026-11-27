@@ -3170,6 +3170,7 @@ async function observeGrokNativeAcp(stdout, stdin, request, onTerminal) {
   const identity = { sessionId, requestId: promptId, cwd };
   const chunks = [];
   const nestedQueueSessions = /* @__PURE__ */ new Set();
+  const nestedQueuePrompts = /* @__PURE__ */ new Set();
   let terminal;
   let awaiting = "initialize";
   const send = (packet) => new Promise((resolve2, reject) => {
@@ -3217,7 +3218,11 @@ async function observeGrokNativeAcp(stdout, stdin, request, onTerminal) {
       } else {
         const notificationSession = params?.sessionId;
         if (method === "_x.ai/queue/changed" && awaiting === "session/prompt" && typeof notificationSession === "string" && notificationSession && Array.isArray(params?.entries)) {
-          if (notificationSession !== sessionId) nestedQueueSessions.add(notificationSession);
+          if (notificationSession !== sessionId) {
+            nestedQueueSessions.add(notificationSession);
+            if (typeof params.runningPromptId === "string" && params.runningPromptId && nestedQueuePrompts.size < 100)
+              nestedQueuePrompts.add(params.runningPromptId);
+          }
         } else if (!method.startsWith("_x.ai/") || notificationSession != null && notificationSession !== sessionId && !(typeof notificationSession === "string" && nestedQueueSessions.has(notificationSession))) {
           throw new GrokAcpProtocolError("Grok ACP agent sent an unexpected notification");
         }
@@ -3230,7 +3235,14 @@ async function observeGrokNativeAcp(stdout, stdin, request, onTerminal) {
       const idShape = id === expectedId ? "matching" : id === String(expectedId) ? "expected-digit-string" : id === null ? "null" : typeof id;
       const code = object4(packet.error)?.code;
       const rpcCode = typeof code === "number" && Number.isInteger(code) && code >= -32768 && code <= -32e3 ? code : "other";
-      throw new GrokAcpProtocolError(`Grok ACP response differs from its outstanding request (stage=${awaiting}, id=${idShape}, result=${hasResult}, error=${hasError}, params=${hasParams}, rpcCode=${rpcCode})`);
+      const meta = object4(object4(packet.result)?._meta);
+      const resultSession = meta?.sessionId === sessionId ? "parent" : typeof meta?.sessionId !== "string" ? "missing" : nestedQueueSessions.has(meta.sessionId) ? "known-child" : "unknown";
+      const resultIds = [meta?.requestId, meta?.promptId].filter((value) => typeof value === "string");
+      const resultRequest = resultIds.includes(promptId) ? "parent-prompt" : typeof id === "string" && resultIds.includes(id) ? "response-id" : resultIds.length ? "unknown" : "missing";
+      const queuedChildPromptId = typeof id === "string" && nestedQueuePrompts.has(id);
+      const envelopeDetails = `stage=${awaiting}, id=${idShape}, result=${hasResult}, error=${hasError}, params=${hasParams}, rpcCode=${rpcCode}`;
+      const identityDetails = `parentPromptId=${id === promptId}, queuedChildPromptId=${queuedChildPromptId}, resultSession=${resultSession}, resultRequest=${resultRequest}`;
+      throw new GrokAcpProtocolError(`Grok ACP response differs from its outstanding request (${envelopeDetails}, ${identityDetails})`);
     }
     if (hasError) {
       const error = object4(packet.error);

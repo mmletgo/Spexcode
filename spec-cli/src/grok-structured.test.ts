@@ -460,6 +460,7 @@ for (const scenario of ['acp-auth-quota', 'acp-auth-stderr-quota', 'acp-prompt-s
       assert.equal(error.code, 'failed')
       if (scenario === 'acp-mismatched-response') {
         assert.match(error.message, /stage=session\/prompt, id=expected-digit-string, result=false, error=true, params=false, rpcCode=-32600/)
+        assert.match(error.message, /parentPromptId=false, queuedChildPromptId=false, resultSession=missing, resultRequest=missing/)
         assert.doesNotMatch(error.message, /fixture private response/)
       }
       return true
