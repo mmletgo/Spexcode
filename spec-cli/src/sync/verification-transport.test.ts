@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
-import { gzipSync } from 'node:zlib'
+import { constants as zlib, createBrotliCompress } from 'node:zlib'
 import test from 'node:test'
 import { createRemoteVerificationRun, remoteVerificationEnvironment } from './verification-transport.js'
 import { verificationEffectDigest, verificationExportDigest } from './verification-remote-helper.mjs'
@@ -119,11 +119,11 @@ test('AC-REMOTE-01 正式executor真实运输、POSIX摘要、链接/模式和re
   assert.equal(f.events().filter(item => item.args[1] === 'create').length, 1)
   assert.equal(f.events().filter(item => item.args[1] === 'start').length, 1)
   const sshCalls = readFileSync(f.sshArguments, 'utf8').trim().split('\n').map(line => JSON.parse(line) as string[])
-  const bootstraps = readFileSync(f.bootstraps, 'utf8').trim().split('\n').map(line => JSON.parse(line) as { gzipFrames: boolean })
+  const bootstraps = readFileSync(f.bootstraps, 'utf8').trim().split('\n').map(line => JSON.parse(line) as { brotliFrames: boolean })
   assert.equal(sshCalls.length, bootstraps.length)
-  for (const [index, args] of sshCalls.entries()) assert.deepEqual(args, ['-T', ...(bootstraps[index].gzipFrames ? ['-o', 'Compression=no'] : []), '-o', 'BatchMode=yes', '--', f.configuration.sshAlias])
-  assert.equal(bootstraps[0].gzipFrames, false)
-  assert.equal(bootstraps.filter(bootstrap => bootstrap.gzipFrames).length, 1)
+  for (const [index, args] of sshCalls.entries()) assert.deepEqual(args, ['-T', ...(bootstraps[index].brotliFrames ? ['-o', 'Compression=no'] : []), '-o', 'BatchMode=yes', '--', f.configuration.sshAlias])
+  assert.equal(bootstraps[0].brotliFrames, false)
+  assert.equal(bootstraps.filter(bootstrap => bootstrap.brotliFrames).length, 1)
   assert.equal(existsSync(result.checkpoint!.transport!.plan.directory), false)
   assert.equal(existsSync(join(f.root, '.spex-verification-control', result.checkpoint!.transport!.plan.runKey, 'closed.json')), true)
   assert.ok(phases.indexOf('terminal') < phases.lastIndexOf('removed'))
@@ -303,7 +303,7 @@ test('AC-REMOTE-11 半帧JSON/base64 EOF持锁保存已排空失败，同资源�
   assert.equal(existsSync(checkpoint.transport!.plan.directory), false)
 })
 
-test('AC-REMOTE-18 gzip尾部截断时即使物化帧齐全也保存失败回执并按原冻结内容续传', async t => {
+test('AC-REMOTE-18 Brotli无完整流尾时即使物化帧齐全也保存失败回执并按原冻结内容续传', async t => {
   const f = fixture(t), previousPath = process.env.PATH
   process.env.PATH = f.temporary + ':' + previousPath
   t.after(() => { process.env.PATH = previousPath })
@@ -312,8 +312,14 @@ test('AC-REMOTE-18 gzip尾部截断时即使物化帧齐全也保存失败回执
   const effect = { id: 'materialize-0', kind: 'materialize', digest: verificationEffectDigest({ effect: { kind: 'materialize' }, ...payload }) }
   checkpoint.transport!.effects.push(effect)
   const file = readFileSync(join(f.source, 'test.mjs'))
-  const encoded = gzipSync(JSON.stringify({ kind: 'file', path: 'test.mjs', executable: 0, bytes: file.toString('base64') }) + '\n{"kind":"end"}\n')
-  const truncated = (async function* () { yield encoded.subarray(0, -8) })()
+  const encoder = createBrotliCompress({ params: { [zlib.BROTLI_PARAM_QUALITY]: 8 } })
+  const chunks: Buffer[] = []
+  encoder.on('data', chunk => chunks.push(chunk))
+  encoder.write(JSON.stringify({ kind: 'file', path: 'test.mjs', executable: 0, bytes: file.toString('base64') }) + '\n{"kind":"end"}\n')
+  await new Promise<void>(resolve => encoder.flush(zlib.BROTLI_OPERATION_FLUSH, resolve))
+  const partial = Buffer.concat(chunks)
+  encoder.destroy()
+  const truncated = (async function* () { yield partial })()
   const active = f.start(f.scoped(checkpoint, { action: 'effect', requestId: randomUUID(), effect, ...payload }), truncated, true)
   const failed = await active.finished as { settled: boolean; uploaded: boolean; reason: string }
   assert.equal(failed.settled, true)

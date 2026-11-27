@@ -5,7 +5,7 @@ import { chmodSync, closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, open
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { createInterface } from 'node:readline'
 import { pipeline } from 'node:stream/promises'
-import { createGunzip, gzipSync } from 'node:zlib'
+import { createBrotliDecompress, gzipSync } from 'node:zlib'
 
 const hash = value => createHash('sha256').update(value).digest('hex')
 const json = value => JSON.stringify(value)
@@ -182,7 +182,7 @@ async function attestation(current, cwd = '.') {
   if (!(await fs.stat(cwd === '.' ? plan.candidatePath : join(plan.candidatePath, safePath(cwd)))).isDirectory()) throw new Error('验证cwd必须是候选内部目录')
   return { exportDigest, runnerDigest: hash(readFileSync(reporter)) }
 }
-async function materialize(current, request, stream, gzipFrames) {
+async function materialize(current, request, stream, brotliFrames) {
   const { plan } = current
   if (!Number.isFinite(request.deadlineAt)) throw new Error('上传缺少原冻结deadline')
   if (Date.now() >= request.deadlineAt) return { settled: true, uploaded: false, reason: '原上传期限已过' }
@@ -197,7 +197,7 @@ async function materialize(current, request, stream, gzipFrames) {
   for (const part of ['candidate', 'runner']) { checkParents(current.root, join(plan.directory, part)); mkdirSync(join(plan.directory, part), { mode: 0o755 }); chmodSync(join(plan.directory, part), 0o755) }
   const links = []; let complete = false
   const uploadTimer = setTimeout(() => stream.destroy(new Error('上传超过原冻结deadline')), Math.max(1, request.deadlineAt - Date.now()))
-  const decoder = gzipFrames ? createGunzip() : undefined
+  const decoder = brotliFrames ? createBrotliDecompress() : undefined
   const decoding = decoder && pipeline(stream, decoder).then(() => null, error => error)
   try {
     for await (const line of createInterface({ input: decoder ?? stream, crlfDelay: Infinity })) {
@@ -261,7 +261,7 @@ async function executeEffect(current, request, options, stream) {
     try {
       const existing = await dockerCommand(request, options, ['container', 'inspect', current.identity.uniqueContainerName], 1048576, current.fd)
       if (existing.truncated || existing.exitCode === 0 || !/No such (object|container)/i.test(existing.stderr)) throw new Error('上传前不能确认原名字容器不存在')
-      result = await materialize(current, request, stream, options.gzipFrames)
+      result = await materialize(current, request, stream, options.brotliFrames)
     }
     catch (error) { result = { settled: true, uploaded: false, reason: String(error) } }
   }
@@ -288,7 +288,7 @@ async function executeEffect(current, request, options, stream) {
 
 /**
  * 一次性worker脱离SSH；所有实际副作用在同run锁内。
- * @param {{dockerProgram?: string, flockProgram?: string, replyWaitMs?: number, gzipFrames?: boolean}=} options
+ * @param {{dockerProgram?: string, flockProgram?: string, replyWaitMs?: number, brotliFrames?: boolean}=} options
  * @returns {Promise<void>}
  */
 export async function verificationSshWorker(options = {}) {
@@ -302,7 +302,7 @@ export async function verificationSshWorker(options = {}) {
 
 /**
  * SSH入口只启动一次性worker或执行只读观察；候选帧永远只是数据。
- * @param {{dockerProgram?: string, flockProgram?: string, replyWaitMs?: number, gzipFrames?: boolean}=} options
+ * @param {{dockerProgram?: string, flockProgram?: string, replyWaitMs?: number, brotliFrames?: boolean}=} options
  * @returns {Promise<void>}
  */
 export async function verificationSshMain(options = {}) {

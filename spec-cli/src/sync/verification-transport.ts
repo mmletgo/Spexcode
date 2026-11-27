@@ -6,7 +6,7 @@ import { once } from 'node:events'
 import { performance } from 'node:perf_hooks'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
-import { createGzip, gunzipSync, gzipSync } from 'node:zlib'
+import { constants as zlib, createBrotliCompress, gunzipSync, gzipSync } from 'node:zlib'
 import { verificationEffectDigest, verificationExportDigest } from './verification-remote-helper.mjs'
 import type { VerificationCheckpoint, VerificationCommandResult, VerificationDriver, VerificationEffect, VerificationRequest, VerificationRpcDiagnostics, VerificationTransportConfiguration, VerificationTransportPlan, VerificationTransportState } from './verification-executor-types.js'
 
@@ -42,7 +42,7 @@ export function sshVerificationRpc(configuration: VerificationTransportConfigura
     const preparingAt = performance.now()
     const materializing = request.action === 'effect' && (request.effect as VerificationEffect).kind === 'materialize'
     const source = await readFile(new URL('./verification-remote-helper.mjs', import.meta.url))
-    const command = `exec node --input-type=module -e 'import{gunzipSync}from"node:zlib";import("data:text/javascript;base64,"+gunzipSync(Buffer.from("${gzipSync(source).toString('base64')}","base64")).toString("base64")).then(m=>m.verificationSshMain(${materializing ? '{gzipFrames:true}' : ''}))'`
+    const command = `exec node --input-type=module -e 'import{gunzipSync}from"node:zlib";import("data:text/javascript;base64,"+gunzipSync(Buffer.from("${gzipSync(source).toString('base64')}","base64")).toString("base64")).then(m=>m.verificationSshMain(${materializing ? '{brotliFrames:true}' : ''}))'`
     return new Promise((fulfil, reject) => {
       const child = spawn('ssh', ['-T', ...(materializing ? ['-o', 'Compression=no'] : []), '-o', 'BatchMode=yes', '--', configuration.sshAlias, command], { shell: false, stdio: ['pipe', 'pipe', 'pipe'] })
       const startedAt = performance.now(), preparationMs = startedAt - preparingAt, loopAtStart = performance.eventLoopUtilization()
@@ -88,7 +88,7 @@ export function sshVerificationRpc(configuration: VerificationTransportConfigura
       void (async () => {
         if (!child.stdin.write(JSON.stringify(request) + '\n')) await once(child.stdin, 'drain')
         if (materializing) {
-          await pipeline(Readable.from(frames ?? []), createGzip(), child.stdin)
+          await pipeline(Readable.from(frames ?? []), createBrotliCompress({ params: { [zlib.BROTLI_PARAM_QUALITY]: 8 } }), child.stdin)
           return
         }
         if (frames) for await (const frame of frames) if (!child.stdin.write(frame)) await once(child.stdin, 'drain')

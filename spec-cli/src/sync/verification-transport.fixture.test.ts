@@ -79,10 +79,10 @@ else {
  const p=spawn('/bin/sh',['-c',command],{stdio:['inherit','pipe','inherit']});p.stdout.pipe(process.stdout,{end:false});
  p.on('close',code=>{if(settings.holdSshClose){process.stderr.write(settings.sensitiveStderr);writeFileSync(${JSON.stringify(sshReady)},'ready');setInterval(()=>{},1000);}else process.exit(code??1);});
 }
-` : `#!/usr/bin/env node\nimport { spawn } from 'node:child_process';\nimport { appendFileSync } from 'node:fs';\nconst gzipFrames=process.argv.at(-1).includes('verificationSshMain({gzipFrames:true})');\nappendFileSync(${JSON.stringify(sshArguments)},JSON.stringify(process.argv.slice(2,-1))+'\\n');\nappendFileSync(${JSON.stringify(bootstraps)},JSON.stringify({gzipFrames})+'\\n');\nconst options={...(${JSON.stringify(options)}),gzipFrames};\nconst entry='import('+JSON.stringify(${JSON.stringify(helper)})+').then(m=>m.verificationSshMain('+JSON.stringify(options)+'))';\nconst p=spawn(process.execPath,['--input-type=module','-e',entry],{stdio:'inherit'});p.on('exit',code=>process.exit(code??1));\n`, { mode: 0o755 })
+` : `#!/usr/bin/env node\nimport { spawn } from 'node:child_process';\nimport { appendFileSync } from 'node:fs';\nconst brotliFrames=process.argv.at(-1).includes('verificationSshMain({brotliFrames:true})');\nappendFileSync(${JSON.stringify(sshArguments)},JSON.stringify(process.argv.slice(2,-1))+'\\n');\nappendFileSync(${JSON.stringify(bootstraps)},JSON.stringify({brotliFrames})+'\\n');\nconst options={...(${JSON.stringify(options)}),brotliFrames};\nconst entry='import('+JSON.stringify(${JSON.stringify(helper)})+').then(m=>m.verificationSshMain('+JSON.stringify(options)+'))';\nconst p=spawn(process.execPath,['--input-type=module','-e',entry],{stdio:'inherit'});p.on('exit',code=>process.exit(code??1));\n`, { mode: 0o755 })
   const children: ReturnType<typeof spawn>[] = []
-  const start = (request: Record<string, unknown>, frames?: AsyncIterable<string | Buffer>, gzipFrames = false) => {
-    const child = spawn(process.execPath, ['--input-type=module', '-e', `import(${JSON.stringify(helper)}).then(m=>m.verificationSshMain(${JSON.stringify({ ...options, gzipFrames })}))`], { stdio: ['pipe', 'pipe', 'pipe'] })
+  const start = (request: Record<string, unknown>, frames?: AsyncIterable<string | Buffer>, brotliFrames = false) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', `import(${JSON.stringify(helper)}).then(m=>m.verificationSshMain(${JSON.stringify({ ...options, brotliFrames })}))`], { stdio: ['pipe', 'pipe', 'pipe'] })
     children.push(child)
     let output = '', stderr = ''
     child.stdout.on('data', chunk => { output += String(chunk) }); child.stderr.on('data', chunk => { stderr += String(chunk) })
