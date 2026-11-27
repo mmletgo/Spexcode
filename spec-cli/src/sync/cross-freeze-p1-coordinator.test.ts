@@ -13,13 +13,14 @@ import { readRecord, writeRecord } from '../session-record.js'
 import { StructuredSessionError, structuredExecutionPolicy } from '../session-structured-policy.js'
 import { sessionIdForCreateKey } from '../sessions.js'
 import { readCodeBehaviorContext } from './code-behavior.js'
-import { prepareSyncAdmission, runSyncOperation } from './coordinator.js'
+import { prepareP1ReviewChallenge, prepareSyncAdmission, runSyncOperation } from './coordinator.js'
 import type { SyncCoordinatorOptions, SyncCoordinatorPlan } from './coordinator-types.js'
 import { CROSS_FREEZE_IMPACT_PURPOSE, type CrossFreezeImpactEvidence, type CrossFreezeImpactOutput } from './cross-freeze-impact-review.js'
+import { p1ReviewDiagnosticEvidence, p1ReviewDiagnosticMarker } from './elaboration-review-challenge.js'
 import { ELABORATION_BOUNDARIES, type ElaborationResult } from './elaboration-types.js'
 import { migrateSyncStore } from './migrations.js'
-import type { BlobRef, SyncAttempt } from './operation-types.js'
-import { captureInputSnapshot, contentHash, readEvidence } from './snapshot.js'
+import type { BlobRef, P1ReviewChallenge, SyncAttempt } from './operation-types.js'
+import { captureInputSnapshot, contentHash, readEvidence, writeEvidence } from './snapshot.js'
 import { readStageDraft } from './stage-worktree.js'
 import { SyncStore, SyncStoreError } from './store.js'
 
@@ -30,8 +31,9 @@ const stopBeforeGeneration = 'fixture reached P1 whole before generation'
 const oldReviewFailure = 'fixture old read-only reviewer stopped without a verdict'
 const digest = (value: unknown): string => contentHash(JSON.stringify(value))
 
-for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent', 'prior-attempt-reviewer-present', 'prior-attempt-reviewer-absent'] as const) test('跨冻结正式 P1 复用与冷验 ' + mode, async t => {
-  const oldApproved = mode !== 'old-unapproved', acrossAttempt = mode.startsWith('prior-attempt-')
+for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent', 'prior-attempt-reviewer-present', 'prior-attempt-reviewer-absent', 'operator-challenge'] as const) test('跨冻结正式 P1 复用与冷验 ' + mode, async t => {
+  const oldApproved = mode !== 'old-unapproved', operatorChallenge = mode === 'operator-challenge'
+  const acrossAttempt = mode.startsWith('prior-attempt-') || operatorChallenge
   const testHome = process.env.SPEXCODE_TEST_HOME
   assert.ok(testHome, '正式会话夹具必须通过 test-home 隔离')
   assert.equal(process.env.SPEX_SESSION_DATABASE_PATH, join(testHome, 'sessions.sqlite'))
@@ -82,9 +84,12 @@ for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent',
     partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 32768, maxParallel: 1 },
   }
   const admit = async (input: typeof oldInput, name: string) => {
+    const executionScope = { paths: [targetPath, sourcePath], contractIds: [], flowIds: [] }
+    const selected = operatorChallenge ? store.readBaselineSelection(input.source, executionScope.paths.map(path => ({ kind: 'path' as const, path }))) : undefined
+    if (selected && !('selection' in selected)) assert.fail(selected.failure.message)
     const next = store.admitAndEnqueue(await prepareSyncAdmission(input, plan, {
       ingressKey: name, rootCauseId: name, origin: 'initial', budget: { maxAttempts: acrossAttempt ? 2 : 1, maxCalls: 24, maxRepairs: 0, timeoutMs: 120_000 },
-      managedRoot, model: 'claude:default',
+      managedRoot, model: 'claude:default', ...(selected ? { baselineSelection: selected.selection, executionScope } : {}),
     }))
     assert.equal(next.retryOf, undefined)
     return store.ackDispatch(input.source.repositoryId, next.dispatchMessageId)
@@ -96,6 +101,8 @@ for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent',
   const calls: { operationId: string; purpose: string; sessionId: string; impact?: 'p0' | 'p1' }[] = []
   const old = await admit(oldInput, 'p1-old-initial')
   let active = old
+  let challenge: P1ReviewChallenge | undefined
+  let rejectedReviewSeed: { baseCommit: string; tree: string; mode: 'read' } | undefined
   const options: SyncCoordinatorOptions = {
     plan, readCurrentPlan: () => plan, managedRoot, artifactRoot,
     tools: { trustedRuntimeRoot: parent, toolEntry: join(parent, 'unused'), canonicalHooksDir: join(parent, 'unused-hooks') },
@@ -149,7 +156,19 @@ for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent',
           assert.equal(seed.mode, 'read')
           assert.equal(readFileSync(join(workspace, targetPath), 'utf8'), targetSource)
           if (active.id !== old.id) assert.match(readFileSync(join(workspace, sourcePath), 'utf8'), /H2 comment only/)
-          output = { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+          if (operatorChallenge && active.id !== old.id && !challenge) {
+            rejectedReviewSeed = { ...seed, mode: 'read' }
+            output = { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{
+              code: 'verify-test-reference', kind: 'repair', affectedIds: ['REQ-EXPORT-01'], message: '复查验收的测试引用',
+              evidence: 'tests/export.test.mjs 与候选契约', decision: '核对原绑定',
+            }] }
+          } else {
+            if (challenge) {
+              assert.match(request.prompt, new RegExp(p1ReviewDiagnosticMarker(challenge.diagnosticRef)))
+              assert.deepEqual(seed, rejectedReviewSeed, '正式复审必须读取原候选的同一 Git 树')
+            }
+            output = { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
+          }
         }
         if (draft) {
           assert.equal(seed.mode, 'edit')
@@ -234,14 +253,68 @@ for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent',
   const approvedRef = stages(store.listAttempts(active.id)[0]).get(localKey)
   assert.ok(approvedRef)
   interruptAfter = undefined
-  if (acrossAttempt) {
-    assert.equal(store.requestControl(active.id, 'pause').control, 'pause')
-    assert.equal(store.requestControl(active.id, 'run').phase, 'queued')
-  }
+  if (acrossAttempt) assert.equal(store.requestControl(active.id, 'pause').phase, 'paused')
+  if (acrossAttempt && !operatorChallenge) assert.equal(store.requestControl(active.id, 'run').phase, 'queued')
   reopen()
 
   const current = read<ElaborationResult>(approvedRef)
   const round = current.rounds.at(-1)!
+  if (operatorChallenge) {
+    const paused = store.readOperation(active.id)
+    assert.equal(current.structurePassed, true)
+    assert.equal(current.reviewPassed, false)
+    assert.equal(current.failure?.code, 'repair_budget_exhausted')
+    assert.equal(round.review?.verdict, 'repair')
+    assert.equal(round.crossFreezeAuthor?.oldInputDigest, original.inputDigest)
+    assert.notEqual(current.inputDigest, round.crossFreezeAuthor?.oldInputDigest)
+    assert.deepEqual(round.traces[0], oldRound.traces[0])
+    assert.ok(round.traces[1] && rejectedReviewSeed)
+    const reviewerRecord = readRecord(round.traces[1].sessionId)
+    const reviewed = reviewerRecord?.structuredExecution
+    assert.ok(reviewerRecord && reviewed?.state === 'completed' && reviewed.resultWorktree)
+    const origin = store.listAttempts(active.id)[0]
+    assert.ok(store.listResources(origin.id).every(resource => resource.phase === 'removed'))
+    assert.ok(current.partitionBinding && current.candidateDigest)
+    const request = { operationId: active.id, requestId: 'cross-freeze-p1-operator-fixture',
+      expectedRevision: paused.revision, inputId: currentInput.id, partitionId: current.partitionBinding.partitionId,
+      resultRef: approvedRef, candidateDigest: current.candidateDigest, diagnostic: '追溯冻结测试及原有验收字段',
+      evidencePaths: ['tests/export.test.mjs'],
+    }
+    const previous = readEvidence(commonDir, approvedRef)
+    challenge = await prepareP1ReviewChallenge(store, paused, plan, request)
+    assert.equal(challenge.origin.attemptId, origin.id)
+    assert.deepEqual(challenge.resultRef, approvedRef)
+    await assert.rejects(prepareP1ReviewChallenge(store, paused, plan, { ...request, evidencePaths: ['missing-proof.js'] }), /复审证据须在原独审冻结 Git 树/)
+    try {
+      writeRecord({ ...reviewerRecord, structuredExecution: { ...reviewed, resultWorktree: { ...reviewed.resultWorktree, tree: oldRound.draft.resultTree } } })
+      await assert.rejects(prepareP1ReviewChallenge(store, paused, plan, request), /局部结果缺少合法作者及已完成的独立只读拒绝/)
+    } finally {
+      writeRecord(reviewerRecord)
+    }
+    assert.deepEqual(writeEvidence(commonDir, p1ReviewDiagnosticEvidence(request)), challenge.diagnosticRef)
+    store.authorizeP1ReviewChallenge(active.id, challenge)
+    assert.equal(store.requestControl(active.id, 'run').phase, 'queued')
+    reopen()
+    const resumed = await runUntilP1()
+    assert.equal(resumed.failure?.message, stopBeforeGeneration, JSON.stringify(resumed.failure))
+    assert.deepEqual(currentCalls().map(call => call.impact ?? call.purpose), ['p0', 'code_behavior_review', 'p1', 'elaboration_review', 'elaboration_review'])
+    const [first, next] = store.listAttempts(active.id)
+    assert.ok(next)
+    assert.deepEqual(stages(first).get(localKey), approvedRef)
+    assert.deepEqual(readEvidence(commonDir, approvedRef), previous)
+    assert.ok(store.listResources(next.id).every(resource => resource.phase === 'removed'))
+    const nextResult = read<ElaborationResult>(stages(next).get(localKey)!), nextRound = nextResult.rounds.at(-1)!
+    assert.equal(nextResult.reviewPassed, true)
+    assert.equal(nextResult.candidateDigest, current.candidateDigest)
+    assert.deepEqual(nextRound.draft, round.draft)
+    assert.deepEqual(nextRound.output, round.output)
+    assert.deepEqual(nextRound.traces[0], round.traces[0])
+    assert.deepEqual(nextRound.crossFreezeAuthor, round.crossFreezeAuthor)
+    assert.notEqual(nextRound.traces[1].sessionId, round.traces[1].sessionId)
+    assert.deepEqual({ operation: store.readOperation(old.id), attempts: store.listAttempts(old.id), resources: store.listResources(oldAttempt.id) }, oldBefore)
+    assert.equal(git(root, 'status', '--porcelain'), '')
+    return
+  }
   if (mode === 'current-reviewer-absent' || mode === 'prior-attempt-reviewer-absent') {
     const reviewer = round.traces.find(trace => trace.purpose === 'elaboration_review')!
     assert.ok(reviewer && round.crossFreezeAuthor)
