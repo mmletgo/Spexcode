@@ -1,4 +1,4 @@
-// Generated from LLM Manager 2a7b8ffbda84b28f5e4ebe30ef75f9bf1ff42916 by npm run build:native-runtime.
+// Generated from LLM Manager 69a75baa0d641cbb929b55de9d0aa60010ab2e24 by npm run build:native-runtime.
 var __defProp = Object.defineProperty;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __esm = (fn, res, err) => function __init() {
@@ -972,6 +972,7 @@ async function observeGrokNativeAcp(stdout, stdin, request, onTerminal) {
   const { sessionId, promptId, cwd, prompt, schema, model } = request;
   const identity = { sessionId, requestId: promptId, cwd };
   const chunks = [];
+  const nestedQueueSessions = /* @__PURE__ */ new Set();
   let terminal;
   let awaiting = "initialize";
   const send = (packet) => new Promise((resolve2, reject) => {
@@ -1001,8 +1002,11 @@ async function observeGrokNativeAcp(stdout, stdin, request, onTerminal) {
         } else await send({ id, error: { code: -32601, message: "Client method unavailable" } });
       } else if (method === "session/update") {
         const update = object3(params?.update), updateMeta = object3(params?._meta);
-        const kind = update?.sessionUpdate;
-        if (params?.sessionId !== sessionId || typeof kind !== "string" || !kind || params?._meta !== void 0 && !updateMeta || updateMeta?.promptId !== void 0 && updateMeta.promptId !== promptId || awaiting !== "session/prompt" && (awaiting !== "session/new" || kind !== "available_commands_update"))
+        const kind = update?.sessionUpdate, updateSession = params?.sessionId;
+        if (typeof kind !== "string" || !kind || params?._meta !== void 0 && !updateMeta)
+          throw new GrokAcpProtocolError("Grok ACP update differs from its original session or prompt");
+        if (awaiting === "session/prompt" && typeof updateSession === "string" && nestedQueueSessions.has(updateSession)) continue;
+        if (updateSession !== sessionId || updateMeta?.promptId !== void 0 && updateMeta.promptId !== promptId || awaiting !== "session/prompt" && (awaiting !== "session/new" || kind !== "available_commands_update"))
           throw new GrokAcpProtocolError("Grok ACP update differs from its original session or prompt");
         if (kind === "tool_call" || kind === "tool_call_update") chunks.length = 0;
         if (kind === "agent_message_chunk") {
@@ -1013,8 +1017,13 @@ async function observeGrokNativeAcp(stdout, stdin, request, onTerminal) {
             chunks.push(content.text);
           }
         }
-      } else if (!method.startsWith("_x.ai/") || params?.sessionId != null && params.sessionId !== sessionId) {
-        throw new GrokAcpProtocolError("Grok ACP agent sent an unexpected notification");
+      } else {
+        const notificationSession = params?.sessionId;
+        if (method === "_x.ai/queue/changed" && awaiting === "session/prompt" && typeof notificationSession === "string" && notificationSession && Array.isArray(params?.entries)) {
+          if (notificationSession !== sessionId) nestedQueueSessions.add(notificationSession);
+        } else if (!method.startsWith("_x.ai/") || notificationSession != null && notificationSession !== sessionId && !(typeof notificationSession === "string" && nestedQueueSessions.has(notificationSession))) {
+          throw new GrokAcpProtocolError("Grok ACP agent sent an unexpected notification");
+        }
       }
       continue;
     }
