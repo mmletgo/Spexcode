@@ -23,7 +23,7 @@ import { p1ReviewDiagnosticMarker, p1ReviewDiagnosticRef, readP1ReviewDiagnostic
 import { composeAuthoredInput } from './author-input.js'
 import { elaborate, hasApprovedElaborationReview, elaborationGapRepairFindings, elaborationMaterialContext, freezeElaborationInput, gapBlockedFinding, incrementalDraftCommand, isParentInterfaceImplementationReviewRejection, matchesProviderDraftSeed, verifyElaborationDraftCache } from './elaboration.js'
 import { outputErrors } from './elaboration-schema.js'
-import type { ElaborationGapReviewCheckpoint, ElaborationGapReviewEvidence, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ElaborationTrace, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ReadonlySpecRepair } from './elaboration-types.js'
+import type { ElaborationGapReviewCheckpoint, ElaborationGapReviewEvidence, ElaborationCrossFreezeAuthor, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationSessionRequest, ElaborationSessionResult, ElaborationTrace, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, ReadonlySpecRepair } from './elaboration-types.js'
 import { claimFileMutex } from './file-mutex.js'
 import { authenticateNativeFailure, authenticateNativeRejectedFinal, authenticateUnstartedElaborationReview, checkpointStageSelection, composedBeforeNullExpansionMatches, findReviewHandoffParent, managedQuotaDispatch, managedQuotaFailureRef, readSyncCheckpoints, readSyncCheckpointStageIndex, retryOperationLineage, settledApprovalSource, syncCheckpointArtifacts, withCheckpointStageBasis } from './checkpoint-evidence.js'
 import type { SyncCheckpointStageView } from './checkpoint-evidence.js'
@@ -40,7 +40,7 @@ import type { SyncPartitionPlan } from './partitioning.js'
 import { contractOmissionBound, freezeGenerationInput, generationReviewRequest, generationStageTree, restoreGenerationInput, reviewError, verifyGenerationReviewDraft, runGeneration } from './generation.js'
 import type { GenerationReadCache } from './generation.js'
 import type { GenerationFinding, GenerationInput, GenerationResult, StoppedCandidateReviewDraft } from './generation-types.js'
-import { captureStageDraft, readStageDraft, readStoppedPhysicalDraft, StageDraftCommitMissingError, stageWorktree, StoppedPhysicalDraftSidecarsError, StoppedPhysicalDraftStatusError, verifyStageResult, type StageDraftMaterialRequest, type StageWorktree } from './stage-worktree.js'
+import { captureStageDraft, overlayStageTree, readStageDraft, readStoppedPhysicalDraft, StageDraftCommitMissingError, stageWorktree, StoppedPhysicalDraftSidecarsError, StoppedPhysicalDraftStatusError, verifyStageResult, type StageDraftMaterialRequest, type StageWorktree } from './stage-worktree.js'
 import { createAttemptRunner, hasSettledGrokP0ExitFailure, hasSettledNativeRpcFailure, hasSettledNativeTurnTransportFailure, matchesNativeDispatchModel, pinSyncNativeRequest } from './native-run.js'
 import type { NativeRunCheckpoint, NativeRunPlan, NativeRunRecord } from './native-run.js'
 import type { AdmitSyncInput, ApplyReceipt, BlobRef, CandidateRef, ComposedInputRef, FrozenBaselineSelection, InputSnapshot, P0ReviewChallenge, P1ReviewChallenge, SyncAttempt, SyncFailure, SyncOperation, SyncScope, SyncResourceRecord, VerificationResultBlob, WriteFence } from './operation-types.js'
@@ -433,6 +433,7 @@ function elaborationReviewOrigin(store: SyncStore, owner: SyncOperation, prior: 
 function elaborationGenerationSource(store: SyncStore, owner: SyncOperation, prior: SyncAttempt, round: ElaborationResult['rounds'][number], result: SavedElaboration): { owner: SyncOperation; attempt: SyncAttempt; key: string; request?: ElaborationSessionRequest } | null {
   const traces = round.traces.filter(trace => trace.purpose === 'elaboration_generate'), trace = traces[0]
   if (traces.length !== 1 || trace.resultDigest !== contentHash(JSON.stringify(round.output))) return null
+  if (round.crossFreezeAuthor) return authenticateCrossFreezeP1Generation(store, owner, prior, result, round)
   for (;;) {
     for (const attempt of store.listAttempts(owner.id).filter(attempt => attempt.number <= prior.number)) {
       const dispatch = attempt.dispatchPlans.find(dispatch => dispatch.purpose === trace.purpose && canonical(dispatch.session) === canonical({ sessionId: trace.sessionId, threadId: trace.threadId, turnId: trace.turnId }))
@@ -576,7 +577,7 @@ function boundElaborationReview(store: SyncStore, operation: SyncOperation, prio
   if (archivedSessionId) assertStoppedArchiveTree(operation.input.source.commonDir, archivedSessionId, request.worktree.baseCommit, request.worktree.tree)
   const generation = elaborationGenerationSource(store, operation, prior, round, result)
   const generationOwner = generation && ownerKey.replace(`sync:${prior.id}:`, `sync:${generation.attempt.id}:`)
-  if (!generation?.request || !generation.key.startsWith(`${generationOwner}:`) || generation.request.inputDigest !== elaborationNativeInputDigest(result.inputDigest, generation.request)
+  if (!generation?.request || !generation.key.startsWith(`${generationOwner}:`) || generation.request.inputDigest !== elaborationNativeInputDigest(round.crossFreezeAuthor?.oldInputDigest ?? result.inputDigest, generation.request)
     || !matchesAttemptNativeModel(generation.owner, generation.attempt, generation.request)
     || generation.request.root !== request.root || generation.request.base !== round.draft.seed.baseCommit
     || store.findResource(generation.attempt.id, generation.key)?.generation !== generation.attempt.generation
@@ -717,7 +718,8 @@ function authenticatedApprovedElaboration(store: SyncStore, owner: SyncOperation
   if (!generation?.request || !source?.request || !source.result || source.request.inputDigest !== review.inputDigest || source.result.resultDigest !== review.resultDigest || canonical(source.result.output) !== canonical(round.reviewOutput)
     || round.traces.some(trace => trace.purpose === 'elaboration_generate' && (trace.sessionId === review.sessionId || trace.threadId === review.threadId))) return false
   for (const request of [generation.request, source.request]) {
-    const expected = elaborationNativeInputDigest(result.inputDigest, request)
+    const inputDigest = request.purpose === 'elaboration_generate' ? round.crossFreezeAuthor?.oldInputDigest ?? result.inputDigest : result.inputDigest
+    const expected = elaborationNativeInputDigest(inputDigest, request)
     const origin = request.purpose === 'elaboration_generate' ? generation.attempt : reviewed!
     const nativeOwner = request.purpose === 'elaboration_generate' ? generation.owner : owner
     if (!matchesAttemptNativeModel(nativeOwner, origin, request) || request.root !== owner.input.source.canonicalRoot || request.frozenContext || !request.worktree || request.base !== request.worktree.baseCommit
@@ -2076,6 +2078,116 @@ function authenticateCrossFreezeP0Author(
       trace.sessionId !== currentReviewer.sessionId && trace.threadId !== currentReviewer.threadId && trace.turnId !== currentReviewer.turnId)
   }
   return false
+}
+
+function historicalElaborationAuthor(store: SyncStore, source: CrossFreezeSource, partitionId: string) {
+  const old = source.operation, commonDir = old.input.source.commonDir, key = `partition:${partitionId}:elaboration`
+  for (const attempt of [...source.attempts].reverse()) {
+    const index = readSyncCheckpointStageIndex(store, old, attempt)
+    const wrapper = [...index.json].reverse().map(({ value }) => value as Stage).find(value => value.version === 'sync-stage-v1' && value.stage === key)
+    if (!wrapper) continue
+    if (!wrapper.readSetDigest || !attempt.composedInput) return null
+    const selection = wrapper.baselineSelectionRef
+      ? JSON.parse(readEvidence(commonDir, wrapper.baselineSelectionRef).toString('utf8')) as FrozenBaselineSelection : undefined
+    const bound = withCheckpointStageBasis(old, wrapper.readSetDigest, selection)
+    const saved = partitionStage<SavedElaboration>(store, bound, attempt, key, selection, index)
+    if (!saved) return null
+    const { result, resultRef } = saved, round = result.rounds.at(-1)
+    const partition = partitionStage<SyncPartitionPlan>(store, bound, attempt, 'partition-plan', selection, index)
+    if (!partition || result.partitionBinding?.partitionId !== partitionId || result.partitionBinding.planDigest !== partition.result.digest
+      || result.phase || !result.structurePassed || !round?.candidate || !round.draft || round.crossFreezeAuthor || round.draft.sourceInputId !== old.input.id
+      || round.candidate.inputDigest !== result.inputDigest || round.candidateDigest !== result.candidateDigest
+      || contentHash(JSON.stringify(round.candidate)) !== round.candidateDigest || round.review?.verdict === 'repair') return null
+    const trace = round.traces.find(item => item.purpose === 'elaboration_generate')
+    const generation = trace && elaborationGenerationSource(store, bound, attempt, round, result)
+    if (!trace || !generation?.request || generation.owner.id !== old.id
+      || !source.attempts.some(item => item.id === generation.attempt.id)
+      || generation.request.inputDigest !== elaborationNativeInputDigest(result.inputDigest, generation.request)
+      || !authenticatedDraftResult(store, bound, generation.attempt, generation.key, trace.purpose, round.draft, readRecord)) return null
+    const reviewer = round.traces.find(item => item.purpose === 'elaboration_review')
+    if (result.reviewPassed ? !reviewer || !authenticatedApprovedElaboration(store, bound, attempt, result, { allowDeferredImplementation: true })
+      : !!round.review || !!round.reviewOutput || !result.failure) return null
+    return { old, result, resultRef, draft: round.draft, trace, receipt: round.output, reviewer, generation }
+  }
+  return null
+}
+
+type HistoricalElaborationAuthor = NonNullable<ReturnType<typeof historicalElaborationAuthor>>
+type SavedCrossFreezeP1Impact = Omit<SavedCrossFreezeP0Impact, 'version'> & {
+  version: 'cross-freeze-p1-impact-v1'
+  composedDigest: string
+}
+
+function crossFreezeP1ImpactInput(
+  operation: SyncOperation, attemptId: string, source: CrossFreezeSource, partitionId: string,
+  author: HistoricalElaborationAuthor, seed: StageWorktree, readPaths: readonly string[],
+  timeoutMs: ElaborationSessionRequest['timeoutMs'], rawRef: BlobRef,
+): Parameters<typeof prepareCrossFreezeImpactReview>[0] {
+  return {
+    operation, attemptId, source, owner: partitionId, stage: 'p1', seed, timeoutMs, readPaths,
+    prior: { attemptId: author.generation.attempt.id, candidateDigest: rawRef.sha256, resultRef: rawRef, author: author.trace,
+      ...(author.result.reviewPassed && author.reviewer ? { approvalRef: author.resultRef, reviewer: author.reviewer } : {}) },
+  }
+}
+
+function crossFreezeP1Author(
+  author: HistoricalElaborationAuthor, evidence: CrossFreezeImpactEvidence, bindingRef: BlobRef, reviewRef: BlobRef,
+): ElaborationCrossFreezeAuthor {
+  return {
+    draft: author.draft, trace: author.trace, receipt: author.receipt,
+    proof: { version: 'elaboration-cross-freeze-author-v1', oldOperationId: author.old.id, oldAttemptId: author.generation.attempt.id,
+      oldPartitionId: evidence.binding.owner, oldResultRef: author.resultRef, oldInputId: author.old.input.id, oldInputDigest: author.result.inputDigest,
+      oldAuthorRequestDigest: author.trace.inputDigest, bindingRef, impactReviewRef: reviewRef },
+    independentOf: [evidence.trace, ...(author.reviewer ? [author.reviewer] : [])],
+  }
+}
+
+function readCrossFreezeP1Impact(
+  store: SyncStore, operation: SyncOperation, origin: SyncAttempt, key: string, currentInputDigest: string,
+  selected: NonNullable<ReturnType<typeof readLockedCrossFreezeSource>>, author: HistoricalElaborationAuthor,
+  readRecordForResult?: (id: string) => NativeRunRecord | null,
+) {
+  const index = readSyncCheckpointStageIndex(store, operation, origin)
+  const local = partitionStage<SavedCrossFreezeP1Impact>(store, operation, origin, `${key}:cross-freeze-impact`, undefined, index)
+  if (!local || local.result.currentInputDigest !== currentInputDigest) return null
+  const { composedDigest, evidence, worktree, sourceRef, checkedPaths, timeoutMs } = local.result
+  const plan = partitionStage<SyncPartitionPlan>(store, operation, origin, 'partition-plan', undefined, index)
+  const partition = plan?.result.partitions.find(item => item.id === evidence.binding.owner)
+  if (local.result.version !== 'cross-freeze-p1-impact-v1' || sourceRef.sha256 !== selected.bindingRef.sha256
+      || !partition || key !== `partition:${partition.id}:elaboration` || composedDigest !== origin.composedInput?.contentDigest
+      || canonical([...partition.readPaths].sort()) !== canonical(checkedPaths) || !store.findResource(origin.id, evidence.requestKey))
+    fail('cross_freeze_native_binding', '保留的 P1 影响复核缺少同一个分区、组合输入或正式 Native 资源')
+  const raw = readStageDraft(operation.input.source.commonDir, author.draft, author.draft)
+  const input = crossFreezeP1ImpactInput(operation, origin.id, selected.source, partition.id, author, evidence.binding.seed, checkedPaths,
+    timeoutMs, { sha256: contentHash(raw) })
+  const prepared = restoreCrossFreezeImpactReview(input, worktree)
+  const actual = authenticateCrossFreezeImpact(store, operation, origin, prepared, evidence.trace, evidence.output, readRecordForResult)
+  if (canonical(actual) !== canonical(evidence)) fail('cross_freeze_native_binding', '保留的 P1 影响结论与原 Native 结算不同')
+  return { verdict: evidence.verdict, author: crossFreezeP1Author(author, evidence, sourceRef, local.resultRef) }
+}
+
+function authenticateCrossFreezeP1Generation(
+  store: SyncStore, operation: SyncOperation, owner: SyncAttempt, result: SavedElaboration, round: ElaborationResult['rounds'][number],
+): HistoricalElaborationAuthor['generation'] | null {
+  const marker = round.crossFreezeAuthor!
+  if (result.partitionBinding?.partitionId !== marker.oldPartitionId || !round.draft) return null
+  for (const candidate of retryOperationLineage(store, operation)) {
+    const selected = readLockedCrossFreezeSource(store, candidate)
+    if (!selected || selected.bindingRef.sha256 !== marker.bindingRef.sha256 || candidate.input.id !== operation.input.id) continue
+    const author = historicalElaborationAuthor(store, selected.source, marker.oldPartitionId)
+    if (!author || canonical(round.draft) !== canonical(author.draft) || canonical(round.output) !== canonical(author.receipt)
+      || canonical(round.traces[0]) !== canonical(author.trace)) return null
+    const key = `partition:${marker.oldPartitionId}:elaboration`
+    for (const origin of store.listAttempts(candidate.id).reverse()) {
+      if (origin.operationId === operation.id && origin.number > owner.number) continue
+      const review = readCrossFreezeP1Impact(store, candidate, origin, key, result.inputDigest, selected, author)
+      if (review?.verdict !== 'reuse' || canonical(review.author.proof) !== canonical(marker)) continue
+      const currentReviewer = round.traces.find(trace => trace.purpose === 'elaboration_review')
+      if (currentReviewer && review.author.independentOf.some(trace => trace.sessionId === currentReviewer.sessionId || trace.threadId === currentReviewer.threadId)) return null
+      return author.generation
+    }
+  }
+  return null
 }
 
 /** 同一判据逐owner核原冻结计划、P0与真实独审；旧指导仅供完整冻结候选认证。 */
@@ -4070,6 +4182,44 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           independentOf: [author.reviewTrace, evidence.trace],
         } satisfies CodeBehaviorCrossFreezeAuthor : null
       }
+      const loadCrossFreezeElaborationAuthor: NonNullable<PartitionCheckpoints['loadCrossFreezeElaborationAuthor']> = async (key, plan, partition, input, inputDigest, existing) => {
+        const selected = existing
+          ? [...retryOperationLineage(store, operation)].filter(owner => owner.input.id === operation.input.id)
+            .map(owner => ({ owner, selected: readLockedCrossFreezeSource(store, owner) }))
+            .find(candidate => candidate.selected?.bindingRef.sha256 === existing.bindingRef.sha256)
+          : crossFreezeSource && { owner: operation, selected: crossFreezeSource }
+        if (!selected?.selected || !input.worktree || input.phase || input.refinement || input.gapRepair || input.readonlySpecRepair) return null
+        assertMaterialFence()
+        const author = historicalElaborationAuthor(store, selected.selected.source, partition.id)
+        if (!author) return null
+        const current = store.readAttempt(fence!.attemptId)
+        for (const prior of store.listAttempts(selected.owner.id).reverse()) {
+          if (prior.operationId === current.operationId && prior.number > current.number || prior.id !== current.id && !['failed', 'superseded', 'settled'].includes(prior.status)) continue
+          await yieldToControl()
+          assertMaterialFence()
+          const proof = readCrossFreezeP1Impact(store, selected.owner, prior, key, inputDigest, selected.selected, author, options.nativeExecution?.runtime?.readRecord)
+          if (proof && (!existing || canonical(existing) === canonical(proof.author.proof))) return proof.verdict === 'reuse' ? proof.author : null
+        }
+        if (existing || selected.owner.id !== operation.id || input.worktree.tree !== view.composed.tree) return null
+        const sizing = stage<{ minimumCalls: number; remainingCalls: number | null }>(store, operation, current, 'partition-budget')
+        if (budget && (!sizing || sizing.remainingCalls === null || sizing.remainingCalls < sizing.minimumCalls + 2 * plan.partitions.length)) return null
+        const commonDir = operation.input.source.commonDir, original = readStageDraft(commonDir, author.draft, author.draft)
+        const rawRef = writeEvidenceBytes(commonDir, Buffer.from(original, 'utf8'))
+        const seed = stageWorktree(commonDir, operation.input.headCommit, overlayStageTree(commonDir, input.worktree.tree, input.context ?? []))
+        const prepared = prepareCrossFreezeImpactReview(crossFreezeP1ImpactInput(operation, current.id, selected.selected.source,
+          partition.id, author, seed, partition.readPaths, callTimeoutMs, rawRef))
+        const result = await runner({ ...prepared.request, signal })
+        const trace: ElaborationTrace = { purpose: prepared.request.purpose, sessionId: result.sessionId, threadId: result.threadId,
+          turnId: result.turnId, resultDigest: result.resultDigest, inputDigest: prepared.request.inputDigest }
+        assertMaterialFence()
+        const evidence = authenticateCrossFreezeImpact(store, operation, store.readAttempt(current.id), prepared, trace, result.output, options.nativeExecution?.runtime?.readRecord)
+        const reviewRef = saveStage(store, fence!, `${key}:cross-freeze-impact`, {
+          version: 'cross-freeze-p1-impact-v1', sourceRef: selected.selected.bindingRef, currentInputDigest: inputDigest,
+          composedDigest: view.composed.contentDigest, checkedPaths: [...partition.readPaths].sort(),
+          worktree: prepared.request.worktree, timeoutMs: callTimeoutMs, evidence,
+        } satisfies SavedCrossFreezeP1Impact, operation.baselineSelection ? undefined : { readSetDigest: operation.readSetDigest })
+        return evidence.verdict === 'reuse' ? crossFreezeP1Author(author, evidence, selected.selected.bindingRef, reviewRef) : null
+      }
       const partitionCheckpoints: PartitionCheckpoints = {
         continueAfterSettledGrokExit: error => error instanceof StructuredSessionError
           && hasSettledGrokP0ExitFailure(store, operation, store.readAttempt(attempt!.id), error, 'native-session'),
@@ -4292,6 +4442,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           }
           return null
         },
+        loadCrossFreezeElaborationAuthor,
         loadAcceptedElaboration: (key, binding, inputDigest) => {
           const readonly = readonlyAccepted(key, binding, inputDigest)
           if (readonly) return readonly

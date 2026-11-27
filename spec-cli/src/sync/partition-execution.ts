@@ -12,7 +12,7 @@ import { elaborate, freezeElaborationInput, inspectElaborationGaps, verifyElabor
 import type { Contract, ContractFinding, Verification } from '@spexcode/spec-core/contracts'
 import { sameContractBusinessMeaning } from './contract-evolution.js'
 import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE, partitionedElaborationCoverageMatches, partitionedElaborationInputDigest } from './elaboration-types.js'
-import type { AnalysisOnlyPartitionEvidence, Applicability, ElaborationGapRepair, ElaborationGapReviewCheckpoint, ElaborationGapReviewEvidence, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationTrace, ElaborationSessionRequest, ElaborationChange, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, InheritedAuthoredParentScope, ReadonlySpecRepair, VerificationOwnershipProjection } from './elaboration-types.js'
+import type { AnalysisOnlyPartitionEvidence, Applicability, ElaborationGapRepair, ElaborationGapReviewCheckpoint, ElaborationGapReviewEvidence, ElaborationCrossFreezeAuthor, ElaborationCrossFreezeAuthorProof, ElaborationInput, ElaborationResult, ElaborationRunner, ElaborationTrace, ElaborationSessionRequest, ElaborationChange, ElaborationRepairSeed, ElaborationRepairDiagnostics, ElaborationDraft, ElaborationDraftMaterial, InheritedAuthoredParentScope, ReadonlySpecRepair, VerificationOwnershipProjection } from './elaboration-types.js'
 import { elaborationTargetBindings, projectVerificationTable, withoutVerificationTables, readonlyFactRepairPreservesTarget, targetHasCurrentChanges } from './elaboration-markdown.js'
 import { actualTreeDiff, isHostPrivatePath, verifyCandidate } from './candidate.js'
 import type { CandidateChanges } from './candidate.js'
@@ -45,6 +45,7 @@ export type PartitionCheckpoints = {
   continueAfterSettledGrokExit?(error: unknown): boolean
   auditP0Approvals?(plan: SyncPartitionPlan): P0ApprovalAudit | Promise<P0ApprovalAudit>
   authenticateAnalysisOnly?(plan: SyncPartitionPlan, evidence: CodeBehaviorEvidence, owners: readonly AnalysisOnlyPartitionEvidence[]): boolean
+  loadCrossFreezeElaborationAuthor?(key: string, plan: SyncPartitionPlan, partition: SyncPartition, input: ElaborationInput, inputDigest: string, existing?: ElaborationCrossFreezeAuthorProof): Promise<ElaborationCrossFreezeAuthor | null>
   loadAcceptedElaboration?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'> | null
   loadAcceptedInterfaceSeed?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, inputDigest: string): Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'> | null
   loadElaborationDraftMaterial?(key: string, binding: NonNullable<ElaborationInput['partitionBinding']>, schemaDigest?: string, request?: StageDraftMaterialRequest): ElaborationDraftMaterial | null | Promise<ElaborationDraftMaterial | null>
@@ -575,8 +576,11 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
       }
     }
     let cacheDraft: ElaborationDraft | undefined
-    const reusableCache = (cachedInput: ElaborationInput, cached: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>): boolean => {
-      const reusable = verifyElaborationDraftCache(cachedInput, cached, checkpoints.elaborationDraftTagged?.(key, cached))
+    const reusableCache = async (cachedInput: ElaborationInput, cached: Omit<ElaborationResult, 'contracts' | 'graph' | 'coverage'>): Promise<boolean> => {
+      const proof = cached.rounds.find(round => round.crossFreezeAuthor)?.crossFreezeAuthor
+      const source = proof ? await checkpoints.loadCrossFreezeElaborationAuthor?.(key, plan, partition, cachedInput, cached.inputDigest, proof) : undefined
+      if (proof && !source) reject(`已审细化草稿缺少同一跨冻结和原作者结算: ${partition.id}`)
+      const reusable = verifyElaborationDraftCache(cachedInput, cached, checkpoints.elaborationDraftTagged?.(key, cached), source ?? undefined)
       const draft = cached.rounds.at(-1)?.draft
       if (!reusable && !cacheDraft && draft) cacheDraft = { ...draft, errors: [...draft.errors, { code: 'rows_patch', message: '已审草稿超出本轮局部owner范围；恢复未受影响目标并重新独审' }] }
       return reusable
@@ -605,13 +609,13 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
       if (usesWholeFiles) repairInputs.push({ input: repairedInput, digest: repairInputDigest })
       for (const target of readonlyRepair?.repair.kind === 'candidate_review' ? repairedInput.targets : []) if (target.source !== null && target.source !== localInput.targets.find(original => original.path === target.path)!.source) factBaselines.set(target.path, target.source)
       const cached = saved && repairInputs.find(item => saved.inputDigest === item.digest && JSON.stringify(saved.readonlySpecRepair) === JSON.stringify(item.input.readonlySpecRepair) && JSON.stringify(saved.gapRepair) === JSON.stringify(item.input.gapRepair))
-      if (cached && reusableCache(cached.input, saved)) return saved
+      if (cached && await reusableCache(cached.input, saved)) return saved
       if (saved && !cached && contentHash(JSON.stringify(saved)) !== (readonlyRepair?.repair.acceptedRef ?? gapRepair!.repair.acceptedRef).sha256) reject('只读修复不能绕过另一份当前局部原件')
       for (const { input, digest } of repairInputs) {
         const accepted = (interfaceSeed ? checkpoints.loadAcceptedInterfaceSeed : checkpoints.loadAcceptedElaboration)?.(key, partitionBinding, digest)
         if (accepted) {
           if (JSON.stringify(accepted.readonlySpecRepair) !== JSON.stringify(input.readonlySpecRepair) || JSON.stringify(accepted.gapRepair) !== JSON.stringify(input.gapRepair)) reject('只读修复承接不能改变原诊断来源')
-          if (reusableCache(input, accepted)) return accepted
+          if (await reusableCache(input, accepted)) return accepted
         }
       }
       const seed = checkpoints.loadElaborationRepairSeed?.(key, partitionBinding, repairInputDigest) ?? undefined
@@ -648,13 +652,19 @@ export async function elaborateSyncPartitions(input: ElaborationInput, plan: Syn
       for (const target of cached.readonlySpecRepair.kind === 'candidate_review' ? restored.targets : []) if (target.source !== null && target.source !== localInput.targets.find(original => original.path === target.path)!.source) factBaselines.set(target.path, target.source)
       return restored
     }
-    if (saved && reusableCache(cachedInput(saved), saved)) return saved
+    if (saved && await reusableCache(cachedInput(saved), saved)) return saved
     const accepted = interfaceSeed ? checkpoints.loadAcceptedInterfaceSeed?.(key, partitionBinding, inputDigest) : checkpoints.loadAcceptedElaboration?.(key, partitionBinding, inputDigest)
     if (accepted) {
-      if (reusableCache(cachedInput(accepted), accepted)) return accepted
+      if (await reusableCache(cachedInput(accepted), accepted)) return accepted
     }
     const seed = checkpoints.loadElaborationRepairSeed?.(key, partitionBinding, inputDigest) ?? undefined
-    const result = await elaborate(localInput, { runner, seed, draft: cacheDraft, loadDraft, loadDraftMaterial: localInput.draftProtocol ? (schemaDigest, request) => checkpoints.loadElaborationDraftMaterial?.(key, partitionBinding, schemaDigest, request) ?? null : undefined, repairDiagnostics: checkpoints.loadElaborationRepairDiagnostics?.(key, partitionBinding, inputDigest) ?? undefined })
+    const repairDiagnostics = checkpoints.loadElaborationRepairDiagnostics?.(key, partitionBinding, inputDigest) ?? undefined
+    const result = await elaborate(localInput, {
+      runner, seed, draft: cacheDraft, loadDraft,
+      loadCrossFreezeAuthor: digest => checkpoints.loadCrossFreezeElaborationAuthor?.(key, plan, partition, localInput, digest, repairDiagnostics?.round.crossFreezeAuthor) ?? null,
+      loadDraftMaterial: localInput.draftProtocol ? (schemaDigest, request) => checkpoints.loadElaborationDraftMaterial?.(key, partitionBinding, schemaDigest, request) ?? null : undefined,
+      repairDiagnostics,
+    })
     const { contracts: _contracts, graph: _graph, coverage: _coverage, ...compact } = result
     checkpoints.save(key, compact)
     return compact
