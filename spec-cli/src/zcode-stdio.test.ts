@@ -4,7 +4,7 @@ import { once } from 'node:events'
 import { createInterface } from 'node:readline'
 import { PassThrough } from 'node:stream'
 import test from 'node:test'
-import { zcodeProtocolLine } from './zcode-structured.js'
+import { loadZCodeNativeAdapter } from './zcode-structured.js'
 
 const sha = (text: string): string => createHash('sha256').update(text).digest('hex')
 function boundaryPacket(symbol: string) {
@@ -13,7 +13,8 @@ function boundaryPacket(symbol: string) {
   return { id: 1, method: 'session/send', params: { content } }
 }
 
-for (const symbol of ['知', '🙂']) test(`ZCode SDK per-Buffer decoding preserves ${symbol} across the 64KiB boundary with ASCII JSON-RPC`, () => {
+for (const symbol of ['知', '🙂']) test(`ZCode SDK per-Buffer decoding preserves ${symbol} across the 64KiB boundary with ASCII JSON-RPC`, async () => {
+  const { zcodeProtocolLine } = await loadZCodeNativeAdapter()
   const packet = boundaryPacket(symbol), bytes = Buffer.from(zcodeProtocolLine(packet))
   const chunks = [bytes.subarray(0, 65536), bytes.subarray(65536, 65537), bytes.subarray(65537)]
   // ZCode 0.17.1 ZCodeProtocolNdjsonConnection.onData uses this exact per-Buffer conversion.
@@ -23,7 +24,8 @@ for (const symbol of ['知', '🙂']) test(`ZCode SDK per-Buffer decoding preser
   assert(!decoded.params.content.includes('\ufffd'))
 })
 
-test('wire escaping preserves JSON semantics, keys, astral characters and existing escapes without changing saved input', () => {
+test('wire escaping preserves JSON semantics, keys, astral characters and existing escapes without changing saved input', async () => {
+  const { zcodeProtocolLine } = await loadZCodeNativeAdapter()
   const packet = { id: '中文🙂', result: { '键': '知🙂\n\\u77e5"\ud800\u2028' } }, saved = JSON.stringify(packet)
   const wire = zcodeProtocolLine(packet)
   assert(/^[\x00-\x7f]*\n$/.test(wire))

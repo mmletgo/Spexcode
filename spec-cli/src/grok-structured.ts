@@ -1,33 +1,60 @@
 import { managedRoute, nativeModelValue } from './llm-manager-route.js'
-import { spawn, spawnSync } from 'node:child_process'
+import { spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { createInterface } from 'node:readline'
-import type { Readable } from 'node:stream'
+import type { Readable, Writable } from 'node:stream'
 import { Ajv } from 'ajv'
 import { detachedRuntimeIsGone, verifyDetachedRuntime, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
 import { NATIVE_PERIODIC_OBSERVATION_FAILURE, nativeWorktreeLaunch, periodicNativeWorktreeSampler, sampleNativeWorktreeProcesses, stopNativeWorktreeDescendants, waitForNativeWorktreeProcessesStopped } from './native-worktree-runtime.js'
 import { sessionIdentityEnvVars } from './harness-shim.js'
 import { assertRejectedOutput, rejectedFinalOutput, structuredExecutionPolicy, structuredExecutionTimer, structuredRealmRoot, StructuredSessionError, type StructuredExecution } from './session-structured-policy.js'
+import { loadManagerNativeRuntime } from './llm-manager-host.js'
 
 export type GrokNativeState = { version: 1; root: string; sessionId: string; pid?: number; receiptFile?: string; turnId?: string }
 export type GrokStructuredExecution = StructuredExecution
 type Callbacks = { onNative(state: GrokNativeState): Promise<void>; onThread(id: string): Promise<void>; onTurn(id: string): Promise<void>; onTurnStarting?(): Promise<void>; onTimeout?(): Promise<void>; signal?: AbortSignal }
 type NativeResult = { threadId: string; turnId: string; text: string; frozenReadProof?: never }
-type NativePlan = { version: 1; readGuidance?: 'direct-git-read-v1' | 'native-file-read-v2' | 'native-candidate-read-v3' | 'native-review-table-read-v4' | 'native-behavior-evidence-v5'; structuredOutput?: 'native-schema-v1'; root: string; sessionId: string; workspace: string; promptDigest: string; policyDigest: string; cliPath: string; cliVersion: string }
+type NativePlan = { version: 1; acp?: { version: 1; promptId: string }; readGuidance?: 'direct-git-read-v1' | 'native-file-read-v2' | 'native-candidate-read-v3' | 'native-review-table-read-v4' | 'native-behavior-evidence-v5'; structuredOutput?: 'native-schema-v1'; root: string; sessionId: string; workspace: string; promptDigest: string; policyDigest: string; cliPath: string; cliVersion: string }
 type NativeLaunch = { planDigest: string; pid: number; receiptFile: string; receiptDigest: string }
 type OwnedLaunch = NativePlan & NativeLaunch
 type Terminal = { sessionId: string; requestId: string; cwd: string; stopReason: string; models: string[] }
 type NativeOutput = { terminal: Terminal; text: string; structuredOutput?: 'present' | 'missing' }
+type GrokAcpTerminal = Omit<Terminal, 'stopReason' | 'models'> & (
+  | { kind: 'result'; stopReason: string; models: string[]; text: string; structuredOutput?: unknown }
+  | { kind: 'rate_limited'; rpcCode: -32003; message: 'Rate limited' }
+  | { kind: 'prompt_error' }
+)
+type GrokStderrDiagnostic = {
+  bytes: number; sha256: string; ended: boolean; oversizedLine: boolean; readError: boolean
+  httpStatuses: number[]; usageBalanceExhausted: boolean
+}
+type GrokAdapter = {
+  GROK_MAX_SCHEMA_ARGUMENT_BYTES: number
+  GrokAcpProtocolError: new (...args: never[]) => Error & { code: string }
+  grokAcpProbeArguments(): string[]
+  grokAcpArguments(): string[]
+  grokSupportsAcp(help: string): boolean
+  grokSupportsStreamingSchema(help: string): boolean
+  grokStreamingArguments(options: {
+    cwd: string; sessionId: string; promptFile: string; mode: 'read' | 'edit'; model?: string; schemaArgument?: string
+  }): string[]
+  grokInvocationEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv
+  grokInvocationFlags(args: string[], useAcp: boolean): ReadonlySet<string>
+  observeGrokNativeStderr(stderr: Readable, flags: ReadonlySet<string>): () => GrokStderrDiagnostic
+  grokStderrHasQuotaExhaustion(diagnostic: GrokStderrDiagnostic): boolean
+  observeGrokNativeStreaming(stdout: Readable, options: { sessionId: string; cwd: string; nativeSchema?: boolean }, onTerminal: (terminal: Terminal) => void): Promise<NativeOutput>
+  observeGrokNativeAcp(stdout: Readable, stdin: Writable, options: {
+    sessionId: string; promptId: string; cwd: string; prompt: string; schema: unknown; model?: string
+  }, onTerminal: (terminal: GrokAcpTerminal) => void): Promise<GrokAcpTerminal>
+}
+type NativeObservation = { output: NativeOutput } | { failure: Exclude<GrokAcpTerminal, { kind: 'result' }> }
 type Exit = { code: number | null; signal: NodeJS.Signals | null }
 type NativeSettlement = { launchDigest: string; outputDigest: string; stopDigest: string; exit: Exit }
 type StopResult = { nativeStopped: boolean; acknowledged: false; nativeStatus?: string; error?: string }
 
 const STOP_MS = 15_000
 const NATIVE_SHUTDOWN_GRACE_MS = 5_000
-const MAX_SCHEMA_ARGUMENT_BYTES = 64 * 1024
-const STDERR_LINE_LIMIT = 4_096
 const MISSING_TERMINAL = 'Grok native stream closed without its original terminal'
 export const GROK_NATIVE_EXIT_DEADLINE_FAILURE = 'Grok native exit was not observed before the settlement deadline'
 export const isGrokNativeExitFailure = ({ code, message }: { code: string; message: string }): boolean =>
@@ -84,6 +111,8 @@ function assertPlan(plan: NativePlan, root: string, execution: GrokStructuredExe
     : Object.hasOwn(readGuidanceText, guidance) && execution.worktree?.mode === 'read' && (
       guidance === 'direct-git-read-v1' || guidance === 'native-file-read-v2' || candidateReviewPurposes.has(execution.purpose)))
   if (plan?.version !== 1 || !guidanceMatches || plan.structuredOutput !== undefined && plan.structuredOutput !== 'native-schema-v1'
+    || plan.acp !== undefined && (plan.acp?.version !== 1 || execution.worktree?.mode !== 'edit' || plan.structuredOutput !== 'native-schema-v1'
+      || typeof plan.acp.promptId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(plan.acp.promptId))
     || native?.version !== 1 || plan.root !== root || native.root !== root || plan.sessionId !== native.sessionId
     || execution.threadId && execution.threadId !== plan.sessionId || execution.turnId && execution.turnId !== native.turnId || worktreePath !== undefined && worktreePath !== plan.workspace
     || plan.policyDigest !== digest(structuredExecutionPolicy(execution)) || !plan.cliPath || !plan.cliVersion
@@ -100,99 +129,9 @@ function assertLaunch(plan: NativePlan, launch: NativeLaunch, execution: GrokStr
 
 function terminalMatches(terminal: Terminal, plan: NativePlan): boolean {
   return terminal.sessionId === plan.sessionId && terminal.cwd === plan.workspace && typeof terminal.requestId === 'string' && !!terminal.requestId.trim()
+    && (plan.acp === undefined || terminal.requestId === plan.acp.promptId)
     && typeof terminal.stopReason === 'string' && !!terminal.stopReason && Array.isArray(terminal.models)
     && terminal.models.every(model => typeof model === 'string' && !!model.trim())
-}
-
-function nativeHttpStatus(text: string): { code: number; message: string } | null {
-  const prefix = /^(?:error:[ \t]*)?HTTP(?:\/[1-3](?:\.[01])?)?[ \t]+/i.exec(text)
-  if (!prefix) return null
-  let value = text.slice(prefix[0].length)
-  const label = /^(?:status(?: code)?|error)([ \t]*)([:=]?)/i.exec(value)
-  if (label) {
-    value = value.slice(label[0].length)
-    if (label[2]) {
-      const gap = /^[ \t]+/.exec(value)
-      if (!gap) return null
-      value = value.slice(gap[0].length)
-    } else if (!label[1]) return null
-  }
-  const status = /^[45]\d{2}(?=[ \t:]|$)/.exec(value)
-  return status ? { code: Number(status[0]), message: value.slice(status[0].length) } : null
-}
-
-type StartupError = { kind: 'unexpected_argument'; flag: string } | { kind: 'os_error'; errno: 'ENOENT' | 'EACCES' }
-
-function observeNativeStderr(stderr: Readable, args: readonly string[]) {
-  const hash = createHash('sha256'), line = Buffer.alloc(STDERR_LINE_LIMIT), httpStatuses = new Set<number>()
-  const startupErrors = new Map<string, StartupError>(), flags = new Set(args.filter((_, index) => index % 2 === 0))
-  let bytes = 0, lineBytes = 0, discardLine = false, oversizedLine = false, usageBalanceExhausted = false, readError = false
-  const finishLine = (): void => {
-    if (!discardLine) {
-      const startupLine = line.toString('utf8', 0, lineBytes).replace(/\r$/, ''), text = startupLine.trim()
-      const argument = /^error: unexpected argument '(--[a-z][a-z-]*)' found$/.exec(startupLine)
-      if (argument && argument[0] === startupLine && flags.has(argument[1])) startupErrors.set(argument[1], { kind: 'unexpected_argument', flag: argument[1] })
-      const errno = startupLine === 'Error: No such file or directory (os error 2)' ? 'ENOENT' : startupLine === 'Error: Permission denied (os error 13)' ? 'EACCES' : undefined
-      if (errno) startupErrors.set(errno, { kind: 'os_error', errno })
-      const status = nativeHttpStatus(text)
-      if (status) httpStatuses.add(status.code)
-      const body = (status?.message ?? text.replace(/^error:[ \t]*/i, '')).trimStart()
-      const message = body.startsWith(':') ? body.slice(1).trimStart() : body
-      if (/^(?:usage balance exhausted|you hit your weekly limit)[.!]?$/i.test(message)) usageBalanceExhausted = true
-    }
-    lineBytes = 0
-    discardLine = false
-  }
-  stderr.on('data', (chunk: Buffer) => {
-    bytes += chunk.length
-    hash.update(chunk)
-    let start = 0
-    while (start < chunk.length) {
-      const newline = chunk.indexOf(0x0a, start), end = newline < 0 ? chunk.length : newline
-      if (end - start > line.length - lineBytes) discardLine = oversizedLine = true
-      if (!discardLine) lineBytes += chunk.copy(line, lineBytes, start, end)
-      if (newline < 0) break
-      finishLine()
-      start = newline + 1
-    }
-  })
-  stderr.once('end', finishLine)
-  stderr.once('error', () => { readError = true })
-  return () => ({ bytes, sha256: hash.digest('hex'), ended: stderr.readableEnded, oversizedLine, readError, httpStatuses: [...httpStatuses].sort((a, b) => a - b), usageBalanceExhausted, ...(startupErrors.size ? { startupErrors: [...startupErrors.values()] } : {}) })
-}
-
-async function observeNativeOutput(stdout: Readable, plan: NativePlan, onEnd: (terminal: Terminal) => void): Promise<NativeOutput> {
-  const lines = createInterface({ input: stdout, crlfDelay: Infinity })
-  const chunks: string[] = []
-  let terminal: Terminal | undefined
-  let structuredOutput: string | undefined
-  try {
-    for await (const line of lines) {
-      if (!line.trim()) continue
-      let event: Record<string, unknown>
-      try { event = JSON.parse(line) as Record<string, unknown> }
-      catch (error) { if (!(error instanceof SyntaxError)) throw error; throw pending('Grok native event is not valid JSON') }
-      if (terminal || typeof event?.type !== 'string') throw pending('Grok native stream has an invalid event or data after its terminal')
-      if (event.type === 'tool_call' || event.type === 'tool_call_update') chunks.length = 0
-      else if (event.type === 'text') {
-        if (typeof event.data !== 'string') throw pending('Grok native text event has an invalid shape')
-        chunks.push(event.data)
-      } else if (event.type === 'end') {
-        const models = event.modelUsage && typeof event.modelUsage === 'object' && !Array.isArray(event.modelUsage) ? Object.keys(event.modelUsage) : []
-        terminal = { sessionId: event.sessionId as string, requestId: event.requestId as string, cwd: event.cwd as string, stopReason: event.stopReason as string, models }
-        if (!terminalMatches(terminal, plan) || terminal.stopReason === 'end_turn' && !models.length) throw pending('Grok native terminal lacks the original session, worktree, request or actual model identity')
-        if (plan.structuredOutput === 'native-schema-v1' && Object.hasOwn(event, 'structuredOutput')) {
-          structuredOutput = JSON.stringify(event.structuredOutput)
-        }
-        onEnd(terminal)
-      }
-    }
-  } finally { lines.close() }
-  if (!terminal) throw pending(MISSING_TERMINAL)
-  return {
-    terminal, text: structuredOutput ?? chunks.join(''),
-    ...(plan.structuredOutput === 'native-schema-v1' ? { structuredOutput: structuredOutput === undefined ? 'missing' : 'present' } : {}),
-  }
 }
 
 function verifyFinal(native: NativeOutput, prompt: string, execution: GrokStructuredExecution): NativeResult {
@@ -334,19 +273,26 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
   if (execution.grokNative || execution.turnStartRequested || execution.threadId || execution.turnId || existsSync(root))
     throw pending('Grok original dispatch has no settled result; exact stop is required')
 
-  const resolved = spawnSync('/usr/bin/which', ['grok'], { encoding: 'utf8', timeout: 10_000 })
-  if (resolved.status !== 0 || !resolved.stdout.trim()) throw new StructuredSessionError('unsupported', 'Grok Build CLI is unavailable')
-  const cliPath = realpathSync(resolved.stdout.trim())
+  const runtime = await loadManagerNativeRuntime()
+  const provider = await runtime.loadNativeAdapter('grok') as GrokAdapter
+  const cliPath = runtime.findNativeExecutable('grok')
+  if (!cliPath) throw new StructuredSessionError('unsupported', 'Grok Build CLI is unavailable')
   if (realpathSync(worktreePath) !== worktreePath) throw new StructuredSessionError('unsupported', 'Grok Build requires the exact physical worktree path')
   const launch = nativeWorktreeLaunch(worktreePath, cliPath, [])
   const version = spawnSync(launch.command, [...launch.args, '--version'], { cwd: worktreePath, encoding: 'utf8', timeout: 10_000 })
   const cliVersion = version.stdout?.trim()
   if (version.status !== 0 || !cliVersion) throw new StructuredSessionError('unsupported', 'Grok Build CLI did not report a version')
   const schemaArgument = JSON.stringify(execution.schema)
-  const help = Buffer.byteLength(schemaArgument) <= MAX_SCHEMA_ARGUMENT_BYTES
+  const help = Buffer.byteLength(schemaArgument) <= provider.GROK_MAX_SCHEMA_ARGUMENT_BYTES
     ? spawnSync(launch.command, [...launch.args, '--help'], { cwd: worktreePath, encoding: 'utf8', timeout: 10_000 })
     : undefined
-  const nativeSchema = help?.status === 0 && /^[\t ]*--json-schema(?:[\t ]|\r?$)/m.test(help.stdout)
+  const acpHelp = execution.worktree.mode === 'edit'
+    ? spawnSync(launch.command, [...launch.args, ...provider.grokAcpProbeArguments()], { cwd: worktreePath, encoding: 'utf8', timeout: 10_000 })
+    : undefined
+  const acp = acpHelp?.status === 0 && provider.grokSupportsAcp(acpHelp.stdout)
+    ? { version: 1 as const, promptId: randomUUID() }
+    : undefined
+  const nativeSchema = !!acp || help?.status === 0 && provider.grokSupportsStreamingSchema(help.stdout)
 
   const native = { version: 1 as const, root, sessionId: randomUUID() }
   const readGuidance = execution.worktree.mode === 'read'
@@ -354,12 +300,14 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
     : behaviorDraftPurposes.has(execution.purpose) ? 'native-behavior-evidence-v5' : undefined
   const promptPath = join(root, 'prompt.txt'), promptBytes = nativePrompt(prompt, execution, readGuidance), receiptFile = join(root, 'process.json'), tmp = join(root, 'tmp')
   const plan: NativePlan = {
-    ...native, ...(readGuidance ? { readGuidance } : {}), ...(nativeSchema ? { structuredOutput: 'native-schema-v1' } : {}),
+    ...native, ...(acp ? { acp } : {}), ...(readGuidance ? { readGuidance } : {}), ...(nativeSchema ? { structuredOutput: 'native-schema-v1' } : {}),
     workspace: worktreePath, cliPath, cliVersion, promptDigest: sha256(promptBytes), policyDigest: digest(structuredExecutionPolicy(execution)),
   }
-  const args = ['--cwd', worktreePath, '--session-id', native.sessionId, '--prompt-file', promptPath, '--output-format', 'streaming-json',
-    ...(execution.worktree.mode === 'read' ? ['--permission-mode', 'plan', '--disallowed-tools', 'enter_plan_mode,exit_plan_mode'] : ['--permission-mode', 'bypassPermissions']),
-    ...(model === undefined ? [] : ['--model', model]), ...(nativeSchema ? ['--json-schema', schemaArgument] : [])]
+  const args = acp ? provider.grokAcpArguments() : provider.grokStreamingArguments({
+    cwd: worktreePath, sessionId: native.sessionId, promptFile: promptPath, mode: execution.worktree.mode, model,
+    ...(nativeSchema ? { schemaArgument } : {}),
+  })
+  const flags = provider.grokInvocationFlags(args, acp !== undefined)
   mkdirSync(realm, { recursive: true, mode: 0o700 })
   try { mkdirSync(root, { mode: 0o700 }) }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw pending('Grok original dispatch is already reserved'); throw error }
@@ -371,11 +319,12 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
   if (callbacks.signal?.aborted) throw cancelled()
   await callbacks.onTurnStarting?.()
 
-  const env: NodeJS.ProcessEnv = { ...process.env, TMPDIR: tmp, GROK_MCP_AUTO_RESTART: '0' }
+  const env = provider.grokInvocationEnvironment({ ...process.env, TMPDIR: tmp })
   for (const key of sessionIdentityEnvVars()) delete env[key]
   const launchedAt = performance.now()
-  const child = spawn('/bin/sh', ['-c', 'IFS= read -r ready && [ "$ready" = start ] || exit 1; exec "$@"', 'spex-grok-launch', launch.command, ...launch.args, ...args], { cwd: worktreePath, env, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
-  const stderrDiagnostic = observeNativeStderr(child.stderr, args)
+  const child = runtime.spawnGatedNativeProcess(launch.command, [...launch.args, ...args], { cwd: worktreePath, env }) as ChildProcessWithoutNullStreams
+  const gate = child.stdio[3] as Writable
+  const stderrDiagnostic = provider.observeGrokNativeStderr(child.stderr, flags)
   let observedExit: Exit | undefined
   let exitAtMs: number | null = null
   const exited = new Promise<Exit & { observedAt: number }>(resolve => child.once('exit', (code, signal) => {
@@ -387,6 +336,7 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
   }))
   let processFailed = false
   child.stdin.once('error', () => { processFailed = true })
+  gate.once('error', () => { processFailed = true })
   let owned: OwnedLaunch | undefined
   let launchBinding: NativeLaunch | undefined
   let deadline: number | undefined, stopTimer: ReturnType<typeof setTimeout> | undefined
@@ -394,6 +344,8 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
   let terminalAtMs: number | undefined, deadlineAtMs: number | undefined, timerFiredAtMs: number | null = null
   let timedOut = false, observerFailure: unknown, timeoutFailure: unknown
   let stopPhase = 'native-exit-or-terminal'
+  let beginAcp: ((start: boolean) => void) | undefined
+  const acpReady = acp && new Promise<boolean>(resolve => { beginAcp = resolve })
   let expire!: () => void
   const expiry = new Promise<null>(resolve => { expire = () => resolve(null) })
   const armStop = (): void => {
@@ -408,6 +360,8 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
   }
   const interrupt = (): void => {
     armStop()
+    beginAcp?.(false)
+    gate.destroy()
     child.stdin.destroy()
     if (owned) signalOwnedGroup(owned)
   }
@@ -416,17 +370,43 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
   let terminal: Terminal | undefined, stdoutFinished = false
   let notifyTerminal!: () => void
   const terminalSeen = new Promise<void>(resolve => { notifyTerminal = resolve })
-  const observed = observeNativeOutput(child.stdout, plan, value => {
+  const onTerminal = (value?: Terminal): void => {
     terminal = value
     terminalAtMs = performance.now() - launchedAt
     armStop()
     notifyTerminal()
-  }).catch(error => {
-    observerFailure ??= error
-    if (stopPhase === 'native-exit-or-terminal') stopPhase = 'native-stdout-protocol'
-    abort()
-    return null
-  }).finally(() => { stdoutFinished = true })
+  }
+  const observed: Promise<NativeObservation | null> = (acpReady && acp
+    ? acpReady.then(async start => {
+      if (!start) return null
+      const native = await provider.observeGrokNativeAcp(child.stdout, child.stdin, {
+        sessionId: plan.sessionId, promptId: acp.promptId, cwd: plan.workspace, prompt: promptBytes, schema: execution.schema, model,
+      }, value => onTerminal(value.kind === 'result' ? value : undefined))
+      if (native.sessionId !== plan.sessionId || native.requestId !== acp.promptId || native.cwd !== plan.workspace)
+        throw pending('Grok ACP prompt observation differs from its native plan')
+      if (native.kind !== 'result') return { failure: native }
+      const { sessionId, requestId, cwd, stopReason, models } = native
+      const terminal = { sessionId, requestId, cwd, stopReason, models }
+      if (!terminalMatches(terminal, plan) || terminal.stopReason === 'end_turn' && !terminal.models.length) throw pending('Grok ACP terminal lacks the original session, worktree, request or actual model identity')
+      const structuredOutput = Object.hasOwn(native, 'structuredOutput')
+      return { output: { terminal, text: structuredOutput ? JSON.stringify(native.structuredOutput) : native.text, structuredOutput: structuredOutput ? 'present' : 'missing' } } as const
+    })
+    : provider.observeGrokNativeStreaming(child.stdout, {
+      sessionId: plan.sessionId, cwd: plan.workspace, nativeSchema: plan.structuredOutput === 'native-schema-v1',
+    }, onTerminal).then(output => ({ output })))
+    .catch((error: unknown) => {
+      const protocolError = error instanceof provider.GrokAcpProtocolError ? error : undefined
+      const startupEof = protocolError?.code === 'missing_startup_terminal'
+      observerFailure ??= protocolError
+        ? pending(startupEof || !acp && protocolError.code === 'missing_terminal' ? MISSING_TERMINAL : protocolError.message)
+        : error
+      if (stopPhase === 'native-exit-or-terminal') stopPhase = 'native-stdout-protocol'
+      if (startupEof) {
+        armStop()
+        child.stdin.end()
+      } else abort()
+      return null
+    }).finally(() => { stdoutFinished = true })
   callbacks.signal?.addEventListener('abort', abort, { once: true })
   const timer = structuredExecutionTimer(execution.timeoutMs, () => {
     timedOut = true
@@ -453,7 +433,11 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
     await callbacks.onNative(running)
     await sampleNativeWorktreeProcesses(owned)
     if (callbacks.signal?.aborted || timedOut || existsSync(join(root, 'cancel.json'))) abort()
-    else child.stdin.end('start\n')
+    else {
+      if (!acp) child.stdin.end()
+      gate.end('start\n')
+      beginAcp?.(true)
+    }
     if (deadline === undefined) census = setInterval(periodicNativeWorktreeSampler(owned, () => deadline !== undefined, error => {
       stopPhase = 'native-periodic-process-observation'
       observerFailure ??= Object.assign(new StructuredSessionError('failed', NATIVE_PERIODIC_OBSERVATION_FAILURE.grok), { cause: error })
@@ -505,10 +489,22 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
     if (!stopped) throw pending('Grok native process-group stop remains unproven')
     stopPhase = 'native-stdout-eof'
     stopTimer = setTimeout(expire, Math.max(0, stopDeadline - Date.now()))
-    const output = await Promise.race([observed, expiry])
+    const observation = await Promise.race([observed, expiry])
     if (callbacks.signal?.aborted || timedOut || existsSync(join(root, 'cancel.json'))) throw Object.assign(cancelled(timedOut), timeoutFailure === undefined ? {} : { cause: timeoutFailure })
     if (observerFailure) throw observerFailure
-    if (processFailed || !output || !child.stdout.readableEnded || Date.now() >= stopDeadline) throw pending('Grok native stdout EOF was not observed within the settlement window')
+    if (processFailed || !observation || !child.stdout.readableEnded || Date.now() >= stopDeadline) throw pending('Grok native stdout EOF was not observed within the settlement window')
+    if ('failure' in observation) {
+      if (observation.failure.kind === 'rate_limited' && managedRoute(execution.model) && exit.code === 0 && exit.signal === null) {
+        writeEvidence(root, 'acp-rate-limit-diagnostic.json', {
+          version: 1, launchDigest: digest(binding), planDigest: digest(plan), stopDigest: stopObservation(root, binding),
+          sessionId: observation.failure.sessionId, requestId: observation.failure.requestId,
+          rpcCode: observation.failure.rpcCode, message: observation.failure.message, exit, stdoutEnded: true,
+        })
+        throw new StructuredSessionError('provider_quota_exhausted', 'Grok ACP reported HTTP 429 in the stopped native prompt')
+      }
+      throw new StructuredSessionError('failed', 'Grok native ACP prompt did not complete successfully')
+    }
+    const { output } = observation
     if (output.terminal.stopReason !== 'end_turn' || exit.code !== 0 || exit.signal !== null) throw new StructuredSessionError('failed', 'Grok native turn did not complete successfully')
     const turnId = output.terminal.requestId
     await callbacks.onThread(native.sessionId)
@@ -563,14 +559,17 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
       }
       if (managedRoute(execution.model) && !timedOut && !callbacks.signal?.aborted && !existsSync(join(root, 'cancel.json'))
         && observedExit.signal === null && observedExit.code !== null && observedExit.code !== 0
-        && stderr.ended && !stderr.readError && !stderr.oversizedLine && (stderr.usageBalanceExhausted || stderr.httpStatuses.includes(429)))
+        && provider.grokStderrHasQuotaExhaustion(stderr))
         throw new StructuredSessionError('provider_quota_exhausted', 'Grok provider reported quota exhaustion in the stopped native invocation')
     }
+    if (acp && error === observerFailure && error instanceof StructuredSessionError && error.code === 'cancellation_pending'
+      && !timedOut && !callbacks.signal?.aborted && !existsSync(join(root, 'cancel.json')))
+      throw new StructuredSessionError('failed', error.message)
     throw error
   } finally {
     clearTimeout(timer); clearTimeout(stopTimer); clearInterval(census)
     callbacks.signal?.removeEventListener('abort', abort)
-    child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy(); child.unref()
+    gate.destroy(); child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy(); child.unref()
     if (deadlineDecision) {
       console.warn('spex grok native exit deadline', JSON.stringify({
         pid: child.pid, terminalAtMs, deadlineAtMs, exitAtMs, timerFiredAtMs,

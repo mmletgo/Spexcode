@@ -15,11 +15,13 @@ Claude Code 或 ZCode 限流时，用户可以显式选择本机已配置的 Gro
 
 ## expanded spec
 
-SpexCode 启动的每个一次性 Grok 工作树进程照常初始化已配置的 MCP 服务，并在该进程内关闭 stdio MCP 自动重启。传输失败由原会话处理，避免终态后已停止的后代被反复重建。退出、流结束与进程归属的结算要求继续适用。
+[[llm-manager-host]] 使用 LLM Manager 安装包的 Grok 执行协议。每个一次性 Grok 工作树进程照常初始化已配置的 MCP 服务，并在该进程内关闭 stdio MCP 自动重启。传输失败由原会话处理，避免终态后已停止的后代被反复重建。退出、流结束与进程归属的结算要求继续适用。
 
 [[llm-manager-host]] 管理的 Grok 工作树在原生 stdout 无原终态、真实非零退出且精确进程组已停止时，只用已排空且未截断的 stderr 诊断中的原 429 或明确额度耗尽，报告可申请正式续路的额度失败。用户取消、其他退出原因和未知停止不触发该分类。
 
 明确的 `grok:<模型或别名>` 仅进入 [[structured-session-runtime]] 的原生 worktree 路由。`grok:default` 沿用本机配置。每轮记录实际 CLI 版本和模型。选择、输入、预算、独审身份与正式重试规则沿 [[sync-model-selection]]。
+
+编辑任务在本机 CLI 声明支持 ACP stdio 时使用该协议，记录预先生成的 prompt ID，认证同一 session、workspace、prompt 终态和实际用量模型。Manager 在确认该 prompt 终态后关闭 stdin，再观察 stdout 至 EOF。仅原 prompt 的明确限额响应在完整停止和自然退出后可作为正式额度。握手后的缺失终态也须结算原进程。保留仅初始化前和原流式模式的明确启动诊断分类。ACP 初始化响应前已收到真实 EOF 时，沿同一有界观察窗口等待原 CLI 自然退出和 stderr 排空，再判断启动额度。取消或窗口耗尽仍精确清理。
 
 一轮只派发一次本机 CLI，使用实际托管工作树和预先绑定的会话 UUID。原生流必须以同一会话、同一工作目录且带唯一原生 request ID 的成功终态结束。终态的 request ID 是 turn 身份。
 
