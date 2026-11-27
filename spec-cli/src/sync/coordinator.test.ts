@@ -11300,7 +11300,7 @@ for (const mode of ['analysis', 'review-execution', 'review-format', 'review-the
   assert.deepEqual(JSON.parse(readEvidence(commonDir, carried.find(stage => stage.stage === `${key}:provenance`)!.resultRef).toString()), { fromOperationId: old.id, fromAttemptId: prior.id, resultRef: accepted.resultRef })
 })
 
-test('Native P0同次尝试冷重进回放结算作者稿并保留独立批准', async t => {
+for (const missingCanonical of [false, true]) test(`Native P0同次尝试冷重进回放结算作者稿并保留独立批准${missingCanonical ? '（原会话缺席）' : ''}`, async t => {
   const importPath = '.spec/project/import-contract/spec.md'
   const importSpec = original.replaceAll('export-job', 'import-job').replaceAll('EXPORT', 'IMPORT').replaceAll('export-contract', 'import-contract').replaceAll('src/export.js', 'src/import.js').replaceAll('tests/export.test.mjs', 'tests/import.test.mjs')
   const f = await fixture(t, { maxAttempts: 2, maxCalls: 12, maxRepairs: 1, timeoutMs: 120_000 }, false, original, 'project', original, {
@@ -11315,8 +11315,9 @@ test('Native P0同次尝试冷重进回放结算作者稿并保留独立批准',
   const nativeCalls: { key: string; purpose: string }[] = []
   const canonicalReads = new Set<string>()
   let rejectedBytes: Buffer | undefined
+  let unavailableSession: string | undefined
   f.options.runner = undefined
-  f.options.nativeExecution = { pollMs: 2, runtime: { readRecord: id => { canonicalReads.add(id); return readRecord(id) }, cancel: async () => assert.fail('夹具禁止真实代理控制'), run: async request => {
+  f.options.nativeExecution = { pollMs: 2, runtime: { readRecord: id => { canonicalReads.add(id); return id === unavailableSession ? null : readRecord(id) }, cancel: async () => assert.fail('夹具禁止真实代理控制'), run: async request => {
     nativeCalls.push({ key: request.requestKey, purpose: request.purpose })
     const { task, pendingAnalysis } = readCodeBehaviorContext(request, commonDir)
     const changedPaths = task.requiredChangedPaths as string[]
@@ -11334,7 +11335,7 @@ test('Native P0同次尝试冷重进回放结算作者稿并保留独立批准',
         const rule = path === 'src/import.js' ? 'RULE-IMPORT-05' : 'RULE-EXPORT-05'
         return { kind: 'refactor', paths: [path], affectedIds: [rule], ruleIds: [rule], originalIntent: '保留原业务', previousBehavior: '原行为',
           sourceBehavior: '原行为', deliveryBehavior: '原行为', evidence: path,
-          counterexample: nativeCalls.length === 3 ? 'import example.route 首个失败点是 route.py:7，抛 ImportError' : '保留原权限' }
+          counterexample: nativeCalls.length === 3 || missingCanonical && nativeCalls.length === 4 ? 'import example.route 首个失败点是 route.py:7，抛 ImportError' : '保留原权限' }
       }), facts: [], acceptanceChanges: [], newNodes: [], resolutions: [] }
     const worktree = committedDraftFixture(f, request, draft, workspace)
     const seed = request.worktree!, createKey = request.sessionCreateKey!, session = sessionIdForCreateKey(createKey)
@@ -11381,7 +11382,8 @@ test('Native P0同次尝试冷重进回放结算作者稿并保留独立批准',
   assert.equal(readRecord(originalRequest.expectedSessionId)?.archived, true)
   f.closeForRestart()
   const statuses: string[] = []
-  for (let ordinal = 1; ordinal <= 2; ordinal++) {
+  const reentries = missingCanonical ? 0 : 2
+  for (let ordinal = 1; ordinal <= reentries; ordinal++) {
     const protocol = openProtocol(join(f.parent, 'sync.sqlite'))
     try {
       const store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) })
@@ -11402,14 +11404,47 @@ test('Native P0同次尝试冷重进回放结算作者稿并保留独立批准',
       assert.deepEqual(stages(store).filter(stage => stage.stage === rejected.stage).at(-1)?.resultRef, rejected.resultRef)
     } finally { protocol.close() }
   }
-  assert.deepEqual(failures, Array(3).fill('behavior_author_evidence_invalid'))
-  assert.deepEqual(statuses, Array(2).fill('recovery_required'))
+  assert.deepEqual(failures, Array(reentries + 1).fill('behavior_author_evidence_invalid'))
+  assert.deepEqual(statuses, Array(reentries).fill('recovery_required'))
   assert.equal(nativeCalls.length, 3)
-  const protocol = openProtocol(join(f.parent, 'sync.sqlite'))
+  let protocol = openProtocol(join(f.parent, 'sync.sqlite'))
   t.after(() => protocol.close())
   const store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) })
   assert.equal(store.requestControl(operationId, 'pause').phase, 'paused')
   assert.equal(store.requestControl(operationId, 'run').phase, 'queued')
+  if (missingCanonical) {
+    interruptBeforeSettlement(store)
+    const second = await runSyncOperation(store, operationId, f.options)
+    assert.equal(second.status, 'recovery_required', JSON.stringify(second.failure))
+    assert.equal(failures.at(-1), 'behavior_author_evidence_invalid')
+    const [, carried] = store.listAttempts(operationId)
+    assert.equal(carried.status, 'running')
+    const resources = store.listResources(carried.id)
+    assert.equal(resources.length, 1)
+    const [resource] = resources
+    const plan = JSON.parse(readEvidence(commonDir, resource.plan.planBlob).toString()) as NativeRunPlan
+    const checkpoint = JSON.parse(readEvidence(commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
+    assert.equal(resource.phase, 'removed')
+    assert.equal(checkpoint.status, 'completed')
+    const worktree = checkpoint.result!.worktree!
+    assert.notEqual(worktree.baseCommit, worktree.headCommit)
+    assert.equal(worktree.baseTree, worktree.tree, '正常空提交后原种子与结果字节完全一致')
+    protocol.close()
+    protocol = openProtocol(join(f.parent, 'sync.sqlite'))
+    const restarted = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) })
+    unavailableSession = plan.expectedSessionId
+    canonicalReads.clear()
+    const outcome = await runSyncOperation(restarted, operationId, f.options)
+    const rejected = restarted.readAttempt(carried.id).failure?.code
+    t.diagnostic(JSON.stringify({ attempt: carried.id, seedAndResultTree: worktree.tree, canonicalRead: canonicalReads.has(unavailableSession), rejected, nativeCalls: nativeCalls.length }))
+    assert.ok(canonicalReads.has(unavailableSession))
+    assert.equal(nativeCalls.length, 4)
+    assert.equal(restarted.readOperation(operationId).callsUsed, 4)
+    assert.deepEqual(restarted.listResources(carried.id), resources)
+    assert.deepEqual(stages(restarted).filter(stage => stage.stage === approved.stage).at(-1), approved)
+    assert.equal(rejected, 'behavior_continuation_binding', JSON.stringify(outcome.failure))
+    return
+  }
   store.startElaboration = () => { throw new StructuredSessionError('unsupported', '已完成 P0，夹具停止于 P1 入口') }
   const repaired = await runSyncOperation(store, operationId, f.options)
   assert.equal(repaired.failure?.message, '已完成 P0，夹具停止于 P1 入口', JSON.stringify(repaired.failure))

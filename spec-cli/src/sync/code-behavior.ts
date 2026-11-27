@@ -720,7 +720,7 @@ export async function analyzeCodeBehavior(supplied: CodeBehaviorInput, runner: E
     }
     const requestKey = `${input.requestKey}:${purpose}`
     const material = draftMode ? await checkpoints?.loadMaterial?.(purpose, binding.schemaDigest, inputDigest, { prompt, worktree: base, previousInstructions }, prior) : undefined
-    const replay = input.contextTransport === 'git-json-v6' && prior?.sourceInputId === input.snapshot.id ? checkpoints?.replayDraft?.(requestKey, purpose, prior) : null
+    const replay = input.contextTransport === 'git-json-v6' && prior ? checkpoints?.replayDraft?.(requestKey, purpose, prior) : null
     const repairErrors = statusOnly ? [] : material?.errors ?? prior?.errors ?? continuation?.errors?.[purpose] ?? []
     const repairDiagnostics = statusOnly ? [] : material?.repairDiagnostics ? [...new Map([...material.repairDiagnostics, ...input.repairDiagnostics ?? []].map(item => [JSON.stringify(item), item])).values()] : input.repairDiagnostics ?? []
     const contextPath = binding.path.replace(/\.json$/, '.context.json')

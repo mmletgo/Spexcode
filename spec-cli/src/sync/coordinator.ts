@@ -3673,9 +3673,16 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
       const replayBehaviorDraft: NonNullable<CodeBehaviorCheckpoints['replayDraft']> = (requestKey, purpose, draft) => {
         assertMaterialFence()
         const current = store.readAttempt(fence!.attemptId)
+        const resource = store.findResource(current.id, requestKey)
+        if (resource?.phase !== 'removed') return null
+        const checkpoint = JSON.parse(readEvidence(operation.input.source.commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
+        if (checkpoint.status !== 'completed') return null
         const authenticated = authenticatedDraftResult(store, operation, current, requestKey, purpose, draft, options.nativeExecution?.runtime?.readRecord ?? readRecord)
         const request = authenticated?.request, result = authenticated?.result
-        return request && result && matchesAttemptNativeModel(operation, current, request) ? { request, result } : null
+        if (draft.sourceInputId !== operation.input.id || !request || !result || !matchesAttemptNativeModel(operation, current, request)) {
+          fail('behavior_continuation_binding', 'P0 同次回放缺少可认证的原 Native 完成结果或对应 Git 稿', [resource.checkpointRef])
+        }
+        return { request, result }
       }
       const loadBehaviorContinuation = (key: string, inputDigest: string, analysisSchemaDigest: string, planDigest?: string): CodeBehaviorContinuation | null => {
         const live = store.readAttempt(attempt!.id), challenge = challengeForKey(key)
