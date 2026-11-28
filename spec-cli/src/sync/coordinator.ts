@@ -1292,7 +1292,8 @@ function stoppedCandidateReviewSource(store: SyncStore, operation: SyncOperation
       if (item.phase !== 'created') return false
       const observed = JSON.parse(readEvidence(commonDir, item.checkpointRef).toString('utf8')) as NativeRunCheckpoint
       return matches(observed) && observed.phase === 'created' && observed.nativeState === (rejectedReservation ? 'failed' : 'cancelling')
-        && observed.nativeCallRequested && canonical(observed.session) === canonical(session)
+        && observed.nativeCallRequested && (!rejectedReservation || !observed.nativeStarted && !observed.stop && !observed.failure && !observed.creationTermination)
+        && canonical(observed.session) === canonical(session)
     })) return null
   const record = readNativeRecord(sessionId), state = record?.structuredExecution, stop = state?.cancellation
   const execution = structuredExecutionPolicy(native.request)
@@ -1358,6 +1359,16 @@ function interruptedCandidateReviewComplete(store: SyncStore, operation: SyncOpe
   })
 }
 
+/** 旧汇总可能未携带分区拒绝。待恢复信号阻止业务返工，续审资格仍由原件认证。 */
+function candidateReviewRecoveryRequired(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, generation: SavedGeneration, checkpoints: SyncCheckpointStageView): boolean {
+  const needsRecovery = (code?: string): boolean => code === 'cancellation_pending' || code === 'llm_manager_route_unavailable'
+  return needsRecovery(generation.failure?.code) || checkpoints.json.some(({ value }) => {
+    const key = (value as Stage).stage
+    return key?.startsWith('partition:') && key.endsWith(':candidate-review')
+      && needsRecovery(partitionStage<SavedGeneration>(store, operation, attempt, key, undefined, checkpoints)?.result.failure?.code)
+  })
+}
+
 /** 真实只读候选失败回到原P1写者；独审诊断不成为refinement或业务授权。 */
 function readonlyRepairFromAttempt(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, readIndex?: (source: SyncAttempt) => SyncCheckpointStageView): ReadonlyOwnerRepair | null {
   if (attempt.operationId !== operation.id) fail('readonly_spec_repair_binding', '只读V1续修来源属于另一操作')
@@ -1371,7 +1382,7 @@ function readonlyRepairFromAttempt(store: SyncStore, operation: SyncOperation, a
   let allFindings = generation?.result.validationFindings.filter(item => item.severity === 'error') ?? []
   const semantic = generation?.result.candidateValidated === true && ['repair', 'failed'].includes(generation.result.status) && !generation.result.reviewPassed && generation.result.partitionEvidence?.some(item => item.review.verdict === 'repair')
   if (!generation?.result.candidate || !semantic && (generation.result.candidateValidated || !allFindings.length || allFindings.some(item => !isReadonlyCitationFailure(item)))) return null
-  if (semantic && generation.result.failure?.code === 'cancellation_pending') return null
+  if (semantic && candidateReviewRecoveryRequired(store, operation, attempt, generation.result, checkpoints)) return null
   const plan = operation.planBlob ? JSON.parse(readEvidence(operation.input.source.commonDir, operation.planBlob).toString('utf8')) as SyncCoordinatorPlan : null
   if (plan?.version !== 'sync-coordinator-v2') return null
   const writable = generation.result.p2SpecWritePaths ?? (plan.direction === 'code_to_spec' ? [] : null)
@@ -1642,9 +1653,10 @@ function pendingReadonlyRepair(store: SyncStore, operation: SyncOperation, attem
     const result = history.read<SavedGeneration>(prior, 'generation')
     return result?.candidate && reuseBehaviorDependentStages(store, operation, prior, history.checkpoints(prior)) ? [{ prior, result }] : []
   })
-  const candidate = generations.at(-1)?.result.candidate
-  if (!candidate) return null
+  const latest = generations.at(-1), candidate = latest?.result.candidate
+  if (!latest || !candidate) return null
   if (candidate.sourceInputId !== operation.input.id) fail('readonly_spec_repair_binding', '最新候选不属于当前冻结输入，不能清除待处理诊断')
+  if (candidateReviewRecoveryRequired(store, operation, latest.prior, latest.result, history.checkpoints(latest.prior))) return null
   verifyCandidate(operation.input.source.commonDir, candidate)
   const candidateDigest = candidate.digest
   for (const { prior, result } of generations) {
@@ -3080,14 +3092,17 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
       if (!await recoverResources(store, operation, options, !active)) return current('recovery_required')
       if (!active) {
         if (attempt?.failure?.kind === 'repairable' && reuseBehaviorDependentStages(store, operation, attempt)) {
-          refinement = stage<Refinement>(store, operation, attempt, 'refinement') ?? refinement
-          const previous = stage<SavedGeneration>(store, operation, attempt, 'generation')
-          if (previous) {
-            repairContext = generationRepairInput(previous, attempt.failure)
-          }
-          else {
-            const elaboration = stage<SavedElaboration>(store, operation, attempt, 'elaboration')
-            seed = elaborationRepairSeed(elaboration, `sync:${attempt.id}:elaborate`)
+          const checkpoints = readSyncCheckpointStageIndex(store, operation, attempt)
+          const previous = stage<SavedGeneration>(store, operation, attempt, 'generation', 'automatic', checkpoints)
+          if (previous?.candidateValidated && candidateReviewRecoveryRequired(store, operation, attempt, previous, checkpoints)) {
+            refinement = undefined; repairContext = undefined; seed = undefined
+          } else {
+            refinement = stage<Refinement>(store, operation, attempt, 'refinement', 'automatic', checkpoints) ?? refinement
+            if (previous) repairContext = generationRepairInput(previous, attempt.failure)
+            else {
+              const elaboration = stage<SavedElaboration>(store, operation, attempt, 'elaboration', 'automatic', checkpoints)
+              seed = elaborationRepairSeed(elaboration, `sync:${attempt.id}:elaborate`)
+            }
           }
         }
         try {
@@ -3280,8 +3295,8 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           if (!candidate || !generation.candidateValidated || generation.reviewPassed || generation.validationFindings.some(finding => finding.severity === 'error') || !approved || !elaborationComposedBinding(store, owner, prior, approved, view.composed, checkpoints) || !originalPlan || !candidatePlan || canonical(candidate.coveredScope.paths) !== canonical(operation.scope.paths)) break
           let failedReviewKeys = authenticatedCandidate?.operationId === owner.id && authenticatedCandidate.sourceAttemptId === prior.id && authenticatedCandidate.candidateDigest === candidate.digest
             ? authenticatedCandidate.formatReviewKeys : undefined
-          if (!failedReviewKeys && (prior.status === 'superseded' && prior.failure === null || prior.failure?.code === 'cancellation_pending' || generation.failure?.code === 'cancellation_pending'
-            || prior.failure?.code === 'llm_manager_route_unavailable' || generation.failure?.code === 'llm_manager_route_unavailable')) {
+          if (!failedReviewKeys && (prior.status === 'superseded' && prior.failure === null || prior.failure?.code === 'cancellation_pending'
+            || prior.failure?.code === 'llm_manager_route_unavailable' || candidateReviewRecoveryRequired(store, owner, prior, generation, checkpoints))) {
             const classified = await withReadonlySnapshotQuery(async () => {
               const proof = candidateReviewAuthentication(store, owner, prior, generation, readIndex)
               for (let step = proof.next(); ; step = proof.next()) {
@@ -5542,7 +5557,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         }
         const continueReservation = requireSettledNativeFailureSources(store, operation, finishedAttempt, [generated, ...localResults], issue.evidenceRefs)
         if (generated.failure?.code === 'cancellation_pending') fail('cancellation_pending', issue.message, issue.evidenceRefs)
-        if (kind === 'repairable' && generated.candidate && !nodeChanges.length) {
+        if (!continueReservation && kind === 'repairable' && generated.candidate && !nodeChanges.length) {
           const findings = generated.partitionEvidence ? generated.partitionEvidence.filter(item => item.review.verdict === 'repair').flatMap(item => item.review.findings) : generated.review?.verdict === 'repair' ? generated.review.findings : []
           const omissions = findings.filter(finding => contractOmissionBound(finding, accepted.contracts))
           const ownerRepair = partitions && generated.p2SpecWritePaths && omissions.every(finding => !within(finding.ruleLocation.slice('contract-omission:'.length).split('#')[0], generated.p2SpecWritePaths!))
@@ -5550,7 +5565,8 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         }
         store.recordFailure(fence, issue, continueReservation && kind === 'repairable')
         if (kind !== 'repairable') return current(kind === 'unsupported' ? 'unsupported' : undefined, issue)
-        repairContext = generationRepairInput(generated); continue
+        if (!continueReservation) repairContext = generationRepairInput(generated)
+        continue
       }
       const delivered = await verifyAndDeliver(attempt, generated, elaboration, ready, retirementBefore, retiredIds, view, partitions, analysis, restorations, !!decision)
       if (delivered) return delivered

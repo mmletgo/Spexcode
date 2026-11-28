@@ -74,6 +74,8 @@ P0 传输冻结回归核新 attempt 保存 `reviewCoveragePreflight` 与 `review
 
 P2 混合失败使用真实 Git/Native 资源记录与 SQLite 冷开：普通 repair 排首、后组 contract-omission、另一组格式失败和一个 accept 同轮结算。冷续只重派原格式稿，保相同 candidate、合法 repair/accept 的原 resultRef；之后只回相应 P1 owner，保未命中原件与旧 CAS。覆盖完整 aggregate 后失租约的 superseded/null、零调用中间 attempt、缺 required outcome 及资源未 removed；不得补旧失败或收据。权限回归另在同 owner 核 ordinary 白名单与 omission 的已接受字段保护，不以并集扩权。
 
+P2 同稿续审期间让 Manager 预约返回明确拒绝，验证原 review 会话以 `notStarted` 结算。SQLite 冷启覆盖新汇总以及旧汇总只保留业务 repair 的状态。仅重派拒绝组的 review，候选、原稿及其它组的 repair、accept 引用保持，补齐独审之后才进入 P1 owner。
+
 同一矩阵另含尚未结清的新候选 GAP，仅在隔离控制前置模拟历史可选 GAP 复核 stage 缺席，其余真实 Git、SQLite、Native 和 CAS 字节保持。冷恢复仍只续 P2 格式组；普通与遗漏 owner 新独审及严格 seal 后才派新 aggregate 的 GAP 复核，协议阶段无 P1 或 GAP 派发，原 GAP 各字段与旧 verdict/ref 保持。
 
 同 owner 的后续 GAP 续稿分别覆盖已批准 RULE.basis 事实修正与合法新增 AC。新并集 GAP 独审后再次重开 SQLite，仅命中 owner 沿最新 acceptedRef 和 Git 草稿继续；新输入不携旧普通或遗漏权限，所有非 GAP 项、元数据、raw 与原 checkpoint 字节保持，最后重做 strict seal。回滚事实或丢弃新增 AC 的负例须以 candidate_gap_scope_changed 在独审前拒绝，不靠扩大原 P0 或合并诊断修绿。

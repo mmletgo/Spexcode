@@ -76,11 +76,12 @@ export type PartitionAnalysisFailures = { planDigest: string; failures: Partitio
 const within = (path: string, paths: readonly string[]): boolean => paths.some(parent => path === parent || path.startsWith(`${parent}/`))
 const unique = (values: readonly string[]): string[] => [...new Set(values)].sort()
 const reject = (message: string): never => { throw Object.assign(new Error(message), { code: 'partition_binding' }) }
-function primaryPartitionFailure<T>(values: readonly T[]): T | undefined {
+function primaryPartitionFailure<T>(values: readonly T[], candidateReview = false): T | undefined {
   const priority = (value: unknown): number => {
     const failure = value as { code?: unknown; status?: unknown; failure?: { code?: unknown } | null } | null | undefined
     const code = failure?.failure?.code ?? failure?.code
-    return code === 'cancellation_pending' ? 2 : code === 'unsupported' || failure?.status === 'unsupported' ? 1 : 0
+    return code === 'cancellation_pending' ? 3 : code === 'unsupported' || failure?.status === 'unsupported' ? 2
+      : candidateReview && code === 'llm_manager_route_unavailable' ? 1 : 0
   }
   return values.reduce<T | undefined>((primary, value) => priority(value) > priority(primary) ? value : primary, values[0])
 }
@@ -1020,7 +1021,7 @@ export async function generateSyncPartitions(input: GenerationInput, plan: SyncP
   base.traces = [...builders, ...checked.flatMap(result => result.traces)]
   independentTraces(base.traces)
   base.partitionEvidence = checked.flatMap((result, index) => result.review ? [{ partitionId: reviews[index].id, candidateDigest: candidate.digest, review: result.review, traces: result.traces }] : [])
-  const rejected = primaryPartitionFailure(checked.filter(result => !result.reviewPassed))
+  const rejected = primaryPartitionFailure(checked.filter(result => !result.reviewPassed), true)
   if (rejected) return { ...base, status: rejected.status, failure: rejected.failure, review: rejected.review }
   const checkedIds = unique(checked.flatMap(result => result.review!.checkedIds))
   if (input.readyIds.some(id => !checkedIds.includes(id))) reject('最终候选独审并集遗漏预定业务ID')
