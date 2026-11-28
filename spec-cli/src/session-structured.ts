@@ -250,7 +250,7 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
     let managerQuota = false
     if (manager && (failedStage?.stop.nativeStopped || !manager.frozenReader && !pendingStop?.turnStartRequested && !pendingStop?.turnId)) {
       const quota = failedStage?.stop.nativeStopped === true && error instanceof StructuredSessionError && error.code === 'provider_quota_exhausted'
-      try { managerQuota = await settleManagedRoute(manager, id, quota ? 'quota' : 'stopped', nativeTokenUsage) === 'quota' && failedStage?.stop.nativeStopped === true }
+      try { managerQuota = await settleManagedRoute(manager, id, quota ? 'quota' : 'stopped', nativeTokenUsage, quota ? error.quotaHttpStatus : undefined) === 'quota' && failedStage?.stop.nativeStopped === true }
       catch (cause) {
         if (!(cause instanceof LlmManagerHostError)) throw cause
         await update({ state: 'cancelling', cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: false, acknowledged: false, error: 'LLM Manager settlement pending' }, error: error instanceof Error ? error.message : String(error) })

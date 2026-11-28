@@ -401,9 +401,15 @@ export const loadNativeAdapter = vendor => {
   writeFileSync(python, `#!${process.execPath}
 process.stdout.write(JSON.stringify({ version: 1, path: ${JSON.stringify(manager)} }))
 `, { mode: 0o700 })
-  const env = process.env
-  process.env = { ...env, SPEX_LLM_MANAGER_PYTHON: python, SPEX_LLM_MANAGER_CONFIG: join(dirname(f.cli), 'config.json') }
-  t.after(() => { process.env = env })
+  const managerEnv = { SPEX_LLM_MANAGER_PYTHON: python, SPEX_LLM_MANAGER_CONFIG: join(dirname(f.cli), 'config.json') }
+  const original = Object.keys(managerEnv).map(key => [key, process.env[key]] as const)
+  Object.assign(process.env, managerEnv)
+  t.after(() => {
+    for (const [key, value] of original) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  })
   const result = await f.run()
   const plan = JSON.parse(readFileSync(join(f.sessionRoot, 'plan.json'), 'utf8'))
   const start = JSON.parse(readFileSync(f.started, 'utf8'))
@@ -821,6 +827,17 @@ test('Grok reports an exactly stopped nonzero streaming exit without a terminal 
   assert.equal(f.state().turnId, undefined)
   assert.equal(existsSync(join(f.sessionRoot, 'result.json')), false)
   assert.equal(existsSync(join(f.sessionRoot, 'settlement.json')), false)
+})
+
+test('Grok passes the real HTTP 402 through after exact native stop and no terminal', async t => {
+  const billing = { message: 'API error (status 402 Payment Required): Grok Build usage balance exhausted', http_status: 402 }
+  const f = fixture(t, 'missing-terminal', managedGrok, 'elaboration_review', [`Error: Internal error: ${JSON.stringify(billing, null, 2)}\n`], 'read')
+  await assert.rejects(f.run(), { code: 'provider_quota_exhausted', quotaHttpStatus: 402 })
+  assert.deepEqual(await stopGrokStructuredTurn(f.state()), { nativeStopped: true, acknowledged: false, nativeStatus: 'stopped' })
+  const receipt = JSON.parse(readFileSync(join(f.sessionRoot, 'missing-terminal-diagnostic.json'), 'utf8'))
+  assert.deepEqual(receipt.stderr.httpStatuses, [402])
+  assert.equal(receipt.stderr.usageBalanceExhausted, true)
+  assert.equal(existsSync(join(f.sessionRoot, 'result.json')), false)
 })
 
 for (const [label, chunks, statuses, exhausted, oversizedLine] of [

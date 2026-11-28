@@ -18,13 +18,13 @@ test('settings and operation selection share the authoritative Manager bridge', 
   const unmanaged = await readSyncModelSettings()
   const runtime = await loadManagerNativeRuntime()
   assert.equal(runtime.nativeRuntimeVersion, 1)
-  assert.equal(runtime.nativeAdapterContract, 6)
+  assert.equal(runtime.nativeAdapterContract, 7)
   for (const [vendor, method] of [
     ['grok', 'prepareGrokStructuredInvocation'],
-    ['claude', 'claudeControlledTerminalExit'],
-    ['zcode', 'zcodeReplayTerminal'],
-    ['cursor', 'cursorCloseMatches'],
-    ['codex', 'codexReadLegacyFrozenVisibleOutputs'],
+    ['claude', 'prepareClaudeStructuredInvocation'],
+    ['zcode', 'connectZCodeStructuredSession'],
+    ['cursor', 'prepareCursorInvocation'],
+    ['codex', 'prepareCodexWorktreeInvocation'],
   ] as const) {
     assert.equal(typeof (await runtime.loadNativeAdapter(vendor) as Record<string, unknown>)[method], 'function')
   }
@@ -75,7 +75,7 @@ if (process.argv[3] === '-m' && process.argv[4] === 'llm_manager.native_runtime'
 
   const oldNative = join(root, 'old-native.mjs'), oldPython = join(root, 'old-python')
   writeFileSync(oldNative, `export const nativeRuntimeVersion=1
-export const nativeAdapterContract=5
+export const nativeAdapterContract=6
 export const findNativeExecutable = () => { throw new Error('must not probe the CLI') }
 export const spawnGatedNativeProcess = findNativeExecutable
 export const spawnNativeProcess = findNativeExecutable
