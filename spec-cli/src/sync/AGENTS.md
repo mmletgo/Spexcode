@@ -55,9 +55,9 @@
 - P2 快照/候选仅操作明确 commonDir 的 Git 对象及私有保活 refs，禁用元数据 fsmonitor/reference hooks；开发/交付提交不可照搬禁 hooks。原输入与 ComposedInputRef 分开；实际模型 diff 和最终 apply diff 分开。
 - 快照/候选针对验证：`npx tsx --import ./scripts/test-home.mjs --test spec-cli/src/sync/snapshot-candidate.test.ts`；build 后 `npm run typecheck`、`npx eslint spec-cli/src/sync/{snapshot,composition,candidate,snapshot-candidate.test}.ts`。
 
-- operation固定请求选择；同request/retry先沿原绑定，真正新操作取显式选择或版本化`sync.model`，再按工作流缺省（native为`claude:default`，历史frozen为sol）。旧operation缺字段仍固定sol，不回写。换模型只经新操作或显式 retryOf；resume/recover 不换模型。完整已审冻结候选仅在未登记V3资源的unsupported正式retry、全部原件与输入/模型/政策绑定冷验一致时零模型续验；缺证或漂移明确拒绝，不静默从P0重做。严格同绑定且已结算的零调用/派发/候选/副作用空失败后继仅可回溯原已审祖先重新认证，不授批准或补旧checkpoint；同parent幂等保持。零调用候选后继仅在全部原验证资源正式removed且完整passed、原导出/政策/closed原件冷验时可沿祖先续验；原记账失败及报告保持，业务failed、缺证或未知资源拒绝，新V3仍fresh。原生工作树任务使用 sync-tools-v3 固定工作流，旧 v1/v2 只恢复原请求；不因注入 runner 降级生产策略。
+- 新正式 Native 同步及验收分别使用 LLM Manager 的通用同步执行组和正式验收组。缺少宿主配置时拒绝新派发。同一 request 和已派发会话按原身份恢复，后续新会话通过原功能组按 Manager 的当前顺序、可用性及额度状态选路。历史操作保留原模型绑定和缺省字段。完整已审冻结候选仅在未登记V3资源的unsupported正式retry、全部原件与输入/模型/政策绑定冷验一致时零模型续验；缺证或漂移明确拒绝，不静默从P0重做。严格同绑定且已结算的零调用/派发/候选/副作用空失败后继仅可回溯原已审祖先重新认证，不授批准或补旧checkpoint；同parent幂等保持。零调用候选后继仅在全部原验证资源正式removed且完整passed、原导出/政策/closed原件冷验时可沿祖先续验；原记账失败及报告保持，业务failed、缺证或未知资源拒绝，新V3仍fresh。原生工作树任务使用 sync-tools-v3 固定工作流，旧 v1/v2 只恢复原请求；不因注入 runner 降级生产策略。
 
-- ZCode使用`zcode:default`或`zcode:<provider-id>/<model>`，模型/别名交SDK解析，实际每轮选择另行留证；与Claude共用版本化原生工作树执行、队列和资源桥；换provider仍须新操作/正式retryOf，不自动fallback。旧v4只读策略和原生读取证明仅用于其历史请求。
+- ZCode、Grok、Claude、Codex 和 Cursor 的启动、模型及额度识别由 Manager 原生适配提供。SpexCode 共用版本化原生工作树执行、队列与资源桥，按每次正式派发冻结 Manager 返回的路线。旧 ZCode v4 只读策略和原生读取证明继续用于原历史请求。
 
 - 原生工作树使用结构化策略 v6，sync v31 组件 marker 拒绝旧 writer；ZCode 新 read 请求冻结精准 ExitPlanMode denylist 与 NativePlan v2，旧资源/记录及仅 reserved dispatch 的字段缺席保持，后者只以完整请求摘要确证；内部创建键首建保留上游冻结字段并严格验策略，不能恢复时补默认。旧数字与 null 的只读 v1–v5 原样恢复。unlimited 模型调用期限为 null，创建、租约、stop/close 及 Docker 期限仍独立有限。升级先停全部旧 backend/queue 并结算资源、备份数据库；回滚恢复升级前备份，不能只删 marker 或改工具描述。
 - [[sync-elaboration]] 新 Native P1 冻结一次根级适用性指导，缺字段的历史派发按原提示恢复。writer75 升级和回滚沿 [[sync-migrations]]。
