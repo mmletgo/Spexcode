@@ -19,67 +19,66 @@ type NativeResult = { threadId: string; turnId: string; text: string; frozenRead
 type NativePlan = { version: 1; root: string; workspace: string; tmp: string; mode: 'read' | 'edit'; promptDigest: string; policyDigest: string; cliPath: string; cliVersion: string; args: string[] }
 type NativeLaunch = { planDigest: string; pid: number; receiptFile: string; receiptDigest: string }
 type OwnedLaunch = NativePlan & NativeLaunch
-type NativeRequest = { planDigest: string; sessionId: string; requestId: string; reportedModel?: string }
-type NativeOutput = { requestDigest: string; stopReason: string; reportedModel?: string; text: string }
+type NativeRequest = { sessionId: string; requestId: string }
+type NativeOutput = { text: string }
 type Exit = { code: number | null; signal: NodeJS.Signals | null }
 type NativeClose = { launchDigest: string; outputDigest: string; signal: 'SIGTERM' }
 type NativeSettlement = { launchDigest: string; outputDigest: string; stopDigest: string; exit: Exit; closeDigest?: string; quotaDigest?: string }
 type StopResult = { nativeStopped: boolean; acknowledged: boolean; nativeStatus?: string; error?: string }
-type RpcObject = Record<string, unknown>
 
 type CursorAdapter = {
   CursorAcpError: new (...args: never[]) => Error & {
     code: 'failed' | 'unsupported' | 'cancellation_pending' | 'provider_quota_exhausted'
     detail?: { threadId: string; turnId: string }
   }
-  cursorModelArgument(value: string): string | undefined
-  inspectCursorCliVersion(launch: ReturnType<typeof nativeWorktreeLaunch> & { cwd: string }): string
-  cursorLaunchArgs(workspace: string, mode: NativePlan['mode'], model?: string): string[]
-  cursorAcpInitialize(): RpcObject
-  cursorAcpCancel(sessionId: string): RpcObject
-  encodeCursorAcpPacket(packet: RpcObject): string
-  cursorTerminalCancelled<T extends { stopReason: string }>(output: T | undefined): output is T
+  prepareCursorInvocation(launch: ReturnType<typeof nativeWorktreeLaunch> & { cwd: string }, mode: NativePlan['mode'], model: string): {
+    args: string[]; cliVersion: string
+  }
   cursorTerminalCompleted(output: NativeOutput | undefined): output is NativeOutput
-  cursorUsageLimitNotice(value: unknown): boolean
   cursorCloseMatches(exit: Exit | undefined, signalled: boolean): boolean
   cursorPromptQuotaFailure(request: NativeRequest): {
     code: 'provider_quota_exhausted'; message: string; detail: { threadId: string; turnId: string }
   }
-  observeCursorAcp(stdout: Readable, plan: Pick<NativePlan, 'workspace' | 'mode'> & { planDigest: string }, prompt: string, send: (packet: RpcObject) => void, hooks: {
+  connectCursorInvocation(pipes: { stdin: Writable; stdout: Readable }, plan: Pick<NativePlan, 'workspace' | 'mode'> & { planDigest: string }, prompt: string, hooks: {
     onSession(id: string): Promise<void>
     startPrompt(request: NativeRequest): Promise<boolean>
     onTerminal(output: NativeOutput): void
-    onProviderQuota?(request: NativeRequest, evidence: 'http_429' | 'usage_limit'): void
+    onQuotaReceipt?(receipt: Record<string, unknown>): void
     isInterrupted(): boolean
-    digestRequest(request: NativeRequest): string
-  }): Promise<{ output: NativeOutput; textOnlyWithoutTools: boolean }>
+    digest(value: unknown): string
+  }): {
+    start(): void
+    cancel(): boolean
+    observed: Promise<{ output: NativeOutput; quota?: Record<string, unknown>; cancellationAcknowledgment?: Record<string, unknown> }>
+  }
 }
 
-const cursorReplay = bundledCursor as Pick<CursorAdapter, 'CursorAcpError' | 'cursorLaunchArgs' | 'cursorModelArgument' | 'cursorTerminalCancelled' | 'cursorTerminalCompleted'
-  | 'cursorUsageLimitNotice' | 'cursorCloseMatches' | 'cursorPromptQuotaFailure'>
+const cursorReplay = bundledCursor as Pick<CursorAdapter, 'CursorAcpError' | 'cursorPromptQuotaFailure'> & {
+  cursorSettlementTiming: { stopMs: number; cancelGraceMs: number; eofGraceMs: number }
+  cursorInvocationMatches(plan: NativePlan, model: string): boolean
+  cursorBoundRequestMatches(request: NativeRequest, planDigest: string): boolean
+  cursorSettledOutputMatches(output: NativeOutput, requestDigest: string, exit: Exit, signalled: boolean): boolean
+  cursorSettledQuota(receipt: unknown, quotaDigest: string | undefined, managed: boolean, request: NativeRequest, output: NativeOutput, digest: (value: unknown) => string): boolean | undefined
+  cursorTerminalCancelled(ack: Record<string, unknown>): boolean
+}
 
-function cursorHostError(provider: CursorAdapter, error: unknown): unknown {
+function cursorHostError(provider: Pick<CursorAdapter, 'CursorAcpError'>, error: unknown): unknown {
   return error instanceof provider.CursorAcpError ? new StructuredSessionError(error.code, error.message, error.detail) : error
 }
 
-const STOP_MS = 15_000
-const CANCEL_GRACE_MS = 1_000
-const EOF_GRACE_MS = 500
+const { stopMs: STOP_MS, cancelGraceMs: CANCEL_GRACE_MS, eofGraceMs: EOF_GRACE_MS } = cursorReplay.cursorSettlementTiming
 const sha256 = (bytes: string | Buffer): string => createHash('sha256').update(bytes).digest('hex')
 const digest = (value: unknown): string => sha256(JSON.stringify(value))
 const pending = (message: string): StructuredSessionError => new StructuredSessionError('cancellation_pending', message)
 const stale = (message: string): StructuredSessionError => new StructuredSessionError('stale_result', message)
 const failed = (message: string): StructuredSessionError => new StructuredSessionError('failed', message)
 const cancelled = (timedOut = false): StructuredSessionError => new StructuredSessionError(timedOut ? 'timeout' : 'cancelled', timedOut ? 'Cursor native turn timed out' : 'Cursor native turn cancelled')
-const object = (value: unknown): RpcObject | undefined => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as RpcObject : undefined
+const object = (value: unknown): Record<string, unknown> | undefined => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
 const nonempty = (value: unknown): value is string => typeof value === 'string' && !!value.trim()
 function quotaFailure(request: NativeRequest, adapter: Pick<CursorAdapter, 'cursorPromptQuotaFailure'>): StructuredSessionError {
   const failure = adapter.cursorPromptQuotaFailure(request)
   return new StructuredSessionError(failure.code, failure.message, failure.detail)
 }
-const terminalQuotaReceipt = (request: NativeRequest, output: NativeOutput) => ({ requestDigest: digest(request), sessionId: request.sessionId,
-  requestId: request.requestId, evidence: 'usage_limit' as const, source: 'acp_terminal' as const, outputDigest: digest(output) })
-
 function readEvidence(root: string, name: string): Buffer {
   try { return readFileSync(join(root, name)) }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw stale('Cursor original native evidence is missing'); throw error }
@@ -96,12 +95,9 @@ function writeEvidence(root: string, name: string, value: unknown): void {
   renameSync(temporary, join(root, name))
 }
 
-function cursorNativeModel(model: string | undefined): string | undefined {
-  try { return cursorReplay.cursorModelArgument(nativeModelValue(model, 'cursor')) }
-  catch (error) {
-    if (!(error instanceof cursorReplay.CursorAcpError) || error.code !== 'unsupported') throw error
-    throw new StructuredSessionError('unsupported', error.message)
-  }
+function invocationMatches(plan: NativePlan, model: string | undefined): boolean {
+  try { return cursorReplay.cursorInvocationMatches(plan, nativeModelValue(model, 'cursor')) }
+  catch (error) { throw cursorHostError(cursorReplay, error) }
 }
 
 const nativePrompt = (prompt: string, execution: CursorStructuredExecution): string =>
@@ -112,7 +108,7 @@ function assertPlan(plan: NativePlan, root: string, execution: CursorStructuredE
   if (plan?.version !== 1 || native?.version !== 1 || plan.root !== root || native.root !== root
     || !nonempty(plan.workspace) || worktreePath !== undefined && worktreePath !== plan.workspace || plan.tmp !== join(root, 'tmp')
     || plan.mode !== execution.worktree?.mode || !nonempty(plan.cliPath) || !nonempty(plan.cliVersion)
-    || !Array.isArray(plan.args) || digest(plan.args) !== digest(cursorReplay.cursorLaunchArgs(plan.workspace, plan.mode, cursorNativeModel(execution.model)))
+    || !invocationMatches(plan, execution.model)
     || plan.policyDigest !== digest(structuredExecutionPolicy(execution))
     || prompt !== undefined && (plan.promptDigest !== sha256(nativePrompt(prompt, execution)) || plan.promptDigest !== sha256(readEvidence(root, 'prompt.txt'))))
     throw stale('Cursor original worktree, prompt or policy binding differs')
@@ -131,10 +127,9 @@ function assertLaunch(plan: NativePlan, launch: NativeLaunch, native: CursorNati
 
 function readRequest(plan: NativePlan, execution: CursorStructuredExecution): NativeRequest {
   const request = read<NativeRequest>(plan.root, 'request.json'), native = execution.cursorNative!
-  if (request?.planDigest !== digest(plan) || !nonempty(request.sessionId) || !nonempty(request.requestId)
+  if (!cursorReplay.cursorBoundRequestMatches(request, digest(plan))
     || request.sessionId !== native.sessionId || request.sessionId !== execution.threadId
-    || request.requestId !== native.requestId || request.requestId !== execution.turnId
-    || request.reportedModel !== undefined && !nonempty(request.reportedModel))
+    || request.requestId !== native.requestId || request.requestId !== execution.turnId)
     throw stale('Cursor original ACP session or prompt request differs')
   return request
 }
@@ -142,7 +137,7 @@ function readRequest(plan: NativePlan, execution: CursorStructuredExecution): Na
 function stopObservation(root: string, launch: NativeLaunch, hash?: string): string {
   const rows = readEvidence(root, 'process-stop-observations.jsonl').toString('utf8').trimEnd().split('\n')
   const line = hash === undefined ? rows.at(-1) : rows.find(row => sha256(row) === hash)
-  let observation: RpcObject | undefined
+  let observation: Record<string, unknown> | undefined
   try { observation = line ? object(JSON.parse(line)) : undefined }
   catch (error) { if (!(error instanceof SyntaxError)) throw error; throw stale('Cursor original native stop observation is invalid') }
   if (!line || observation?.boundaryVersion !== 2 || observation.pid !== launch.pid || observation.receiptFile !== launch.receiptFile
@@ -157,10 +152,9 @@ function readSettledOutput(root: string, prompt: string, execution: CursorStruct
   assertLaunch(plan, launch, execution.cursorNative!)
   const request = readRequest(plan, execution), output = read<NativeOutput>(root, 'result.json'), settlement = read<NativeSettlement>(root, 'settlement.json')
   if (settlement?.launchDigest !== digest(launch) || settlement.outputDigest !== digest(output) || !nonempty(settlement.stopDigest)
-    || !cursorReplay.cursorCloseMatches(settlement.exit, settlement.closeDigest !== undefined) || existsSync(join(root, 'cancel.json'))
+    || existsSync(join(root, 'cancel.json'))
     || existsSync(join(root, 'close.json')) !== (settlement.closeDigest !== undefined)
-    || output?.requestDigest !== digest(request) || !cursorReplay.cursorTerminalCompleted(output) || typeof output.text !== 'string'
-    || output.reportedModel !== undefined && !nonempty(output.reportedModel))
+    || !cursorReplay.cursorSettledOutputMatches(output, digest(request), settlement.exit, settlement.closeDigest !== undefined))
     throw stale('Cursor settled native terminal or stopped process evidence differs')
   if (settlement.closeDigest !== undefined) {
     const close = read<NativeClose>(root, 'close.json')
@@ -168,10 +162,9 @@ function readSettledOutput(root: string, prompt: string, execution: CursorStruct
       || close.signal !== 'SIGTERM' || digest(close) !== settlement.closeDigest) throw stale('Cursor original ACP server shutdown differs')
   }
   stopObservation(root, launch, settlement.stopDigest)
-  const receipt = existsSync(join(root, 'provider-quota.json')) ? object(read<unknown>(root, 'provider-quota.json')) : undefined
-  const quota = receipt?.source === 'acp_terminal'
-  if (quota !== (settlement.quotaDigest !== undefined) || quota && (!managedRoute(execution.model) || !cursorReplay.cursorUsageLimitNotice(output.text)
-    || digest(receipt) !== settlement.quotaDigest || digest(terminalQuotaReceipt(request, output)) !== settlement.quotaDigest))
+  const receipt = existsSync(join(root, 'provider-quota.json')) ? read<unknown>(root, 'provider-quota.json') : undefined
+  const quota = cursorReplay.cursorSettledQuota(receipt, settlement.quotaDigest, !!managedRoute(execution.model), request, output, digest)
+  if (quota === undefined)
     throw stale('Cursor settled ACP usage notice does not match its original quota receipt')
   return { request, output, quota }
 }
@@ -264,7 +257,7 @@ export async function stopCursorStructuredTurn(execution: CursorStructuredExecut
     if (!await waitForStop(owned, deadline, true)) return unproven
     let acknowledged = false
     if (existsSync(join(native.root, 'cancel-ack.json'))) {
-      const ack = read<{ launchDigest: string; requestDigest: string; stopReason: string }>(native.root, 'cancel-ack.json')
+      const ack = read<Record<string, unknown>>(native.root, 'cancel-ack.json')
       const cancel = read<{ launchDigest: string }>(native.root, 'cancel.json')
       acknowledged = ack?.launchDigest === launchDigest && cancel?.launchDigest === launchDigest && cursorReplay.cursorTerminalCancelled(ack) && ack.requestDigest === digest(readRequest(plan, execution))
     }
@@ -305,18 +298,15 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
   const provider = await runtime.loadNativeAdapter('cursor') as CursorAdapter
   const cliPath = runtime.findNativeExecutable('cursor')
   if (!cliPath) throw new StructuredSessionError('unsupported', 'Cursor CLI is unavailable')
-  let model: string | undefined
-  try { model = provider.cursorModelArgument(nativeModelValue(execution.model, 'cursor')) }
-  catch (error) { throw cursorHostError(provider, error) }
   if (realpathSync(worktreePath) !== worktreePath) throw new StructuredSessionError('unsupported', 'Cursor CLI requires the exact physical worktree path')
   const launch = nativeWorktreeLaunch(worktreePath, cliPath, [])
-  const args = provider.cursorLaunchArgs(worktreePath, execution.worktree.mode, model)
-  let cliVersion: string
-  try { cliVersion = provider.inspectCursorCliVersion({ ...launch, cwd: worktreePath }) }
+  let invocation: ReturnType<CursorAdapter['prepareCursorInvocation']>
+  try { invocation = provider.prepareCursorInvocation({ ...launch, cwd: worktreePath }, execution.worktree.mode, nativeModelValue(execution.model, 'cursor')) }
   catch (error) { throw cursorHostError(provider, error) }
 
   const native: CursorNativeState = { version: 1, root }
   const promptBytes = nativePrompt(prompt, execution), receiptFile = join(root, 'process.json'), tmp = join(root, 'tmp'), cancelPath = join(root, 'cancel.json')
+  const { args, cliVersion } = invocation
   const plan: NativePlan = { version: 1, root, workspace: worktreePath, tmp, mode: execution.worktree.mode, cliPath, cliVersion, args, promptDigest: sha256(promptBytes), policyDigest: digest(structuredExecutionPolicy(execution)) }
   mkdirSync(realm, { recursive: true, mode: 0o700 })
   try { mkdirSync(root, { mode: 0o700 }) }
@@ -336,7 +326,7 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
   const closed = new Promise<Exit>(resolveExit => child.once('close', (code, signal) => resolveExit({ code, signal })))
   let gatedLaunch: OwnedLaunch | undefined, owned: OwnedLaunch | undefined, boundRequest: NativeRequest | undefined
   let normalClose: NativeClose | undefined, closeTimer: ReturnType<typeof setTimeout> | undefined
-  let terminalSeen = false, cancelSent = false, interrupted = false, timedOut = false, stopped = false
+  let interrupted = false, timedOut = false, stopped = false
   let failure: unknown, timeoutFailure: unknown, deadline: number | undefined, expire!: () => void
   let stopTimer: ReturnType<typeof setTimeout> | undefined, forceTimer: ReturnType<typeof setTimeout> | undefined
   let census: ReturnType<typeof setInterval> | undefined
@@ -346,14 +336,10 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
     deadline = Date.now() + STOP_MS
     stopTimer = setTimeout(expire, STOP_MS)
   }
-  const send = (packet: RpcObject): void => { stdin.write(provider.encodeCursorAcpPacket(packet)) }
   const shutdown = (): void => {
     armStop()
     if (!owned || forceTimer) return
-    if (boundRequest && !terminalSeen && !stdin.destroyed && !stdin.writableEnded) {
-      send(provider.cursorAcpCancel(boundRequest.sessionId))
-      cancelSent = true
-    }
+    const cancelSent = connection.cancel()
     forceTimer = setTimeout(() => {
       try {
         gate.destroy()
@@ -376,20 +362,11 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
   const observationFault = (error: unknown): void => {
     fault(Object.assign(failed(NATIVE_PERIODIC_OBSERVATION_FAILURE.cursor), { cause: error }))
   }
-  child.once('error', fault); stdin.once('error', fault); gate.once('error', fault)
-  activeInterrupts.set(root, abort)
-  callbacks.signal?.addEventListener('abort', abort, { once: true })
-  const timer = structuredExecutionTimer(execution.timeoutMs, () => {
-    timedOut = true
-    abort()
-    void callbacks.onTimeout?.().catch(error => { timeoutFailure = error })
-  })
-  const observed = provider.observeCursorAcp(stdout, { workspace: plan.workspace, mode: plan.mode, planDigest: digest(plan) }, promptBytes, send, {
-    digestRequest: digest,
+  const connection = provider.connectCursorInvocation({ stdin, stdout }, { workspace: plan.workspace, mode: plan.mode, planDigest: digest(plan) }, promptBytes, {
+    digest,
     onSession: callbacks.onThread,
     ...(managedRoute(execution.model) ? {
-      onProviderQuota: (request: NativeRequest, evidence: 'http_429' | 'usage_limit') =>
-        writeEvidence(root, 'provider-quota.json', { requestDigest: digest(request), sessionId: request.sessionId, requestId: request.requestId, evidence }),
+      onQuotaReceipt: (receipt: Record<string, unknown>) => writeEvidence(root, 'provider-quota.json', receipt),
     } : {}),
     startPrompt: async request => {
       await callbacks.onNative({ ...native, pid: child.pid, receiptFile, sessionId: request.sessionId, requestId: request.requestId })
@@ -401,10 +378,7 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
     },
     isInterrupted: () => interrupted,
     onTerminal: output => {
-      terminalSeen = true
       armStop()
-      stdin.end()
-      // Cursor ACP is a persistent server and can remain alive after the client's EOF.
       closeTimer = setTimeout(() => {
         if (!owned || interrupted || failure) return
         try {
@@ -416,9 +390,18 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
         } catch (error) { fault(error) }
       }, EOF_GRACE_MS)
     },
-  }).then(output => output, (error: unknown) => {
+  })
+  const observed = connection.observed.catch((error: unknown) => {
     fault(cursorHostError(provider, error))
     return null
+  })
+  child.once('error', fault); stdin.once('error', fault); gate.once('error', fault)
+  activeInterrupts.set(root, abort)
+  callbacks.signal?.addEventListener('abort', abort, { once: true })
+  const timer = structuredExecutionTimer(execution.timeoutMs, () => {
+    timedOut = true
+    abort()
+    void callbacks.onTimeout?.().catch(error => { timeoutFailure = error })
   })
   try {
     if (!child.pid) throw pending('Cursor launch PID is unavailable')
@@ -434,7 +417,7 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
     if (interrupted || callbacks.signal?.aborted || existsSync(cancelPath)) abort()
     else if (!failure) {
       gate.end('start\n')
-      send(provider.cursorAcpInitialize())
+      connection.start()
     } else shutdown()
     const sample = periodicNativeWorktreeSampler(launched, () => deadline !== undefined, observationFault)
     census = setInterval(() => {
@@ -447,8 +430,11 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
     if (!ended) throw pending('Cursor native close and process-group stop remain unproven')
     const [exit, observation] = ended
     const output = observation?.output
-    if (interrupted && cancelSent && boundRequest && provider.cursorTerminalCancelled(output))
-      writeEvidence(root, 'cancel-ack.json', { launchDigest: digest(binding), requestDigest: digest(boundRequest), stopReason: output.stopReason })
+    if (interrupted && boundRequest && observation?.cancellationAcknowledgment) {
+      writeEvidence(root, 'cancel-ack.json', {
+        launchDigest: digest(binding), requestDigest: digest(boundRequest), ...observation.cancellationAcknowledgment,
+      })
+    }
     const success = !failure && provider.cursorTerminalCompleted(output) && provider.cursorCloseMatches(exit, normalClose !== undefined) && !interrupted
     stopped = await waitForStop(owned, success ? Date.now() + STOP_MS : deadline!, !success || normalClose !== undefined)
     if (!stopped) throw pending('Cursor native close and process-group stop remain unproven')
@@ -460,13 +446,12 @@ export async function cursorStructuredTurn(realm: string, id: string, prompt: st
     if (!success) throw failed('Cursor ACP prompt did not complete successfully')
     writeEvidence(root, 'result.json', output)
     let quotaDigest: string | undefined
-    if (managedRoute(execution.model) && observation?.textOnlyWithoutTools && provider.cursorUsageLimitNotice(output.text)) {
+    if (observation?.quota) {
       try {
         const actual = nativeWorktreeResult(worktreePath, execution.worktree)
         if (actual.headCommit === execution.worktree.baseCommit && actual.tree === execution.worktree.tree) {
-          const receipt = terminalQuotaReceipt(boundRequest, output)
-          writeEvidence(root, 'provider-quota.json', receipt)
-          quotaDigest = digest(receipt)
+          writeEvidence(root, 'provider-quota.json', observation.quota)
+          quotaDigest = digest(observation.quota)
         }
       } catch (error) {
         // An edited worktree makes the text ordinary rejected output, retaining its original bytes.
