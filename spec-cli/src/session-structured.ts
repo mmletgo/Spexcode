@@ -7,7 +7,7 @@ import { mainRoot, runtimeRoot, sessionArtifactPath } from '@spexcode/spec-core'
 import { readRecord, withRecordLock, writeRecord } from './session-record.js'
 import { codexStructuredTurn, codexStopStructuredTurn, readManagedFrozenArchivedTurn, stopUnboundManagedFrozenRealm } from './codex-harness.js'
 import { commitCodexGenerationRegistration, prepareCodexGenerationRegistration, readCodexGenerationLedger, resolveCodexGenerationForClose } from './codex-runtime-generations.js'
-import { assertRejectedOutput, structuredGeneration, prepareStructuredRealm, prepareFrozenReaderRuntime, assertFrozenReaderRuntime, StructuredSessionError, StructuredSessionTransportError, structuredObserverState, structuredExecutionPolicy, structuredRealmRoot, pinNativeConfiguration, pinZCodeToolPolicy, type StructuredExecution, type FrozenReaderRuntime } from './session-structured-policy.js'
+import { assertRejectedOutput, structuredGeneration, prepareStructuredRealm, prepareFrozenReaderRuntime, assertFrozenReaderRuntime, StructuredSessionError, StructuredSessionTransportError, structuredDispatchUnstarted, structuredObserverState, structuredExecutionPolicy, structuredRealmRoot, pinNativeConfiguration, pinZCodeToolPolicy, type StructuredExecution, type FrozenReaderRuntime } from './session-structured-policy.js'
 import { assertFrozenBinding, prepareFrozenPrompt, prepareManagedFrozenPrompt, readFrozenManifest, type FrozenContextRef, type FrozenEntryJson, type FrozenReadProof, type FrozenReadReceipt } from './frozen-context.js'
 import { verifyStructuredFrozenReadProof as verifyFrozenReadProof } from './structured-frozen-evidence.js'
 import { configuredSessionApplication } from './session-application.js'
@@ -113,8 +113,20 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
     if (manager && !execution.turnStartRequested && !execution.threadId) {
       try { await reserveManagedRoute(manager, id, controller.signal) }
       catch (error) {
-        if (!(error instanceof LlmManagerHostError) || error.code !== 'llm_manager_host_unavailable') throw error
-        throw new StructuredSessionError('cancellation_pending', 'The exact LLM Manager reservation status is unknown')
+        if (!(error instanceof LlmManagerHostError)) throw error
+        if (error.code === 'llm_manager_route_unavailable') {
+          const original = readRecord(id)
+          if (!original?.structuredExecution || original.harnessSessionId || !structuredDispatchUnstarted(original.structuredExecution))
+            throw new StructuredSessionError('cancellation_pending', error.message)
+          // The reservation rejection certifies that no Manager claim was created for this session.
+          await update({ state: 'failed', errorCode: error.code, error: error.message, cancellation: {
+            reason: 'cancelled', requestedAt: Date.now(), nativeStopped: true, acknowledged: false, nativeStatus: 'notStarted',
+          } })
+          return 'failed'
+        }
+        if (error.code === 'llm_manager_host_unavailable' || error.code === 'llm_manager_host_invalid_response')
+          throw new StructuredSessionError('cancellation_pending', 'The exact LLM Manager reservation status is unknown')
+        throw error
       }
     }
     const hosted = managedFrozen ? await hostedFrozenRuntime(manager!.frozenReader!) : undefined
@@ -456,7 +468,8 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
   } catch (error) {
     if (error instanceof StructuredSessionError) {
       const state = readRecord(id)?.structuredExecution
-      throw new StructuredSessionError(error.code, error.message, { sessionId: id, threadId: state?.threadId, turnId: state?.turnId, rejectedOutput: error.rejectedOutput, failedWorktree: error.failedWorktree, ...(error.code === 'native_turn_transport_failed' ? { requestKey: request.requestKey, inputDigest: request.inputDigest } : {}) })
+      throw new StructuredSessionError(error.code, error.message, { sessionId: id, threadId: state?.threadId, turnId: state?.turnId, rejectedOutput: error.rejectedOutput, failedWorktree: error.failedWorktree,
+        ...(error.code === 'native_turn_transport_failed' || error.code === 'llm_manager_route_unavailable' ? { requestKey: request.requestKey, inputDigest: request.inputDigest } : {}) })
     }
     throw error
   } finally { request.signal?.removeEventListener('abort', onAbort) }

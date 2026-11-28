@@ -2218,8 +2218,11 @@ function committedDraftFixture(f: Awaited<ReturnType<typeof fixture>>, request: 
   return nativeWorktreeResult(workspace, seed)
 }
 
-for (const missingLaunch of [false, true]) test(`Grok P1 独审退出超时结算后只重审原Git候选 missingLaunch=${missingLaunch}`, async t => {
-  const failureMessage = 'Grok native exit was not observed before the settlement deadline'
+for (const scenario of ['exit-timeout', 'missing-launch', 'preterminal', 'preterminal-missing-stop', 'preterminal-foreign-cancel', 'preterminal-published'] as const) test(`Grok P1 独审结算后只重审原Git候选 ${scenario}`, async t => {
+  const preterminal = scenario.startsWith('preterminal'), missingLaunch = scenario === 'missing-launch'
+  const invalidEvidence = scenario !== 'exit-timeout' && scenario !== 'preterminal'
+  const failureMessage = preterminal ? 'Grok native stream closed without its original terminal' : 'Grok native exit was not observed before the settlement deadline'
+  const failureCode = preterminal ? 'cancellation_pending' : 'failed'
   const budget = { maxAttempts: 2, maxCalls: 8, maxRepairs: 1, timeoutMs: 120_000 }
   const f = await fixture(t, budget, false, original, 'project', original, {
     version: 'sync-coordinator-v2', direction: 'spec_to_code', sourcePaths: ['src/export.js'], agentWorkflow: 'native-worktree-v1',
@@ -2252,6 +2255,7 @@ const prior = fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : ''
 const hold = review && !prior.includes('"purpose":"elaboration_review"')
 const purpose = review ? 'elaboration_review' : 'elaboration_generate'
 fs.appendFileSync(log, JSON.stringify({ purpose, mode, sessionId, commit: git('rev-parse', 'HEAD'), tree: git('rev-parse', 'HEAD^{tree}') }) + '\\n', { mode: 0o600 })
+if (hold && ${preterminal}) process.exit(0)
 let output = { verdict: 'accept', checkedBoundaries: ${JSON.stringify(ELABORATION_BOUNDARIES)}, findings: [] }
 if (!review) {
   const draft = ${JSON.stringify({ ...draft, version: 'elaboration-target-rows-v3', changes })}
@@ -2268,7 +2272,8 @@ else setTimeout(() => process.exit(0), 100)
 `, { mode: 0o700 })
 
   f.options.runner = undefined
-  f.store.expandContractScope = () => { throw new StructuredSessionError('unsupported', 'fixture在P1独审通过后停止') }
+  const stopAfterApproval = () => { throw new StructuredSessionError('unsupported', 'fixture在P1独审通过后停止') }
+  f.store.expandContractScope = stopAfterApproval
   const commonDir = f.input.source.commonDir
   const read = <T>(ref: BlobRef): T => JSON.parse(readEvidence(commonDir, ref).toString('utf8')) as T
   const readLocal = (attempt: SyncAttempt) => {
@@ -2278,7 +2283,7 @@ else setTimeout(() => process.exit(0), 100)
   }
   const recordFailure = f.store.recordFailure.bind(f.store)
   let saved: { failure: SyncAttempt['failure']; local: ReturnType<typeof readLocal>; resource: string; record: string; archive: string; hiddenLaunch?: string } | undefined
-  f.store.recordFailure = (fence, issue) => {
+  if (!preterminal) f.store.recordFailure = (fence, issue) => {
     const recorded = recordFailure(fence, issue)
     if (saved || issue.message !== failureMessage) return recorded
     const attempt = f.store.readAttempt(fence.attemptId), dispatch = attempt.dispatchPlans.find(item => item.purpose === 'elaboration_review')!
@@ -2291,13 +2296,50 @@ else setTimeout(() => process.exit(0), 100)
     return recorded
   }
 
-  const result = await runSyncOperation(f.store, f.operation.id, f.options)
-  const attempts = f.store.listAttempts(f.operation.id), [before, after] = attempts
+  let store = f.store
+  let result = await runSyncOperation(store, f.operation.id, f.options)
+  if (preterminal) {
+    assert.equal(result.failure?.code, failureCode, JSON.stringify(result.failure))
+    const [origin] = store.listAttempts(f.operation.id)
+    const dispatch = origin.dispatchPlans.find(item => item.purpose === 'elaboration_review')!
+    const id = sessionIdForCreateKey(dispatch.sessionCreateKey), observation = store.findResource(origin.id, dispatch.key)!
+    assert.equal(observation.phase, 'created')
+    const interrupted = read<NativeRunCheckpoint>(observation.checkpointRef)
+    assert.equal(interrupted.nativeState, 'cancelling')
+    assert.ok(interrupted.nativeCallRequested && !interrupted.nativeStarted)
+    assert.deepEqual(interrupted.session, { sessionId: id, threadId: null, turnId: null })
+    assert.equal(store.requestControl(f.operation.id, 'pause').phase, 'paused')
+    const recovery = await recoverSyncOperationResources(store, f.operation.id, { root: f.root, inputId: f.input.id, artifactRoot: f.artifactRoot })
+    assert.equal(recovery.status, 'resources_recovered', JSON.stringify(recovery.failure))
+    const record = readRecord(id)!, settled = store.findResource(origin.id, dispatch.key)!
+    assert.ok(settled.checkpoints.some(item => item.checkpointRef.sha256 === observation.checkpointRef.sha256))
+    const nativeRoot = record.structuredExecution!.grokNative!.root
+    const launch = readFileSync(join(nativeRoot, 'launch.json'))
+    const cancel = join(nativeRoot, 'cancel.json')
+    assert.deepEqual(JSON.parse(readFileSync(cancel, 'utf8')), { launchDigest: contentHash(launch) })
+    if (scenario === 'preterminal-missing-stop') rmSync(join(nativeRoot, 'process-stop-observations.jsonl'))
+    if (scenario === 'preterminal-foreign-cancel') {
+      writeFileSync(`${cancel}.foreign`, JSON.stringify({ launchDigest: '0'.repeat(64) }))
+      renameSync(`${cancel}.foreign`, cancel)
+    }
+    const resultFile = join(nativeRoot, 'result.json')
+    if (scenario === 'preterminal-published') writeFileSync(resultFile, '{}')
+    saved = { failure: origin.failure, local: readLocal(origin), resource: JSON.stringify(settled), record: JSON.stringify(record), archive: f.git('rev-parse', `refs/spex-archive/${id}`) }
+    f.closeForRestart()
+    const protocol = openProtocol(join(f.parent, 'sync.sqlite'))
+    t.after(() => protocol.close())
+    store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) })
+    store.expandContractScope = stopAfterApproval
+    store.requestControl(f.operation.id, 'run')
+    result = await runSyncOperation(store, f.operation.id, f.options)
+    if (scenario === 'preterminal-published') rmSync(resultFile)
+  }
+  const attempts = store.listAttempts(f.operation.id), [before, after] = attempts
   if (!saved) assert.fail(JSON.stringify({ failure: result.failure, attempts: attempts.map(attempt => ({ failure: attempt.failure, dispatches: attempt.dispatchPlans.map(dispatch => dispatch.purpose) })), calls: existsSync(log) ? readFileSync(log, 'utf8') : '' }))
   if (saved.hiddenLaunch) renameSync(`${saved.hiddenLaunch}.hidden`, saved.hiddenLaunch)
   assert.equal(attempts.length, 2)
   assert.deepEqual(before.dispatchPlans.map(dispatch => dispatch.purpose), ['elaboration_generate', 'elaboration_review'])
-  const [generate, review] = before.dispatchPlans, resource = f.store.findResource(before.id, review.key)!
+  const [generate, review] = before.dispatchPlans, resource = store.findResource(before.id, review.key)!
   const originalPlan = read<NativeRunPlan>(resource.plan.planBlob), checkpoint = read<NativeRunCheckpoint>(resource.checkpointRef)
   const reviewId = sessionIdForCreateKey(review.sessionCreateKey), record = readRecord(reviewId)!, state = record.structuredExecution!
   const originalRound = saved.local.result.rounds.at(-1)!, seed = originalPlan.request.worktree!
@@ -2306,14 +2348,14 @@ else setTimeout(() => process.exit(0), 100)
   assert.equal(JSON.stringify(resource), saved.resource)
   assert.equal(JSON.stringify(record), saved.record)
   assert.equal(resource.phase, 'removed')
-  assert.equal(checkpoint.phase, 'removed'); assert.equal(checkpoint.status, 'failed')
-  assert.deepEqual(checkpoint.failure, { code: 'failed', message: failureMessage })
-  assert.deepEqual(saved.local.result.failure, { code: 'failed', message: failureMessage, sessionId: reviewId })
+  assert.equal(checkpoint.phase, 'removed'); assert.equal(checkpoint.status, preterminal ? 'cancelled' : 'failed')
+  assert.deepEqual(checkpoint.failure, preterminal ? undefined : { code: 'failed', message: failureMessage })
+  assert.deepEqual(saved.local.result.failure, { code: failureCode, message: failureMessage, sessionId: reviewId })
   assert.ok(checkpoint.nativeCallRequested && !checkpoint.nativeStarted)
   assert.deepEqual(checkpoint.session, { sessionId: reviewId, threadId: null, turnId: null })
   assert.equal(checkpoint.stop?.nativeStatus, 'stopped')
-  assert.ok(resource.checkpoints.some(({ checkpointRef }) => read<NativeRunCheckpoint>(checkpointRef).nativeState === 'failed'))
-  assert.equal(state.state, 'failed'); assert.equal(state.output, undefined); assert.equal(state.resultWorktree, undefined)
+  assert.ok(resource.checkpoints.some(({ checkpointRef }) => read<NativeRunCheckpoint>(checkpointRef).nativeState === (preterminal ? 'cancelling' : 'failed')))
+  assert.equal(state.state, preterminal ? 'cancelled' : 'failed'); assert.equal(state.output, undefined); assert.equal(state.resultWorktree, undefined)
   assert.equal(state.grokNative?.turnId, undefined)
   assert.equal(existsSync(join(state.grokNative!.root, 'result.json')), false)
   assert.equal(f.git('rev-parse', `refs/spex-archive/${reviewId}`), saved.archive)
@@ -2327,17 +2369,20 @@ else setTimeout(() => process.exit(0), 100)
   const candidateChange = originalRound.candidate.changes[0]
   assert.equal(readObject(commonDir, readTree(commonDir, seed.tree).find(entry => entry.path === candidateChange.path)!.oid).toString('utf8'), candidateChange.source)
   const calls = readFileSync(log, 'utf8').trimEnd().split('\n').map(line => JSON.parse(line) as { purpose: string; mode: string; sessionId: string; commit: string; tree: string })
-  t.diagnostic(JSON.stringify({ dispatches: attempts.map(attempt => attempt.dispatchPlans.map(dispatch => dispatch.purpose)), callsUsed: result.operation.callsUsed, failure: result.failure?.code }))
+  t.diagnostic(JSON.stringify({ dispatches: attempts.map(attempt => attempt.dispatchPlans.map(dispatch => dispatch.purpose)), callsUsed: result.operation.callsUsed, failure: result.failure }))
   assert.equal(result.operation.id, f.operation.id)
   assert.deepEqual(result.operation.budget, f.operation.budget)
-  assert.deepEqual(after.dispatchPlans.map(dispatch => dispatch.purpose), missingLaunch ? [] : ['elaboration_review'], '下一轮只可派发原候选的独审')
-  assert.deepEqual(calls.map(call => call.purpose), missingLaunch ? ['elaboration_generate', 'elaboration_review'] : ['elaboration_generate', 'elaboration_review', 'elaboration_review'])
-  assert.equal(result.operation.callsUsed, missingLaunch ? 2 : 3)
-  if (missingLaunch) {
-    assert.ok(result.failure, '缺少原生启动原件须明确拒绝')
+  assert.deepEqual(after.dispatchPlans.map(dispatch => dispatch.purpose), invalidEvidence ? [] : ['elaboration_review'], '下一轮只可派发原候选的独审')
+  assert.deepEqual(calls.map(call => call.purpose), invalidEvidence ? ['elaboration_generate', 'elaboration_review'] : ['elaboration_generate', 'elaboration_review', 'elaboration_review'])
+  assert.equal(result.operation.callsUsed, invalidEvidence ? 2 : 3)
+  if (invalidEvidence) {
+    assert.equal(result.failure?.code, 'stale_result', '原生启动、停止、取消或发布状态失配须明确拒绝')
+    const originalReason = scenario === 'preterminal-foreign-cancel' ? 'Grok original native cancellation binding differs'
+      : scenario === 'preterminal-published' ? 'Grok source lacks its original unpublished exit' : 'Grok original native evidence is missing'
+    assert.equal(result.failure?.message, originalReason)
   } else {
     const approved = readLocal(after).result, approvedRound = approved.rounds.at(-1)!, [newReview] = after.dispatchPlans
-    const newResource = f.store.findResource(after.id, newReview.key)!, newPlan = read<NativeRunPlan>(newResource.plan.planBlob)
+    const newResource = store.findResource(after.id, newReview.key)!, newPlan = read<NativeRunPlan>(newResource.plan.planBlob)
     assert.equal(approved.reviewPassed, true)
     assert.equal(approved.candidateDigest, saved.local.result.candidateDigest)
     assert.deepEqual(approvedRound.candidate, originalRound.candidate)
@@ -2357,7 +2402,7 @@ else setTimeout(() => process.exit(0), 100)
     assert.notEqual(newReview.session?.sessionId, generate.session?.sessionId)
     assert.equal(after.failure?.code, 'unsupported')
   }
-  assert.equal(f.store.listJournals(f.operation.id).length, 0)
+  assert.equal(store.listJournals(f.operation.id).length, 0)
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
   assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
   assert.deepEqual(readFileSync(join(f.root, 'tests/export.test.mjs')), readFileSync(new URL('tests/export.test.mjs', fixturePath)))
@@ -9327,15 +9372,18 @@ for (const witness of ['missing', 'canonical', 'attachment'] as const) test(`P1�
   assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
 })
 
-for (const tamper of ['none', 'managed-failover', 'managed-quota', 'managed-quota-cold', 'managed-quota-empty', 'managed-quota-host-error', 'attribution', 'turn', 'stop', 'source', 'unrelated', 'bad-json', 'bad-shape', 'missing', 'program-error', 'bare-errno', 'git-errno', 'cas-missing', 'cas-mismatch', 'cold-provenance', 'cold-reserved'] as const) test(`P1已结算provider独审失败恢复同Git候选 tamper=${tamper}`, async t => {
+for (const tamper of ['none', 'managed-failover', 'managed-reservation-rejected', 'managed-reservation-author', 'managed-quota', 'managed-quota-cold', 'managed-quota-empty', 'managed-quota-host-error', 'attribution', 'turn', 'stop', 'source', 'unrelated', 'bad-json', 'bad-shape', 'missing', 'program-error', 'bare-errno', 'git-errno', 'cas-missing', 'cas-mismatch', 'cold-provenance', 'cold-reserved'] as const) test(`P1已结算provider独审失败恢复同Git候选 tamper=${tamper}`, async t => {
   const { managedModel } = await import('../llm-manager-route.js')
   const { LlmManagerHostError } = await import('../llm-manager-host.js')
   const quota = tamper.startsWith('managed-quota')
+  const rejectedReservation = tamper.startsWith('managed-reservation')
+  const authorReservation = tamper === 'managed-reservation-author'
   const unavailable = tamper === 'managed-quota-empty' || tamper === 'managed-quota-host-error'
-  const managed = quota || tamper === 'managed-failover'
-  const admitted = { vendor: 'claude', model: 'preferred', kind: 'anthropic-messages', routeId: '1'.repeat(64) } as const
+  const managed = quota || rejectedReservation || tamper === 'managed-failover'
+  const admitted = rejectedReservation ? { vendor: 'grok', model: 'default', kind: 'cli', routeId: '1'.repeat(64) } as const
+    : { vendor: 'claude', model: 'preferred', kind: 'anthropic-messages', routeId: '1'.repeat(64) } as const
   const successor = { vendor: 'zcode', model: 'bigmodel-api/GLM-5.3-Flash', kind: 'cli', routeId: '2'.repeat(64) } as const
-  const actualRoute = quota ? admitted : successor
+  const actualRoute = quota || rejectedReservation ? admitted : successor
   const parentPath = '.spec/project/spec.md', parentId = 'REQ-PARENT-01'
   const raw = '重复导出请求必须保留首次结果，具体下载由子叶实现。'
   const parent = `---\ntitle: 导出上层接口\nstatus: pending\n---\n## raw source\n\n${raw}\n`
@@ -9343,14 +9391,15 @@ for (const tamper of ['none', 'managed-failover', 'managed-quota', 'managed-quot
   parentRows.changes[0].nodeId = 'project'
   parentRows.applicability = ELABORATION_BOUNDARIES.map(boundary => ({ boundary, applies: false, basis: '完整子叶承接实现和验收，本层仅保留共享义务', affectedIds: [parentId] }))
   const leaf = original.slice(0, original.indexOf('## expanded spec')).replace('contract-schema: sync-v1\n', '')
-  const f = await fixture(t, { maxAttempts: unavailable ? 3 : 2, maxCalls: 12, maxRepairs: quota ? 1 : 0, timeoutMs: 120_000 }, false, leaf, 'project', original, {
+  const f = await fixture(t, { maxAttempts: unavailable ? 3 : 2, maxCalls: 12, maxRepairs: quota || rejectedReservation ? 1 : 0, timeoutMs: 120_000 }, false, leaf, 'project', original, {
     version: 'sync-coordinator-v2', direction: 'spec_to_code', agentWorkflow: 'native-worktree-v1', intentNodeId: 'project', sourcePaths: ['src'],
     targets: [{ nodeId: 'project', path: parentPath, rawSource: raw }, { nodeId: 'export-contract', path: contractPath }],
     partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 524_288, maxParallel: 1 },
   }, undefined, 'spec', managed ? managedModel(admitted) : 'zcode:bigmodel-api/GLM-5.3-Flash', false, { [parentPath]: parent })
   const commonDir = f.input.source.commonDir, operationId = f.operation.id
-  const failureCode = quota ? 'provider_quota_exhausted' : 'unsupported'
-  const error = quota ? 'Claude provider returned HTTP 429 for the original native turn' : tamper === 'unrelated' ? 'ZCode actual ModelRequest identity or toolCount differs' : 'ZCode provider rejected the native turn (retryable=false)'
+  const failureCode = quota ? 'provider_quota_exhausted' : rejectedReservation ? 'llm_manager_route_unavailable' : 'unsupported'
+  const error = quota ? 'Claude provider returned HTTP 429 for the original native turn' : rejectedReservation ? failureCode
+    : tamper === 'unrelated' ? 'ZCode actual ModelRequest identity or toolCount differs' : 'ZCode provider rejected the native turn (retryable=false)'
   const calls: { attempt: number; request: ElaborationSessionRequest }[] = []
   const quotaLookups: string[] = []
   let quotaSuccessorAvailable = !unavailable
@@ -9363,16 +9412,17 @@ for (const tamper of ['none', 'managed-failover', 'managed-quota', 'managed-quot
       const operation = f.store.readOperation(operationId), attempt = f.store.readAttempt(operation.currentAttemptId!)
       calls.push({ attempt: attempt.number, request: actual })
       const seed = actual.worktree!, key = actual.sessionCreateKey!, session = sessionIdForCreateKey(key), workspace = join(f.parent, `provider-review-${calls.length}`)
-      const generate = actual.purpose === 'elaboration_generate', failing = !generate && attempt.number === 1
+      const generate = actual.purpose === 'elaboration_generate', failing = (authorReservation ? generate : !generate) && attempt.number === 1
+      const rejectedBeforeStart = failing && rejectedReservation
       const execution = structuredExecutionPolicy(actual), identity = { threadId: `thread-${session}`, turnId: `turn-${session}` }
       const branch = `codex/provider-review-${session}`
-      if (!generate) f.git('worktree', 'add', '-b', branch, workspace, seed.baseCommit)
-      const worktree = generate ? committedDraftFixture(f, actual, adaptElaborationNativeOutput(actual, parentRows), workspace) : nativeWorktreeResult(workspace, seed)
-      if (generate) f.git('-C', workspace, 'switch', '-c', branch)
+      if (!generate || rejectedBeforeStart) f.git('worktree', 'add', '-b', branch, workspace, seed.baseCommit)
+      const worktree = generate && !rejectedBeforeStart ? committedDraftFixture(f, actual, adaptElaborationNativeOutput(actual, parentRows), workspace) : nativeWorktreeResult(workspace, seed)
+      if (generate && !rejectedBeforeStart) f.git('-C', workspace, 'switch', '-c', branch)
       const prompt = nativeWorktreePrompt(actual.prompt, seed)
       const output = generate ? { summary: '已提交父接口JSON草稿' } : { verdict: 'accept', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [] }
       let zcodeNative: ZCodeStructuredExecution['zcodeNative']
-      if (failing && !quota) {
+      if (failing && !quota && !rejectedBeforeStart) {
         const generic = execution.nativeConfiguration === 'cli-config-v1'
         const selection = generic ? zcodeNativeConfigSelection(execution.model, execution.effort) : zcodeNativeSelection(execution.model, execution.effort)
         const { model } = selection, toolDenylist = execution.zcodeToolPolicy?.toolDenylist
@@ -9403,11 +9453,11 @@ for (const tamper of ['none', 'managed-failover', 'managed-quota', 'managed-quot
       }
       const resultDigest = hash(output)
       configuredSessionApplication().createSession({ sessionId: session, status: failing ? 'error' : 'awaiting' })
-      writeRecord({ session, governed: true, worktreePath: workspace, base: seed.baseCommit, forkCommit: seed.baseCommit, branch, title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(), harness: actual.model?.startsWith('claude:') ? 'claude' : 'zcode', harnessSessionId: identity.threadId, runtimeStartToken: null, status: failing ? 'error' : 'awaiting', stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: null, launchOwner: null, createRequestId: contentHash(key),
+      writeRecord({ session, governed: true, worktreePath: workspace, base: seed.baseCommit, forkCommit: seed.baseCommit, branch, title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(), harness: actual.model?.startsWith('claude:') ? 'claude' : actual.model?.startsWith('grok:') ? 'grok-structured' : 'zcode', harnessSessionId: rejectedBeforeStart ? null : identity.threadId, runtimeStartToken: null, status: failing ? 'error' : 'awaiting', stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: null, launchOwner: null, createRequestId: contentHash(key),
         createPayloadHash: hash({ prompt, parent: null, launcher: null, base: seed.baseCommit, structuredExecution: execution }),
-        structuredExecution: { ...execution, ...identity, turnStartRequested: true, ...(failing ? { state: 'failed', errorCode: failureCode, error, zcodeNative, cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: true, acknowledged: false, nativeStatus: quota ? 'processGroupGone' : 'stopped' } } : { state: 'completed', output, resultDigest, resultWorktree: worktree }) },
+        structuredExecution: { ...execution, ...(!rejectedBeforeStart && { ...identity, turnStartRequested: true }), ...(failing ? { state: 'failed', errorCode: failureCode, error, zcodeNative, cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: true, acknowledged: false, nativeStatus: rejectedBeforeStart ? 'notStarted' : quota ? 'processGroupGone' : 'stopped' } } : { state: 'completed', output, resultDigest, resultWorktree: worktree }) },
       })
-      if (failing) throw new StructuredSessionError(failureCode, error, { sessionId: session, ...identity })
+      if (failing) throw new StructuredSessionError(failureCode, error, { sessionId: session, ...(rejectedBeforeStart ? { requestKey: actual.requestKey, inputDigest: actual.inputDigest } : identity) })
       return { sessionId: session, ...identity, output, resultDigest, worktree }
     },
   }
@@ -9417,6 +9467,11 @@ for (const tamper of ['none', 'managed-failover', 'managed-quota', 'managed-quot
       pollMs: 2, runtime,
       resolveManagedRoute: async (anchor, reviewQuota) => {
         assert.deepEqual(anchor, admitted)
+        if (rejectedReservation) {
+          assert.equal(reviewQuota, undefined)
+          const attempt = f.store.readAttempt(f.store.readOperation(operationId).currentAttemptId!)
+          return attempt.number === 1 ? actualRoute : successor
+        }
         if (!reviewQuota) return actualRoute
         assert.deepEqual(reviewQuota.route, actualRoute)
         quotaLookups.push(reviewQuota.failedSessionId)
@@ -9437,7 +9492,7 @@ for (const tamper of ['none', 'managed-failover', 'managed-quota', 'managed-quot
   const previousCwd = process.cwd()
   process.chdir(f.root)
   t.after(() => process.chdir(previousCwd))
-  if (tamper === 'managed-quota-cold') {
+  if (tamper === 'managed-quota-cold' || rejectedReservation) {
     const recordFailure = f.store.recordFailure.bind(f.store)
     f.store.recordFailure = (fence, issue, continueRepair) => {
       const recorded = recordFailure(fence, issue, continueRepair)
@@ -9449,8 +9504,8 @@ for (const tamper of ['none', 'managed-failover', 'managed-quota', 'managed-quot
     }
   }
   const originalRun = await runSyncOperation(f.store, operationId, f.options)
-  if (quota) {
-    if (tamper === 'managed-quota-cold') {
+  if (quota || rejectedReservation) {
+    if (tamper === 'managed-quota-cold' || rejectedReservation) {
       assert.equal(f.store.readOperation(operationId).phase, 'repairing')
       assert.equal(f.store.listAttempts(operationId).length, 1)
       f.closeForRestart()
@@ -9464,9 +9519,26 @@ for (const tamper of ['none', 'managed-failover', 'managed-quota', 'managed-quot
     assert.ok(retry, JSON.stringify({ operation: f.store.readOperation(operationId).phase, failure: originalRun.failure }))
     const before = resultFor(prior).result, after = resultFor(retry).result
     assert.equal(before.failure?.code, failureCode)
-    assert.equal(before.structurePassed, true)
+    assert.equal(before.structurePassed, !authorReservation)
     assert.equal(before.reviewPassed, false)
-    assert.deepEqual(quotaLookups, [before.failure?.sessionId])
+    assert.deepEqual(quotaLookups, rejectedReservation ? [] : [before.failure?.sessionId])
+    if (authorReservation) {
+      const first = prior.dispatchPlans.find(dispatch => dispatch.purpose === 'elaboration_generate')!
+      const second = retry.dispatchPlans.find(dispatch => dispatch.purpose === 'elaboration_generate')!
+      const resource = f.store.findResource(prior.id, first.key)!
+      const checkpoint = JSON.parse(readEvidence(commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
+      assert.equal(before.candidateDigest, null)
+      assert.equal(after.reviewPassed, true)
+      assert.equal(resource.phase, 'removed')
+      assert.equal(checkpoint.nativeStarted, false)
+      assert.equal(checkpoint.stop?.nativeStatus, 'notStarted')
+      assert.deepEqual(checkpoint.failure, { code: failureCode, message: error })
+      assert.equal(second.managedModel, managedModel(successor))
+      assert.notEqual(second.sessionCreateKey, first.sessionCreateKey)
+      assert.deepEqual(calls[0].request.worktree, calls[1].request.worktree)
+      assert.equal(calls[0].request.inputDigest, calls[1].request.inputDigest)
+      return
+    }
     assert.equal(after.candidateDigest, before.candidateDigest)
     assert.equal(after.rounds[0].draft?.oid, before.rounds[0].draft?.oid)
     assert.deepEqual(after.rounds[0].traces[0], before.rounds[0].traces[0])
@@ -9493,6 +9565,17 @@ for (const tamper of ['none', 'managed-failover', 'managed-quota', 'managed-quot
       assert.notEqual(review.session?.sessionId, before.failure?.sessionId)
       assert.notEqual(review.session?.sessionId, before.rounds[0].traces[0].sessionId)
       assert.deepEqual(calls[1].request.worktree, calls[2].request.worktree)
+      if (rejectedReservation) {
+        const first = prior.dispatchPlans.find(dispatch => dispatch.purpose === 'elaboration_review')!
+        const resource = f.store.findResource(prior.id, first.key)!
+        const checkpoint = JSON.parse(readEvidence(commonDir, resource.checkpointRef).toString()) as NativeRunCheckpoint
+        assert.equal(resource.phase, 'removed')
+        assert.equal(checkpoint.stop?.nativeStatus, 'notStarted')
+        assert.equal(checkpoint.nativeStarted, false)
+        assert.deepEqual(checkpoint.failure, { code: failureCode, message: error })
+        assert.notEqual(review.sessionCreateKey, first.sessionCreateKey)
+        assert.equal(f.store.readOperation(operationId).managedQuotaRetry, undefined)
+      }
     }
     return
   }
@@ -12820,15 +12903,17 @@ for (const mode of ['repair', 'repair-restart', 'repair-complete-restart', 'nati
   assert.equal(f.store.listJournals(admitted.id).length, 0)
 })
 
-for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', 'omission-drop'] as const) for (const boundary of gapMode === 'none' ? ['failed', 'superseded-zero-call', 'legacy-v4', 'legacy-v4-retry', 'stale-v8', 'stale-v8-handoff', 'model-handoff', 'legacy-v4-handoff', 'model-handoff-restart', 'legacy-v4-handoff-restart', 'legacy-v4-handoff-v1-repair', 'model-handoff-missing-source', 'stopped-review-draft'] as const : gapMode === 'pending' ? ['failed', 'superseded-zero-call', 'legacy-v4', 'model-handoff', 'legacy-v4-handoff'] as const : ['failed'] as const) test(`${boundary.startsWith('stale-v8') ? 'v8未发布候选换指导后同operation重审或拒绝显式交接' : `${gapMode === 'none' ? '' : gapMode === 'pending' ? 'P1 GAP保持期间，' : `P1 GAP已审基线 ${gapMode}，`}P2混合普通修复、契约遗漏与格式失败经SQLite冷续只补原评审再回精确owner`} ${boundary}`, { timeout: 180000 }, async t => {
+for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', 'omission-drop'] as const) for (const boundary of gapMode === 'none' ? ['failed', 'superseded-zero-call', 'legacy-v4', 'legacy-v4-retry', 'stale-v8', 'stale-v8-handoff', 'model-handoff', 'legacy-v4-handoff', 'model-handoff-restart', 'legacy-v4-handoff-restart', 'legacy-v4-handoff-v1-repair', 'model-handoff-missing-source', 'stopped-review-draft', 'manager-reservation-rejected', 'manager-reservation-legacy-summary'] as const : gapMode === 'pending' ? ['failed', 'superseded-zero-call', 'legacy-v4', 'model-handoff', 'legacy-v4-handoff'] as const : ['failed'] as const) test(`${boundary.startsWith('stale-v8') ? 'v8未发布候选换指导后同operation重审或拒绝显式交接' : `${gapMode === 'none' ? '' : gapMode === 'pending' ? 'P1 GAP保持期间，' : `P1 GAP已审基线 ${gapMode}，`}P2混合普通修复、契约遗漏与格式失败经SQLite冷续只补原评审再回精确owner`} ${boundary}`, { timeout: 180000 }, async t => {
   const withGap = gapMode !== 'none', repairGap = withGap && gapMode !== 'pending', factBaseline = gapMode.startsWith('fact'), rejectedGap = gapMode.endsWith('rollback') || gapMode.endsWith('drop')
   const handoff = boundary.includes('handoff'), handoffRestart = boundary.endsWith('handoff-restart'), missingSource = boundary.endsWith('missing-source')
   const stoppedDraft = boundary === 'stopped-review-draft'
+  const rejectedReservation = boundary.startsWith('manager-reservation-')
+  const repeatsReview = stoppedDraft || rejectedReservation
   const handoffV1 = boundary === 'legacy-v4-handoff-v1-repair'
   let handedOff = false
   const legacy = boundary.startsWith('legacy-v4'), legacyRetry = boundary === 'legacy-v4-retry', analysisOnlyPath = 'tests/independent-smoke.test.mjs'
   const staleV8 = boundary.startsWith('stale-v8'), historicalGuidance = legacy || staleV8
-  const protocolAttempt = handoff ? 1 : boundary === 'failed' || stoppedDraft || staleV8 ? 2 : 3, ownerAttempt = protocolAttempt + 1 + (handoffRestart || stoppedDraft ? 1 : 0)
+  const protocolAttempt = handoff ? 1 : boundary === 'failed' || repeatsReview || staleV8 ? 2 : 3, ownerAttempt = protocolAttempt + 1 + (handoffRestart || repeatsReview ? 1 : 0)
   const gapAttempt = ownerAttempt + 1
   const definitions = (historicalGuidance ? ['export', 'import', 'archive'] as const : ['export', 'import', 'archive', 'quiet'] as const).map(word => {
     const upper = word.toUpperCase(), nodeId = `${word}-contract`, path = word === 'export' ? contractPath : `.spec/project/${word}/${nodeId}/spec.md`
@@ -12842,6 +12927,8 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
   const extras = Object.fromEntries(definitions.slice(1).flatMap(item => [[item.path, item.source], [item.sourcePath, readFileSync(new URL('src/export.js', fixturePath), 'utf8')], [item.testPath, readFileSync(new URL('tests/export.test.mjs', fixturePath), 'utf8').replaceAll('EXPORT', item.upper).replaceAll('src/export.js', item.sourcePath)]]))
   if (historicalGuidance) extras[analysisOnlyPath] = 'import test from "node:test"\ntest("standalone smoke", () => {})\n'
   const maxAttempts = (repairGap || handoffV1 ? gapAttempt : ownerAttempt) + (legacyRetry ? 2 : 0) + (handoff ? 1 : 0)
+  const { managedModel } = await import('../llm-manager-route.js')
+  const route = { vendor: 'claude', model: 'default', kind: 'cli', routeId: '5'.repeat(64) } as const
   const f = await fixture(t, { maxAttempts, maxCalls: 40, maxRepairs: maxAttempts - 1, timeoutMs: 180000 }, false, original, 'project', original, {
     version: 'sync-coordinator-v2', direction: 'code_to_spec', agentWorkflow: 'native-worktree-v1', sourcePaths: ['src', ...(historicalGuidance ? [analysisOnlyPath] : [])], writePaths: ['.spec'],
     targets: definitions.map(({ nodeId, path }) => ({ nodeId, path })), facts: definitions.map(item => ({ source: `decision:${item.upper}-POLICY`, text: item.source })),
@@ -12849,7 +12936,7 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
     verifications: definitions.map(({ verification: item }) => ({ definition: { id: item.id, command: item.command, cwd: item.cwd, timeoutMs: item.timeoutMs }, environment })),
     mandatoryTests: definitions.map(item => ({ verificationId: item.verification.id, testPath: item.testPath, testId: `AC-${item.upper}-03` })),
     partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 32768, maxParallel: 1 }, commitTrigger: { before: null, paths: [...definitions.map(item => item.sourcePath), ...(historicalGuidance ? [analysisOnlyPath] : [])] },
-  }, undefined, 'code', 'claude:default', true, extras)
+  }, undefined, 'code', rejectedReservation ? managedModel(route) : 'claude:default', true, extras)
   let store = f.store
   let historicalRun = runSyncOperation
   const freezeHistoricalProtocol = (): void => {
@@ -12875,6 +12962,29 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
   const unapprovedReview = { draft: '已正常提交，仍需独审' }
   const stopMessage = 'fixture native stop remains unproven'
   let settleReview: (() => Promise<void>) | undefined, stoppedWorkspace: string | undefined
+  let rejectedReviewRequest: ElaborationSessionRequest | undefined
+  const managerTrace = join(f.parent, 'p2-manager-reserve.ndjson')
+  if (rejectedReservation) {
+    const previousCwd = process.cwd()
+    process.chdir(f.root)
+    t.after(() => process.chdir(previousCwd))
+    const bridge = join(f.parent, 'p2-manager'), nativeRuntime = fileURLToPath(new URL('../../llm-manager/native-runtime.mjs', import.meta.url))
+    writeFileSync(bridge, `#!${process.execPath}
+const fs = require('node:fs')
+if (process.argv[3] === '-m') console.log(JSON.stringify({ version: 1, path: ${JSON.stringify(nativeRuntime)} }))
+else {
+  const request = JSON.parse(fs.readFileSync(0, 'utf8'))
+  fs.appendFileSync(${JSON.stringify(managerTrace)}, JSON.stringify(request) + '\\n')
+  if (request.action !== 'reserve') process.exit(1)
+  console.log(JSON.stringify({ ok: false, code: 'llm_manager_route_unavailable' }))
+}
+`, { mode: 0o700 })
+    for (const [name, value] of [['SPEX_LLM_MANAGER_CONFIG', join(f.parent, 'p2-manager.json')], ['SPEX_LLM_MANAGER_PYTHON', bridge]]) {
+      const previous = process.env[name]
+      process.env[name] = value
+      t.after(() => { if (previous === undefined) delete process.env[name]; else process.env[name] = previous })
+    }
+  }
   const stages = (attempt: SyncAttempt): { stage: string; resultRef: BlobRef }[] => attempt.checkpointRefs.map(ref => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()))
   const read = <T,>(ref: BlobRef): T => JSON.parse(readEvidence(f.input.source.commonDir, ref).toString()) as T
   const completeReview = (request: ElaborationSessionRequest, output: unknown, worktree: ElaborationSessionResult['worktree']): Promise<ElaborationSessionResult> => {
@@ -12921,6 +13031,29 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
       output = { inputId: identity.inputId, candidateDigest: identity.candidateDigest, verdict: 'accept', checkedIds: identity.requiredIds, findings: [] }
       if (!handedOff && attempt.number === 1 && ['ordinary', 'omission'].includes(role.kind)) output = { ...(output as object), verdict: 'repair', findings: [{ kind: 'repair', affectedIds: [`RULE-${definition.upper}-05`], ruleLocation: `${role.kind === 'omission' ? 'contract-omission:' : 'contract:'}${definition.path}#RULE-${definition.upper}-05`, codeLocation: `${definition.sourcePath}#ExportService`, evidence: '冻结原意支持的精确边界需要本owner重新核对', counterexample: '同一输入与原稳定规则未完整对应', message: '只沿原意核对，不授新业务或源码写权' }] }
       if (!handedOff && attempt.number === 1 && role.kind === 'format') return rejectedReviewFixture({ ...f, store }, request, rejected)
+      if (rejectedReservation && attempt.number === protocolAttempt && role.kind === 'format') {
+        rejectedReviewRequest = request
+        const { executeQueuedStructuredSession } = await import('../session-structured.js')
+        const { sessionArtifactPath } = await import('@spexcode/spec-core')
+        const fence = { operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint }
+        return createAttemptRunner(store, fence, { pollMs: 2, runtime: { readRecord, cancel: cancelStructuredSession, run: async native => {
+          const createKey = native.sessionCreateKey!, sessionId = sessionIdForCreateKey(createKey), execution = structuredExecutionPolicy(native)
+          const worktreePath = join(f.parent, 'reservation-rejected-review'), branch = `codex/p2-reservation-${sessionId}`
+          f.git('worktree', 'add', '-b', branch, worktreePath, seed.baseCommit)
+          const prompt = nativeWorktreePrompt(native.prompt, seed)
+          configuredSessionApplication().createSession({ sessionId, status: 'queued' })
+          writeRecord({ session: sessionId, governed: true, worktreePath, base: seed.baseCommit, forkCommit: seed.baseCommit, branch,
+            title: null, name: null, parent: null, issues: [], issue: null, proposal: null, merges: 0, note: null, sortKey: null, createdAt: Date.now(),
+            harness: 'claude-headless', harnessSessionId: null, runtimeStartToken: null, status: 'queued', stopped: false, archived: false, closedAt: null, launcher: null, launchCmd: 'claude', launchOwner: null,
+            createRequestId: contentHash(createKey), createPayloadHash: contentHash(JSON.stringify({ prompt, parent: null, launcher: null, base: seed.baseCommit, structuredExecution: execution })), structuredExecution: execution })
+          const launch = sessionArtifactPath(sessionId, 'launch')
+          mkdirSync(join(launch, '..'), { recursive: true }); writeFileSync(launch, prompt)
+          assert.equal(await executeQueuedStructuredSession(sessionId), 'failed')
+          const result = readRecord(sessionId)!.structuredExecution!
+          assert.equal(result.errorCode, 'llm_manager_route_unavailable')
+          throw new StructuredSessionError(result.errorCode, result.error!, { sessionId, requestKey: native.requestKey, inputDigest: native.inputDigest })
+        } } })(request)
+      }
       if (stoppedDraft && attempt.number === protocolAttempt && role.kind === 'format') {
         const worktree = committedDraftFixture(f, request, unapprovedReview, join(f.parent, 'interrupted-review-draft'))
         stoppedWorkspace = worktree.worktreePath
@@ -12957,6 +13090,14 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
         const entry = readTree(f.input.source.commonDir, seed.tree).find(entry => entry.path === path)!
         assert.deepEqual(JSON.parse(readObject(f.input.source.commonDir, entry.oid).toString()), unapprovedReview, '继续原正常提交的未批准JSON')
         const worktree = committedDraftFixture(f, request, output, join(f.parent, 'settled-review-draft'))
+        return completeReview(request, output, worktree)
+      }
+      if (rejectedReservation && attempt.number === protocolAttempt + 1) {
+        assert.equal(role.kind, 'format')
+        assert.ok(rejectedReviewRequest)
+        assert.deepEqual(seed, rejectedReviewRequest.worktree)
+        assert.equal(request.prompt, rejectedReviewRequest.prompt)
+        const worktree = committedDraftFixture(f, request, output, join(f.parent, 'reservation-resumed-review'))
         return completeReview(request, output, worktree)
       }
       if (!staleV8 && (!handoff || handedOff) && attempt.number === protocolAttempt) {
@@ -13125,7 +13266,7 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
   }
   const initialGeneration = read<import('./generation-types.js').GenerationResult>(originalStages.find(stage => stage.stage === 'generation')!.resultRef)
   assert.equal(initialGeneration.review?.verdict, 'repair'); assert.equal(initialGeneration.review!.findings.some(finding => finding.ruleLocation.startsWith('contract-omission:')), false)
-  if (boundary !== 'failed' && !handoff && !stoppedDraft && !staleV8) {
+  if (boundary !== 'failed' && !handoff && !repeatsReview && !staleV8) {
     // 控制前置精确模拟已观察的失租约元数据；业务/CAS/Native原件均来自上面的真实首轮。
     const interrupted = { ...first, status: 'superseded' as const, failure: null }
     f.protocol.withTransaction(tx => tx.exec('UPDATE sync_attempts SET status=?,record_json=? WHERE id=?', interrupted.status, JSON.stringify(interrupted), interrupted.id))
@@ -13152,6 +13293,15 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
   store = new SyncStore(protocol, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) }); f.useStore(store)
   const stopBeforeVerification = () => { throw Object.assign(new Error('P2与原owner分流已完整通过，fixture在V3前停止'), { code: 'unsupported' }) }
   store.freezeCandidate = stopBeforeVerification
+  if (rejectedReservation) {
+    const recordFailure = store.recordFailure.bind(store)
+    store.recordFailure = (fence, issue, continueRepair) => {
+      const failed = store.readAttempt(fence.attemptId)
+      const result = recordFailure(fence, issue, continueRepair)
+      if (failed.number === protocolAttempt) throw Object.assign(new Error('fixture cold restart at recorded Manager reservation rejection'), { code: 'SYNC_FENCE_EXPIRED' })
+      return result
+    }
+  }
   if (handoffV1) {
     const recordFailure = store.recordFailure.bind(store)
     store.recordFailure = (fence, issue) => {
@@ -13252,6 +13402,56 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
     assert.deepEqual(store.readAttempt(interrupted.id).checkpointRefs, before)
     assert.deepEqual(calls.filter(call => call.attempt === protocolAttempt + 1).map(call => call.purpose), ['code_review'], JSON.stringify({ failure: result.failure, calls }))
   }
+  if (rejectedReservation) {
+    const rejectedAttempt = store.readAttempt(result.operation.currentAttemptId!)
+    assert.equal(rejectedAttempt.number, protocolAttempt)
+    const rejectedStage = stages(rejectedAttempt).find(stage => stage.stage.endsWith(':candidate-review') && read<import('./generation-types.js').GenerationResult>(stage.resultRef).failure?.code === 'llm_manager_route_unavailable')!
+    const checkpoint = store.findResource(rejectedAttempt.id, rejectedReviewRequest!.requestKey)!
+    assert.ok(rejectedStage)
+    assert.equal(checkpoint.phase, 'removed')
+    const saved = read<NativeRunCheckpoint>(checkpoint.checkpointRef)
+    assert.equal(saved.nativeStarted, false)
+    assert.equal(saved.stop?.nativeStatus, 'notStarted')
+    assert.deepEqual(readFileSync(managerTrace, 'utf8').trim().split('\n').map(line => JSON.parse(line)), [{ action: 'reserve', route, sessionId: saved.expectedSessionId }])
+    const previousStages = stages(rejectedAttempt)
+    const generationStage = previousStages.find(stage => stage.stage === 'generation')!
+    const beforeGeneration = read<import('./generation-types.js').GenerationResult>(generationStage.resultRef)
+    const priorRepair = beforeGeneration.partitionEvidence?.find(item => item.review.verdict === 'repair')
+    assert.ok(priorRepair, '被拒预约与同候选的合法修复意见并存')
+    assert.equal(beforeGeneration.failure?.code, 'llm_manager_route_unavailable')
+    if (boundary === 'manager-reservation-legacy-summary') {
+      const legacyGeneration = { ...beforeGeneration, status: 'repair', failure: null, review: priorRepair.review }
+      const resultRef = writeEvidence(f.input.source.commonDir, legacyGeneration)
+      const oldSummary = { ...rejectedAttempt, failure: { ...rejectedAttempt.failure!, code: 'generation_failed' }, checkpointRefs: rejectedAttempt.checkpointRefs.map(ref => {
+        const wrapper = read<{ stage: string; resultRef: BlobRef }>(ref)
+        return wrapper.stage === 'generation' ? { ...writeEvidence(f.input.source.commonDir, { ...wrapper, resultRef }), artifacts: syncCheckpointArtifacts(legacyGeneration, resultRef) } : ref
+      }) }
+      protocol.withTransaction(tx => tx.exec('UPDATE sync_attempts SET record_json=? WHERE id=?', JSON.stringify(oldSummary), oldSummary.id))
+    }
+    const before = store.readAttempt(rejectedAttempt.id).checkpointRefs
+    records.clear(); protocol.close()
+    const reopened = openProtocol(join(f.parent, 'sync.sqlite')); t.after(() => reopened.close())
+    store = new SyncStore(reopened, { readBlob: ref => readEvidence(f.input.source.commonDir, ref) }); f.useStore(store)
+    store.freezeCandidate = stopBeforeVerification
+    result = await runSyncOperation(store, f.operation.id, f.options)
+    assert.deepEqual(store.readAttempt(rejectedAttempt.id).checkpointRefs, before)
+    assert.deepEqual(calls.filter(call => call.attempt === protocolAttempt + 1).map(call => call.purpose), ['code_review'], JSON.stringify({ failure: result.failure, calls }))
+    const resumed = stages(store.listAttempts(f.operation.id).find(item => item.number === protocolAttempt + 1)!)
+    const originalRepair = previousStages.find(stage => stage.stage === 'repair-input')
+    for (const stage of resumed.filter(stage => stage.stage === 'repair-input')) {
+      const repair = read<{ repairContext?: unknown; refinement?: unknown; readonlyOwnerRepair?: unknown }>(stage.resultRef)
+      if (repair.repairContext !== undefined) assert.deepEqual(repair.repairContext, originalRepair && read<{ repairContext?: unknown }>(originalRepair.resultRef).repairContext)
+      assert.equal(repair.refinement, undefined)
+      assert.equal(repair.readonlyOwnerRepair, undefined)
+    }
+    assert.ok(resumed.every(stage => stage.stage !== 'refinement'), '同候选补审时不得先冻结业务返工输入')
+    const afterGeneration = read<import('./generation-types.js').GenerationResult>(resumed.find(stage => stage.stage === 'generation')!.resultRef)
+    assert.deepEqual(afterGeneration.candidate, beforeGeneration.candidate)
+    assert.equal(read<import('./generation-types.js').GenerationResult>(resumed.find(stage => stage.stage === rejectedStage.stage)!.resultRef).reviewPassed, true)
+    for (const peer of previousStages.filter(stage => stage.stage.endsWith(':candidate-review') && stage.stage !== rejectedStage.stage)) {
+      assert.deepEqual(resumed.find(stage => stage.stage === peer.stage)?.resultRef, peer.resultRef)
+    }
+  }
   if (handoffRestart) {
     assert.equal(result.status, 'paused', JSON.stringify({ failure: result.failure, calls }))
     const partial = store.readAttempt(result.operation.currentAttemptId!), proofs = partial.checkpointRefs.flatMap(ref => [ref, ...ref.artifacts?.map(item => item.ref) ?? []]).map(ref => ({ ref, bytes: readEvidence(f.input.source.commonDir, ref) }))
@@ -13310,7 +13510,7 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
   else assert.equal(result.failure?.message, 'P2与原owner分流已完整通过，fixture在V3前停止', JSON.stringify({ failure: result.failure, calls }))
   assert.deepEqual(calls.filter(call => call.attempt === protocolAttempt).map(call => call.purpose), ['code_review'])
   assert.deepEqual(calls.filter(call => call.attempt === ownerAttempt && call.purpose === 'elaboration_generate').map(call => call.nodeId).sort(), [...roles.values()].filter(role => role.kind === 'ordinary' || role.kind === 'omission').map(role => role.definition.nodeId).sort())
-  const attempts = store.listAttempts(f.operation.id), second = stages(attempts.find(attempt => attempt.number === protocolAttempt + (handoffRestart || stoppedDraft ? 1 : 0))!), third = stages(attempts.find(attempt => attempt.number === ownerAttempt)!)
+  const attempts = store.listAttempts(f.operation.id), second = stages(attempts.find(attempt => attempt.number === protocolAttempt + (handoffRestart || repeatsReview ? 1 : 0))!), third = stages(attempts.find(attempt => attempt.number === ownerAttempt)!)
   if (withGap) {
     assert.deepEqual(gapReviews.map(item => item.attempt), legacy ? [ownerAttempt] : [1, ownerAttempt])
     const original = read<ElaborationResult>(originalStages.find(stage => stage.stage === 'elaboration')!.resultRef)
@@ -13352,7 +13552,7 @@ for (const gapMode of ['none', 'pending', 'fact', 'omission', 'fact-rollback', '
     if (role.kind === 'format' || role.kind === 'quiet') assert.deepEqual(third.find(stage => stage.stage === before.stage)?.resultRef, before.resultRef)
   }
   for (const { ref, bytes } of originalBlobs) assert.deepEqual(readEvidence(f.input.source.commonDir, ref), bytes)
-  if (boundary !== 'failed' && !handoff && !stoppedDraft) for (const attempt of attempts.slice(0, 2)) { assert.equal(attempt.status, 'superseded'); assert.equal(attempt.failure, null) }
+  if (boundary !== 'failed' && !handoff && !repeatsReview) for (const attempt of attempts.slice(0, 2)) { assert.equal(attempt.status, 'superseded'); assert.equal(attempt.failure, null) }
   if (!repairGap && !handoffV1) {
     const repair = read<{ readonlyOwnerRepair: Parameters<typeof continuationCoordinator.validateReadonlyRepair>[2] }>(third.find(stage => stage.stage === 'repair-input')!.resultRef).readonlyOwnerRepair
     const readAttempt = store.readAttempt.bind(store), listResources = store.listResources.bind(store), findResource = store.findResource.bind(store)

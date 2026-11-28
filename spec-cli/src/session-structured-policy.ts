@@ -60,7 +60,7 @@ export type StructuredExecution = {
   resultDigest?: string
   nativeTokenUsage?: NativeTokenUsage
   error?: string
-  errorCode?: 'structured_output_retries_exhausted' | 'structured_output_format_invalid' | 'native_worktree_result_invalid' | 'native_rpc_timeout' | 'native_turn_transport_failed' | 'provider_quota_exhausted' | 'unsupported'
+  errorCode?: 'structured_output_retries_exhausted' | 'structured_output_format_invalid' | 'native_worktree_result_invalid' | 'native_rpc_timeout' | 'native_turn_transport_failed' | 'provider_quota_exhausted' | 'llm_manager_route_unavailable' | 'unsupported'
   rejectedOutput?: RejectedStructuredOutput
   worktree?: NativeWorktreeRequest
   zcodeToolPolicy?: ZCodeToolPolicy
@@ -173,6 +173,22 @@ export function structuredExecutionPolicy(request: Pick<StructuredExecution, 'sc
 /** 模型调用无期限时不装计时器；创建和精确停止预算由各自入口持有。 */
 export function structuredExecutionTimer(timeoutMs: number | null, onTimeout: () => void): ReturnType<typeof setTimeout> | undefined {
   return timeoutMs === null ? undefined : setTimeout(onTimeout, timeoutMs)
+}
+
+/** Manager 准入拒绝只在原派发尚无任何原生身份或产物时证明未启动。 */
+export function structuredDispatchUnstarted(state: StructuredExecution): boolean {
+  return !state.turnStartRequested && state.threadId === undefined && state.turnId === undefined
+    && !state.grokNative && !state.cursorNative && !state.codexNative && !state.claudeNative && !state.zcodeNative
+    && state.output === undefined && !state.resultDigest && !state.resultWorktree && !state.failedWorktree && !state.rejectedOutput
+    && !state.nativeTokenUsage && !state.frozenReads?.length && !state.frozenReadProof
+}
+
+/** 只接受 Manager 在原名额请求明确返回前置拒绝所写的失败与停止记录。 */
+export function isManagedReservationRejection(state: StructuredExecution): boolean {
+  const stop = state.cancellation
+  return state.state === 'failed' && state.errorCode === 'llm_manager_route_unavailable' && state.error === state.errorCode
+    && !!managedRoute(state.model) && structuredDispatchUnstarted(state) && stop?.nativeStopped === true
+    && stop.nativeStatus === 'notStarted' && stop.acknowledged === false && stop.reason === 'cancelled' && stop.error === undefined && stop.pendingManagerQuota === undefined
 }
 // A missing process-start probe is not proof of death. Only an explicit release, ESRCH or a
 // different start token permits another process to claim this exact native turn's observation.

@@ -74,6 +74,8 @@ P0 传输冻结回归核新 attempt 保存 `reviewCoveragePreflight` 与 `review
 
 P2 混合失败使用真实 Git/Native 资源记录与 SQLite 冷开：普通 repair 排首、后组 contract-omission、另一组格式失败和一个 accept 同轮结算。冷续只重派原格式稿，保相同 candidate、合法 repair/accept 的原 resultRef；之后只回相应 P1 owner，保未命中原件与旧 CAS。覆盖完整 aggregate 后失租约的 superseded/null、零调用中间 attempt、缺 required outcome 及资源未 removed；不得补旧失败或收据。权限回归另在同 owner 核 ordinary 白名单与 omission 的已接受字段保护，不以并集扩权。
 
+P2 同稿续审期间让 Manager 预约返回明确拒绝，验证原 review 会话以 `notStarted` 结算。SQLite 冷启覆盖新汇总以及旧汇总只保留业务 repair 的状态。仅重派拒绝组的 review，候选、原稿及其它组的 repair、accept 引用保持，补齐独审之后才进入 P1 owner。
+
 同一矩阵另含尚未结清的新候选 GAP，仅在隔离控制前置模拟历史可选 GAP 复核 stage 缺席，其余真实 Git、SQLite、Native 和 CAS 字节保持。冷恢复仍只续 P2 格式组；普通与遗漏 owner 新独审及严格 seal 后才派新 aggregate 的 GAP 复核，协议阶段无 P1 或 GAP 派发，原 GAP 各字段与旧 verdict/ref 保持。
 
 同 owner 的后续 GAP 续稿分别覆盖已批准 RULE.basis 事实修正与合法新增 AC。新并集 GAP 独审后再次重开 SQLite，仅命中 owner 沿最新 acceptedRef 和 Git 草稿继续；新输入不携旧普通或遗漏权限，所有非 GAP 项、元数据、raw 与原 checkpoint 字节保持，最后重做 strict seal。回滚事实或丢弃新增 AC 的负例须以 candidate_gap_scope_changed 在独审前拒绝，不靠扩大原 P0 或合并诊断修绿。
@@ -148,6 +150,8 @@ Grok P0 分析逾期退出的回归以真实 SQLite/Git 和受控原生资源桥
 Grok P0 独审退出超时回归使用真实 SQLite、Git、原生资源桥和受控 CLI。首个独审写入并提交 accept 草稿和结束事件，进程直到退出期限之后才停止。核对原独审 failed/removed、保留停止证据、无批准结果。原 operation 下一 attempt 只派发新独审，核对两次待审分析逐值一致及独立会话身份，确认只有新独审通过后才离开 P0。分区场景分别耗尽尝试额度与返修额度，核对剩余调用可在本轮完成其他独立分区的分析与独审，失败分区仍待处理且未开启新一轮。全程保持作者工作树和索引，回归在 P0 后停止。
 
 Grok P1 只读独审退出超时以真实 SQLite、Git、原生资源桥和受控 CLI 重现。原生成候选通过结构且有正常 Git 提交，独审成功终态后进程逾期退出，原失败经正式停止和归档。下一 attempt 复用逐值相同的候选及原生成身份，只派发新的独立只读审查。缺原启动原件时零新派发，原失败仍保留。回归在 P1 后停止。 ZCode 的错误任务反例在新 attempt 领取后才替换历史读取视图，先以原件完成资源检查，再验证候选任务绑定拒绝且零新派发。
+
+同一 Grok P1 受控 CLI 在首次只读独审发布终态前退出，正式资源保留未发布回合的 `created/cancelling`。经正式暂停、资源结算与 SQLite 冷开后，只为原 Git 候选开启新独审。核对原失败、资源、作者追踪、只读树和最终结论。缺停止观察、取消凭据指向另一启动或已有原生结果时零新派发。
 
 同一受控 CLI 另覆盖分析退出超时。新 attempt 在同 operation 逐字读取原 Git 草稿，重新提交新分析，并由另一个会话独审。原失败保持无批准、原草稿归档和作者源码/索引保持，结果证据只引用新分析和新独审。
 
@@ -385,6 +389,8 @@ P1 `session/events` 独审超时回归用真实Git提交、隔离SQLite及受控
 P1独审格式失败回归使用真实Git、隔离SQLite及受控Native资源桥，覆盖单体、Code→Spec分区连续两次失败、原正式拒稿失配和候选正文失配。候选、Git生成对象、原生成追踪、review schema与保护树保持，只读seed每轮只增加当轮所需的上一份拒稿原字节，后续正常审查返回前无批准。原checkpoint未存CAS ref时仍原样保留；错packet不能派发新会话；Code→Spec零代码生成。已有V3超时请求与同策略新独审在相同候选下提示逐字相等。
 
 P1 停态 provider 作者续稿回归使用真实 Git 和隔离 SQLite，核对原物理稿字节、本轮编辑描述的唯一请求键变化及后续独审。保护文件或编辑描述的其他字段变化、外来请求键、编辑描述缺失或损坏继续拒绝。
+
+P1 Manager 预约拒绝回归用真实 Git、隔离 SQLite 和受控运行时覆盖作者及独审。原 Grok 预约以 `notStarted` 结算，冷启后用新键按原组普通选路取得 ZCode。作者核对原 Git seed 与输入摘要，独审核对同一候选摘要、作者轨迹和只读 seed。拒绝记录与额度游标分离，旧请求和原证据保持。
 
 定向独审跨兄弟失败的回归为已登记原候选授权插入同冻结计划、已结算但无本分区派发的失败尝试。只读续审须沿原授权和原作者证据。第一次新独审故意缺边界，正式恢复后仍续审同一候选。
 

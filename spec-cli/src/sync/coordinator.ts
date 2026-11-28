@@ -42,7 +42,7 @@ import { contractOmissionBound, freezeGenerationInput, generationReviewRequest, 
 import type { GenerationReadCache } from './generation.js'
 import type { GenerationFinding, GenerationInput, GenerationResult, StoppedCandidateReviewDraft } from './generation-types.js'
 import { captureStageDraft, overlayStageTree, readStageDraft, readStoppedPhysicalDraft, StageDraftCommitMissingError, stageWorktree, StoppedPhysicalDraftSidecarsError, StoppedPhysicalDraftStatusError, verifyStageResult, type StageDraftMaterialRequest, type StageWorktree } from './stage-worktree.js'
-import { createAttemptRunner, hasSettledGrokP0ExitFailure, hasSettledNativeRpcFailure, hasSettledNativeTurnTransportFailure, matchesNativeDispatchModel, pinSyncNativeRequest } from './native-run.js'
+import { createAttemptRunner, hasSettledGrokP0ExitFailure, hasSettledManagerReservationRejection, hasSettledNativeRpcFailure, hasSettledNativeTurnTransportFailure, matchesNativeDispatchModel, pinSyncNativeRequest } from './native-run.js'
 import type { NativeRunCheckpoint, NativeRunPlan, NativeRunRecord } from './native-run.js'
 import type { AdmitSyncInput, ApplyReceipt, BlobRef, CandidateRef, ComposedInputRef, FrozenBaselineSelection, InputSnapshot, P0ReviewChallenge, P1ReviewChallenge, SyncAttempt, SyncFailure, SyncOperation, SyncScope, SyncResourceRecord, VerificationResultBlob, WriteFence } from './operation-types.js'
 import { deliverVerifiedAttempt, planPrivateDelivery } from './private-delivery.js'
@@ -58,7 +58,7 @@ import { assertGrokUnpublishedExitSource, isGrokNativeExitFailure } from '../gro
 import { assertZCodeSettledProviderFailure, assertZCodeStoppedDraftSource, isZCodeEventsRpcTimeout, isZCodeProviderRejection, type ZCodeStructuredExecution } from '../zcode-structured.js'
 import { NATIVE_PERIODIC_OBSERVATION_FAILURE, NATIVE_PROCESS_OBSERVATION_PENDING, nativeWorktreePrompt, nativeWorktreeResult } from '../native-worktree-runtime.js'
 import { readRecord } from '../session-record.js'
-import { structuredExecutionPolicy, StructuredSessionError } from '../session-structured-policy.js'
+import { isManagedReservationRejection, structuredExecutionPolicy, StructuredSessionError } from '../session-structured-policy.js'
 import { SettledSessionCreateTimeoutError } from '../session-structured.js'
 import { canonicalSnapshotSource, captureInputSnapshot, contentHash, identifyRawWorktree, objectGit, readEvidence, readObject, readObjectBatch, readTree, validateRepositoryPath, verifySnapshot, visitObjectBatch, withReadonlySnapshotQuery, writeEvidence, writeEvidenceBytes } from './snapshot.js'
 import type { SnapshotManifest, TreeEntry } from './snapshot.js'
@@ -89,11 +89,15 @@ const analysisRepairDiagnosticCodes = new Set([...behaviorAnalysisRepairCodes, .
 const nativeObservationFailures = new Set<string>([NATIVE_PROCESS_OBSERVATION_PENDING, ...Object.values(NATIVE_PERIODIC_OBSERVATION_FAILURE)])
 const isNativeObservationFailure = (failure: Pick<SyncFailure, 'code' | 'message'> | null): boolean =>
   failure?.code === 'failed' && nativeObservationFailures.has(failure.message)
-function requireSettledRpcSources(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, sources: readonly { status: string; failure: { code: string; message: string; sessionId?: string; threadId?: string; turnId?: string; requestKey?: string; inputDigest?: string } | null }[], evidenceRefs: BlobRef[]): void {
-  if (!sources.some(source => source.failure?.code === 'native_rpc_timeout')) return
+function requireSettledNativeFailureSources(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, sources: readonly { status: string; failure: { code: string; message: string; sessionId?: string; threadId?: string; turnId?: string; requestKey?: string; inputDigest?: string } | null }[], evidenceRefs: BlobRef[]): boolean {
+  const rpc = sources.filter(source => source.failure?.code === 'native_rpc_timeout')
+  const rejected = sources.filter(source => source.failure?.code === 'llm_manager_route_unavailable')
+  if (!rpc.length && !rejected.length) return false
   const blocked = sources.find(source => source.failure?.code === 'cancellation_pending') ?? sources.find(source => ['unsupported', 'cancelled', 'conflict', 'needs_input'].includes(source.status))
   if (blocked) fail(blocked.failure?.code ?? 'unsupported', blocked.failure?.message ?? '并发分区仍有不可自动续修的结果', evidenceRefs)
-  if (sources.some(source => source.failure?.code === 'native_rpc_timeout' && !hasSettledNativeRpcFailure(store, operation, attempt, source.failure))) fail('cancellation_pending', '原生RPC故障尚无本尝试的精确停止及资源结算证明', evidenceRefs)
+  if (rpc.some(source => !hasSettledNativeRpcFailure(store, operation, attempt, source.failure!))) fail('cancellation_pending', '原生RPC故障尚无本尝试的精确停止及资源结算证明', evidenceRefs)
+  if (rejected.some(source => !hasSettledManagerReservationRejection(store, operation, attempt, source.failure!))) fail('cancellation_pending', 'Manager 准入拒绝尚无本尝试的精确未启动及资源结算证明', evidenceRefs)
+  return rejected.length > 0
 }
 const fenceFor = (operation: SyncOperation, attempt: SyncAttempt): WriteFence => ({ operationId: operation.id, attemptId: attempt.id, generation: attempt.generation, leaseToken: attempt.leaseToken, sourceFingerprint: operation.input.source.physicalFingerprint })
 type InputView = { composed: ComposedInputRef; manifest: SnapshotManifest; files: Map<string, string>; readPaths: readonly string[]; readSetDigest: string; frozen: FrozenContracts }
@@ -512,7 +516,7 @@ function settledElaborationReview(store: SyncStore, operation: SyncOperation, pr
   const key = `${ownerKey}:${round.index}:elaboration_review`
   const quota = !rejection && failure.code === 'provider_quota_exhausted' ? managedQuotaDispatch(store, operation, prior, key) : undefined
   if (providerReview && rejection) return
-  if (!rejection && !grokExit && failure.code === 'failed' && round.candidateDigest) {
+  if (!rejection && !grokExit && (failure.code === 'failed' || failure.code === 'llm_manager_route_unavailable') && round.candidateDigest) {
     const unstarted = authenticateUnstartedElaborationReview(store, operation, prior, key, failure, round.candidateDigest)
     if (unstarted) {
       if (prior.dispatchPlans.some(dispatch => store.findResource(prior.id, dispatch.key)?.phase !== 'removed')) fail('review_retry_binding', '未启动独审仍有同轮未结算资源')
@@ -560,7 +564,7 @@ function settledElaborationReview(store: SyncStore, operation: SyncOperation, pr
   const expectedFailure = stoppedReview ? undefined : { code: failure.code, message: failure.message, ...(rejection ? { rejectedOutput: checkpoint.failure?.rejectedOutput } : {}), ...(failedWorktree ? { failedWorktree } : {}) }
   if (resource.attemptId !== prior.id || resource.generation !== prior.generation || plan.schemaVersion !== 1 || checkpoint.schemaVersion !== 1
     || request.purpose !== 'elaboration_review' || request.worktree?.mode !== 'read' || !transportMatches || record.base !== request.base || record.forkCommit !== request.base
-    || !checkpoint.nativeCallRequested || !grokExit && !publishedIdentity || checkpoint.status !== terminalStatus || checkpoint.nativeState !== terminalStatus
+    || !checkpoint.nativeCallRequested || !grokExit && !proof.interruptedGrokReview && !publishedIdentity || checkpoint.status !== terminalStatus || checkpoint.nativeState !== terminalStatus
     || !quota && !stoppedReview && !nativeClaudeFormat && checkpoint.stop?.nativeStatus !== 'stopped' || checkpoint.result || checkpoint.creationTermination
     || checkpoint.candidateDigest !== null && checkpoint.candidateDigest !== round.candidateDigest
     || canonical(prior.dispatchPlans.find(dispatch => dispatch.key === key)?.session) !== canonical(session)
@@ -1252,7 +1256,8 @@ function stoppedCandidateReviewSource(store: SyncStore, operation: SyncOperation
   const checkpoints = readIndex(origin), commonDir = operation.input.source.commonDir
   const source = partitionStage<SavedGeneration>(store, operation, origin, key, undefined, checkpoints), saved = source?.result
   const failure = saved?.failure
-  if (!saved || failure?.code !== 'cancellation_pending' || saved.status !== 'failed' || saved.inputId !== operation.input.id
+  const rejectedReservation = failure?.code === 'llm_manager_route_unavailable', terminal = rejectedReservation ? 'failed' : 'cancelled'
+  if (!saved || !failure || failure.code !== 'cancellation_pending' && !rejectedReservation || saved.status !== 'failed' || saved.inputId !== operation.input.id
     || !saved.candidateValidated || saved.reviewPassed || saved.review !== null || saved.reviewOutput !== null || saved.traces.length
     || saved.validationFindings.some(item => item.severity === 'error') || canonical(saved.candidate) !== canonical(candidate)
     || canonical(candidate.coveredScope.paths) !== canonical(operation.scope.paths) || canonical(reviewPlanStage(store, operation, origin, 'candidate-partition-plan', undefined, readIndex)?.result) !== canonical(plan)) return null
@@ -1280,29 +1285,33 @@ function stoppedCandidateReviewSource(store: SyncStore, operation: SyncOperation
   if (!matches(native) || !matches(checkpoint) || !native.request.worktree || failure.sessionId !== sessionId
     || native.request.purpose !== 'code_review' || native.request.inputDigest !== saved.inputDigest || native.sessionCreateKey !== dispatch.sessionCreateKey
     || contentHash(JSON.stringify(native.request)) !== dispatch.requestDigest || canonical(dispatch.session) !== canonical(session)
-    || checkpoint.phase !== 'removed' || checkpoint.status !== 'cancelled' || checkpoint.nativeState !== 'cancelled' || !checkpoint.nativeCallRequested
-    || checkpoint.result || checkpoint.failure || checkpoint.creationTermination || canonical(checkpoint.session) !== canonical(session)
+    || checkpoint.phase !== 'removed' || checkpoint.status !== terminal || checkpoint.nativeState !== terminal || !checkpoint.nativeCallRequested
+    || checkpoint.result || canonical(checkpoint.failure) !== canonical(rejectedReservation ? { code: failure.code, message: failure.message } : undefined)
+    || rejectedReservation && checkpoint.nativeStarted || checkpoint.creationTermination || canonical(checkpoint.session) !== canonical(session)
     || !resource.checkpoints.some(item => {
       if (item.phase !== 'created') return false
       const observed = JSON.parse(readEvidence(commonDir, item.checkpointRef).toString('utf8')) as NativeRunCheckpoint
-      return matches(observed) && observed.phase === 'created' && observed.nativeState === 'cancelling' && observed.nativeCallRequested && canonical(observed.session) === canonical(session)
+      return matches(observed) && observed.phase === 'created' && observed.nativeState === (rejectedReservation ? 'failed' : 'cancelling')
+        && observed.nativeCallRequested && (!rejectedReservation || !observed.nativeStarted && !observed.stop && !observed.failure && !observed.creationTermination)
+        && canonical(observed.session) === canonical(session)
     })) return null
   const record = readNativeRecord(sessionId), state = record?.structuredExecution, stop = state?.cancellation
   const execution = structuredExecutionPolicy(native.request)
   const prompt = nativeWorktreePrompt(native.request.prompt, native.request.worktree), base = native.request.worktree.baseCommit
   if (!record || !state || record.session !== sessionId || record.createRequestId !== contentHash(native.sessionCreateKey)
     || record.createPayloadHash !== contentHash(JSON.stringify({ prompt, parent: null, launcher: null, base, structuredExecution: execution }))
-    || canonical(structuredExecutionPolicy(state)) !== canonical(execution) || state.state !== 'cancelled' || state.error !== failure.message
+    || canonical(structuredExecutionPolicy(state)) !== canonical(execution) || state.state !== terminal || state.error !== failure.message
+    || rejectedReservation && !isManagedReservationRejection(state)
     || (state.threadId ?? null) !== session.threadId || (state.turnId ?? null) !== session.turnId
     || record.harnessSessionId !== session.threadId || stop?.reason !== 'cancelled' || stop.nativeStopped !== true
     || state.output !== undefined || state.resultDigest !== undefined || state.resultWorktree || state.rejectedOutput || state.failedWorktree
-    || canonical(checkpoint.stop) !== canonical({ sessionId, state: 'cancelled', threadId: state.threadId, turnId: state.turnId,
+    || canonical(checkpoint.stop) !== canonical({ sessionId, state: terminal, threadId: state.threadId, turnId: state.turnId,
       nativeStopped: true, acknowledged: stop.acknowledged, nativeStatus: stop.nativeStatus, error: stop.error })) return null
   const policy = JSON.parse(readEvidence(commonDir, operation.planBlob!).toString('utf8')) as SyncCoordinatorPlan
   const writable = generation.p2SpecWritePaths ?? (policy.version === 'sync-coordinator-v2' && policy.direction === 'code_to_spec' ? [] : undefined)
   const expected = generationReviewRequest(input, candidate, true, writable, cache)
   return matchesScheduledNativeReview(operation, origin, dispatch, native.request, expected.request)
-    ? { input, record, seed: native.request.worktree, draftBinding: expected.draftBinding, resultRef: source!.resultRef, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef }
+    ? { input, record, seed: native.request.worktree, draftBinding: rejectedReservation ? undefined : expected.draftBinding, resultRef: source!.resultRef, nativePlanRef: resource.plan.planBlob, checkpointRef: resource.checkpointRef }
     : null
 }
 
@@ -1329,7 +1338,7 @@ function* candidateReviewAuthentication(store: SyncStore, operation: SyncOperati
     const original = partitionStage<ReturnType<typeof freezeGenerationInput>['inputEvidence']>(store, operation, attempt, `${key}:input`, undefined, checkpoints)?.result
     const input = original ? restoreGenerationInput(original) : acceptedReviewInput(store, operation, attempt, key, saved.resultRef, checkpoints)
     if (!(input && completedCandidateReviewSource(store, operation, attempt, key, candidate, plan, input, readIndex, true, cache))) {
-      const source = saved.result.failure?.code === 'cancellation_pending'
+      const source = saved.result.failure?.code === 'cancellation_pending' || saved.result.failure?.code === 'llm_manager_route_unavailable'
         ? stoppedCandidateReviewSource(store, operation, attempt, key, candidate, plan, readIndex, options?.readNativeRecord, cache)
         : failedCandidateReviewSource(store, operation, attempt, key, candidate, plan, input ?? undefined, readIndex, options?.readNativeRecord, cache)
       if (!source) return null
@@ -1350,6 +1359,16 @@ function interruptedCandidateReviewComplete(store: SyncStore, operation: SyncOpe
   })
 }
 
+/** 旧汇总可能未携带分区拒绝。待恢复信号阻止业务返工，续审资格仍由原件认证。 */
+function candidateReviewRecoveryRequired(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, generation: SavedGeneration, checkpoints: SyncCheckpointStageView): boolean {
+  const needsRecovery = (code?: string): boolean => code === 'cancellation_pending' || code === 'llm_manager_route_unavailable'
+  return needsRecovery(generation.failure?.code) || checkpoints.json.some(({ value }) => {
+    const key = (value as Stage).stage
+    return key?.startsWith('partition:') && key.endsWith(':candidate-review')
+      && needsRecovery(partitionStage<SavedGeneration>(store, operation, attempt, key, undefined, checkpoints)?.result.failure?.code)
+  })
+}
+
 /** 真实只读候选失败回到原P1写者；独审诊断不成为refinement或业务授权。 */
 function readonlyRepairFromAttempt(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, readIndex?: (source: SyncAttempt) => SyncCheckpointStageView): ReadonlyOwnerRepair | null {
   if (attempt.operationId !== operation.id) fail('readonly_spec_repair_binding', '只读V1续修来源属于另一操作')
@@ -1363,7 +1382,7 @@ function readonlyRepairFromAttempt(store: SyncStore, operation: SyncOperation, a
   let allFindings = generation?.result.validationFindings.filter(item => item.severity === 'error') ?? []
   const semantic = generation?.result.candidateValidated === true && ['repair', 'failed'].includes(generation.result.status) && !generation.result.reviewPassed && generation.result.partitionEvidence?.some(item => item.review.verdict === 'repair')
   if (!generation?.result.candidate || !semantic && (generation.result.candidateValidated || !allFindings.length || allFindings.some(item => !isReadonlyCitationFailure(item)))) return null
-  if (semantic && generation.result.failure?.code === 'cancellation_pending') return null
+  if (semantic && candidateReviewRecoveryRequired(store, operation, attempt, generation.result, checkpoints)) return null
   const plan = operation.planBlob ? JSON.parse(readEvidence(operation.input.source.commonDir, operation.planBlob).toString('utf8')) as SyncCoordinatorPlan : null
   if (plan?.version !== 'sync-coordinator-v2') return null
   const writable = generation.result.p2SpecWritePaths ?? (plan.direction === 'code_to_spec' ? [] : null)
@@ -1634,9 +1653,10 @@ function pendingReadonlyRepair(store: SyncStore, operation: SyncOperation, attem
     const result = history.read<SavedGeneration>(prior, 'generation')
     return result?.candidate && reuseBehaviorDependentStages(store, operation, prior, history.checkpoints(prior)) ? [{ prior, result }] : []
   })
-  const candidate = generations.at(-1)?.result.candidate
-  if (!candidate) return null
+  const latest = generations.at(-1), candidate = latest?.result.candidate
+  if (!latest || !candidate) return null
   if (candidate.sourceInputId !== operation.input.id) fail('readonly_spec_repair_binding', '最新候选不属于当前冻结输入，不能清除待处理诊断')
+  if (candidateReviewRecoveryRequired(store, operation, latest.prior, latest.result, history.checkpoints(latest.prior))) return null
   verifyCandidate(operation.input.source.commonDir, candidate)
   const candidateDigest = candidate.digest
   for (const { prior, result } of generations) {
@@ -3072,14 +3092,17 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
       if (!await recoverResources(store, operation, options, !active)) return current('recovery_required')
       if (!active) {
         if (attempt?.failure?.kind === 'repairable' && reuseBehaviorDependentStages(store, operation, attempt)) {
-          refinement = stage<Refinement>(store, operation, attempt, 'refinement') ?? refinement
-          const previous = stage<SavedGeneration>(store, operation, attempt, 'generation')
-          if (previous) {
-            repairContext = generationRepairInput(previous, attempt.failure)
-          }
-          else {
-            const elaboration = stage<SavedElaboration>(store, operation, attempt, 'elaboration')
-            seed = elaborationRepairSeed(elaboration, `sync:${attempt.id}:elaborate`)
+          const checkpoints = readSyncCheckpointStageIndex(store, operation, attempt)
+          const previous = stage<SavedGeneration>(store, operation, attempt, 'generation', 'automatic', checkpoints)
+          if (previous?.candidateValidated && candidateReviewRecoveryRequired(store, operation, attempt, previous, checkpoints)) {
+            refinement = undefined; repairContext = undefined; seed = undefined
+          } else {
+            refinement = stage<Refinement>(store, operation, attempt, 'refinement', 'automatic', checkpoints) ?? refinement
+            if (previous) repairContext = generationRepairInput(previous, attempt.failure)
+            else {
+              const elaboration = stage<SavedElaboration>(store, operation, attempt, 'elaboration', 'automatic', checkpoints)
+              seed = elaborationRepairSeed(elaboration, `sync:${attempt.id}:elaborate`)
+            }
           }
         }
         try {
@@ -3272,7 +3295,8 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           if (!candidate || !generation.candidateValidated || generation.reviewPassed || generation.validationFindings.some(finding => finding.severity === 'error') || !approved || !elaborationComposedBinding(store, owner, prior, approved, view.composed, checkpoints) || !originalPlan || !candidatePlan || canonical(candidate.coveredScope.paths) !== canonical(operation.scope.paths)) break
           let failedReviewKeys = authenticatedCandidate?.operationId === owner.id && authenticatedCandidate.sourceAttemptId === prior.id && authenticatedCandidate.candidateDigest === candidate.digest
             ? authenticatedCandidate.formatReviewKeys : undefined
-          if (!failedReviewKeys && (prior.status === 'superseded' && prior.failure === null || prior.failure?.code === 'cancellation_pending' || generation.failure?.code === 'cancellation_pending')) {
+          if (!failedReviewKeys && (prior.status === 'superseded' && prior.failure === null || prior.failure?.code === 'cancellation_pending'
+            || prior.failure?.code === 'llm_manager_route_unavailable' || candidateReviewRecoveryRequired(store, owner, prior, generation, checkpoints))) {
             const classified = await withReadonlySnapshotQuery(async () => {
               const proof = candidateReviewAuthentication(store, owner, prior, generation, readIndex)
               for (let step = proof.next(); ; step = proof.next()) {
@@ -3723,7 +3747,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           const managedReviewQuota = failure?.code === 'provider_quota_exhausted' && !!source?.result.structurePassed && !source.result.reviewPassed
           const interruptedReview = failure?.code === 'cancellation_pending' && source?.result.structurePassed
             && !source.result.reviewPassed && !round?.review && round?.reviewOutput === null && !round.rejectedOutput
-          const unstartedReview = failure?.code === 'failed' && source?.result.structurePassed
+          const unstartedReview = (failure?.code === 'failed' || failure?.code === 'llm_manager_route_unavailable') && source?.result.structurePassed
             && !source.result.reviewPassed && round?.review === null && round.reviewOutput === null && !round.rejectedOutput
           if (!newerGeneration && source && round && failure
             && (!carriedGenerations.size || carriedGenerations.size === 1 && carriedGenerations.has(canonical(round.traces.find(trace => trace.purpose === 'elaboration_generate'))))
@@ -3847,7 +3871,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
             || !priorElaborationInputMatches(prior, binding, owner, checkpoints)) return missingFormalReview()
           if (rememberUnavailableQuota(prior, result, owner, checkpoints)) continue
           if (!round?.draft || !round.candidate || !result.structurePassed || result.reviewPassed || result.status !== 'failed' || !failure
-            || !(reviewFormatRepairCodes.has(failure.code) || failure.code === 'provider_quota_exhausted' || failure.code === 'failed' || failure.code === 'cancellation_pending')) return missingFormalReview()
+            || !(reviewFormatRepairCodes.has(failure.code) || failure.code === 'provider_quota_exhausted' || failure.code === 'failed' || failure.code === 'llm_manager_route_unavailable' || failure.code === 'cancellation_pending')) return missingFormalReview()
           if (carriedQuotaRefs.size && (failure.code !== 'provider_quota_exhausted' || carriedQuotaRefs.size !== 1 || !carriedQuotaRefs.has(source.resultRef.sha256)
             || carriedGenerations.size !== 1 || !carriedGenerations.has(canonical(round.traces.find(trace => trace.purpose === 'elaboration_generate'))))) return missingFormalReview()
           const requestKey = `sync:${prior.id}:${ownerSuffix}`
@@ -5036,6 +5060,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
               || item instanceof StructuredSessionError && (structuredAnalysisRepairCodes.has(item.code)
                 || hasSettledNativeRpcFailure(store, operation, currentAttempt, item)
                 || hasSettledNativeTurnTransportFailure(store, operation, currentAttempt, item)
+                || hasSettledManagerReservationRejection(store, operation, currentAttempt, item)
                 || hasSettledGrokP0ExitFailure(store, operation, currentAttempt, item))))
             if (!signal.aborted && blocked instanceof StructuredSessionError && blocked.code === 'native_turn_transport_failed') fail('cancellation_pending', '原生turn传输故障尚无本尝试的精确停止及资源结算证明')
             if (blocked || signal.aborted) {
@@ -5045,7 +5070,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
             }
             const message = p0StatusOnly ? CODE_BEHAVIOR_FAILURE_STATUS : issue.message
             const rejected = failure(issue.code!, message ?? String(error), 'repairable', [writeEvidence(operation.input.source.commonDir, { code: issue.code, message, ...(partitionFailures ? { partitionFailures: partitionFailures.map(storedPartitionFailure) } : {}), ...(error instanceof StructuredSessionError ? { sessionId: error.sessionId, threadId: error.threadId, turnId: error.turnId } : {}) })])
-            store.recordFailure(fence, rejected); continue
+            store.recordFailure(fence, rejected, errors.some(item => item instanceof StructuredSessionError && item.code === 'llm_manager_route_unavailable')); continue
           }
           saveStage(store, fence, 'analysis', approved)
         }
@@ -5248,7 +5273,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         if (stopped) fail('cancelled', issue.message, issue.evidenceRefs)
         const failureSources = elaboration.partitionEvidence?.map(owner => JSON.parse(readEvidence(operation.input.source.commonDir, owner.resultRef).toString('utf8')) as SavedElaboration) ?? [elaboration]
         const failedAttempt = store.readAttempt(attempt.id)
-        requireSettledRpcSources(store, operation, failedAttempt, failureSources, issue.evidenceRefs)
+        const continueReservation = requireSettledNativeFailureSources(store, operation, failedAttempt, failureSources, issue.evidenceRefs)
         if (elaboration.failure?.code === 'cancellation_pending') fail('cancellation_pending', issue.message, issue.evidenceRefs)
         if (partitions && options.plan.agentWorkflow && kind === 'repairable' && failureSources.some(source => isNativeObservationFailure(source.failure))) issue.serialElaborationRetry = true
         if (elaboration.failure?.code === 'partition_final_seal_failed') {
@@ -5262,7 +5287,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         const continueQuotaReview = kind === 'repairable' && failureSources.some(owner => owner.structurePassed && !owner.reviewPassed
           && owner.failure?.code === 'provider_quota_exhausted' && failedAttempt.dispatchPlans.some(dispatch => dispatch.purpose === 'elaboration_review'
             && dispatch.session?.sessionId === owner.failure?.sessionId && managedQuotaDispatch(store, operation, failedAttempt, dispatch.key)))
-        store.recordFailure(fence, issue, continueQuotaReview)
+        store.recordFailure(fence, issue, continueQuotaReview || continueReservation && kind === 'repairable')
         if (kind !== 'repairable') return current(unsupported ? 'unsupported' : undefined, issue)
         seed = elaborationRepairSeed(elaboration, `sync:${attempt.id}:elaborate`)
         continue
@@ -5530,17 +5555,18 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
             if (signal.aborted) fail('cancelled', issue.message, issue.evidenceRefs)
           }
         }
-        requireSettledRpcSources(store, operation, finishedAttempt, [generated, ...localResults], issue.evidenceRefs)
+        const continueReservation = requireSettledNativeFailureSources(store, operation, finishedAttempt, [generated, ...localResults], issue.evidenceRefs)
         if (generated.failure?.code === 'cancellation_pending') fail('cancellation_pending', issue.message, issue.evidenceRefs)
-        if (kind === 'repairable' && generated.candidate && !nodeChanges.length) {
+        if (!continueReservation && kind === 'repairable' && generated.candidate && !nodeChanges.length) {
           const findings = generated.partitionEvidence ? generated.partitionEvidence.filter(item => item.review.verdict === 'repair').flatMap(item => item.review.findings) : generated.review?.verdict === 'repair' ? generated.review.findings : []
           const omissions = findings.filter(finding => contractOmissionBound(finding, accepted.contracts))
           const ownerRepair = partitions && generated.p2SpecWritePaths && omissions.every(finding => !within(finding.ruleLocation.slice('contract-omission:'.length).split('#')[0], generated.p2SpecWritePaths!))
           if (omissions.length && !ownerRepair) { refinement = { prior: elaboration, candidate: generated.candidate, candidateDigest: generated.candidate.digest, diagnostics: omissions.map(finding => ({ code: 'contract_boundary_omission', message: JSON.stringify(finding) })) }; saveStage(store, fence, 'refinement', refinement) }
         }
-        store.recordFailure(fence, issue)
+        store.recordFailure(fence, issue, continueReservation && kind === 'repairable')
         if (kind !== 'repairable') return current(kind === 'unsupported' ? 'unsupported' : undefined, issue)
-        repairContext = generationRepairInput(generated); continue
+        if (!continueReservation) repairContext = generationRepairInput(generated)
+        continue
       }
       const delivered = await verifyAndDeliver(attempt, generated, elaboration, ready, retirementBefore, retiredIds, view, partitions, analysis, restorations, !!decision)
       if (delivered) return delivered

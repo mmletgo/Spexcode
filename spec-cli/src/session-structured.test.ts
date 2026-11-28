@@ -765,3 +765,60 @@ if (process.argv[3] === '-m') {
   assert.equal(readRecord(cancelledId)?.structuredExecution?.errorCode, undefined)
   assert.deepEqual(requests(), [expected, expected, { action: 'settle', route, sessionId: cancelledId, outcome: 'stopped' }])
 })
+
+for (const scenario of ['confirmed', 'transport', 'invalid-response', 'native-identity'] as const) test(`structured managed reservation rejection requires exact absence of native startup (${scenario})`, async t => {
+  const { sessionArtifactPath } = await import('@spexcode/spec-core')
+  const { configuredSessionApplication } = await import('./session-application.js')
+  const { fromRaw, readRecord, writeRecord } = await import('./session-record.js')
+  const { cancelStructuredSession, executeQueuedStructuredSession } = await import('./session-structured.js')
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'spex-managed-reservation-rejection-')))
+  const trace = join(root, 'bridge.ndjson')
+  const bridge = join(root, 'manager')
+  const runtime = fileURLToPath(new URL('../llm-manager/native-runtime.mjs', import.meta.url))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  writeFileSync(bridge, `#!${process.execPath}
+const fs = require('node:fs')
+if (process.argv[3] === '-m') console.log(JSON.stringify({ version: 1, path: ${JSON.stringify(runtime)} }))
+else {
+  const request = JSON.parse(fs.readFileSync(0, 'utf8'))
+  fs.appendFileSync(${JSON.stringify(trace)}, JSON.stringify(request) + '\\n')
+  if (request.action === 'reserve' && ${JSON.stringify(scenario)} === 'transport') process.exit(1)
+  if (request.action === 'reserve' && ${JSON.stringify(scenario)} === 'invalid-response') return console.log('invalid bridge response')
+  console.log(JSON.stringify(request.action === 'reserve'
+    ? { ok: false, code: 'llm_manager_route_unavailable' }
+    : { ok: true, value: { outcome: 'stopped' } }))
+}
+`, { mode: 0o700 })
+  const env = { PATH: `${root}:/usr/bin:/bin:/usr/sbin:/sbin`, SPEX_LLM_MANAGER_CONFIG: join(root, 'manager.json'), SPEX_LLM_MANAGER_PYTHON: bridge }
+  for (const [key, value] of Object.entries(env)) {
+    const original = process.env[key]
+    process.env[key] = value
+    t.after(() => { if (original === undefined) delete process.env[key]; else process.env[key] = original })
+  }
+  const id = `structured-route-unavailable-${scenario}-${process.pid}`
+  const route = { routeId: '5'.repeat(64), vendor: 'grok', kind: 'cli', model: 'default' } as const
+  const worktree = { mode: 'edit', baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40) } as const
+  configuredSessionApplication().createSession({ sessionId: id, status: 'queued' })
+  const rec = fromRaw({ session_id: id, governed: true, worktree_path: root, branch: null, title: null, name: null, status: 'queued', proposal: null, merges: 0, note: null, sortkey: null, createdAt: 1, stopped: false, archived: false, harness: 'grok-structured', launch_cmd: 'grok' })
+  rec.structuredExecution = structuredExecutionPolicy(execution({ purpose: 'elaboration_generate', model: managedModel(route), worktree, timeoutMs: null, nativeConfiguration: 'cli-config-v1' }))
+  if (scenario === 'native-identity') rec.structuredExecution.grokNative = { version: 1, root, sessionId: 'previous-grok-session' }
+  writeRecord(rec)
+  const launch = sessionArtifactPath(id, 'launch')
+  mkdirSync(join(launch, '..'), { recursive: true }); writeFileSync(launch, 'original frozen prompt')
+  assert.equal(await executeQueuedStructuredSession(id), scenario === 'confirmed' ? 'failed' : 'cancelling')
+  const state = readRecord(id)!.structuredExecution!
+  assert.equal(state.turnStartRequested, undefined)
+  if (scenario === 'confirmed') {
+    assert.equal(state.error, 'llm_manager_route_unavailable')
+    assert.equal(state.errorCode, 'llm_manager_route_unavailable')
+    assert.equal(state.grokNative, undefined)
+    assert.equal(state.cancellation?.nativeStopped, true)
+    assert.equal(state.cancellation?.nativeStatus, 'notStarted')
+    assert.equal((await cancelStructuredSession(id, { wakeQueue: false })).state, 'failed')
+  } else {
+    assert.equal(state.errorCode, undefined)
+    assert.equal(state.cancellation?.nativeStopped, false)
+    assert.equal(state.grokNative?.sessionId, scenario === 'native-identity' ? 'previous-grok-session' : undefined)
+  }
+  assert.deepEqual(readFileSync(trace, 'utf8').trim().split('\n').map(line => JSON.parse(line)), [{ action: 'reserve', route, sessionId: id }])
+})

@@ -20,7 +20,7 @@ related:
 
 ## expanded spec
 
-[[llm-manager-host]] 绑定的原生会话沿正式队列和原工具工作树运行。派发前在 Manager 取得原选项的组和供应商名额。已认证的实际完成、已证明从未启动或已认证停止才能结算名额。宿主通信或原进程状态未知时保留会话与名额恢复债务。只有原生终态或同轮可信 API 转发确认的额度失败在停止后发布 `provider_quota_exhausted`，代码和独审工件无成功授权。
+[[llm-manager-host]] 绑定的原生会话沿正式队列和原工具工作树运行。派发前在 Manager 取得原选项的组和供应商名额。已认证的实际完成、已证明从未启动或已认证停止才能结算名额。Manager 在原会话预约明确返回 `llm_manager_route_unavailable`，且原记录仍无原生启动、身份或产物时，持久保留原错误及 `failed/notStarted`。该预约未建立 claim，无需外部结算。宿主通信或原进程状态未知时保留会话与名额恢复债务。只有原生终态或同轮可信 API 转发确认的额度失败在停止后发布 `provider_quota_exhausted`，代码和独审工件无成功授权。
 
 version6 原生 worktree 结算在既有 structuredExecution 内保存可选 nativeTokenUsage。只接受对应 adapter 在认证同一终态及停止后交付的已报告计数，随 completed 或已认证终态导致的 failed 一次写入；业务/schema/Git 后置拒绝仍保持原结果。无可证终态、取消、超时及历史缺席都不追补。读侧以同一 canonical session 的 thread/turn 与 nativeTokenUsage 为准；该字段不进入业务 output、resultDigest、请求/创建摘要、Sync 证据对象或 Git。无存储 schema 迁移。计数来源及输入口径见 [[claude-structured-runtime]] 和 [[zcode-structured-runtime]]。
 
