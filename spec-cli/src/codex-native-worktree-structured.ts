@@ -34,25 +34,35 @@ type Packet = Record<string, unknown>
 type Exit = { code: number | null; signal: NodeJS.Signals | null }
 
 type NativePermissions = { name: string; writableRoots: string[]; shellPath?: string }
-type NativeThreadOptions = { workspace: string; model?: string; permissions?: NativePermissions }
 type CodexAdapter = {
   CodexNativeProtocolError: new (...args: never[]) => Error & { code: 'failed' | 'unsupported' | 'cancelled' | 'provider_quota_exhausted' }
   codexNativeModel(selection?: string): string | undefined
-  codexNativeWorktreeArgs(root: string, tmp: string): string[]
   codexNativeTokenUsage(total?: Packet): NativeTokenUsage | undefined
-  CodexNativeAppServer: new (input: Writable, output: Readable) => {
-    readonly failure?: Error
-    fail(cause: unknown): void
-    initialize(clientName: string, version: string): Promise<void>
-    startThread(options: NativeThreadOptions & { beforeStart?: () => void }): Promise<Proof['thread']>
-    startTurn(options: NativeThreadOptions & { prompt: string; schema: Packet; effort?: string }): Promise<string>
-    waitForTerminal(): Promise<void>
-    interrupt(): Promise<Identity | undefined>
-    readFinal(): Final
+  codexWorktreeFinalMatches(thread: Proof['thread'], final: Final, request: Identity & { workspace: string; model?: string }): boolean
+  codexWorktreeExitGraceMs: number
+  assertCodexWorktreeExit(exit: Exit | null, exitedWithinGrace: boolean): void
+  prepareCodexWorktreeInvocation(request: {
+    root: string; tmp: string; modelSelection?: string; clientName: string; clientVersion: string
+    workspace: string; permissions?: NativePermissions; prompt: string; schema: Packet; effort?: string
+  }): {
+    model?: string
+    args: string[]
+    environment(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv
+    connect(input: Writable, output: Readable): {
+      fail(cause: unknown): void
+      interrupt(): Promise<Identity | undefined>
+      closeInput(): void
+      run(hooks: {
+        check(): void
+        onThread(id: string): Promise<void>
+        onTurn(id: string): Promise<void>
+      }): Promise<{ thread: Proof['thread']; final: Final; nativeTokenUsage?: NativeTokenUsage }>
+    }
   }
 }
 
-const { codexNativeModel, codexNativeTokenUsage } = codexReplay as Pick<CodexAdapter, 'codexNativeModel' | 'codexNativeTokenUsage'>
+const { codexNativeModel, codexNativeTokenUsage, codexWorktreeFinalMatches } = codexReplay as Pick<CodexAdapter,
+  'codexNativeModel' | 'codexNativeTokenUsage' | 'codexWorktreeFinalMatches'>
 const STOP_MS = 15_000
 const sha = (text: string | Buffer): string => createHash('sha256').update(text).digest('hex')
 const digest = (value: unknown): string => sha(JSON.stringify(value))
@@ -63,10 +73,8 @@ const read = <T>(root: string, name: string): T => {
 }
 const write = (root: string, name: string, value: unknown): void => writeFileSync(join(root, name), JSON.stringify(value), { flag: 'wx', mode: 0o400 })
 const object = (value: unknown): Packet => value && typeof value === 'object' && !Array.isArray(value) ? value as Packet : {}
-const string = (value: unknown): value is string => typeof value === 'string' && value.length > 0
 const pending = (message: string) => new StructuredSessionError('cancellation_pending', message)
 const stale = (message: string) => new StructuredSessionError('stale_result', message)
-const failed = (message: string) => new StructuredSessionError('failed', message)
 const policyDigest = ({ version, policy, schema, inputDigest, purpose, timeoutMs, model, effort, worktree, nativeConfiguration }: Execution): string =>
   digest({ version, policy, schema, inputDigest, purpose, timeoutMs, model, effort, worktree, nativeConfiguration })
 
@@ -127,10 +135,8 @@ function readFinalProof(root: string, prompt: string, execution: Execution, work
     const proof = read<Proof>(root, 'settlement.json')
     if (plan.workspace !== workspace || plan.promptDigest !== sha(prompt) || plan.model !== nativeModel
       || digest(proof) !== native.proofDigest || proof.launchDigest !== digest(read<Launch>(root, 'launch.json'))
-      || proof.thread.id !== native.threadId || proof.thread.cwd !== workspace || !string(proof.thread.model) || !string(proof.thread.cliVersion)
-      || nativeModel !== undefined && proof.thread.model !== nativeModel
-      || proof.final.threadId !== native.threadId || proof.final.turnId !== native.turnId || execution.threadId !== native.threadId
-      || execution.turnId !== native.turnId || proof.final.status !== 'completed' || !string(proof.final.itemId) || !string(proof.final.text)
+      || execution.threadId !== native.threadId || execution.turnId !== native.turnId
+      || !codexWorktreeFinalMatches(proof.thread, proof.final, { workspace, model: nativeModel, threadId: native.threadId, turnId: native.turnId })
       || existsSync(join(root, 'cancel.json')))
       throw stale('Codex worktree terminal evidence differs from the fixed turn')
     stopDigest(launch, proof.stopDigest)
@@ -259,13 +265,18 @@ export async function codexNativeWorktreeTurn(realm: string, id: string, prompt:
   if (realpathSync(workspace) !== workspace) throw stale('Codex requires the physical worktree path')
   const runtime = await loadManagerNativeRuntime()
   const provider = await runtime.loadNativeAdapter('codex') as CodexAdapter
-  const nativeModel = provider.codexNativeModel(modelSelection)
+  const translate = (cause: unknown): unknown => cause instanceof provider.CodexNativeProtocolError
+    ? new StructuredSessionError(cause.code, cause.message) : cause
   const tmp = join(root, 'tmp'), receiptFile = join(root, 'process.json')
-  const plan: Plan = { root, workspace, tmp, policyDigest: policyDigest(execution), promptDigest: sha(prompt), ...(nativeModel ? { model: nativeModel } : {}) }
   const permissions = execution.worktree.mode === 'edit' ? editPermissions(workspace, tmp) : undefined
   const cli = runtime.findNativeExecutable('codex')
   if (!cli) throw new StructuredSessionError('unsupported', 'Codex CLI is unavailable')
-  const args = provider.codexNativeWorktreeArgs(root, tmp)
+  const invocation = provider.prepareCodexWorktreeInvocation({
+    root, tmp, workspace, modelSelection, permissions, prompt, schema: execution.schema, effort: execution.effort,
+    clientName: 'spexcode-native-worktree', clientVersion: '1',
+  })
+  const plan: Plan = { root, workspace, tmp, policyDigest: policyDigest(execution), promptDigest: sha(prompt),
+    ...(invocation.model ? { model: invocation.model } : {}) }
   mkdirSync(realm, { recursive: true, mode: 0o700 })
   try { mkdirSync(root, { mode: 0o700 }) }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw pending('Codex worktree dispatch is already reserved'); throw error }
@@ -277,26 +288,25 @@ export async function codexNativeWorktreeTurn(realm: string, id: string, prompt:
   if (callbacks.signal?.aborted) throw new StructuredSessionError('cancelled', 'Codex worktree turn was cancelled before startup')
   await callbacks.onTurnStarting?.()
 
-  const env: NodeJS.ProcessEnv = { ...process.env, TMPDIR: tmp }
+  const env = invocation.environment(process.env)
   for (const key of sessionIdentityEnvVars()) delete env[key]
-  const child = runtime.spawnGatedNativeProcess(cli, args, { cwd: workspace, env, stderr: 'ignore' })
-  const gate = child.stdio[3] as Writable, stdin = child.stdin!
+  const child = runtime.spawnGatedNativeProcess(cli, invocation.args, { cwd: workspace, env, stderr: 'ignore' })
+  const gate = child.stdio[3] as Writable
   const closed = new Promise<Exit>(resolve => child.once('close', (code, signal) => resolve({ code, signal })))
-  let owned: OwnedLaunch | undefined, interrupted = false, timedOut = false, closing = false, streamEnded = false
+  let owned: OwnedLaunch | undefined, interrupted = false, timedOut = false, closing = false
   let fault: unknown
   let interrupting: Promise<void> | undefined
-  const rpc = new provider.CodexNativeAppServer(stdin, child.stdout!)
-  const fail = (error: unknown): void => { fault ??= error; rpc.fail(error) }
+  const connection = invocation.connect(child.stdin!, child.stdout!)
+  const fail = (error: unknown): void => { fault ??= error; connection.fail(error) }
   child.once('error', fail); gate.on('error', fail)
-  child.stdout!.once('end', () => { streamEnded = true })
   const cancelFile = join(root, 'cancel.json')
   const interrupt = (): Promise<void> => {
     if (interrupting) return interrupting
     interrupted = true
     interrupting = (async () => {
-      if (closing || streamEnded) return
+      if (closing) return
       try {
-        const ack = await rpc.interrupt()
+        const ack = await connection.interrupt()
         if (ack) write(root, 'interrupt.json', { ...ack, planDigest: native.planDigest })
       } catch (error) { fault ??= error }
     })()
@@ -311,6 +321,7 @@ export async function codexNativeWorktreeTurn(realm: string, id: string, prompt:
   })
   let census: ReturnType<typeof setInterval> | undefined
   let proof: Proof | undefined
+  let usage: NativeTokenUsage | undefined
   let error: unknown
   const assertRunning = (): void => {
     if (interrupted || callbacks.signal?.aborted || existsSync(cancelFile)) {
@@ -318,8 +329,6 @@ export async function codexNativeWorktreeTurn(realm: string, id: string, prompt:
       throw new StructuredSessionError(timedOut ? 'timeout' : 'cancelled', 'Codex worktree turn was cancelled')
     }
     if (fault) throw fault
-    if (rpc.failure) throw rpc.failure
-    if (streamEnded) throw failed('Codex app-server disconnected before terminal evidence')
   }
   try {
     if (!child.pid) throw pending('Codex worktree has no launch PID')
@@ -334,22 +343,23 @@ export async function codexNativeWorktreeTurn(realm: string, id: string, prompt:
     gate.end('start\n')
     const sample = periodicNativeWorktreeSampler(owned, () => closing, fail)
     census = setInterval(() => { if (existsSync(cancelFile)) abort(); sample() }, 250)
-    await rpc.initialize('spexcode-native-worktree', '1')
-    const options = { workspace, model: nativeModel, permissions }
-    const thread = await rpc.startThread({ ...options, beforeStart: assertRunning })
-    native.threadId = thread.id
-    await callbacks.onNative({ ...native })
-    await callbacks.onThread(thread.id)
-    assertRunning()
-    const turnId = await rpc.startTurn({ ...options, prompt, schema: execution.schema, effort: execution.effort })
-    native.turnId = turnId
-    await callbacks.onNative({ ...native })
-    await callbacks.onTurn(turnId)
-    await rpc.waitForTerminal()
-    assertRunning()
-    proof = { launchDigest: digest(launch), thread, final: rpc.readFinal(), stopDigest: '' }
+    const result = await connection.run({
+      check: assertRunning,
+      onThread: async threadId => {
+        native.threadId = threadId
+        await callbacks.onNative({ ...native })
+        await callbacks.onThread(threadId)
+      },
+      onTurn: async turnId => {
+        native.turnId = turnId
+        await callbacks.onNative({ ...native })
+        await callbacks.onTurn(turnId)
+      },
+    })
+    proof = { launchDigest: digest(launch), thread: result.thread, final: result.final, stopDigest: '' }
+    usage = result.nativeTokenUsage
   } catch (cause) {
-    error = cause instanceof provider.CodexNativeProtocolError ? new StructuredSessionError(cause.code, cause.message) : cause
+    error = translate(cause)
   }
   closing = true
   clearInterval(census)
@@ -357,15 +367,15 @@ export async function codexNativeWorktreeTurn(realm: string, id: string, prompt:
   try {
     await interrupting
     gate.destroy()
-    stdin.end()
-    const exit = await Promise.race([closed, delay(500).then(() => null)])
+    connection.closeInput()
+    const exit = await Promise.race([closed, delay(provider.codexWorktreeExitGraceMs).then(() => null)])
     if (!exit && owned) signalGroup(owned)
     if (!owned || !await waitForNativeWorktreeProcessesStopped(owned, deadline, !exit, () => launchMatches(owned!)))
       throw pending('Codex exact native process stop remains unproven')
     if (proof) {
       const finalExit = exit ?? await Promise.race([closed, delay(Math.max(0, deadline - Date.now())).then(() => null)])
-      if (!finalExit || !(finalExit.code === 0 && finalExit.signal === null || !exit && finalExit.code === null && finalExit.signal === 'SIGTERM'))
-        throw failed('Codex app-server did not complete its native shutdown')
+      try { provider.assertCodexWorktreeExit(finalExit, exit !== null) }
+      catch (cause) { throw translate(cause) }
       proof.stopDigest = stopDigest(owned)
     }
   } finally {
@@ -379,5 +389,5 @@ export async function codexNativeWorktreeTurn(realm: string, id: string, prompt:
   if (error) throw error
   write(root, 'settlement.json', proof)
   await callbacks.onNative({ ...native, proofDigest: digest(proof) })
-  return resultFromFinal(proof!.final, prompt, execution, provider.codexNativeTokenUsage(proof!.final.tokenUsage))
+  return resultFromFinal(proof!.final, prompt, execution, usage)
 }

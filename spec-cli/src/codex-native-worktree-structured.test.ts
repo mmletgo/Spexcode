@@ -41,9 +41,23 @@ test('official Codex isolates read and edit, retains rejected output, reports qu
   t.after(() => rmSync(base, { recursive: true, force: true }))
   const home = join(base, 'codex-home'), repo = join(base, 'repo'), realm = join(base, 'realm')
   mkdirSync(home); mkdirSync(repo)
-  const previous = process.env.CODEX_HOME
+  const installed = join(base, 'manager-runtime.mjs'), launcher = join(base, 'manager-runtime')
+  const bundled = new URL('../llm-manager/native-runtime.mjs', import.meta.url).href
+  writeFileSync(installed, `export * from ${JSON.stringify(bundled)}
+import { loadNativeAdapter as load } from ${JSON.stringify(bundled)}
+export async function loadNativeAdapter(vendor) {
+  if (vendor !== 'codex') throw new Error('unexpected vendor')
+  const { CodexNativeProtocolError, prepareCodexWorktreeInvocation, codexWorktreeExitGraceMs, assertCodexWorktreeExit } = await load(vendor)
+  return { CodexNativeProtocolError, prepareCodexWorktreeInvocation, codexWorktreeExitGraceMs, assertCodexWorktreeExit }
+}
+`)
+  writeFileSync(launcher, `#!${process.execPath}
+process.stdout.write(JSON.stringify({ version: 1, path: ${JSON.stringify(installed)} }))
+`, { mode: 0o700 })
+  const env = process.env
+  process.env = { ...env, SPEX_LLM_MANAGER_PYTHON: launcher, SPEX_LLM_MANAGER_CONFIG: join(base, 'fixture.json') }
   process.env.CODEX_HOME = home
-  t.after(() => { if (previous === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = previous })
+  t.after(() => { process.env = env })
   const version = spawnSync('codex', ['--version'], { encoding: 'utf8' })
   assert.equal(version.status, 0, 'test requires the installed Codex CLI')
   git(repo, 'init', '-q'); git(repo, 'config', 'user.name', 'Test'); git(repo, 'config', 'user.email', 'fixture@example.invalid')

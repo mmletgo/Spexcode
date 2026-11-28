@@ -16,7 +16,7 @@ LLM Manager 已冻结到 Codex 的工作树任务通过本机 Codex CLI 执行�
 
 ## expanded spec
 
-新派发使用 [[llm-manager-host]] 对应 Manager 安装包中的原生 CLI 适配。SpexCode 核对固定工作树和原请求，持有进程归属与交付证据。模型缺省值和原生用量冷复验使用 Manager 的同源解析。
+新派发由 [[llm-manager-host]] 对应的 Manager 安装包准备完整 Codex 调用。SpexCode 提供冻结输入、允许的权限范围和工作树，核对原请求，持有进程归属与交付证据。SpexCode 在开始原生协议前先登记并放行精确进程。Manager 接通原生流，串联握手、线程和轮次，在收到身份后交给宿主记录。Manager 解释中断、输入关闭、原生终态、退出和用量。历史收据保持原形状，模型缺省值、原生终态及用量的冷复验使用同源解析。
 
 [[structured-session-runtime]] 为每次派发启动独立的 Codex app-server stdio 进程和临时原生 thread。启动 cwd、工作区根和 thread cwd 绑定同一真实工作树。只读调用使用 Codex 只读 sandbox。编辑调用使用 Codex 原生权限配置，写入范围为工作树、任务私有临时目录及正常提交所需的 Git 元数据。共享配置与其他分支继续只读。两种模式均关闭 MCP、拒绝审批、交互输入及权限扩张。Git 结果按 [[native-worktree-runtime]] 核验。
 
