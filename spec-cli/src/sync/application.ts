@@ -458,6 +458,13 @@ export class SyncApplication {
       const hasImplementation = verifySnapshot(snapshot).some(entry => entry.mode !== '120000' && coveredPath(entry.path, settings.sourcePaths) && coveredPath(entry.path, frozen.plan.readPaths))
       const direction = origin === 'combined' ? 'combined' : origin === 'code' || origin === 'initial' && hasImplementation ? 'code_to_spec' : 'spec_to_code'
       if (trigger || direction !== 'spec_to_code') frozen = await this.freezeNodePlan(snapshot, nodeId, true, direction, trigger?.commitTrigger)
+      const committedIngress = trigger ? `observation:${snapshot.source.repositoryId}:${snapshot.id}:${nodeId}` : null
+      const admittedCommit = committedIngress && this.store.findOperationByIngressKey(committedIngress)
+      const initial = origin && !admittedCommit && control.control === 'run'
+        ? await this.freezeNodePlan(snapshot, nodeId, true, this.initialDirection(snapshot, settings.sourcePaths)) : null
+      const initialBasis = initial ? { policyDigest: syncPlanDigest(initial.plan), selectionDigest: initial.selection.digest } : undefined
+      const explicit = initialBasis && this.store.findExplicitCommittedInitial(snapshot, initialBasis.policyDigest, initialBasis.selectionDigest)
+      if (explicit && initial) frozen = initial
       const plan = frozen.plan
       selection = frozen.selection
       const differenceKey = `${snapshot.id}:${selection.digest}:${syncPlanDigest(plan)}`
@@ -475,20 +482,16 @@ export class SyncApplication {
       const { changed, specChanged, codeChanged, latestDifferenceDigest } = cachedDifference
       const observation = { input: snapshot, configRef, selection, latestDifferenceDigest }
       const previouslyAdmitted = changed && this.store.hasAdmittedObservation(snapshot.source, configRef, latestDifferenceDigest)
-      const ingressKey = snapshot.captureKind === 'commit' ? `observation:${snapshot.source.repositoryId}:${snapshot.id}:${nodeId}` : `observation:${snapshot.source.repositoryId}:${snapshot.id}:${nodeId}:${latestDifferenceDigest}`
-      const observedOrigin = snapshot.captureKind === 'commit' ? origin : !selection.bindings.some(binding => ('bytePair' in binding ? binding.bytePair : binding.intentPair)) ? 'initial' : specChanged && codeChanged ? 'combined' : codeChanged ? 'code' : 'spec'
-      if (!changed || !observedOrigin || control.control === 'pause' || previouslyAdmitted || this.store.findOperationByIngressKey(ingressKey)) {
+      const ingressKey = committedIngress ?? `observation:${snapshot.source.repositoryId}:${snapshot.id}:${nodeId}:${latestDifferenceDigest}`
+      const observedOrigin = explicit?.origin ?? (committedIngress ? origin : !selection.bindings.some(binding => ('bytePair' in binding ? binding.bytePair : binding.intentPair)) ? 'initial' : specChanged && codeChanged ? 'combined' : codeChanged ? 'code' : 'spec')
+      if ((!explicit && !changed) || !observedOrigin || control.control === 'pause' || previouslyAdmitted || (committedIngress ? admittedCommit : this.store.findOperationByIngressKey(ingressKey))) {
         this.latestObservation = this.store.recordObservation(observation, { controlRevision: control.revision, selectionDigest: selection.digest }); return
       }
-      const initial = trigger && await this.freezeNodePlan(snapshot, nodeId, true, this.initialDirection(snapshot, settings.sourcePaths))
-      const initialBasis = initial ? { policyDigest: syncPlanDigest(initial.plan), selectionDigest: initial.selection.digest } : undefined
-      const explicit = initialBasis && this.store.findExplicitCommittedInitial(snapshot, initialBasis.policyDigest, initialBasis.selectionDigest)
-      const dispatch = explicit && initial ? initial : frozen
       const model = explicit ? syncModel(explicit) : await this.resolveDefaultModel(settings, Boolean(plan.agentWorkflow))
-      const admission = await prepareSyncAdmission(snapshot, dispatch.plan, { ingressKey, rootCauseId: ingressKey, origin: explicit?.origin ?? observedOrigin, ...syncModelBinding(model), budget: settings.budget, managedRoot: this.managedRoot, baselineSelection: dispatch.selection, automaticSourceAdoption: this.automaticSourceAdoption(snapshot) })
+      const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: ingressKey, origin: observedOrigin, ...syncModelBinding(model), budget: settings.budget, managedRoot: this.managedRoot, baselineSelection: selection, automaticSourceAdoption: this.automaticSourceAdoption(snapshot) })
       if (!this.ownsObservation()) return
       if (!explicit) this.prepareTools(ingressKey, this.store.findOperationByIngressKey(ingressKey), model, plan.agentWorkflow)
-      const result = this.store.observeAndAdmit({ ...observation, selection: dispatch.selection }, admission, { controlRevision: control.revision, selectionDigest: dispatch.selection.digest, ...(initialBasis ? { explicitInitial: { ...initialBasis, operationId: explicit?.id } } : {}) })
+      const result = this.store.observeAndAdmit(observation, admission, { controlRevision: control.revision, selectionDigest: selection.digest, ...(initialBasis ? { explicitInitial: { ...initialBasis, operationId: explicit?.id } } : {}) })
       this.latestObservation = result.observation
       if (result.outcome !== 'blocked') this.start(result.operation.id)
     } catch (error) {
