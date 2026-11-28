@@ -15,11 +15,11 @@ Claude Code 或 ZCode 限流时，用户可以显式选择本机已配置的 Gro
 
 ## expanded spec
 
-[[llm-manager-host]] 使用 LLM Manager 安装包的 Grok 执行协议。SpexCode 提供绑定工作树的隔离启动描述。Manager 解释 CLI 模型选择，探测实际版本，选择结构化传输并确定原生 Schema 能力。ACP 与流式 JSON 的厂商终态、请求绑定和启动错误由 Manager 解释，返回同一结果结构。每个一次性 Grok 工作树进程照常初始化已配置的 MCP 服务，并在该进程内关闭 stdio MCP 自动重启。传输失败由原会话处理，避免终态后已停止的后代被反复重建。SpexCode 核对精确进程退出、流结束、进程归属和原任务证据。
+[[llm-manager-host]] 使用 LLM Manager 安装包准备完整的 Grok 调用。SpexCode 提供绑定工作树的隔离启动描述、冻结任务、输出 Schema 和会话身份。Manager 解释模型、探测版本、选择传输及原生 Schema，生成协议身份、参数和环境。SpexCode 登记原进程后放行，Manager 接管原生输入和流读取。Manager 解释终态、错误、额度和历史协议描述，并提供同一结果结构及可持久化的安全诊断。每个一次性 Grok 工作树进程照常初始化已配置的 MCP 服务，并在该进程内关闭 stdio MCP 自动重启。传输失败由原会话处理，避免终态后已停止的后代被反复重建。SpexCode 核对精确进程退出、流结束、进程归属、冻结 Schema 和原任务证据。
 
 LLM Manager 为短时原生 streaming-json 执行关闭该子进程的厂商 trace 上传，避免终态后等待上传队列。本机原生会话和结算证据照常保存。ACP 沿用原 trace 设置。
 
-[[llm-manager-host]] 管理的 Grok 工作树在原生 stdout 无原终态、真实非零退出且精确进程组已停止时，只用已排空且未截断的 stderr 诊断中的原 429 或明确额度耗尽，报告可申请正式续路的额度失败。用户取消、其他退出原因和未知停止不触发该分类。
+[[llm-manager-host]] 管理的 Grok 工作树在原生 stdout 无原终态、真实非零退出且精确进程组已停止时，只用已排空且未截断的 stderr 诊断中的原 429 或明确额度耗尽，报告可申请正式续路的额度失败。用户取消、其他退出原因和未知停止不触发该分类。 流式任务已证实原进程组停止、stdout 到达 EOF、CLI 自然非零退出，且原终态缺失时，Manager 在保留有界诊断后将无额度信号的调用登记为已结算失败，允许从原任务失败环节续跑。
 
 已持久化的 Grok 终态使用同一 Manager 源的离线解析核对完成状态与实际模型，沿已保存的原进程和原请求身份认证。Manager 核对原 ACP prompt 身份与原生 Schema 要求，给出退出观察期限、受认可的自然退出和额度失败判定。历史逾期失败由同一适配识别原分类和原消息，SpexCode 重验绑定请求、进程停止、输出流和业务 Schema。
 

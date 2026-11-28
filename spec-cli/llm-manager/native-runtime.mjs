@@ -2996,11 +2996,14 @@ __export(grok_exports, {
   grokInvocationEnvironment: () => grokInvocationEnvironment,
   grokInvocationFlags: () => grokInvocationFlags,
   grokNativeModel: () => grokNativeModel,
+  grokReadOnlyGuidance: () => grokReadOnlyGuidance,
+  grokSettledInvocationMatches: () => grokSettledInvocationMatches,
   grokSettledOutputMatches: () => grokSettledOutputMatches,
   grokSettlementTiming: () => grokSettlementTiming,
   grokStderrHasQuotaExhaustion: () => grokStderrHasQuotaExhaustion,
   grokStreamingArguments: () => grokStreamingArguments,
   grokStreamingQuotaFailure: () => grokStreamingQuotaFailure,
+  grokStructuredProfileMatches: () => grokStructuredProfileMatches,
   grokSupportsAcp: () => grokSupportsAcp,
   grokSupportsStreamingSchema: () => grokSupportsStreamingSchema,
   grokTerminalCompleted: () => grokTerminalCompleted,
@@ -3010,9 +3013,10 @@ __export(grok_exports, {
   observeGrokNativeAcp: () => observeGrokNativeAcp,
   observeGrokNativeStderr: () => observeGrokNativeStderr,
   observeGrokNativeStreaming: () => observeGrokNativeStreaming,
-  observeGrokStructured: () => observeGrokStructured
+  observeGrokStructured: () => observeGrokStructured,
+  prepareGrokStructuredInvocation: () => prepareGrokStructuredInvocation
 });
-import { createHash as createHash4 } from "node:crypto";
+import { createHash as createHash4, randomUUID as randomUUID2 } from "node:crypto";
 import { createInterface as createInterface3 } from "node:readline";
 import { finished } from "node:stream/promises";
 function grokNativeModel(value) {
@@ -3114,6 +3118,103 @@ function grokInvocationEnvironment(environment, useAcp) {
 }
 function grokInvocationFlags(args, useAcp) {
   return new Set(useAcp ? [args[0], args[1], args[4]] : args.filter((_, index) => index % 2 === 0));
+}
+function grokStructuredProfileMatches(profile, mode) {
+  const { acp, structuredOutput } = profile;
+  return (structuredOutput === void 0 || structuredOutput === "native-schema-v1") && (acp === void 0 || acp?.version === 1 && mode === "edit" && structuredOutput === "native-schema-v1" && typeof acp.promptId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(acp.promptId));
+}
+function grokSettledInvocationMatches(plan, output, exit) {
+  return grokSettledOutputMatches(output, {
+    sessionId: plan.sessionId,
+    cwd: plan.workspace,
+    promptId: plan.acp?.promptId,
+    nativeSchema: plan.structuredOutput === "native-schema-v1"
+  }) && grokCleanNativeExit(output.terminal, exit);
+}
+function prepareGrokStructuredInvocation({ launch, mode, sessionId, prompt, promptFile, schema, model: modelValue }) {
+  const model = grokNativeModel(modelValue);
+  const cwd = launch.cwd;
+  const schemaArgument = JSON.stringify(schema);
+  const native = inspectGrokStructuredCli(launch, mode, schemaArgument);
+  if (!native) throw Object.assign(new Error("Grok Build CLI did not report a version"), { code: "unsupported" });
+  const { cliVersion, useAcp, nativeSchema } = native;
+  const acp = useAcp ? { version: (
+    /** @type {const} */
+    1
+  ), promptId: randomUUID2() } : void 0;
+  const profile = { ...acp ? { acp } : {}, ...nativeSchema ? { structuredOutput: "native-schema-v1" } : {} };
+  const args = acp ? grokAcpArguments() : grokStreamingArguments({
+    cwd,
+    sessionId,
+    promptFile,
+    mode,
+    model,
+    ...nativeSchema ? { schemaArgument } : {}
+  });
+  const flags = grokInvocationFlags(args, useAcp);
+  return {
+    cliVersion,
+    profile,
+    args,
+    /** @param {NodeJS.ProcessEnv} base */
+    environment: (base) => grokInvocationEnvironment(base, useAcp),
+    /** @param {{ stdin: Writable, stdout: Readable, stderr: Readable, released: Promise<boolean> }} pipes
+     * @param {(terminal?: GrokStreamingTerminal) => void} onTerminal
+     */
+    connect({ stdin, stdout, stderr, released }, onTerminal) {
+      const diagnostics = observeGrokNativeStderr(stderr, flags);
+      const observed = released.then((start) => {
+        if (!start) return null;
+        if (!acp) stdin.end();
+        return observeGrokStructured({
+          stdin,
+          stdout,
+          sessionId,
+          cwd,
+          nativeSchema,
+          ...acp ? { acp: { promptId: acp.promptId, prompt, schema, model } } : {}
+        }, onTerminal);
+      }).catch((error) => {
+        if (describeGrokStructuredError(error, useAcp)?.finishInput) stdin.end();
+        throw error;
+      });
+      return { observed, diagnostics };
+    },
+    /** @param {unknown} error */
+    describeError(error) {
+      const described = describeGrokStructuredError(error, useAcp);
+      if (described) return { message: described.message, missingTerminal: described.missingTerminal, waitForExit: described.finishInput };
+    },
+    /** @param {unknown} error
+     * @param {{stderr?: GrokStderrDiagnostic, exit?: NativeExit, stdoutEnded: boolean, managed: boolean}} facts
+     * @returns {GrokTerminalFailure | undefined}
+     */
+    classifyStoppedError(error, { stderr, exit, stdoutEnded, managed }) {
+      const protocol = describeGrokStructuredError(error, useAcp);
+      if (!protocol) return void 0;
+      const quota = protocol.missingTerminal && stderr && exit && managed && grokStreamingQuotaFailure(stderr, exit);
+      if (quota) return quota;
+      if (useAcp) return grokAcpProtocolFailure("cancellation_pending", protocol.message);
+      if (protocol.missingTerminal && stderr && stdoutEnded && exit?.signal === null && exit.code !== null && exit.code !== 0)
+        return { code: "failed", message: protocol.message };
+    },
+    /** @param {GrokStructuredObservation} observation @param {NativeExit} exit @param {boolean} managed
+     * @returns {{output: GrokStructuredOutput} | {error: GrokTerminalFailure, diagnostic?: {name: string, payload: Record<string, unknown>}}}
+     */
+    settle(observation, exit, managed) {
+      if ("output" in observation) {
+        const error2 = grokTerminalFailure(observation.output.terminal, exit);
+        return error2 ? { error: error2 } : observation;
+      }
+      const { failure } = observation;
+      const error = grokAcpNativeFailure(failure, exit, managed);
+      if (error.code === "provider_quota_exhausted" && failure.kind === "rate_limited") {
+        const { sessionId: sessionId2, requestId, rpcCode, message } = failure;
+        return { error, diagnostic: { name: "acp-rate-limit-diagnostic.json", payload: { sessionId: sessionId2, requestId, rpcCode, message } } };
+      }
+      return { error };
+    }
+  };
 }
 function object4(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? (
@@ -3418,12 +3519,17 @@ function grokStreamingQuotaFailure(stderr, exit) {
   if (exit.signal !== null || exit.code === null || exit.code === 0 || !grokStderrHasQuotaExhaustion(stderr)) return void 0;
   return { code: "provider_quota_exhausted", message: "Grok provider reported quota exhaustion in the stopped native invocation" };
 }
-var GROK_MAX_SCHEMA_ARGUMENT_BYTES, grokSettlementTiming, exitDeadlineMessage, GrokAcpProtocolError, requestIds, stopReasons;
+var GROK_MAX_SCHEMA_ARGUMENT_BYTES, grokSettlementTiming, grokReadOnlyGuidance, exitDeadlineMessage, GrokAcpProtocolError, requestIds, stopReasons;
 var init_grok = __esm({
   "src/llm_manager/native/grok.mjs"() {
     init_cli_probe();
     GROK_MAX_SCHEMA_ARGUMENT_BYTES = 64 * 1024;
     grokSettlementTiming = Object.freeze({ stopMs: 15e3, nativeShutdownGraceMs: 5e3 });
+    grokReadOnlyGuidance = Object.freeze({
+      repository: "For checked-out repository evidence, use the built-in read-only tools read_file, grep, and list_dir. Do not use run_terminal_command to inspect checked-out files or run tests, and do not use search_tool or use_tool for local files. Use an exact read-only Git command only if the task explicitly requires inspecting a historical Git object that is not in the checked-out tree.",
+      legacy: "For repository inspection, use built-in file readers or read-only shell commands such as cat, rg, and git show. Read the exact files and Git objects in this worktree and avoid the search_tool and use_tool discovery wrappers for this local evidence.",
+      candidate: "The current worktree holds the frozen candidate for this independent review. Inspect it directly with read_file, grep, and list_dir. Trace the relevant source, tests, and requirements to complete the requested review. Test execution is a separate verification stage."
+    });
     exitDeadlineMessage = "Grok native exit was not observed before the settlement deadline";
     GrokAcpProtocolError = class extends Error {
       /** @param {string} message @param {GrokProtocolErrorCode} code */
@@ -3488,7 +3594,7 @@ __export(zcode_exports, {
   zcodeWorktreeResponse: () => zcodeWorktreeResponse,
   zcodeWorktreeTurnMatches: () => zcodeWorktreeTurnMatches
 });
-import { randomUUID as randomUUID2 } from "node:crypto";
+import { randomUUID as randomUUID3 } from "node:crypto";
 import { constants as constants2 } from "node:os";
 import { join as join3 } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -4314,7 +4420,7 @@ var init_zcode = __esm({
     };
     nativeRpcTimeoutMessage = (method) => `ZCode native RPC timeout (${method})`;
     zcodeVersionArgs = () => ["--version"];
-    zcodeNativeIdentity = () => ({ sessionId: `sess_${randomUUID2()}`, inputId: randomUUID2(), queryId: randomUUID2() });
+    zcodeNativeIdentity = () => ({ sessionId: `sess_${randomUUID3()}`, inputId: randomUUID3(), queryId: randomUUID3() });
     zcodeAppServerArgs = (workspace) => ["app-server", "--cwd", workspace];
     terminalTypes = /* @__PURE__ */ new Set(["turn.completed", "turn.failed", "turn.cancelled"]);
   }
@@ -4329,7 +4435,7 @@ init_zcode();
 import { spawn, spawnSync as spawnSync2 } from "node:child_process";
 import { realpathSync as realpathSync2 } from "node:fs";
 var nativeRuntimeVersion = 1;
-var nativeAdapterContract = 5;
+var nativeAdapterContract = 6;
 var commands = Object.freeze({
   claude: "claude",
   codex: "codex",
