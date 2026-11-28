@@ -103,4 +103,4 @@ ZCode 原生工作树的精确 turn.failed EPIPE 在正式 stop 肯定后保存 
 
 已认证typed格式错误不要求必有rejectedOutput：缺少最终结构化字段时，先核error原thread/turn与canonical一致，再复用原adapter.stop与真实nativeWorktreeResult保可选failedWorktree。Git后置合约失败保原格式错误及确证stop，绝不假造Git或final；同键只验证已存原seed/record路径/停止与Git对象，不补捕旧失败。旧无typed code/witness仍按原failed重放；后续新attempt的现在材料观察由协调器承担，不能追写原record。
 
-已认证的原生余额耗尽由实际原进程停止门禁后进入 Manager 额度结算，保留原生 HTTP 402 证据。
+已认证的原生额度耗尽由实际原进程停止门禁后进入 Manager 额度结算。确认停止后，在请求 Manager 前将原路线、适配器提供的可选 HTTP 状态与原失败原因持久保存到原会话。调用者加入原结算。Manager 响应丢失时保持 cancelling，正式恢复复核原进程停止并以同一路线和会话重提交原额度结算。Manager 按原生状态或组内默认额度策略计算后继，确认 quota 后以原原因发布 failed/provider_quota_exhausted。停机证据或结算未获确认时继续保留现场。同会话不新派发，未认证额度的显式取消按正常停止结算。

@@ -52,7 +52,10 @@ export type StructuredExecution = {
   state?: 'running' | 'completed' | 'failed' | 'cancelling' | 'cancelled' | 'timeout'
   observer?: ProcessIdentity | null
   turnStartRequested?: boolean
-  cancellation?: { reason: 'cancelled' | 'timeout'; requestedAt: number; nativeStopped: boolean; acknowledged: boolean; nativeStatus?: string; error?: string }
+  cancellation?: {
+    reason: 'cancelled' | 'timeout'; requestedAt: number; nativeStopped: boolean; acknowledged: boolean; nativeStatus?: string; error?: string
+    pendingManagerQuota?: { routeId: string; httpStatus?: StructuredSessionError['quotaHttpStatus'] }
+  }
   output?: unknown
   resultDigest?: string
   nativeTokenUsage?: NativeTokenUsage

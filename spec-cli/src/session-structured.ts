@@ -86,6 +86,10 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
   const controller = new AbortController(); activeControllers.set(id, controller)
   let finish: () => void = () => {}
   activeFinished.set(id, new Promise<void>((resolvePromise) => { finish = resolvePromise }))
+  const releaseObserver = (): void => {
+    if (activeControllers.get(id) !== controller) return
+    activeControllers.delete(id); activeFinished.delete(id); finish()
+  }
   let nativeTokenUsage: StructuredExecution['nativeTokenUsage']
   let failedStage: { worktree?: NativeWorktreeResult; stop: { nativeStopped: boolean; acknowledged: boolean; nativeStatus?: string; error?: string } } | undefined
   const update = async (change: Partial<StructuredExecution>): Promise<void> => {
@@ -237,6 +241,21 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
       return 'cancelling'
     }
     if (error instanceof StructuredSessionError) nativeTokenUsage ??= error.nativeTokenUsage
+    if (manager && failedStage?.stop.nativeStopped && failedStage.stop.nativeStatus !== 'notStarted'
+      && error instanceof StructuredSessionError && error.code === 'provider_quota_exhausted') {
+      const pendingManagerQuota = { routeId: manager.routeId, httpStatus: error.quotaHttpStatus }
+      const state = await withRecordLock(id, async () => {
+        const current = readRecord(id)!, pinned = current.structuredExecution!
+        if (pinned.state !== 'running') return pinned.state
+        // Record the original quota before a lost Manager reply can make settlement ambiguous.
+        writeRecord({ ...current, structuredExecution: { ...pinned, state: 'cancelling', error: error.message,
+          ...(nativeTokenUsage ? { nativeTokenUsage } : {}), cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: false,
+            acknowledged: false, error: 'LLM Manager settlement pending', pendingManagerQuota } } })
+        return 'cancelling'
+      })
+      releaseObserver()
+      return state === 'cancelling' ? (await cancelStructuredSession(id, { wakeQueue: false })).state : state
+    }
     if (manager?.frozenReader && !pendingStop?.threadId && !pendingStop?.turnId && !pendingStop?.turnStartRequested) {
       try {
         await stopUnboundManagedFrozenRealm(requiredRealmRoot(execution), loadManagerPersistentCodex, { cwd: rec.worktreePath })
@@ -249,8 +268,7 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
     }
     let managerQuota = false
     if (manager && (failedStage?.stop.nativeStopped || !manager.frozenReader && !pendingStop?.turnStartRequested && !pendingStop?.turnId)) {
-      const quota = failedStage?.stop.nativeStopped === true && error instanceof StructuredSessionError && error.code === 'provider_quota_exhausted'
-      try { managerQuota = await settleManagedRoute(manager, id, quota ? 'quota' : 'stopped', nativeTokenUsage, quota ? error.quotaHttpStatus : undefined) === 'quota' && failedStage?.stop.nativeStopped === true }
+      try { managerQuota = await settleManagedRoute(manager, id, 'stopped', nativeTokenUsage) === 'quota' && failedStage?.stop.nativeStopped === true }
       catch (cause) {
         if (!(cause instanceof LlmManagerHostError)) throw cause
         await update({ state: 'cancelling', cancellation: { reason: 'cancelled', requestedAt: Date.now(), nativeStopped: false, acknowledged: false, error: 'LLM Manager settlement pending' }, error: error instanceof Error ? error.message : String(error) })
@@ -264,10 +282,10 @@ export async function executeQueuedStructuredSession(id: string): Promise<Struct
       : error instanceof ZCodeNativeTurnFailedError && (error.code === 'native_turn_transport_failed' || error.code === 'unsupported') && failedStage?.stop.nativeStopped
       ? error.code
       : error instanceof StructuredSessionError && (error.code === 'structured_output_retries_exhausted' || error.code === 'structured_output_format_invalid' || error.code === 'native_worktree_result_invalid'
-        || error.code === 'provider_quota_exhausted' && failedStage?.stop.nativeStopped) ? error.code : undefined
+        || error.code === 'provider_quota_exhausted' && !manager && failedStage?.stop.nativeStopped) ? error.code : undefined
     await update({ state, ...(state === 'failed' && nativeTokenUsage ? { nativeTokenUsage } : {}), ...(rejectedOutput ? { rejectedOutput } : {}), ...(failedStage ? { ...(failedStage.worktree ? { failedWorktree: failedStage.worktree } : {}), cancellation: { reason: 'cancelled', requestedAt: Date.now(), ...failedStage.stop } } : {}), error: error instanceof Error ? error.message : String(error), ...(errorCode ? { errorCode } : {}) })
     return state
-  } finally { activeControllers.delete(id); activeFinished.delete(id); finish() }
+  } finally { releaseObserver() }
 }
 
 export async function runStructuredSession(request: StructuredSessionRequest): Promise<StructuredSessionResult> {
@@ -396,6 +414,11 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
         return { sessionId: id, threadId: state.threadId, turnId: state.turnId, output: state.output, resultDigest: state.resultDigest, ...(state.resultWorktree ? { worktree: state.resultWorktree } : {}), ...(state.frozenReadProof ? { frozenReadProof: state.frozenReadProof } : {}) }
       }
       if (state.state === 'cancelling') {
+        if (state.cancellation?.pendingManagerQuota) {
+          const settled = await cancel(state.cancellation.reason)
+          if (settled.state === 'failed') continue
+          throw new StructuredSessionError('cancellation_pending', state.error || settled.error || 'LLM Manager quota settlement remains unproven')
+        }
         if (state.errorCode === 'native_rpc_timeout') {
           const stopped = await (cancelTask ??= cancelStructuredSession(id, { reason: state.cancellation?.reason ?? 'cancelled', settleFailure: true }))
           throw new StructuredSessionError(stopped.nativeStopped ? stopped.state === 'failed' && !request.signal?.aborted ? 'native_rpc_timeout' : state.cancellation?.reason ?? 'cancelled' : 'cancellation_pending', state.error || 'native RPC failed before exact stop')
@@ -471,6 +494,7 @@ export async function cancelStructuredSession(id: string, options: { reason?: 'c
       reason = execution.cancellation?.reason ?? reason
       writeRecord({ ...rec, stopped: true, structuredExecution: { ...execution, state: 'cancelling', cancellation: {
         reason, requestedAt: execution.cancellation?.requestedAt ?? Date.now(), nativeStopped: false, acknowledged: execution.cancellation?.acknowledged ?? false,
+        pendingManagerQuota: execution.cancellation?.pendingManagerQuota,
       } } })
       return readRecord(id)!
     })
@@ -510,20 +534,36 @@ export async function cancelStructuredSession(id: string, options: { reason?: 'c
       else stop = await codexStopStructuredTurn(runtimeDir, binding.endpoint, state.threadId!, state.turnId,
         readFileSync(sessionArtifactPath(id, 'launch'), 'utf8'), options.timeoutMs ?? 15_000, manager?.frozenReader ? await loadManagerPersistentCodex() : undefined)
     }
-    if (manager && stop.nativeStopped) await settleManagedRoute(manager, id, 'stopped')
+    const pendingQuota = state.cancellation?.pendingManagerQuota
+    if (pendingQuota && stop.nativeStopped) {
+      if (manager?.routeId !== pendingQuota.routeId || stop.nativeStatus === 'notStarted') {
+        stop = { nativeStopped: false, acknowledged: false, error: 'original LLM Manager quota or native stop binding cannot be verified' }
+      } else {
+        try {
+          const outcome = await settleManagedRoute(manager, id, 'quota', state.nativeTokenUsage, pendingQuota.httpStatus)
+          if (outcome !== 'quota') stop = { nativeStopped: false, acknowledged: false, error: 'LLM Manager did not confirm the original quota settlement' }
+        } catch (error) {
+          if (!(error instanceof LlmManagerHostError)) throw error
+          stop = { nativeStopped: false, acknowledged: false, error: 'LLM Manager settlement pending' }
+        }
+      }
+    } else if (manager && stop.nativeStopped) await settleManagedRoute(manager, id, 'stopped')
     const result = await withRecordLock(id, async (): Promise<StructuredCancellationResult> => {
       const latest = readRecord(id)!, pinned = latest.structuredExecution!
       // A late native refusal/timeout cannot downgrade an already durable exact stop proof.
       if (pinned.cancellation?.nativeStopped)
         return { sessionId: id, state: pinned.state!, threadId: pinned.threadId, turnId: pinned.turnId,
           nativeStopped: true, acknowledged: pinned.cancellation.acknowledged, nativeStatus: pinned.cancellation.nativeStatus }
-      const cancellation = { reason, requestedAt: pinned.cancellation!.requestedAt, ...stop, acknowledged: stop.acknowledged || pinned.cancellation!.acknowledged }
-      const failed = options.settleFailure && pinned.errorCode === 'native_rpc_timeout'
+      const cancellation = { reason, requestedAt: pinned.cancellation!.requestedAt, ...stop, acknowledged: stop.acknowledged || pinned.cancellation!.acknowledged,
+        ...(!stop.nativeStopped && pendingQuota ? { pendingManagerQuota: pendingQuota } : {}) }
+      const quotaSettled = stop.nativeStopped && pendingQuota !== undefined
+      const failed = quotaSettled || options.settleFailure && pinned.errorCode === 'native_rpc_timeout'
       const next = stop.nativeStopped ? failed ? 'failed' : reason : 'cancelling'
       const note = failed ? pinned.error! : stop.nativeStopped ? `structured execution ${reason}; native ${stop.nativeStatus}` : pinned.error ?? `structured cancellation pending: ${stop.error}`
       configuredSessionApplication().transitionSession(id, { status: 'error', proposal: null, note })
       writeRecord({ ...latest, status: 'error', proposal: null, note, launchOwner: null, launchReadinessStartedAt: null,
-        structuredExecution: { ...pinned, state: next, ...(stop.turnId ? { turnId: stop.turnId } : {}), cancellation, error: pinned.error ?? note } })
+        structuredExecution: { ...pinned, state: next, ...(stop.turnId ? { turnId: stop.turnId } : {}), cancellation, error: pinned.error ?? note,
+          ...(quotaSettled ? { errorCode: 'provider_quota_exhausted' } : {}) } })
       return { sessionId: id, state: next, threadId: pinned.threadId, turnId: stop.turnId ?? pinned.turnId, ...stop, acknowledged: cancellation.acknowledged }
     })
     const { refreshQueueCandidate, requestQueueDrain } = await import('./sessions.js')
