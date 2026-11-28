@@ -20,7 +20,7 @@ const sha256 = (text: string): string => createHash('sha256').update(text).diges
 
 type Scenario = 'startup-error' | 'success' | 'wrong-session' | 'wrong-cwd' | 'missing-request' | 'duplicate-terminal' | 'missing-terminal' | 'wrong-format' | 'bad-schema' | 'hang' | 'read' | 'periodic' | 'split-settlement-window' | 'cancel-during-settlement' | 'inherited-stdout' | 'inherited-stdout-trailing' | 'parent-awaits-owned-child' | 'parent-restarts-owned-child' | 'mcp-transport-reconnect' | 'natural-child-shutdown' | 'short-lived-terminal-parent' | 'unowned-stdout' | 'terminal-exit-timeout' | 'terminal-timeout-unowned-stdout'
   | 'native-schema-success' | 'native-schema-trailing' | 'native-schema-missing' | 'native-schema-mismatch'
-  | 'acp-success' | 'acp-missing' | 'acp-quota' | 'acp-startup-quota' | 'acp-startup-delayed-quota' | 'acp-auth-quota' | 'acp-auth-stderr-quota' | 'acp-prompt-stderr-quota' | 'acp-signal' | 'acp-mismatched-response'
+  | 'acp-success' | 'acp-missing' | 'acp-quota' | 'acp-balance-quota' | 'acp-startup-quota' | 'acp-startup-delayed-quota' | 'acp-auth-quota' | 'acp-auth-stderr-quota' | 'acp-prompt-stderr-quota' | 'acp-signal' | 'acp-mismatched-response'
 
 function fixture(t: TestContext, scenario: Scenario, model = 'grok:default', purpose = 'grok-fixture', stderrChunks: readonly string[] = [], mode: 'read' | 'edit' = scenario === 'read' ? 'read' : 'edit') {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'spex-grok-fixture-')))
@@ -95,6 +95,11 @@ if (acp) {
       writeFileSync(join(process.env.TMPDIR, '..', 'fixture-started.json'), JSON.stringify({ args, requestId, prompt: params.prompt[0].text, traceUpload: process.env.GROK_TELEMETRY_TRACE_UPLOAD }), { flag: 'wx' })
       if (scenario === 'acp-quota') {
         quota()
+        return
+      }
+      if (scenario === 'acp-balance-quota') {
+        send({ id, error: { code: -32603, message: 'Internal error',
+          data: { message: 'API error (status 402 Payment Required): Grok Build usage balance exhausted', http_status: 402 } } })
         return
       }
       if (scenario === 'acp-prompt-stderr-quota') {
@@ -449,6 +454,20 @@ test('Grok ACP preserves a matching missing-schema result for authentic rejected
 })
 
 const managedGrok = managedModel({ routeId: 'a'.repeat(64), vendor: 'grok', model: 'default', kind: 'cli' })
+
+test('Grok ACP preserves HTTP 402 when the original balance error settles naturally', async t => {
+  const f = fixture(t, 'acp-balance-quota', managedGrok)
+  await assert.rejects(f.run(), { code: 'provider_quota_exhausted', quotaHttpStatus: 402 })
+  const proof = JSON.parse(readFileSync(join(f.sessionRoot, 'acp-balance-exhaustion-diagnostic.json'), 'utf8'))
+  const plan = JSON.parse(readFileSync(join(f.sessionRoot, 'plan.json'), 'utf8'))
+  assert.equal(proof.sessionId, plan.sessionId)
+  assert.equal(proof.requestId, plan.acp.promptId)
+  assert.equal(proof.rpcCode, -32603)
+  assert.equal(proof.httpStatus, 402)
+  assert.deepEqual(proof.exit, { code: 0, signal: null })
+  assert.equal(proof.stdoutEnded, true)
+  assert.equal(existsSync(join(f.sessionRoot, 'settlement.json')), false)
+})
 
 test('Grok ACP reports the bound native prompt quota after exact natural settlement', async t => {
   const f = fixture(t, 'acp-quota', managedGrok)

@@ -462,7 +462,7 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
           ...settlement.diagnostic.payload, exit, stdoutEnded: true,
         })
       }
-      throw new StructuredSessionError(settlement.error.code, settlement.error.message)
+      throw new StructuredSessionError(settlement.error.code, settlement.error.message, { quotaHttpStatus: settlement.error.httpStatus })
     }
     const { output } = settlement
     const turnId = output.terminal.requestId

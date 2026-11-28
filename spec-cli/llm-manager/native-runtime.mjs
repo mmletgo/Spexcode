@@ -3253,7 +3253,12 @@ function grokTerminalFailure(terminal, exit) {
   return { code: "failed", message: "Grok native turn did not complete successfully" };
 }
 function grokAcpNativeFailure(failure, exit, managed) {
-  return failure.kind === "rate_limited" && managed && exit.code === 0 && exit.signal === null ? { code: "provider_quota_exhausted", message: "Grok ACP reported HTTP 429 in the stopped native prompt" } : { code: "failed", message: "Grok native ACP prompt did not complete successfully" };
+  if (managed && exit.code === 0 && exit.signal === null) {
+    if (failure.kind === "balance_exhausted") return grokBalanceFailure;
+    if (failure.kind === "rate_limited")
+      return { code: "provider_quota_exhausted", message: "Grok ACP reported HTTP 429 in the stopped native prompt" };
+  }
+  return { code: "failed", message: "Grok native ACP prompt did not complete successfully" };
 }
 function grokAcpProtocolFailure(code, message) {
   if (code === "cancellation_pending") return { code: "failed", message };
@@ -3418,9 +3423,16 @@ function prepareGrokStructuredInvocation({ launch, mode, sessionId, prompt, prom
       }
       const { failure } = observation;
       const error = grokAcpNativeFailure(failure, exit, managed);
-      if (error.code === "provider_quota_exhausted" && failure.kind === "rate_limited") {
+      if (error.code === "provider_quota_exhausted" && failure.kind !== "prompt_error") {
         const { sessionId: sessionId2, requestId, rpcCode, message } = failure;
-        return { error, diagnostic: { name: "acp-rate-limit-diagnostic.json", payload: { sessionId: sessionId2, requestId, rpcCode, message } } };
+        const name = failure.kind === "balance_exhausted" ? "acp-balance-exhaustion-diagnostic.json" : "acp-rate-limit-diagnostic.json";
+        return { error, diagnostic: { name, payload: {
+          sessionId: sessionId2,
+          requestId,
+          rpcCode,
+          message,
+          ...error.httpStatus === void 0 ? {} : { httpStatus: error.httpStatus }
+        } } };
       }
       return { error };
     }
@@ -3560,7 +3572,12 @@ async function observeGrokNativeAcp(stdout, stdin, request, onTerminal) {
       if (!Number.isSafeInteger(error?.code) || typeof error?.message !== "string")
         throw new GrokAcpProtocolError("Grok ACP agent returned an invalid RPC error");
       if (awaiting !== "session/prompt") throw new GrokAcpProtocolError(`Grok ACP ${awaiting} was rejected`);
-      terminal = error.code === -32003 && error.message === "Rate limited" ? { ...identity, kind: "rate_limited", rpcCode: -32003, message: "Rate limited" } : { ...identity, kind: "prompt_error" };
+      const billing = object4(error.data);
+      if (error.code === -32003 && error.message === "Rate limited")
+        terminal = { ...identity, kind: "rate_limited", rpcCode: -32003, message: "Rate limited" };
+      else if (error.code === -32603 && error.message === "Internal error" && billing?.http_status === 402 && billing.message === grokBalanceMessage && Object.keys(billing).length === 2)
+        terminal = { ...identity, kind: "balance_exhausted", rpcCode: -32603, message: "Internal error" };
+      else terminal = { ...identity, kind: "prompt_error" };
     } else {
       const result = object4(packet.result);
       if (!result) throw new GrokAcpProtocolError("Grok ACP agent returned an invalid RPC result");
@@ -3736,11 +3753,10 @@ function grokStderrHasQuotaExhaustion({ ended, readError, oversizedLine, usageBa
 }
 function grokStreamingQuotaFailure(stderr, exit) {
   if (exit.signal !== null || exit.code === null || exit.code === 0 || !grokStderrHasQuotaExhaustion(stderr)) return void 0;
-  if (stderr.usageBalanceExhausted && stderr.httpStatuses.includes(402))
-    return { code: "provider_quota_exhausted", message: "Grok Build reported HTTP 402 usage balance exhausted", httpStatus: 402 };
+  if (stderr.usageBalanceExhausted && stderr.httpStatuses.includes(402)) return grokBalanceFailure;
   return { code: "provider_quota_exhausted", message: "Grok provider reported quota exhaustion in the stopped native invocation" };
 }
-var GROK_MAX_SCHEMA_ARGUMENT_BYTES, grokSettlementTiming, grokReadOnlyGuidance, exitDeadlineMessage, GrokAcpProtocolError, requestIds, stopReasons, grokWrappedQuotaLines;
+var GROK_MAX_SCHEMA_ARGUMENT_BYTES, grokSettlementTiming, grokReadOnlyGuidance, exitDeadlineMessage, grokBalanceMessage, grokBalanceFailure, GrokAcpProtocolError, requestIds, stopReasons, grokWrappedQuotaLines;
 var init_grok = __esm({
   "src/llm_manager/native/grok.mjs"() {
     init_cli_probe();
@@ -3752,6 +3768,18 @@ var init_grok = __esm({
       candidate: "The current worktree holds the frozen candidate for this independent review. Inspect it directly with read_file, grep, and list_dir. Trace the relevant source, tests, and requirements to complete the requested review. Test execution is a separate verification stage."
     });
     exitDeadlineMessage = "Grok native exit was not observed before the settlement deadline";
+    grokBalanceMessage = "API error (status 402 Payment Required): Grok Build usage balance exhausted";
+    grokBalanceFailure = Object.freeze({
+      code: (
+        /** @type {const} */
+        "provider_quota_exhausted"
+      ),
+      message: "Grok Build reported HTTP 402 usage balance exhausted",
+      httpStatus: (
+        /** @type {const} */
+        402
+      )
+    });
     GrokAcpProtocolError = class extends Error {
       /** @param {string} message @param {GrokProtocolErrorCode} code */
       constructor(message, code = "invalid_protocol") {
@@ -3762,7 +3790,7 @@ var init_grok = __esm({
     requestIds = Object.freeze({ initialize: 1, authenticate: 2, "session/new": 3, "session/prompt": 4 });
     stopReasons = /* @__PURE__ */ new Set(["end_turn", "max_tokens", "max_turn_requests", "refusal", "cancelled"]);
     grokWrappedQuotaLines = `Error: Internal error: ${JSON.stringify({
-      message: "API error (status 402 Payment Required): Grok Build usage balance exhausted",
+      message: grokBalanceMessage,
       http_status: 402
     }, null, 2)}`.split("\n");
   }
