@@ -480,23 +480,24 @@ export class SyncApplication {
       if (!changed || !observedOrigin || control.control === 'pause' || previouslyAdmitted || this.store.findOperationByIngressKey(ingressKey)) {
         this.latestObservation = this.store.recordObservation(observation, { controlRevision: control.revision, selectionDigest: selection.digest }); return
       }
-      let dispatchPlan = plan, explicit: SyncOperation | null = null
-      if (observedOrigin === 'initial' && trigger?.commitTrigger.before === null && plan.version === 'sync-coordinator-v2') {
-        const { commitTrigger: _trigger, ...explicitPlan } = plan
-        explicit = this.store.findExplicitCommittedInitial(snapshot, syncPlanDigest(explicitPlan), selection.digest)
-        if (explicit) dispatchPlan = explicitPlan
-      }
+      const initial = trigger && await this.freezeNodePlan(snapshot, nodeId, true, this.initialDirection(snapshot, settings.sourcePaths))
+      const initialBasis = initial ? { policyDigest: syncPlanDigest(initial.plan), selectionDigest: initial.selection.digest } : undefined
+      const explicit = initialBasis && this.store.findExplicitCommittedInitial(snapshot, initialBasis.policyDigest, initialBasis.selectionDigest)
+      const dispatch = explicit && initial ? initial : frozen
       const model = explicit ? syncModel(explicit) : await this.resolveDefaultModel(settings, Boolean(plan.agentWorkflow))
-      const admission = await prepareSyncAdmission(snapshot, dispatchPlan, { ingressKey, rootCauseId: ingressKey, origin: observedOrigin, ...syncModelBinding(model), budget: settings.budget, managedRoot: this.managedRoot, baselineSelection: selection, automaticSourceAdoption: this.automaticSourceAdoption(snapshot) })
+      const admission = await prepareSyncAdmission(snapshot, dispatch.plan, { ingressKey, rootCauseId: ingressKey, origin: explicit?.origin ?? observedOrigin, ...syncModelBinding(model), budget: settings.budget, managedRoot: this.managedRoot, baselineSelection: dispatch.selection, automaticSourceAdoption: this.automaticSourceAdoption(snapshot) })
       if (!this.ownsObservation()) return
       if (!explicit) this.prepareTools(ingressKey, this.store.findOperationByIngressKey(ingressKey), model, plan.agentWorkflow)
-      const result = this.store.observeAndAdmit(observation, admission, { controlRevision: control.revision, selectionDigest: selection.digest, ...(explicit ? { explicitInitialId: explicit.id } : {}) })
+      const result = this.store.observeAndAdmit({ ...observation, selection: dispatch.selection }, admission, { controlRevision: control.revision, selectionDigest: dispatch.selection.digest, ...(initialBasis ? { explicitInitial: { ...initialBasis, operationId: explicit?.id } } : {}) })
       this.latestObservation = result.observation
       if (result.outcome !== 'blocked') this.start(result.operation.id)
     } catch (error) {
       const failure = (error as { syncFailure?: NonNullable<SyncObservation['failure']> }).syncFailure ?? { code: error instanceof SyncApplicationError || error instanceof SyncStoreError ? error.code : 'sync_observation_planning_failed', message: error instanceof Error ? error.message : String(error), kind: 'unsupported' as const, evidenceRefs: [] }
       this.latestObservation = this.store.recordObservation({ input: snapshot, configRef, selection, latestDifferenceDigest: writeEvidence(snapshot.source.commonDir, { nodeId, configDigest, selection: selection?.digest ?? null, failure, content: snapshot.contentDigest }).sha256, failure }, { controlRevision: control.revision, selectionDigest: selection?.digest ?? null })
     }
+  }
+  private initialDirection(snapshot: InputSnapshot, sourcePaths: readonly string[]): 'code_to_spec' | 'spec_to_code' {
+    return verifySnapshot(snapshot).some(entry => entry.mode !== '120000' && coveredPath(entry.path, sourcePaths)) ? 'code_to_spec' : 'spec_to_code'
   }
   private resolveDefaultModel(settings: { model?: string }, nativeWorkflow: boolean): Promise<string> {
     const testRunner = this.options.runner !== undefined
@@ -766,7 +767,7 @@ export class SyncApplication {
       if (revalidation && retry.recordUnverifiedCoverage !== recordUnverifiedCoverage) throw new SyncApplicationError('sync_retry_changed', '重验已交付的候选须保留原验收覆盖选择')
       const oldSelection = (ingress ?? prior)?.baselineSelection ?? (revalidation ? this.store.readRevalidationSelection(retry.id) : retry?.baselineSelection)
       const businessSelection = prior ? this.store.readBusinessBaselineSelection(prior.id) : retry ? this.store.readBusinessBaselineSelection(retry.id) : oldSelection
-      const direction = origin === 'combined' ? 'combined' : origin === 'code' || origin === 'initial' && verifySnapshot(snapshot).some(entry => entry.mode !== '120000' && coveredPath(entry.path, settings.sourcePaths)) ? 'code_to_spec' : 'spec_to_code'
+      const direction = origin === 'initial' ? this.initialDirection(snapshot, settings.sourcePaths) : origin === 'combined' ? 'combined' : origin === 'code' ? 'code_to_spec' : 'spec_to_code'
       const frozen = oldSelection ? { plan: this.operationPlan(prior ?? retry!), selection: oldSelection } : prior || retry ? null : await this.freezeNodePlan(snapshot, input.nodeId, false, direction)
       const plan = frozen?.plan ?? this.operationPlan((prior ?? retry)!)
       if (recordUnverifiedCoverage && (plan.version !== 'sync-coordinator-v2' || !plan.agentWorkflow || plan.direction !== 'code_to_spec' || !plan.mandatoryTests.length)) throw new SyncApplicationError('sync_coverage_invalid', '记录未执行验收覆盖需要原生工作树、只读代码同步及冻结保护测试', 400)
