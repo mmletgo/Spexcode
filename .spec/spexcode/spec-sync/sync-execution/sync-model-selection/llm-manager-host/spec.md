@@ -17,7 +17,7 @@ related:
 
 ## expanded spec
 
-宿主用绝对路径登记 `SPEX_LLM_MANAGER_PYTHON` 和 `SPEX_LLM_MANAGER_CONFIG`，在独立宿主数据库按 owner 使用 Manager 的 Provider、Key 和功能组。设置入口复用原 LlmSettings 组件，走同源、仅本机宿主管理授权的端点。浏览器读取只得到 Key hint。保存和测试使用 Manager 的公开方法，交易和秘密保管由宿主提供。组件与私有依赖在本机选装，公开发行的默认构建和未启用管理的宿主仍可工作。
+宿主用绝对路径登记 `SPEX_LLM_MANAGER_PYTHON` 和 `SPEX_LLM_MANAGER_CONFIG`，在独立宿主数据库按 owner 使用 Manager 的 Provider、Key 和功能组。正式同步和独审使用该配置。设置入口复用原 LlmSettings 组件，走同源、仅本机宿主管理授权的端点。浏览器读取只得到 Key hint。保存和测试使用 Manager 的公开方法，交易和秘密保管由宿主提供。
 
 宿主通过同一设置端点读写当前 owner 的全局调度时区。Manager 验证 IANA 时区，并用保存值判断所有 Provider 的周时段与节假日。首次选择前由历史 Provider 时区继续决定可用时段，保存 Provider 表单时保留该历史值。已有宿主在升级 Manager 依赖后、恢复服务前执行 `host.py upgrade <绝对配置路径>`。该命令通过 Manager 加入调度时区表，可重复执行。初始化新库时直接创建该表。
 

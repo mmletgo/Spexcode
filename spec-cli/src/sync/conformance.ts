@@ -9,7 +9,7 @@ import { runtimeRoot } from '@spexcode/spec-core'
 import { contractImpact, dependencyClosure, validateContractGraph } from '@spexcode/spec-core/contracts'
 import type { Acceptance, ContractGraph } from '@spexcode/spec-core/contracts'
 import { FROZEN_PROMPT_THRESHOLD_BYTES, prepareManagedFrozenPrompt } from '../frozen-context.js'
-import { llmManagerRequested, LlmManagerHostError, loadManagerPersistentCodex, resolveManagedRoute } from '../llm-manager-host.js'
+import { LlmManagerHostError, loadManagerPersistentCodex, resolveManagedRoute } from '../llm-manager-host.js'
 import { managedFrozenCapability, managedModel, managedRoute, type ManagedRoute } from '../llm-manager-route.js'
 import { structuredExecutionPolicy } from '../session-structured-policy.js'
 import { DEFAULT_SYNC_MODEL } from './model-selection.js'
@@ -142,6 +142,8 @@ async function runNativeReviewWorker(request: NativeReviewRequest, signal: Abort
       return reply
     }
     const execution = record.structuredExecution!
+    if ('diagnostic' in reply && reply.diagnostic.code === 'native_review_recovery_required'
+      && (execution.state === 'completed' || execution.cancellation?.nativeStopped)) return reply
     const route = managedRoute(request.model)
     if ('diagnostic' in reply && quota && request.worktree?.mode === 'read' && route
       && execution.state === 'failed' && execution.cancellation?.nativeStopped && execution.errorCode === quota.code && execution.error === quota.message
@@ -373,7 +375,7 @@ export async function runConformance(supplied: ConformanceInput, options: Confor
     writeFileSync(join(evidenceDirectory, 'input.json'), serialized)
     const prompt = `${CANDIDATE_REVIEW_INSTRUCTIONS}\n这是从真实Git对象重建的独立CI候选检查，没有builder总结或本机passed证据。base∪candidate旧新完整契约和断言同入读集合。intentAuthorization仅来自外部可信调用者选定的policyCommit，程序已精确匹配intentChanges的path及旧新raw摘要；此登记批准该具体原意差量，source是来源说明而非身份签名，候选自带记录不提供权限。授权不证明实现正确；仍须核对完整旧新raw、实现、规则及断言。退役必须由授权raw或上层规则变更支持，旧AC保留原test路径、稳定ID与固定命令，改成验证移除后行为的真实负向断言。逐项核退役来源和负向断言，随意删schema/node/AC/test、弱化未授权raw或断言均repair。新旧所有itemIds均必须checkedIds，retiredIds仍是本次实际待审义务。没有裁决权限，不得用oracle-policy批准命令或oracle更新。缺少调用依赖必须repair。\n冻结完整输入:\n${serialized}`
     const capability = Buffer.byteLength(prompt, 'utf8') > FROZEN_PROMPT_THRESHOLD_BYTES ? managedFrozenCapability : undefined
-    if (!options.testReviewRunner && llmManagerRequested()) {
+    if (!options.testReviewRunner) {
       if (signal?.aborted) fail('cancelled', '独审选路前已取消')
       const route = await resolveManagedRoute(undefined, undefined, undefined, capability).catch(error => {
         if (capability && error instanceof LlmManagerHostError && ['llm_manager_invalid', 'llm_manager_native_capability_mismatch', 'llm_manager_native_capability_unavailable'].includes(error.code)) return null
@@ -386,13 +388,13 @@ export async function runConformance(supplied: ConformanceInput, options: Confor
     const route = result.reviewRoute
     const keyPrefix = `conformance:${result.inputDigest}:`
     const runner: ElaborationRunner = options.testReviewRunner ?? (async request => {
-      let current = route, dispatch = request
+      let current = route!, dispatch = request
       const usedRoutes = new Set<string>()
       while (true) {
-        if (current) usedRoutes.add(current.routeId)
+        usedRoutes.add(current.routeId)
         const response = await isolatedNativeReview(dispatch, commonDir, evidenceDirectory)
         if ('result' in response) return response.result
-        if (!current || !response.stoppedQuota) return fail(response.diagnostic.code, response.diagnostic.message)
+        if (!response.stoppedQuota) return fail(response.diagnostic.code, response.diagnostic.message)
         if (signal?.aborted) fail('cancelled', '独审续路前已取消')
         const successor = await resolveManagedRoute(current, route, response.stoppedQuota.sessionId, current.frozenReader?.capability).catch(error => {
           if (error instanceof LlmManagerHostError) return fail(`unsupported_${error.code}`, 'LLM Manager 无法确认原独审额度或完成正式续路')

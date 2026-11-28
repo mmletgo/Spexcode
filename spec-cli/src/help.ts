@@ -451,7 +451,7 @@ consumes the token after it.`,
 
 在 .spec/spexcode.json 的 sync 字段登记 sync-settings-v1、sourcePaths/testPaths/readPaths、
 verifications、mandatoryTests、facts 与 budget，再启用当前输入工作树的授权。
-可选 sync.model 为本项目新 operation 固定精确默认模型；配置变化仍需重新启用。
+新原生同步使用宿主登记的 LLM Manager 功能组。
 nodeIds 可明确限定意图根；新纯raw需求须登记根节点，status显示实际纳入与未纳入范围。
 支持已登记的 Docker Node --test；缺少可信镜像、命令或预算明确拒绝。
 可配置有限 callTimeoutMs；缺省单次最多 120000ms，旧操作沿用自身冻结配置和总期限。
@@ -464,9 +464,9 @@ recover 只核对并结算已有资源或已开始的交付日志，保持原控
 resources recover 是单次离线资源清理；必须明确原input-id，不启动API/队列，不回放journal，也不改变业务失败或取得resume/adopt权限。
 challenge 在正式暂停并结算后登记定向复审。P0 定位已批准的局部分析，P1 定位结构已通过且独审要求修订的局部候选。登记后用 resume 续审，诊断由真实独审按原冻结证据核实。
 resume 继续原操作，--retry-of 建立关联新操作；三个入口各自有明确门禁。
-宿主登记 LLM Manager 后，新原生派发（含独审）按原功能组的当前可用顺序选路，已预留或在途派发沿该次冻结路线。
+新原生派发（含独审）按 LLM Manager 原功能组的当前可用顺序选路，已预留或在途派发沿该次冻结路线。
 正式重试可用 --retry-of --model llm-manager 请求同组路线。额度失败后，Manager 按实际失败派发为重试的首个新会话选择组内后继路线。
-未启用管理时，手动 --model 优先于项目 sync.model。普通重复、未指定模型的重试及 resume/recover 复用原选择。操作及独审均使用已冻结的模型。
+缺少 Manager 配置时，新同步和独审报告配置错误。普通重复和已有会话复验保留原选择。
 --retry-of 显式重试可重试的失败操作，保留原正文意图并关联旧结果；不能同时传 --patch-file。
 --inherit-retry-budget 与 --retry-of、--model 合用，交接已结算、尚未验证交付的代码→Spec 候选，保留原预算族与截止时间。
 只有显式重试建立新操作和新预算，普通重复请求继续归并。未结算资源或已变输入拒绝重试。

@@ -4354,6 +4354,8 @@ async function closeSessionUnlocked(id: string, source: CloseSource, wakeQueue =
   if (wt.rec.launchReadinessPending)
     throw new ResourceConflict(`refusing to close ${id}: a resume transaction is pending; revalidate or cancel that transaction first`)
   const execution = wt.rec.structuredExecution
+  if (execution?.worktree && structuredObserverState(execution) !== 'gone')
+    throw new ResourceConflict(`refusing to close ${id}: the exact native worktree observer has not released its record`)
   if (execution?.worktree && execution.state !== 'completed'
     && (!['failed', 'cancelled', 'timeout'].includes(execution.state ?? '') || execution.cancellation?.nativeStopped !== true))
     throw new ResourceConflict(`refusing to close ${id}: exact native worktree execution has not settled`)

@@ -11,7 +11,7 @@ related:
 
 ## raw source
 
-Claude Code 或 ZCode 限流时，用户可以显式选择本机已配置的 Grok Build 接续。Grok Build 在 SpexCode 创建的隔离工作树中完成原任务，沿用正式独审、验收和交付。
+LLM Manager 按功能组的当前顺序选择已配置的 Grok Build。Grok Build 在 SpexCode 创建的隔离工作树中完成原任务，沿用正式独审、验收和交付。
 
 ## expanded spec
 
@@ -23,7 +23,7 @@ LLM Manager 为短时原生 streaming-json 执行关闭该子进程的厂商 tra
 
 已持久化的 Grok 终态使用同一 Manager 源的离线解析核对完成状态与实际模型，沿已保存的原进程和原请求身份认证。Manager 核对原 ACP prompt 身份与原生 Schema 要求，给出退出观察期限、受认可的自然退出和额度失败判定。历史逾期失败由同一适配识别原分类和原消息，SpexCode 重验绑定请求、进程停止、输出流和业务 Schema。
 
-明确的 `grok:<模型或别名>` 仅进入 [[structured-session-runtime]] 的原生 worktree 路由。`grok:default` 沿用本机配置。每轮记录实际 CLI 版本和模型。选择、输入、预算、独审身份与正式重试规则沿 [[sync-model-selection]]。
+Manager 派发的 Grok 模型或别名进入 [[structured-session-runtime]] 的原生 worktree 路由。`grok:default` 沿用本机配置。每轮记录实际 CLI 版本和模型。选择、输入、预算、独审身份与正式重试规则沿 [[sync-model-selection]]。
 
 编辑任务在本机 CLI 声明支持 ACP stdio 时使用该协议，记录预先生成的 prompt ID，认证同一 session、workspace、prompt 终态和实际用量模型。Manager 在确认该 prompt 终态后关闭 stdin，再观察 stdout 至 EOF。仅原 prompt 的明确限额或完整的结构化 HTTP 402 余额耗尽响应在原进程完整停止、自然零退出及 EOF 后可作为正式额度。握手后的缺失终态也须结算原进程。保留仅初始化前和原流式模式的明确启动诊断分类。ACP 初始化响应前已收到真实 EOF 时，沿同一有界观察窗口等待原 CLI 自然退出和 stderr 排空，再判断启动额度。取消或窗口耗尽仍精确清理。
 
@@ -48,3 +48,5 @@ stdout 在原生终态前结束时保留原失败分类。真实 CLI 退出和�
 Grok 在成功终态后逾期退出并经清理取得正式失败时，原未公开的 thread/turn 保持缺席。冷态读取未批准的 P0 分析或完整 P1 细化 Git 草稿，以及恢复同一 P1 只读独审，须额外认证 canonical 失败、原工作树、策略和提示、原生计划与 launch/receipt、精确进程已停止、末条停止观察及未形成成功结算。原任务继续失败，不从清理重建 Native 输出。
 
 Grok P1 只读独审在发布终态前留下 `cancellation_pending` 时，正式结算后沿同一原生计划、工作树、策略、提示、launch/receipt、精确进程停止与末条停止观察冷验。原取消凭据须对应同一 launch，且 canonical 终态为取消，原回合、结果和成功结算均未发布。通过证明只取得同候选新独审所需的停止资格，原失败分类和身份保持。
+
+Grok P1 只读独审在发布回合身份前被 Manager 确认额度耗尽时，以原失败、实际原生启动、正式控制结算及停止原件确认本轮。支持原工作树已归档的同候选续审，原缺席的线程与回合保持缺席。额度分类和新路线仍由 Manager 提供。

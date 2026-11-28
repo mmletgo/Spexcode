@@ -7,6 +7,18 @@ import { loadManagerNativeRuntime, reserveManagedRoute } from '../llm-manager-ho
 import { managedModel, managedRoute, nativeModelValue } from '../llm-manager-route.js'
 import { configuredSyncModel, readSyncModelSettings, resolveSyncModel } from './model-selection.js'
 
+test('正式原生同步缺少 Manager 配置时不采用项目或 CLI 的直接模型', async t => {
+  const original = process.env
+  process.env = { ...original }
+  t.after(() => { process.env = original })
+  delete process.env.SPEX_LLM_MANAGER_PYTHON
+  delete process.env.SPEX_LLM_MANAGER_CONFIG
+  assert.equal(configuredSyncModel({ model: 'grok:default' }, true), 'llm-manager')
+  await assert.rejects(resolveSyncModel('llm-manager', true), { code: 'sync_llm_manager_config' })
+  await assert.rejects(resolveSyncModel('grok:default', true), { code: 'sync_llm_manager_config' })
+  assert.equal(await resolveSyncModel('grok:default', true, { previouslyBound: 'grok:default' }), 'grok:default')
+})
+
 test('settings and operation selection share the authoritative Manager bridge', async t => {
   const original = process.env
   process.env = { ...original }

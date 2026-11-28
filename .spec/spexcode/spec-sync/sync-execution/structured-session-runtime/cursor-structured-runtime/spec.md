@@ -11,7 +11,7 @@ related:
 
 ## raw source
 
-SpexCode 优先使用本机 Cursor CLI 进行 Spec 与代码同步。用户沿用 CLI 已有的认证、连接和模型配置，也可以显式选择 Cursor CLI 支持的模型。
+Manager 功能组选择 Cursor 时，Spec 与代码同步沿用本机 Cursor CLI 的认证和连接。模型由 Manager 选择，默认项使用 CLI 本机模型配置。
 
 ## expanded spec
 

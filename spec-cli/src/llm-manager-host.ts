@@ -191,6 +191,7 @@ export function applyLlmManagerSettings(body: Record<string, unknown>): Promise<
 }
 
 export async function resolveManagedRoute(nextAfter?: ManagedRoute, sameGroupAs?: ManagedRoute, failedSessionId?: string, capability?: typeof managedFrozenCapability): Promise<ManagedRoute | null> {
+  llmManagerHost()
   await loadManagerNativeRuntime()
   const route = await managerCall({
     action: 'resolve',
@@ -209,6 +210,7 @@ export async function resolveManagedRoute(nextAfter?: ManagedRoute, sameGroupAs?
 
 export async function reserveManagedRoute(route: ManagedRoute, sessionId: string, signal: AbortSignal): Promise<void> {
   signal.throwIfAborted()
+  llmManagerHost()
   await loadManagerNativeRuntime()
   for (;;) {
     signal.throwIfAborted()

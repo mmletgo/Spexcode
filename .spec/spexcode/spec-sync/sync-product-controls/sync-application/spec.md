@@ -37,7 +37,7 @@ server可选SPEX_VERIFICATION_SSH_DOCKER_ENDPOINT只接受本机Unix socket，�
 
 显式offline source-continuity见 [[sync-source-registration]]，不创建缓存owner、observer、attempt或模型调用。enable与登记在commonDir共享注册锁内写启用记录，v2后续配置/实际分支授权保留continuity链；identity不永久绑定旧业务配置。普通assertSource核完整repo/root/commonDir/gitDir/branch/physical，不能因共享repo投影而给未证明旧linked source继续权。资源-only专用factory及coordinator的raw Git元数据核验不受失效v2自锁，且不进入normal恢复或准入。
 
-新操作默认冻结plan.agentWorkflow=native-worktree-v1与sync-tools-v3:{model,agentWorkflow,tools,runtimeDigest}。读取运行资料同时核请求选择及workflow，拒绝新旧协议热替换；旧v1/v2及缺字段plan按原frozen协议恢复/retry，旧已持久payload不改写。新业务裁决/revert为新操作，使用新工作流。新workflow使用Claude Code或ZCode；未显式指定且项目未配置模型时固定请求选择claude:default，交由CLI原生配置解析，不把默认或别名当成精确实际模型。模型、base URL和CLI版本无产品允许名册，实际每轮身份由[[claude-structured-runtime]]、[[zcode-structured-runtime]]记录。历史缺省sol身份不改变，不能把裸sol静默换执行器。v24组件writer marker保护新原生配置语义，固定v3运行描述仍核其请求选择。
+新操作默认冻结 plan.agentWorkflow=native-worktree-v1 与 sync-tools-v3:{model,agentWorkflow,tools,runtimeDigest}。读取运行资料同时核请求选择及 workflow，拒绝新旧协议热替换。旧 v1/v2 与缺字段 plan 按原协议恢复，已持久 payload 保留。新操作由 [[sync-model-selection]] 按 Manager 功能组选路。新业务裁决与 revert 使用同一工作流。v24 组件 writer marker 继续保护原生配置语义，v3 运行描述仍核其请求选择。
 
 本节点落实 [[sync-product-controls]] 的 P2 应用入口与 P3 手动代码意图/裁决；P4 外部 watcher由本服务实现，完整恢复矩阵与P5最终验收由上层保留。生产 configuredSyncApplication 复用后端同仓库的 canonical session protocol，按已注册 source 工作树实例化，不创建其它数据库或队列，迁移先备份。运行资料及固定 compiled CLI 位于源码外当前用户拥有的独占 0700 runtime。
 
@@ -132,11 +132,11 @@ adopt(operationId) 依 [[sync-source-adoption]] 采纳实际 settled receipt.act
 
 revert 将精确历史恢复 Spec 作为可信目标，保原节点/业务 ID 与原路径；restore 授权只能由原 settled receipt 和固定 history 请求派生。原 retired ledger 保留，新完整交付推进该身份当前有效 head，后续普通操作继续使用该 head。
 
-正式 run/verify 可传 model；新原生工作树操作未选择时使用项目配置或claude:default，历史工作流仍默认sol。同 requestId 省略选择及显式 retry 省略选择均继承已持久请求选择；改同 requestId 选择拒绝，普通重复换选择不获新预算。旧非默认frozen操作保存sync-tools-v2/model，新原生操作保存sync-tools-v3；运行描述与operation的请求选择精确一致。v1及缺模型旧operation保原sol/payload/证据，恢复不能换模型。完整合同属于[[sync-model-selection]]。
+新原生 run/verify 使用 Manager。相同 requestId 沿用原请求选择，托管正式 retry 省略选择时继承原准入绑定。旧非默认 frozen 操作保存 sync-tools-v2/model，新原生操作保存 sync-tools-v3。v1 及缺模型旧 operation 保留原 sol、payload 和证据。完整合同属于 [[sync-model-selection]]。
 
 已存在或备份固定运行描述先核精确期望模型，再允许admission。未受理请求留下的原描述若与后续选择不符，明确早拒，不新建operation/receipt/FIFO且不静默重建；匹配原描述的合法显式retry或新请求仍沿既有入口。
 
-新手动 run/verify operation 可显式选择模型以覆盖项目默认；省略模型时，同 request 的 prior 或显式 retry 的原选择优先于当前版本化配置 `sync.model`，无 prior/retry 才使用项目值或该计划的工作流默认值。自动观察、decide 与 revert 新operation采用相同判据；admission、固定运行描述与真实runner request保相同请求选择，本轮实际模型由CLI证据另行绑定。同request改选择拒绝，普通重复不能用配置变化重置预算；授权/configDigest/currentness门禁保持。
+自动观察、decide 与 revert 同样在准入时请求 Manager。admission 和固定运行描述保留准入绑定，每轮实际模型由 [[sync-model-selection]] 和原生证据另行绑定。相同 requestId 改选择拒绝，普通重复不能用配置变化重置预算。授权、configDigest 和 currentness 门禁保持。
 
 新操作选择 `llm-manager` 时，在 [[sync-model-selection]] 规定的宿主选路成功后固定具体原生 CLI 模型。自动观察在确实准入时才选路。同 requestId 的重放直接使用原操作已固定的模型。
 

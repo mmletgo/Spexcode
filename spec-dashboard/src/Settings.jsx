@@ -251,7 +251,7 @@ export default function Settings() {
           </Row>
         </Section>
         <Section title={t('settings.secSyncModel')}>
-          <SyncModelSettings t={t} Row={Row} />
+          <SyncModelSettings t={t} />
         </Section>
         <LauncherProfiles t={t} launchers={launcherState.launchers} refreshLaunchers={launcherState.refreshLaunchers} />
         <ProjectConfigEditor t={t} />

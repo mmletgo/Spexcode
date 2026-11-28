@@ -805,11 +805,11 @@ executionAvailability 显示 recovery_required 时，可用 recover 精确恢复
 当前canonicalRoot/commonDir必须与原来源一致。此入口只结算精确Native/Docker资源，不启动watcher/queue，
 不回放任何journal或创建receipt，不改变原失败、候选与输出摘要；未知停止仍保留资源。
 它不授予物理身份连续性，正常read/resume/adopt仍核完整来源身份；有未决journal时只列出并保留。
-宿主启用 LLM Manager 时，run/verify 采用已登记的功能组。同步和正式验收可登记各自的组，共用供应商和凭据。
+run/verify 采用宿主登记的 LLM Manager 功能组。同步和正式验收可登记各自的组，共用供应商和凭据。
 每次新的原生派发（含独审）按同组当前可用顺序选路。首选路线冷却期满并通过恢复核验后，可承接下一次新派发。
 已预留或在途的派发按该次冻结的路线继续。重复请求、未另选路线的正式重试和 resume/recover 继续沿原操作的组选路身份。
 --retry-of --model llm-manager 可为正式重试请求同组路线。遇到已结算的额度失败，Manager 按实际失败派发为重试的首个新会话选择组内后继路线，其后新会话恢复该组的当前顺序。
-未启用 Manager 的原生操作由显式 --model 或项目 sync.model 选路，原生缺省为 Claude Code。同 requestId 不得改模型，普通重复请求不会刷新预算。回滚 writer 前须停止写入并结算资源，再恢复升级前一致数据库备份。
+缺少 Manager 配置时，新同步与独审报告配置错误。同 requestId 不得改路线，普通重复请求不会刷新预算。回滚 writer 前须停止写入并结算资源，再恢复升级前一致数据库备份。
 
 show/status 的 retryEligibility 给出能否显式重试及具体拒绝原因。--retry-of 为可重试的失败或未交付取消建立
 关联的新操作和新预算，继承原正文保存意图及来源；不能同时 --patch-file。普通重复请求不重置预算，

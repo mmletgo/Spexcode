@@ -41,6 +41,7 @@ export function pinSyncNativeRequest(request: FrozenRequest, saved: Pick<Structu
 }
 export type NativeRunRecord = Pick<SessRec, 'session' | 'status' | 'harnessSessionId' | 'structuredExecution' | 'createRequestId' | 'createPayloadHash'> & Partial<Pick<SessRec, 'worktreePath'>>
 export type AttemptRunnerOptions = {
+  requireManagedRoute?: true
   resourceRecoveryOnly?: true
   retireSettledWorktrees?: true
   resolveManagedRoute?: (anchor: ManagedRoute, reviewQuota?: ElaborationSessionRequest['reviewQuota']) => Promise<ManagedRoute | null>
@@ -414,6 +415,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
       if (outcome) {
         if (!outcome.ok) {
           if (!observe() && creationTermination()) return stop()
+          if (outcome.error instanceof StructuredSessionError && outcome.error.code === 'cancellation_pending') throw outcome.error
           const state = runtime.readRecord(expectedSessionId)?.structuredExecution
           const stoppedFailure = state ? stoppedFailedEvidence(state) : null
           if (stoppedFailure) {
@@ -461,6 +463,8 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
     const findDispatch = () => store.readAttempt(fence.attemptId).dispatchPlans.find(plan => plan.key === supplied.requestKey)
     const dispatch = findDispatch()
     const resource = store.findResource(fence.attemptId, supplied.requestKey)
+    if (options.requireManagedRoute && !dispatch && !resource && !routeAnchor)
+      throw new SyncApplicationError('sync_llm_manager_required_for_new_dispatch', '原操作缺少 LLM Manager 路线，请通过正式重试接续')
     const modelReused = (): StructuredSessionError => new StructuredSessionError('key_reused', 'native request key was reused with a different Manager model')
     const exactModel = dispatch?.managedModel
     if (supplied.model !== operation.model && (exactModel === undefined || supplied.model !== exactModel) && (routeAnchor || managedRoute(supplied.model)))

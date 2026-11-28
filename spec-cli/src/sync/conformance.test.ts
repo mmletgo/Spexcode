@@ -91,7 +91,7 @@ function reviewer(change?: (review: GenerationReview, value: ReviewContext, requ
 const noDocker = async (): Promise<never> => { throw new Error('fixture: Docker unavailable') }
 const evidence = (name: string): Pick<ConformanceInput, 'evidenceDirectory'> => process.env.SPEX_VERIFICATION_EVIDENCE_DIR ? { evidenceDirectory: mkdtempSync(join(process.env.SPEX_VERIFICATION_EVIDENCE_DIR, `${name}-`)) } : {}
 
-function publicCheck(t: TestContext, input: ConformanceInput, config: string): { status: number | null; result: ConformanceResult } {
+function publicCheck(t: TestContext, input: ConformanceInput, config: string, configured = true): { status: number | null; result: ConformanceResult } {
   const host = dirname(config), evidenceDirectory = mkdtempSync(join(tmpdir(), 'spex-conformance-public-'))
   const callerDatabase = join(host, 'caller-sessions.sqlite')
   t.after(() => {
@@ -102,7 +102,7 @@ function publicCheck(t: TestContext, input: ConformanceInput, config: string): {
   const cli = spawnSync(process.execPath, [
     '--import', fileURLToPath(new URL('../../../scripts/test-home.mjs', import.meta.url)), '--import', import.meta.resolve('tsx'),
     fileURLToPath(new URL('../cli.ts', import.meta.url)), 'sync', 'check', '--base', input.baseCommit, '--candidate', input.candidateCommit, '--policy', input.policyCommit, '--repository', input.repository, '--evidence-directory', evidenceDirectory,
-  ], { cwd: input.repository, env: { ...process.env, PATH: [host, '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(delimiter), SPEX_SESSION_DATABASE_PATH: callerDatabase, SPEX_LLM_MANAGER_CONFIG: config, SPEX_LLM_MANAGER_PYTHON: join(host, 'bridge'), SPEX_VERIFICATION_SSH_ALIAS: undefined, SPEX_VERIFICATION_SSH_ROOT: undefined, SPEX_VERIFICATION_SSH_DOCKER_ENDPOINT: undefined }, encoding: 'utf8', timeout: 30000 })
+  ], { cwd: input.repository, env: { ...process.env, PATH: [host, '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(delimiter), SPEX_SESSION_DATABASE_PATH: callerDatabase, SPEX_LLM_MANAGER_CONFIG: configured ? config : undefined, SPEX_LLM_MANAGER_PYTHON: configured ? join(host, 'bridge') : undefined, SPEX_VERIFICATION_SSH_ALIAS: undefined, SPEX_VERIFICATION_SSH_ROOT: undefined, SPEX_VERIFICATION_SSH_DOCKER_ENDPOINT: undefined }, encoding: 'utf8', timeout: 30000 })
   assert.ifError(cli.error)
   assert.ok(cli.stdout, cli.stderr)
   assert.equal(existsSync(callerDatabase), false, '公开命令不接触调用方会话数据库')
@@ -135,6 +135,19 @@ process.stdout.write(JSON.stringify(message.action === 'settle' && !${settle} ? 
 `, { mode: 0o700 })
   return { host, config, calls: (): { action: string; route?: unknown; sessionId?: string; outcome?: string }[] => readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line)) }
 }
+
+test('公开 sync check 缺少 Manager 配置时在原生审查前明确停止', t => {
+  const repo = fixture(), manager = managerFixture(t, null)
+  t.after(() => rmSync(repo.root, { recursive: true, force: true }))
+  put(repo.root, 'src/greet.mjs', `${implementation}\n// reference refactor\n`)
+  const { result, status } = publicCheck(t, repo.input(save(repo.root)), manager.config, false)
+  assert.equal(status, 2, JSON.stringify(result.diagnostics))
+  assert.equal(result.status, 'unsupported')
+  assert.deepEqual(result.diagnostics.map(({ code }) => code), ['unsupported_llm_manager_host_config'])
+  assert.equal(result.review, null)
+  assert.deepEqual(result.runs, [])
+  assert.equal(git(repo.root, ['worktree', 'list', '--porcelain']).match(/^worktree /gm)?.length, 1)
+})
 
 test('公开 sync check 在 Manager 功能组没有就绪路线时拒绝使用旧默认模型', t => {
   const repo = fixture(), manager = managerFixture(t, null)
@@ -204,7 +217,7 @@ createInterface({ input: process.stdin, crlfDelay: Infinity }).on('line', line =
 `, { mode: 0o700 })
   const { status, result } = publicCheck(t, repo.input(candidate), manager.config)
   assert.equal(result.reviewExecution, 'native')
-  assert.deepEqual(result.reviewRoute, quota && settle ? successorRoute : cursorRoute)
+  assert.deepEqual(result.reviewRoute, quota && settle ? successorRoute : cursorRoute, JSON.stringify(result.diagnostics))
   const attempts = readdirSync(result.evidenceDirectory).filter(path => path.startsWith('review-')).map(path => {
     const realm = join(result.evidenceDirectory, path)
     assert.ok(existsSync(join(realm, 'runtime', 'sessions.sqlite')))
@@ -218,7 +231,7 @@ createInterface({ input: process.stdin, crlfDelay: Infinity }).on('line', line =
   if (!settle) {
     const [{ realm, raw }] = attempts
     assert.equal(status, 1, JSON.stringify(result.diagnostics))
-    assert.deepEqual(calls, [{ action: 'resolve' }, reserve, complete, { ...complete, outcome: 'stopped' }])
+    assert.deepEqual(calls, [{ action: 'resolve' }, reserve, complete, { ...complete, outcome: quota ? 'quota' : 'stopped' }])
     assert.equal(result.status, 'recovery_required')
     assert.deepEqual(result.diagnostics, [raw.diagnostic])
     assert.equal(raw.diagnostic.code, 'native_review_recovery_required')

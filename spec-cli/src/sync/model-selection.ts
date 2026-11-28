@@ -36,9 +36,9 @@ export function syncModel(input: { model?: string }, nativeWorkflow = false): st
   return input.model ?? (nativeWorkflow ? DEFAULT_NATIVE_SYNC_MODEL : DEFAULT_SYNC_MODEL)
 }
 
-/** 宿主全托管只影响新准入，旧请求始终先读取原存档模型。 */
-export function configuredSyncModel(input: { model?: string }, nativeWorkflow: boolean): string {
-  return nativeWorkflow && llmManagerRequested() ? MANAGED_SYNC_MODEL : syncModel(input, nativeWorkflow)
+/** 正式原生同步统一通过 Manager 准入；只有注入 runner 的测试可以固定厂商。 */
+export function configuredSyncModel(input: { model?: string }, nativeWorkflow: boolean, testRunner = false): string {
+  return nativeWorkflow && (!testRunner || llmManagerRequested()) ? MANAGED_SYNC_MODEL : syncModel(input, nativeWorkflow)
 }
 
 /** 默认选择保留原持久载荷字节；只有非默认选择增加字段。 */
@@ -50,11 +50,16 @@ export function syncModelBinding(model?: string): { model?: string } {
 export async function resolveSyncModel(
   selection: string,
   nativeWorkflow: boolean,
-  previouslyBound?: string,
-  nextAfter?: ManagedRoute,
-  sameGroupAs?: ManagedRoute,
+  { previouslyBound, nextAfter, sameGroupAs, testRunner = false }: {
+    previouslyBound?: string
+    nextAfter?: ManagedRoute
+    sameGroupAs?: ManagedRoute
+    testRunner?: boolean
+  } = {},
 ): Promise<string> {
   if (previouslyBound !== undefined && (selection === MANAGED_SYNC_MODEL || selection === previouslyBound)) return previouslyBound
+  if (nativeWorkflow && !testRunner && !llmManagerRequested())
+    throw new SyncApplicationError('sync_llm_manager_config', '宿主尚未登记完整 LLM Manager 配置')
   if (selection !== MANAGED_SYNC_MODEL) {
     if (managedRoute(selection)) throw new SyncApplicationError('sync_llm_manager_untrusted_route', '只可从功能组取得 Manager 路线')
     if (nativeWorkflow && llmManagerRequested() && previouslyBound === undefined)

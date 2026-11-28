@@ -256,6 +256,17 @@ async function fixture(existingRoot?: string, model?: string) {
 const localRoute = { routeId: '1'.repeat(64), vendor: 'zcode', model: 'local/model', kind: 'cli' } satisfies ManagedRoute
 const preferredRoute = { routeId: '2'.repeat(64), vendor: 'claude', model: 'MiniMax-M3.1', kind: 'anthropic-messages' } satisfies ManagedRoute
 
+test('正式资源桥拒绝无 Manager 路线的历史操作新派发', async () => {
+  const f = await fixture(undefined, 'grok:default')
+  try {
+    const run = createAttemptRunner(f.store, f.claimed.fence, { requireManagedRoute: true, blobIO: f.blobIO })
+    await assert.rejects(run(f.request), { code: 'sync_llm_manager_required_for_new_dispatch' })
+    assert.deepEqual(f.store.readAttempt(f.claimed.attempt.id).dispatchPlans, [])
+    assert.equal(f.store.readOperation(f.claimed.operation.id).callsUsed, 0)
+    assert.equal(f.store.findResource(f.claimed.attempt.id, f.request.requestKey), null)
+  } finally { f.cleanup() }
+})
+
 test('Manager 正式额度后继用于首个派发，后续新键回到已恢复的组首', async () => {
   const f = await fixture(undefined, managedModel(localRoute))
   try {
