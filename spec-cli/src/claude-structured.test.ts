@@ -6,7 +6,7 @@ import childProcess, { spawn, type SpawnOptions } from 'node:child_process'
 import { syncBuiltinESMExports } from 'node:module'
 import { HARNESS_IDENTITIES, verifyDetachedRuntime, writeDetachedRuntimeReceipt } from '@spexcode/spec-core'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, relative } from 'node:path'
 import { prepareFrozenPrompt, readFrozenManifest, claudeFrozenContextPrompt, freezeContext, readFrozenRange, proveClaudeFrozenReads, verifyFrozenReadProof, claudeMessageDigest, readClaudeApiSourceMetadata, readClaudePublicHistory, type ClaudeFrozenWitness, type ClaudePublicMessage, type ClaudePublicRecord } from './frozen-context.js'
 import { StructuredSessionError, structuredExecutionPolicy, structuredRealmRoot, type StructuredExecution } from './session-structured-policy.js'
 import { sampleNativeWorktreeProcesses } from './native-worktree-runtime.js'
@@ -1048,10 +1048,10 @@ test('native CLI configuration accepts opaque selections and omits --model for d
   for (const model of ['claude:', 'claude:   ', 'claude:a\0b', 'codex:model']) assert.throws(() => claudeNativeModel(model, 'cli-config-v1'))
 })
 
-for (const [selected, configMode, outcome] of [['default', 'unset', 'success'], ['default', 'empty', 'success'], ['sonnet', 'explicit', 'success'], ['provider/opaque[1m]', 'explicit', 'success'], ['provider/opaque[1m]', 'explicit', 'controlled-success-143'], ['provider/opaque[1m]', 'explicit', 'controlled-missing-final-143'], ['provider/opaque[1m]', 'explicit', 'controlled-cancel-after-term'], ['provider/opaque[1m]', 'explicit', 'periodic-recovered'], ['provider/opaque[1m]', 'explicit', 'periodic-expired'], ['provider/opaque[1m]', 'explicit', 'periodic-cancelled'], ['provider/opaque[1m]', 'explicit', 'periodic-final-pending'], ['provider/opaque[1m]', 'explicit', 'periodic-error'], ['provider/opaque[1m]', 'explicit', 'periodic-error-stop-unknown'], ['provider/opaque[1m]', 'explicit', 'periodic-result-first'], ['any/alias + context', 'explicit', 'schema-exhaustion']] as const) test(`native CLI configuration fixture preserves configuration and model observations for ${selected}/${configMode}/${outcome}`, async t => {
+for (const [selected, configMode, outcome] of [['default', 'unset', 'success'], ['default', 'empty', 'success'], ['sonnet', 'explicit', 'success'], ['provider/opaque[1m]', 'explicit', 'success'], ['provider/opaque[1m]', 'manager-relative', 'success'], ['provider/opaque[1m]', 'explicit', 'controlled-success-143'], ['provider/opaque[1m]', 'explicit', 'controlled-missing-final-143'], ['provider/opaque[1m]', 'explicit', 'controlled-cancel-after-term'], ['provider/opaque[1m]', 'explicit', 'periodic-recovered'], ['provider/opaque[1m]', 'explicit', 'periodic-expired'], ['provider/opaque[1m]', 'explicit', 'periodic-cancelled'], ['provider/opaque[1m]', 'explicit', 'periodic-final-pending'], ['provider/opaque[1m]', 'explicit', 'periodic-error'], ['provider/opaque[1m]', 'explicit', 'periodic-error-stop-unknown'], ['provider/opaque[1m]', 'explicit', 'periodic-result-first'], ['any/alias + context', 'explicit', 'schema-exhaustion']] as const) test(`native CLI configuration fixture preserves configuration and model observations for ${selected}/${configMode}/${outcome}`, async t => {
   const directory = mkdtempSync(join(tmpdir(), 'spex-claude-native-config-')), bin = join(directory, 'bin'), config = selected === 'default' ? join(directory, 'home', '.claude') : join(directory, 'native-config'), workspace = join(directory, 'worktree'), realm = join(directory, 'realm'), root = join(realm, 'native')
   const identityKeys = [...new Set(['SPEXCODE_SESSION_ID', ...HARNESS_IDENTITIES.map(harness => harness.sessionEnvVar)])].filter(Boolean)
-  const environmentKeys = [...identityKeys, 'PATH', 'HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDECODE', 'CLAUDE_CODE_USE_BEDROCK', 'ANTHROPIC_MODEL', 'ANTHROPIC_BASE_URL', 'PUBLIC_CLAUDE_FIXTURE_LOG'] as const
+  const environmentKeys = [...identityKeys, 'PATH', 'HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDECODE', 'CLAUDE_CODE_USE_BEDROCK', 'ANTHROPIC_MODEL', 'ANTHROPIC_BASE_URL', 'PUBLIC_CLAUDE_FIXTURE_LOG', 'SPEX_LLM_MANAGER_CONFIG', 'SPEX_LLM_MANAGER_PYTHON'] as const
   const before = Object.fromEntries(environmentKeys.map(key => [key, process.env[key]]))
   const periodic = outcome.startsWith('periodic-'), release = join(directory, 'release-result')
   const missingFinal = outcome === 'controlled-missing-final-143'
@@ -1060,6 +1060,27 @@ for (const [selected, configMode, outcome] of [['default', 'unset', 'success'], 
   const watchdog = periodic ? setTimeout(() => controller.abort(), 45_000) : undefined
   try {
     mkdirSync(bin); mkdirSync(config, { recursive: true }); mkdirSync(workspace)
+    if (configMode === 'manager-relative') {
+      const installed = join(directory, 'manager.mjs'), locator = join(bin, 'manager-locator')
+      const bundle = JSON.stringify(new URL('../llm-manager/native-runtime.mjs', import.meta.url).href)
+      writeFileSync(installed, `export * from ${bundle}
+import { claudeReplay } from ${bundle}
+const wireMethods = new Set(['claudeProcessEnvironment', 'claudeWorktreeArgs', 'claudeStructuredArgs', 'readClaudeStreamEvent', 'interpretClaudeStreamEvent', 'encodeClaudeUserMessage', 'encodeClaudeInterrupt'])
+export const loadNativeAdapter = vendor => {
+  if (vendor !== 'claude') throw new Error('wrong provider')
+  return new Proxy(claudeReplay, { get(adapter, name) {
+    if (wireMethods.has(name)) throw new Error('host attempted low-level Claude adaptation: ' + name)
+    return adapter[name]
+  } })
+}
+`)
+      writeFileSync(locator, `#!${process.execPath}
+if (process.argv.slice(2).join(' ') !== '-I -m llm_manager.native_runtime') process.exit(2)
+console.log(JSON.stringify({ version: 1, path: ${JSON.stringify(installed)} }))
+`, { mode: 0o700 })
+      process.env.SPEX_LLM_MANAGER_CONFIG = join(directory, 'manager.json')
+      process.env.SPEX_LLM_MANAGER_PYTHON = locator
+    }
     childProcess.execFileSync('git', ['init', '-q'], { cwd: workspace, stdio: 'pipe' })
     writeFileSync(join(config, 'settings.json'), 'UNPARSEABLE_PUBLIC_FIXTURE_SETTINGS')
     const log = join(directory, 'observed.json'), cli = join(bin, 'claude'), actualModel = 'native-provider/resolved-model'
@@ -1095,7 +1116,8 @@ readline.createInterface({input:process.stdin}).on('line',line=>{
 });
 `)
     chmodSync(cli, 0o755)
-    process.env.PATH = `${bin}:${before.PATH}`; process.env.HOME = join(directory, 'home'); if (configMode === 'unset') delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = configMode === 'empty' ? '' : config; process.env.CLAUDECODE = '1'; process.env.CLAUDE_CODE_USE_BEDROCK = '1'; process.env.ANTHROPIC_MODEL = 'native-user-default'; process.env.ANTHROPIC_BASE_URL = 'https://public-provider.invalid/arbitrary-route'; process.env.PUBLIC_CLAUDE_FIXTURE_LOG = log
+    const configOption = configMode === 'unset' ? undefined : configMode === 'empty' ? '' : configMode === 'manager-relative' ? relative(workspace, config) : config
+    process.env.PATH = `${bin}:${before.PATH}`; process.env.HOME = join(directory, 'home'); if (configOption === undefined) delete process.env.CLAUDE_CONFIG_DIR; else process.env.CLAUDE_CONFIG_DIR = configOption; process.env.CLAUDECODE = '1'; process.env.CLAUDE_CODE_USE_BEDROCK = '1'; process.env.ANTHROPIC_MODEL = 'native-user-default'; process.env.ANTHROPIC_BASE_URL = 'https://public-provider.invalid/arbitrary-route'; process.env.PUBLIC_CLAUDE_FIXTURE_LOG = log
     for (const key of identityKeys) process.env[key] = `PUBLIC_PARENT_${key}`
     const schema = { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false }
     let execution: StructuredExecution = { ...structuredExecutionPolicy({ schema, inputDigest: 'fixture', purpose: 'native-config-fixture', timeoutMs: controlled || periodic ? null : 10000, model: `claude:${selected}`, worktree: { baseCommit: 'a'.repeat(40), tree: 'b'.repeat(40), mode: 'read' } }), nativeConfiguration: 'cli-config-v1' }
@@ -1255,14 +1277,15 @@ const waiting = setInterval(() => {
     assert(!Object.hasOwn(terminal, 'usage'))
     assert.equal(execution.model, `claude:${selected}`)
     const observed = JSON.parse(readFileSync(log, 'utf8')) as { args: string[]; config?: string; provider: string; nested?: string; model: string; baseUrl: string; identity: Record<string, string>; store: Record<string, string | undefined> }
-    assert.equal(observed.config, configMode === 'unset' ? undefined : configMode === 'empty' ? '' : config); assert.equal(observed.provider, '1'); assert.equal(observed.model, 'native-user-default'); assert.equal(observed.baseUrl, 'https://public-provider.invalid/arbitrary-route')
+    assert.equal(observed.config, configOption); assert.equal(observed.provider, '1'); assert.equal(observed.model, 'native-user-default'); assert.equal(observed.baseUrl, 'https://public-provider.invalid/arbitrary-route')
     assert.equal(observed.nested, undefined)
     assert.deepEqual(observed.identity, { SPEXCODE_SESSION_ID: 'native' })
     assert.deepEqual(observed.store, { SPEXCODE_HOME: process.env.SPEXCODE_HOME, SPEX_SESSION_DATABASE_PATH: process.env.SPEX_SESSION_DATABASE_PATH })
     assert.equal(observed.args.includes('--model'), selected !== 'default')
     if (selected !== 'default') assert.equal(observed.args[observed.args.indexOf('--model') + 1], selected)
-    const plan = JSON.parse(readFileSync(join(root, 'plan.json'), 'utf8')) as { version: number; cliVersion: string; binaryDigest: string; requestedModel: string; resolvedModel: string; historyDigest: string }
+    const plan = JSON.parse(readFileSync(join(root, 'plan.json'), 'utf8')) as { version: number; cliVersion: string; binaryDigest: string; requestedModel: string; resolvedModel: string; historyDigest: string; configRoot: string }
     assert.equal(plan.version, 2); assert.equal(plan.cliVersion, '9.8.7 (Claude Code)'); assert.match(plan.binaryDigest, /^[a-f0-9]{64}$/)
+    assert.equal(plan.configRoot, config)
     assert.equal(existsSync(join(root, 'auth-status.json')), false)
     assert.equal(plan.requestedModel, `claude:${selected}`); assert.equal(plan.resolvedModel, actualModel)
     const snapshot = readFileSync(join(root, 'public-history.json'), 'utf8'); assert(!snapshot.includes('SYNTHETIC_PRIVATE_THINKING'))

@@ -401,6 +401,28 @@ test('Cursor rejects an unavailable CLI version before reserving the original di
 
 test('Cursor ACP binds native session, exact client request, reported model and real Git draft', async t => {
   const f = fixture(t, 'edit', 'cursor:opaque/vendor +preview ')
+  const manager = join(dirname(f.cli), 'manager.mjs'), entry = join(dirname(f.cli), 'manager-entry')
+  const bundled = new URL('../llm-manager/native-runtime.mjs', import.meta.url).href
+  writeFileSync(manager, `export * from ${JSON.stringify(bundled)}
+import { cursorReplay } from ${JSON.stringify(bundled)}
+const { CursorAcpError, prepareCursorInvocation, connectCursorInvocation, cursorTerminalCompleted, cursorCloseMatches, cursorPromptQuotaFailure } = cursorReplay
+export const loadNativeAdapter = vendor => {
+  if (vendor !== 'cursor') throw new Error('unexpected adapter')
+  return { CursorAcpError, prepareCursorInvocation, connectCursorInvocation, cursorTerminalCompleted, cursorCloseMatches, cursorPromptQuotaFailure }
+}
+`)
+  writeFileSync(entry, `#!${process.execPath}
+process.stdout.write(JSON.stringify({ version: 1, path: ${JSON.stringify(manager)} }))
+`, { mode: 0o700 })
+  const previousPython = process.env.SPEX_LLM_MANAGER_PYTHON, previousConfig = process.env.SPEX_LLM_MANAGER_CONFIG
+  process.env.SPEX_LLM_MANAGER_PYTHON = entry
+  process.env.SPEX_LLM_MANAGER_CONFIG = join(dirname(f.cli), 'config.json')
+  t.after(() => {
+    if (previousPython === undefined) delete process.env.SPEX_LLM_MANAGER_PYTHON
+    else process.env.SPEX_LLM_MANAGER_PYTHON = previousPython
+    if (previousConfig === undefined) delete process.env.SPEX_LLM_MANAGER_CONFIG
+    else process.env.SPEX_LLM_MANAGER_CONFIG = previousConfig
+  })
   const result = await f.run()
   const invocation = readJson<{ args: string[]; promptId: string; sessionId: string; prompt: unknown }>(f.started)
   assert.deepEqual(invocation.args, ['--workspace', f.workspace, '--sandbox', 'enabled', '--trust', '--model', 'opaque/vendor +preview ', 'acp'])

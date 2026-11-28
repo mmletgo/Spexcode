@@ -217,11 +217,18 @@ class ReserveRequest(RouteRequest):
 
 
 class SettleRequest(RouteRequest):
-    """正式调用完成、额度耗尽或确认停止后提交一次 Manager 结算。"""
+    """
+    Business Logic（为什么需要这个类）:
+        正式调用结算时应保留原生余额耗尽与普通限流的区别。
+
+    Code Logic（这个类做什么）:
+        接收精确路线、调用身份、结算结果和可选用量。原生适配认证的余额耗尽可携带 HTTP 402。
+    """
 
     action: Literal["settle"]
     outcome: Outcome
     usage: NativeUsage | None = None
+    quotaStatus: Literal[402] | None = None
 
 
 class SettingsRequest(BaseModel):
@@ -632,8 +639,11 @@ def settle(manager: LlmManager, config: HostConfig, request: SettleRequest) -> d
 
     Code Logic（这个函数做什么）:
         只有精确 claim 能结算；同一 claim 保留首次结果。成功写 Manager 回执及用量，额度失败沿 Manager 游标计算后继。
+        只从已确认的原生额度结算接收 HTTP 402，由 Manager 采用真实状态计算冷却。
     """
 
+    if request.quotaStatus is not None and (request.outcome != "quota" or request.route.kind != "cli"):
+        raise HostError("llm_manager_invalid_quota_status")
     claim = manager.session.get(RouteClaim, (manager.owner_id, request.sessionId))
     if claim is None:
         return {"outcome": "stopped"}
@@ -666,7 +676,9 @@ def settle(manager: LlmManager, config: HostConfig, request: SettleRequest) -> d
     if outcome == "completed" and current:
         manager.report_success(choice, now=moment)
     if outcome == "quota":
-        successor = manager.report_failure(choice, FailureReport(status_code=429), now=moment) if current else manager.skip_option(choice, now=moment)
+        if request.quotaStatus is not None:
+            claim.upstream_status = request.quotaStatus
+        successor = manager.report_failure(choice, FailureReport(status_code=request.quotaStatus or 429), now=moment) if current else manager.skip_option(choice, now=moment)
         successor = manager.prepare_route(successor)
         if successor is not None:
             claim.successor_id = bind_choice(manager, config.group_id, successor, request.route.frozenReader.capability if request.route.frozenReader else None).routeId

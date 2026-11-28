@@ -647,7 +647,10 @@ for (const censusPhase of ['pre-exit', 'post-exit', 'late-protocol-error', 'star
   const bin = join(directory, 'bin'), workspace = join(directory, 'workspace'), realm = join(directory, 'realm'), id = 'fixture'
   const root = join(realm, id), exitPath = join(root, 'exit.json'), completedPath = join(root, 'completed.json'), stopObservationsPath = join(root, 'process-stop-observations.jsonl')
   mkdirSync(bin); mkdirSync(workspace); mkdirSync(realm)
-  const originalEnv = { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR }
+  const originalEnv = {
+    PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR,
+    SPEX_LLM_MANAGER_PYTHON: process.env.SPEX_LLM_MANAGER_PYTHON, SPEX_LLM_MANAGER_CONFIG: process.env.SPEX_LLM_MANAGER_CONFIG,
+  }
   const originalSpawn = childProcess.spawn.bind(childProcess)
   let preExitCensusCalls = 0, postExitCensusCalls = 0, preExitInjectedCensusCalls = 0, postExitInjectedCensusCalls = 0, coldReplayRequested = false
   let publishedBeforeStartupCensus = false, startupInjectedCensusCalls = 0
@@ -768,6 +771,27 @@ else throw new Error('unexpected fixture RPC')
   process.env.HOME = directory
   process.env.TMPDIR = directory
   try {
+    if (censusPhase === 'pre-exit') {
+      const entry = join(directory, 'manager.mjs'), python = join(directory, 'manager-entry')
+      const bundled = new URL('../llm-manager/native-runtime.mjs', import.meta.url).href
+      writeFileSync(entry, `export * from ${JSON.stringify(bundled)}
+import { zcodeReplay } from ${JSON.stringify(bundled)}
+const blocked = new Set([
+  'zcodeRpc', 'zcodePermissionScope', 'zcodeCreateInput', 'zcodeRequireSession', 'zcodeSelectSessionModel',
+  'zcodeAssertSendAck', 'zcodeEventCollector', 'zcodeIdleObservation', 'isZCodeEventsTimeout',
+  'zcodeTerminalFailure', 'zcodeRuntimeFiles', 'zcodeRuntimeEnv',
+])
+export const loadNativeAdapter = vendor => {
+  if (vendor !== 'zcode') throw new Error('unexpected fixture adapter')
+  return Object.fromEntries(Object.entries(zcodeReplay).filter(([name]) => !blocked.has(name)))
+}
+`)
+      writeFileSync(python, `#!${process.execPath}
+process.stdout.write(JSON.stringify({ version: 1, path: ${JSON.stringify(entry)} }))
+`, { mode: 0o700 })
+      process.env.SPEX_LLM_MANAGER_PYTHON = python
+      process.env.SPEX_LLM_MANAGER_CONFIG = join(directory, 'config.json')
+    }
     const running = zcodeStructuredTurn(realm, id, prompt, execution, callbacks, workspace).then(
       result => ({ result }),
       error => ({ error: error as { code?: string; message?: string } }),

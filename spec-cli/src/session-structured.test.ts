@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { processStartToken } from '@spexcode/spec-core'
 import { codexStructuredTurn } from './codex-harness.js'
 import { frozenReaderDisabledFeatures, prepareStructuredRealm, structuredExecutionPolicy, structuredExecutionTimer, structuredRealmRoot, structuredObserverState, StructuredSessionError, StructuredSessionTransportError, type StructuredExecution, type FrozenReaderRuntime } from './session-structured-policy.js'
@@ -673,4 +674,94 @@ test('structured observer ownership distinguishes live, released, replaced and u
   assert.equal(structuredObserverState(execution({ state: 'running', observer: { pid: process.pid, startToken: 'previous-process-start' } })), 'gone')
   assert.equal(structuredObserverState(execution({ state: 'running' })), 'unproven')
   assert.equal(structuredObserverState(execution({ state: 'running', observer: { pid: process.pid, startToken: '' } })), 'unproven')
+})
+
+for (const quotaStatus of [402, undefined] as const) test(`structured recovery settles the original managed Grok HTTP ${quotaStatus ?? 429} after a lost settlement response`, async t => {
+  const { configuredSessionApplication } = await import('./session-application.js')
+  const { sessionArtifactPath } = await import('@spexcode/spec-core')
+  const { fromRaw, readRecord, writeRecord } = await import('./session-record.js')
+  const { cancelStructuredSession, executeQueuedStructuredSession } = await import('./session-structured.js')
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'spex-grok-quota-recovery-')))
+  const cli = join(root, 'grok'), bridge = join(root, 'manager'), workspace = join(root, 'repo'), trace = join(root, 'settlements')
+  const runtime = fileURLToPath(new URL('../llm-manager/native-runtime.mjs', import.meta.url))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const billing = { message: 'API error (status 402 Payment Required): Grok Build usage balance exhausted', http_status: 402 }
+  const providerError = quotaStatus === 402 ? `Error: Internal error: ${JSON.stringify(billing, null, 2)}\n` : 'HTTP 429: rate limited\n'
+  writeFileSync(cli, `#!${process.execPath}
+const args = process.argv.slice(2)
+if (args[0] === '--version') console.log('grok 1.0.77 (fixture) [stable]')
+else if (args[0] === '--help') console.log('Options: --output-format <FORMAT>')
+else if (!args.includes('--help')) {
+  require('node:fs').appendFileSync(${JSON.stringify(join(root, 'dispatches'))}, 'started\\n')
+  process.stderr.write(${JSON.stringify(providerError)}, () => process.exit(1))
+}
+`, { mode: 0o700 })
+  writeFileSync(bridge, `#!${process.execPath}
+const fs = require('node:fs')
+if (process.argv[3] === '-m') {
+  console.log(JSON.stringify({ version: 1, path: ${JSON.stringify(runtime)} }))
+} else {
+  const request = JSON.parse(fs.readFileSync(0, 'utf8'))
+  if (request.action === 'settle') {
+    const trace = ${JSON.stringify(trace)}
+    const retransmission = fs.existsSync(trace)
+    fs.appendFileSync(trace, JSON.stringify(request) + '\\n')
+    if (!retransmission) process.exit(1)
+  }
+  console.log(JSON.stringify({ ok: true, value: { outcome: request.outcome } }))
+}
+`, { mode: 0o700 })
+  const env = { PATH: `${root}:/usr/bin:/bin:/usr/sbin:/sbin`, SPEX_LLM_MANAGER_CONFIG: join(root, 'manager.json'), SPEX_LLM_MANAGER_PYTHON: bridge }
+  for (const [key, value] of Object.entries(env)) {
+    const original = process.env[key]
+    process.env[key] = value
+    t.after(() => { if (original === undefined) delete process.env[key]; else process.env[key] = original })
+  }
+  mkdirSync(workspace)
+  const git = (...args: string[]): string => execFileSync('git', ['-C', workspace, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+  git('init', '-q'); git('-c', 'user.name=quota-fixture', '-c', 'user.email=quota-fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'fixture')
+  const id = `grok-quota-settlement-${quotaStatus ?? 429}-${process.pid}`
+  const route = { routeId: '4'.repeat(64), vendor: 'grok', kind: 'cli', model: 'default' } as const
+  const worktree = { mode: 'read', baseCommit: git('rev-parse', 'HEAD'), tree: git('rev-parse', 'HEAD^{tree}') } as const
+  configuredSessionApplication().createSession({ sessionId: id, status: 'queued' })
+  const rec = fromRaw({ session_id: id, governed: true, worktree_path: workspace, branch: null, title: null, name: null, status: 'queued', proposal: null, merges: 0, note: null, sortkey: null, createdAt: 1, stopped: false, archived: false, harness: 'grok-structured', launch_cmd: 'grok' })
+  rec.structuredExecution = structuredExecutionPolicy(execution({ purpose: 'elaboration_review', model: managedModel(route), worktree, timeoutMs: null, nativeConfiguration: 'cli-config-v1' }))
+  writeRecord(rec)
+  const launch = sessionArtifactPath(id, 'launch')
+  mkdirSync(join(launch, '..'), { recursive: true }); writeFileSync(launch, 'pinned quota fixture prompt')
+  const requests = (): unknown[] => readFileSync(trace, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+  const expected = { action: 'settle', route, sessionId: id, outcome: 'quota', ...(quotaStatus === undefined ? {} : { quotaStatus }) }
+  assert.equal(await executeQueuedStructuredSession(id), 'cancelling')
+  assert.deepEqual(requests(), [expected])
+  const interrupted = readRecord(id)!.structuredExecution!
+  assert.match(interrupted.error!, /quota|balance/iu)
+  assert.equal(interrupted.cancellation?.nativeStopped, false)
+  const receiptPath = interrupted.grokNative!.receiptFile!
+  const receipt = readFileSync(receiptPath)
+  rmSync(receiptPath)
+  assert.equal((await cancelStructuredSession(id, { wakeQueue: false })).nativeStopped, false)
+  assert.deepEqual(requests(), [expected], 'missing original process receipt cannot settle the Manager reservation')
+  writeFileSync(receiptPath, receipt)
+  const recovered = await cancelStructuredSession(id, { wakeQueue: false })
+  assert.deepEqual(requests(), [expected, expected])
+  assert.equal(recovered.nativeStopped, true)
+  assert.equal(recovered.state, 'failed')
+  const failure = readRecord(id)!.structuredExecution!
+  assert.equal(failure.errorCode, 'provider_quota_exhausted')
+  assert.equal(failure.error, interrupted.error)
+  assert.equal(failure.grokNative?.sessionId, interrupted.grokNative?.sessionId)
+  assert.equal(failure.output, undefined)
+  assert.equal(failure.resultWorktree, undefined)
+  assert.equal(await executeQueuedStructuredSession(id), 'failed')
+  assert.deepEqual(await cancelStructuredSession(id, { wakeQueue: false }), recovered)
+  assert.deepEqual(requests(), [expected, expected])
+  assert.equal(readFileSync(join(root, 'dispatches'), 'utf8'), 'started\n')
+
+  const cancelledId = `${id}-user-cancelled`
+  configuredSessionApplication().createSession({ sessionId: cancelledId, status: 'queued' })
+  writeRecord({ ...rec, session: cancelledId })
+  const cancelled = await cancelStructuredSession(cancelledId, { wakeQueue: false })
+  assert.equal(cancelled.state, 'cancelled')
+  assert.equal(readRecord(cancelledId)?.structuredExecution?.errorCode, undefined)
+  assert.deepEqual(requests(), [expected, expected, { action: 'settle', route, sessionId: cancelledId, outcome: 'stopped' }])
 })

@@ -22,7 +22,7 @@ type OwnedLaunch = NativePlan & NativeLaunch
 type Terminal = { sessionId: string; requestId: string }
 type NativeOutput = { terminal: Terminal; text: string; structuredOutput?: 'present' | 'missing' }
 type NativeDiagnostic = Record<string, unknown>
-type NativeFailure = { code: 'failed' | 'provider_quota_exhausted'; message: string }
+type NativeFailure = { code: 'failed' | 'provider_quota_exhausted'; message: string; httpStatus?: 402 }
 type GrokInvocation = {
   cliVersion: string
   profile: Record<string, unknown>
@@ -462,7 +462,7 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
           ...settlement.diagnostic.payload, exit, stdoutEnded: true,
         })
       }
-      throw new StructuredSessionError(settlement.error.code, settlement.error.message)
+      throw new StructuredSessionError(settlement.error.code, settlement.error.message, { quotaHttpStatus: settlement.error.httpStatus })
     }
     const { output } = settlement
     const turnId = output.terminal.requestId
@@ -523,7 +523,7 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
       const classified = invocation.classifyStoppedError(originalObserverError, {
         stderr, exit: observedExit, stdoutEnded: child.stdout.readableEnded, managed: !!managedRoute(execution.model),
       })
-      if (classified) throw new StructuredSessionError(classified.code, classified.message)
+      if (classified) throw new StructuredSessionError(classified.code, classified.message, { quotaHttpStatus: classified.httpStatus })
     }
     throw error
   } finally {

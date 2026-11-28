@@ -20,7 +20,7 @@ related:
 
 ## expanded spec
 
-新派发通过 [[llm-manager-host]] 的安装包启动 Claude CLI。原生模型参数、CLI 版本探测、认证投影及隔离认证状态探测、stream-json 协议、公开历史与 Schema 工具错误投影、兼容 Anthropic Messages 的中继由 LLM Manager 持有。SpexCode 提供探测所用的隔离启动描述，落盘公开认证回执，固定任务工具面、工作树权限并核验原始见证。Manager 统一投影原生成功、终态退出、格式失败和结构化输出耗尽，认证原生消息、已发请求和实际工具回复。宿主核原 Git 工作树、请求摘要、信号观察、进程停止和业务 JSON Schema。
+新派发通过 [[llm-manager-host]] 的安装包启动 Claude CLI。LLM Manager 准备原生参数和环境，核 CLI 版本、认证投影及隔离认证状态，解释配置根与精确历史位置，持有兼容 Anthropic Messages 的中继。SpexCode 提供隔离启动描述、冻结工具策略和工作树权限，先登记原进程再放行同一请求。Manager 连接 stream-json，按原顺序解释请求回显和取消回执，处理终态后的协议输入关闭，统一投影原生成功、终态退出、格式失败和结构化输出耗尽。宿主保存公开认证和原生见证，核对 Git 工作树、请求摘要、信号观察、进程停止和业务 JSON Schema。原配置根、CLI 版本、MCP 描述和历史收据的保存格式继续按原协议复核。
 
 [[llm-manager-host]] 的 Claude API 路线沿原 native-worktree 固定执行策略，使用同轮临时 loopback 转发。原生进程只接收本轮临时授权，启动时禁用会覆盖路线的外部设置和 hooks。macOS 子进程同一次沙箱同时限制 Git 共享配置写入和 Manager 私有文件读取。原生 init、消息、schema、进程组和结果照原路径核验。可信终态只投影原 429 状态码，真实 API 转发额度失败仍须原生停止。
 

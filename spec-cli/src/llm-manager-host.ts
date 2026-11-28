@@ -63,7 +63,7 @@ function managerCall(message: Record<string, unknown>): Promise<unknown> {
 type NativeVendor = 'claude' | 'codex' | 'cursor' | 'grok' | 'zcode'
 type ManagerNativeRuntime = {
   nativeRuntimeVersion: 1
-  nativeAdapterContract: 6
+  nativeAdapterContract: 7
   findNativeExecutable(vendor: NativeVendor): string | undefined
   spawnGatedNativeProcess(command: string, args: readonly string[], options: {
     cwd: string
@@ -102,7 +102,7 @@ export function loadManagerNativeRuntime(): Promise<ManagerNativeRuntime> {
         || typeof loaded.spawnGatedNativeProcess !== 'function' || typeof loaded.spawnNativeProcess !== 'function'
         || typeof loaded.loadNativeAdapter !== 'function')
       throw new LlmManagerHostError('llm_manager_native_invalid_response')
-    if (loaded.nativeAdapterContract !== 6) throw new LlmManagerHostError('llm_manager_native_incompatible')
+    if (loaded.nativeAdapterContract !== 7) throw new LlmManagerHostError('llm_manager_native_incompatible')
     return loaded as ManagerNativeRuntime
   }).catch(error => {
     nativeRuntimes.delete(key)
@@ -227,8 +227,9 @@ export async function settleManagedRoute(
   sessionId: string,
   outcome: 'completed' | 'quota' | 'stopped',
   usage?: NativeTokenUsage,
+  quotaStatus?: 402,
 ): Promise<'completed' | 'quota' | 'stopped'> {
-  const result = await managerCall({ action: 'settle', route, sessionId, outcome, ...(usage ? { usage: {
+  const result = await managerCall({ action: 'settle', route, sessionId, outcome, ...(quotaStatus === undefined ? {} : { quotaStatus }), ...(usage ? { usage: {
     inputTokens: usage.totalInputTokens ?? usage.uncachedInputTokens,
     cachedInputTokens: usage.cacheReadInputTokens,
     cacheCreationInputTokens: usage.cacheWriteInputTokens,

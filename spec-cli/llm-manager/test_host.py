@@ -350,6 +350,29 @@ with patch('llm_manager.native_capability.codex_frozen_runtime', return_value=di
         self.assertEqual(recovered["kind"], "anthropic-messages")
         self.assertEqual(recovered, self.rpc(action="resolve"))
 
+    def test_native_402_uses_same_group_successor_then_recovers_original_priority(self) -> None:
+        self.add_native("grok", "account")
+        self.add_native("claude", "auto")
+        self.group("grok", "claude")
+        preferred = self.rpc(action="resolve")
+        self.assertEqual(preferred["vendor"], "grok")
+        self.assertTrue(self.reserve(preferred, "native-balance-fixture")["ok"])
+        self.assertEqual(self.call(action="settle", route=preferred, sessionId="native-balance-fixture", outcome="stopped", quotaStatus=402)["code"], "llm_manager_invalid_quota_status")
+        self.assertEqual(self.rpc(action="settle", route=preferred, sessionId="native-balance-fixture", outcome="quota", quotaStatus=402), {"outcome": "quota"})
+        successor = self.rpc(action="resolve", nextAfter=preferred, failedSessionId="native-balance-fixture")
+        self.assertEqual(successor["vendor"], "claude")
+        self.assertEqual(self.rpc(action="resolve"), successor)
+        with sqlite3.connect(self.database) as database:
+            raw = database.execute("SELECT upstream_status FROM spex_llm_route_claim WHERE session_id = ?", ("native-balance-fixture",)).fetchone()
+            self.assertEqual(raw, (402,))
+            breaker = database.execute("SELECT option_id, last_failure_at, cooldown_until FROM llm_circuit_breaker WHERE owner_id = ?", ("fixture-owner",)).fetchone()
+            self.assertIsNotNone(breaker)
+            assert breaker is not None
+            self.assertEqual(breaker[0], "grok-option")
+            self.assertEqual((datetime.fromisoformat(breaker[2]) - datetime.fromisoformat(breaker[1])).total_seconds(), 5 * 60 * 60)
+            database.execute("UPDATE llm_circuit_breaker SET cooldown_until = ? WHERE option_id = ?", ("2000-01-01 00:00:00.000000", "grok-option"))
+        self.assertEqual(self.rpc(action="resolve", sameGroupAs=successor), preferred)
+
     def test_same_group_anchor_rejects_another_owner_or_group(self) -> None:
         self.add_native("grok", "account")
         self.group("grok")

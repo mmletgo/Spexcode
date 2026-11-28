@@ -19,13 +19,13 @@ Claude Code 或 ZCode 限流时，用户可以显式选择本机已配置的 Gro
 
 LLM Manager 为短时原生 streaming-json 执行关闭该子进程的厂商 trace 上传，避免终态后等待上传队列。本机原生会话和结算证据照常保存。ACP 沿用原 trace 设置。
 
-[[llm-manager-host]] 管理的 Grok 工作树在原生 stdout 无原终态、真实非零退出且精确进程组已停止时，只用已排空且未截断的 stderr 诊断中的原 429 或明确额度耗尽，报告可申请正式续路的额度失败。用户取消、其他退出原因和未知停止不触发该分类。 流式任务已证实原进程组停止、stdout 到达 EOF、CLI 自然非零退出，且原终态缺失时，Manager 在保留有界诊断后将无额度信号的调用登记为已结算失败，允许从原任务失败环节续跑。
+[[llm-manager-host]] 管理的 Grok 工作树在原生 stdout 无原终态、真实非零退出且精确进程组已停止时，只用已排空且未截断的 stderr 诊断中的原 429 或明确额度耗尽，报告可申请正式续路的额度失败。已排空的 stderr 若以原 Grok 多行错误完整报告 HTTP 402 及余额耗尽，可携带真实 HTTP 402 进入同组正式续路。用户取消、其他退出原因和未知停止不触发该分类。 流式任务已证实原进程组停止、stdout 到达 EOF、CLI 自然非零退出，且原终态缺失时，Manager 在保留有界诊断后将无额度信号的调用登记为已结算失败，允许从原任务失败环节续跑。
 
 已持久化的 Grok 终态使用同一 Manager 源的离线解析核对完成状态与实际模型，沿已保存的原进程和原请求身份认证。Manager 核对原 ACP prompt 身份与原生 Schema 要求，给出退出观察期限、受认可的自然退出和额度失败判定。历史逾期失败由同一适配识别原分类和原消息，SpexCode 重验绑定请求、进程停止、输出流和业务 Schema。
 
 明确的 `grok:<模型或别名>` 仅进入 [[structured-session-runtime]] 的原生 worktree 路由。`grok:default` 沿用本机配置。每轮记录实际 CLI 版本和模型。选择、输入、预算、独审身份与正式重试规则沿 [[sync-model-selection]]。
 
-编辑任务在本机 CLI 声明支持 ACP stdio 时使用该协议，记录预先生成的 prompt ID，认证同一 session、workspace、prompt 终态和实际用量模型。Manager 在确认该 prompt 终态后关闭 stdin，再观察 stdout 至 EOF。仅原 prompt 的明确限额响应在完整停止和自然退出后可作为正式额度。握手后的缺失终态也须结算原进程。保留仅初始化前和原流式模式的明确启动诊断分类。ACP 初始化响应前已收到真实 EOF 时，沿同一有界观察窗口等待原 CLI 自然退出和 stderr 排空，再判断启动额度。取消或窗口耗尽仍精确清理。
+编辑任务在本机 CLI 声明支持 ACP stdio 时使用该协议，记录预先生成的 prompt ID，认证同一 session、workspace、prompt 终态和实际用量模型。Manager 在确认该 prompt 终态后关闭 stdin，再观察 stdout 至 EOF。仅原 prompt 的明确限额或完整的结构化 HTTP 402 余额耗尽响应在原进程完整停止、自然零退出及 EOF 后可作为正式额度。握手后的缺失终态也须结算原进程。保留仅初始化前和原流式模式的明确启动诊断分类。ACP 初始化响应前已收到真实 EOF 时，沿同一有界观察窗口等待原 CLI 自然退出和 stderr 排空，再判断启动额度。取消或窗口耗尽仍精确清理。
 
 Grok ACP 的内嵌会话通知由 Manager 按原连接和已登记会话区分。只有父会话的文本和精确终态能进入 SpexCode 的正式结果；Manager 处理内嵌会话通知时，原进程归属、退出和独审证据继续按本节点的门禁核对。
 

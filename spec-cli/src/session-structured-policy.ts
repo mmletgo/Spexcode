@@ -52,7 +52,10 @@ export type StructuredExecution = {
   state?: 'running' | 'completed' | 'failed' | 'cancelling' | 'cancelled' | 'timeout'
   observer?: ProcessIdentity | null
   turnStartRequested?: boolean
-  cancellation?: { reason: 'cancelled' | 'timeout'; requestedAt: number; nativeStopped: boolean; acknowledged: boolean; nativeStatus?: string; error?: string }
+  cancellation?: {
+    reason: 'cancelled' | 'timeout'; requestedAt: number; nativeStopped: boolean; acknowledged: boolean; nativeStatus?: string; error?: string
+    pendingManagerQuota?: { routeId: string; httpStatus?: StructuredSessionError['quotaHttpStatus'] }
+  }
   output?: unknown
   resultDigest?: string
   nativeTokenUsage?: NativeTokenUsage
@@ -193,7 +196,8 @@ export class StructuredSessionError extends Error {
   readonly failedWorktree?: NativeWorktreeResult
   readonly requestKey?: string
   readonly inputDigest?: string
-  constructor(readonly code: 'unsupported' | 'failed' | 'cancelled' | 'timeout' | 'key_reused' | 'stale_result' | 'cancellation_pending' | NonNullable<StructuredExecution['errorCode']>, message: string, identity: { sessionId?: string; threadId?: string; turnId?: string; rejectedOutput?: RejectedStructuredOutput; nativeTokenUsage?: NativeTokenUsage; failedWorktree?: NativeWorktreeResult; requestKey?: string; inputDigest?: string } = {}) {
+  readonly quotaHttpStatus?: 402
+  constructor(readonly code: 'unsupported' | 'failed' | 'cancelled' | 'timeout' | 'key_reused' | 'stale_result' | 'cancellation_pending' | NonNullable<StructuredExecution['errorCode']>, message: string, identity: { sessionId?: string; threadId?: string; turnId?: string; rejectedOutput?: RejectedStructuredOutput; nativeTokenUsage?: NativeTokenUsage; failedWorktree?: NativeWorktreeResult; requestKey?: string; inputDigest?: string; quotaHttpStatus?: 402 } = {}) {
     super(message)
     this.name = 'StructuredSessionError'
     this.sessionId = identity.sessionId
@@ -204,6 +208,7 @@ export class StructuredSessionError extends Error {
     if (identity.failedWorktree !== undefined) this.failedWorktree = identity.failedWorktree
     if (identity.requestKey !== undefined) this.requestKey = identity.requestKey
     if (identity.inputDigest !== undefined) this.inputDigest = identity.inputDigest
+    if (identity.quotaHttpStatus !== undefined) this.quotaHttpStatus = identity.quotaHttpStatus
   }
 }
 

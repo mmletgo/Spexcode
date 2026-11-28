@@ -31,6 +31,7 @@ var init_cli_probe = __esm({
 // src/llm_manager/native/claude.mjs
 var claude_exports = {};
 __export(claude_exports, {
+  CLAUDE_FROZEN_TOOLS: () => CLAUDE_FROZEN_TOOLS,
   CLAUDE_LEGACY_CLI_VERSION: () => CLAUDE_LEGACY_CLI_VERSION,
   CLAUDE_VERSION_ARGS: () => CLAUDE_VERSION_ARGS,
   ClaudeNativeProtocolError: () => ClaudeNativeProtocolError,
@@ -42,9 +43,12 @@ __export(claude_exports, {
   claudeApiToolResultIds: () => claudeApiToolResultIds,
   claudeAuthenticationArgs: () => claudeAuthenticationArgs,
   claudeControlledTerminalExit: () => claudeControlledTerminalExit,
+  claudeFrozenMcpConfiguration: () => claudeFrozenMcpConfiguration,
   claudeMcpToolNames: () => claudeMcpToolNames,
   claudeMessageBlocks: () => claudeMessageBlocks,
   claudeMessageDigest: () => claudeMessageDigest,
+  claudeMessageMatchesPrompt: () => claudeMessageMatchesPrompt,
+  claudeNativeHistoryPath: () => claudeNativeHistoryPath,
   claudeNativeModel: () => claudeNativeModel,
   claudeNaturalSuccessExit: () => claudeNaturalSuccessExit,
   claudeOriginalReplayMismatch: () => claudeOriginalReplayMismatch,
@@ -62,6 +66,7 @@ __export(claude_exports, {
   claudeUnsuccessfulExitMessage: () => claudeUnsuccessfulExitMessage,
   claudeWorktreeArgs: () => claudeWorktreeArgs,
   claudeWorktreeTerminal: () => claudeWorktreeTerminal,
+  connectClaudeStructuredStream: () => connectClaudeStructuredStream,
   consumeClaudeRecoveryRequest: () => consumeClaudeRecoveryRequest,
   encodeClaudeInterrupt: () => encodeClaudeInterrupt,
   encodeClaudeUserMessage: () => encodeClaudeUserMessage,
@@ -74,6 +79,7 @@ __export(claude_exports, {
   isClaudeStructuredOutputEnforcement: () => isClaudeStructuredOutputEnforcement,
   matchingClaudeRecoveries: () => matchingClaudeRecoveries,
   prepareClaudeAuthenticationEnvironment: () => prepareClaudeAuthenticationEnvironment,
+  prepareClaudeStructuredInvocation: () => prepareClaudeStructuredInvocation,
   projectClaudeApiSourceMetadata: () => projectClaudeApiSourceMetadata,
   projectClaudeFrozenReadEvidence: () => projectClaudeFrozenReadEvidence,
   projectClaudeFrozenSchemaFailure: () => projectClaudeFrozenSchemaFailure,
@@ -86,9 +92,10 @@ __export(claude_exports, {
 });
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { createInterface } from "node:readline";
 function inspectClaudeCliVersion(launch, nativeConfiguration) {
   const cliVersion = execFileSync(launch.command, [...launch.args, ...CLAUDE_VERSION_ARGS], { encoding: "utf8" }).trim();
   if (!cliVersion || !nativeConfiguration && cliVersion !== CLAUDE_LEGACY_CLI_VERSION) {
@@ -258,8 +265,40 @@ function claudeWorktreeArgs(input) {
     ...effort
   ];
 }
+function prepareClaudeStructuredInvocation(input, onAuthentication) {
+  const prepared = claudeProcessEnvironment(input);
+  const configRoot = input.nativeConfiguration ? resolve(input.cwd, prepared.environment.CLAUDE_CONFIG_DIR || join(prepared.environment.HOME || homedir(), ".claude")) : input.configHome;
+  if (input.frozen) {
+    const { authentication, exitStatus, rejection } = inspectClaudeIsolatedAuthentication({
+      ...input.frozen.authentication,
+      cwd: input.cwd,
+      env: prepared.environment
+    });
+    onAuthentication?.({ ...authentication, source: prepared.source, exitStatus });
+    if (rejection) throw rejection;
+  }
+  const args = input.frozen ? claudeStructuredArgs({ ...input, ...input.frozen, allowedTools: CLAUDE_FROZEN_TOOLS, systemPrompt: frozenSystemPrompt }) : claudeWorktreeArgs({ ...input, mode: input.worktreeMode });
+  return { ...prepared, configRoot, args };
+}
+function claudeFrozenMcpConfiguration(command, args) {
+  return { mcpServers: { frozen: { type: "stdio", command, args } } };
+}
+function claudeNativeHistoryPath(configRoot, sessionId) {
+  const projects = join(configRoot, "projects");
+  if (!existsSync(projects)) throw new ClaudeNativeProtocolError("stale_result", "Claude native config root has no session projects");
+  const paths = readdirSync(projects, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => join(projects, entry.name, `${sessionId}.jsonl`)).filter((path) => existsSync(path));
+  if (paths.length !== 1 || !realpathSync(paths[0]).startsWith(`${realpathSync(projects)}/`))
+    throw new ClaudeNativeProtocolError("stale_result", "Claude config root has no unique exact native session history");
+  return paths[0];
+}
+function claudeUserMessage(prompt) {
+  return { role: "user", content: [{ type: "text", text: prompt }] };
+}
+function claudeMessageMatchesPrompt(message, prompt) {
+  return jsonDigest(message) === jsonDigest(claudeUserMessage(prompt));
+}
 function encodeClaudeUserMessage(sessionId, userUuid, prompt) {
-  return JSON.stringify({ type: "user", session_id: sessionId, uuid: userUuid, message: { role: "user", content: [{ type: "text", text: prompt }] } }) + "\n";
+  return JSON.stringify({ type: "user", session_id: sessionId, uuid: userUuid, message: claudeUserMessage(prompt) }) + "\n";
 }
 function encodeClaudeInterrupt(requestId) {
   return JSON.stringify({ type: "control_request", request_id: requestId, request: { subtype: "interrupt" } }) + "\n";
@@ -1328,15 +1367,52 @@ function interpretClaudeStreamEvent(event, options) {
     return { kind: "result", result, receipt: { ...result, ...nativeTokenUsage ? { nativeTokenUsage } : {}, apiErrorStatus } };
   }
 }
+function connectClaudeStructuredStream({ stdin, stdout }, options, callbacks) {
+  let hasInit = false, ordinal = 0, work = Promise.resolve();
+  const policy = { ...options, allowedTools: options.worktree ? void 0 : CLAUDE_FROZEN_TOOLS };
+  let interruptId;
+  const lines = createInterface({ input: stdout });
+  lines.on("line", (line) => {
+    let observed = 0;
+    work = work.then(async () => {
+      if (!callbacks.shouldConsume()) return;
+      observed = ++ordinal;
+      const event = readClaudeStreamEvent(line);
+      const observation = claudeProtocolObservation(event, observed);
+      if (observation) callbacks.onObservation(observation);
+      const projection = interpretClaudeStreamEvent(event, { ...policy, hasInit, interruptId });
+      if (!projection) return;
+      if (projection.kind === "init") hasInit = true;
+      await callbacks.onEvent(projection);
+      if (projection.kind === "result") stdin.end();
+    }).catch((error) => callbacks.onError(error, observed));
+  });
+  return {
+    /** @param {string} prompt */
+    start: (prompt) => {
+      stdin.write(encodeClaudeUserMessage(options.sessionId, options.userUuid, prompt));
+    },
+    /** @param {string} requestId */
+    interrupt(requestId) {
+      if (!stdin.writable) return;
+      interruptId = requestId;
+      stdin.write(encodeClaudeInterrupt(requestId));
+    },
+    drain: () => work,
+    close: () => lines.close()
+  };
+}
 function isClaudeRateLimitTerminal(result, exit) {
   return result.type === "result" && result.subtype === "success" && result.is_error === true && result.apiErrorStatus === 429 && exit.code === 1 && exit.signal === null;
 }
-var CLAUDE_LEGACY_CLI_VERSION, CLAUDE_VERSION_ARGS, authenticationKeys, isolatedSettings, streamArgs, ClaudeNativeProtocolError, truncatedRecoveryText, outputLimitRecoveryText, structuredOutputEnforcement, recoveryTexts, historyRecordKeys, historyRowTypes, structuredOutputErrorPrefix;
+var CLAUDE_LEGACY_CLI_VERSION, CLAUDE_VERSION_ARGS, CLAUDE_FROZEN_TOOLS, frozenSystemPrompt, authenticationKeys, isolatedSettings, streamArgs, ClaudeNativeProtocolError, truncatedRecoveryText, outputLimitRecoveryText, structuredOutputEnforcement, recoveryTexts, historyRecordKeys, historyRowTypes, structuredOutputErrorPrefix;
 var init_claude = __esm({
   "src/llm_manager/native/claude.mjs"() {
     init_cli_probe();
     CLAUDE_LEGACY_CLI_VERSION = "2.1.309 (Claude Code)";
     CLAUDE_VERSION_ARGS = Object.freeze(["--version"]);
+    CLAUDE_FROZEN_TOOLS = Object.freeze(["StructuredOutput", "mcp__frozen__spex_read_frozen"]);
+    frozenSystemPrompt = "Read only immutable context through the configured spex_read_frozen MCP. Follow the frozen task and return the requested schema using StructuredOutput. No shell, files, network, tools discovery, skills or subagents. Never call DeferredToolPlaceholder.";
     authenticationKeys = ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL"];
     isolatedSettings = [
       "--restricted",
@@ -1366,7 +1442,7 @@ var init_claude = __esm({
 
 // src/llm_manager/native/codex-frozen.mjs
 import { createHash as createHash2 } from "node:crypto";
-import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync as readFileSync2, readdirSync, realpathSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync as readFileSync2, readdirSync as readdirSync2, realpathSync as realpathSync2 } from "node:fs";
 import { basename, dirname, isAbsolute, join as join2 } from "node:path";
 function object(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? (
@@ -1408,7 +1484,7 @@ function assertCodexUnboundRealmHasNoRollouts(home) {
     if (!isAbsolute(home)) throw unproven();
     const homeStat = lstatSync(home, { bigint: true });
     if (!isReadableDirectory(homeStat)) throw unproven();
-    const root = realpathSync(home);
+    const root = realpathSync2(home);
     const directories = [
       { path: join2(root, "sessions"), levels: [/^\d{4}$/, /^(0[1-9]|1[0-2])$/, /^(0[1-9]|[12][0-9]|3[01])$/], optional: true },
       { path: join2(root, "archived_sessions"), levels: [], optional: true }
@@ -1417,15 +1493,15 @@ function assertCodexUnboundRealmHasNoRollouts(home) {
     for (const { path, levels, optional } of directories) {
       const stat = lstatSync(path, { bigint: true, throwIfNoEntry: false });
       if (optional && stat === void 0) continue;
-      if (!isReadableDirectory(stat) || realpathSync(path) !== path)
+      if (!isReadableDirectory(stat) || realpathSync2(path) !== path)
         throw unproven();
       observed.set(path, stat);
-      for (const child of readdirSync(path, { withFileTypes: true })) {
+      for (const child of readdirSync2(path, { withFileTypes: true })) {
         if (!child.isDirectory() || !levels[0]?.test(child.name)) throw unproven();
         directories.push({ path: join2(path, child.name), levels: levels.slice(1), optional: false });
       }
     }
-    if (realpathSync(home) !== root) throw unproven();
+    if (realpathSync2(home) !== root) throw unproven();
     for (const [path, before] of observed) {
       const after = lstatSync(path, { bigint: true });
       if (after.dev !== before.dev || after.ino !== before.ino || after.mtimeNs !== before.mtimeNs || after.ctimeNs !== before.ctimeNs)
@@ -1437,7 +1513,7 @@ function assertCodexUnboundRealmHasNoRollouts(home) {
   }
 }
 function codexPersistentSocketPaths(socketPath, uid) {
-  const rendezvous = join2(realpathSync(dirname(socketPath)), basename(socketPath));
+  const rendezvous = join2(realpathSync2(dirname(socketPath)), basename(socketPath));
   const daemonDirectory = join2("/private/tmp", `codex-daemon-${uid}`);
   const physicalSocket = join2(daemonDirectory, sha(Buffer.from(rendezvous)));
   return { rendezvous, daemonDirectory, physicalSocket, lockPath: `${physicalSocket}.lock` };
@@ -1558,7 +1634,7 @@ function codexDecodeFrozenItems(items, toolName) {
 function readRolloutFile(path) {
   let fd;
   try {
-    const physical = realpathSync(path);
+    const physical = realpathSync2(path);
     fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     const before = fstatSync(fd, { bigint: true });
     if (!before.isFile()) throw new CodexNativeProtocolError("stale_result", "Codex frozen rollout is not a regular file");
@@ -1709,7 +1785,7 @@ function readArchive(options, path, turn, items) {
   if (!options.generation || turn.id !== options.turnId || typeof turn.status !== "string" || !["completed", "failed", "interrupted"].includes(turn.status) || options.prompt !== void 0 && !codexFrozenPromptMatches(items, options.prompt))
     throw new CodexNativeProtocolError("stale_result", "Codex frozen archive history does not match its exact terminal turn or prompt");
   const source = readRolloutFile(path);
-  const archiveDirectory = join2(realpathSync(options.home), "archived_sessions");
+  const archiveDirectory = join2(realpathSync2(options.home), "archived_sessions");
   if (dirname(source.path) !== archiveDirectory || !basename(source.path).startsWith("rollout-") || !basename(source.path).endsWith(`-${options.threadId}.jsonl`))
     throw new CodexNativeProtocolError("stale_result", "Codex frozen archive has no exact carrier in the scoped archive directory");
   const completed = turn.status === "completed";
@@ -1798,6 +1874,7 @@ __export(codex_exports, {
   CodexNativeProtocolError: () => CodexNativeProtocolError,
   CodexPersistentAppServer: () => CodexPersistentAppServer,
   assertCodexUnboundRealmHasNoRollouts: () => assertCodexUnboundRealmHasNoRollouts,
+  assertCodexWorktreeExit: () => assertCodexWorktreeExit,
   codexAuditFrozenCatalog: () => codexAuditFrozenCatalog,
   codexBuildFrozenCatalog: () => codexBuildFrozenCatalog,
   codexDecodeFrozenItems: () => codexDecodeFrozenItems,
@@ -1818,12 +1895,15 @@ __export(codex_exports, {
   codexReadFrozenRollout: () => codexReadFrozenRollout,
   codexReadLegacyFrozenVisibleOutputs: () => codexReadLegacyFrozenVisibleOutputs,
   codexValidateFrozenVisibility: () => codexValidateFrozenVisibility,
+  codexWorktreeExitGraceMs: () => codexWorktreeExitGraceMs,
+  codexWorktreeFinalMatches: () => codexWorktreeFinalMatches,
+  prepareCodexWorktreeInvocation: () => prepareCodexWorktreeInvocation,
   verifyCodexFrozenArchive: () => verifyCodexFrozenArchive
 });
 import { createHash as createHash3, randomBytes } from "node:crypto";
 import { execFileSync as execFileSync2 } from "node:child_process";
 import { createConnection } from "node:net";
-import { createInterface } from "node:readline";
+import { createInterface as createInterface2 } from "node:readline";
 import { setTimeout as delay } from "node:timers/promises";
 function object2(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? (
@@ -1887,6 +1967,52 @@ function terminalError(turn) {
   }
   return failed("Codex exact native turn did not complete successfully");
 }
+function assertCodexWorktreeExit(exit, exitedWithinGrace) {
+  if (!exit || !(exit.code === 0 && exit.signal === null || !exitedWithinGrace && exit.code === null && exit.signal === "SIGTERM"))
+    throw failed("Codex app-server did not complete its native shutdown");
+}
+function codexWorktreeFinalMatches(savedThread, savedFinal, { workspace, model, threadId, turnId }) {
+  const thread = object2(savedThread), final = object2(savedFinal);
+  return thread.id === threadId && thread.cwd === workspace && nonempty(thread.model) && nonempty(thread.cliVersion) && (model === void 0 || thread.model === model) && final.threadId === threadId && final.turnId === turnId && final.status === "completed" && nonempty(final.itemId) && nonempty(final.text);
+}
+function prepareCodexWorktreeInvocation({ root, tmp, modelSelection, clientName, clientVersion, workspace, permissions, prompt, schema, effort }) {
+  const model = codexNativeModel(modelSelection);
+  const options = { workspace, model, permissions };
+  return {
+    model,
+    args: codexNativeWorktreeArgs(root, tmp),
+    /** @param {NodeJS.ProcessEnv} base */
+    environment: (base) => ({ ...base, TMPDIR: tmp }),
+    /** @param {import('node:stream').Writable} input @param {import('node:stream').Readable} output */
+    connect(input, output) {
+      const server = new CodexNativeAppServer(input, output);
+      return {
+        /** @param {unknown} cause */
+        fail: (cause) => server.fail(cause),
+        interrupt: () => output.readableEnded ? Promise.resolve(void 0) : server.interrupt(),
+        closeInput: () => input.end(),
+        /** @param {{check: () => void, onThread: (id: string) => Promise<void>, onTurn: (id: string) => Promise<void>}} hooks */
+        async run({ check, onThread, onTurn }) {
+          const assertReady = () => {
+            check();
+            if (server.failure) throw server.failure;
+            if (output.readableEnded) throw failed("Codex app-server disconnected before terminal evidence");
+          };
+          await server.initialize(clientName, clientVersion);
+          const thread = await server.startThread({ ...options, beforeStart: assertReady });
+          await onThread(thread.id);
+          assertReady();
+          const turnId = await server.startTurn({ ...options, prompt, schema, effort });
+          await onTurn(turnId);
+          await server.waitForTerminal();
+          assertReady();
+          const final = server.readFinal();
+          return { thread, final, nativeTokenUsage: codexNativeTokenUsage(final.tokenUsage) };
+        }
+      };
+    }
+  };
+}
 function codexPersistentAppServerArgs(socketPath) {
   return ["app-server", "--strict-config", "--listen", `unix://${socketPath}`];
 }
@@ -1916,7 +2042,7 @@ function encodeClientFrame(opcode, payload) {
 function legacyStructuredPromptMatches(items, prompt) {
   return items.map(object2).some((item) => item.type === "userMessage" && Array.isArray(item.content) && item.content.some((input) => object2(input).type === "text" && object2(input).text === prompt));
 }
-var CONTROL_MS, nativeErrorKinds, nativeHttpErrorKinds, CodexNativeAppServer, persistentThreadSourceKinds, CodexPersistentAppServer;
+var CONTROL_MS, nativeErrorKinds, nativeHttpErrorKinds, CodexNativeAppServer, codexWorktreeExitGraceMs, persistentThreadSourceKinds, CodexPersistentAppServer;
 var init_codex = __esm({
   "src/llm_manager/native/codex.mjs"() {
     init_codex_frozen();
@@ -1961,13 +2087,13 @@ var init_codex = __esm({
       /** @type {() => void} */
       #wake = () => {
       };
-      #terminal = new Promise((resolve2) => {
-        this.#wake = () => resolve2(void 0);
+      #terminal = new Promise((resolve3) => {
+        this.#wake = () => resolve3(void 0);
       });
       /** @param {import('node:stream').Writable} input @param {import('node:stream').Readable} output */
       constructor(input, output) {
         this.#input = input;
-        const lines = createInterface({ input: output });
+        const lines = createInterface2({ input: output });
         lines.on("line", (line) => {
           try {
             this.#receive(object2(JSON.parse(line)));
@@ -2040,8 +2166,8 @@ var init_codex = __esm({
         const id = ++this.#requestId;
         let timer;
         try {
-          return await new Promise((resolve2, reject) => {
-            this.#pending.set(id, { method, resolve: resolve2, reject });
+          return await new Promise((resolve3, reject) => {
+            this.#pending.set(id, { method, resolve: resolve3, reject });
             timer = setTimeout(() => reject(failed(`Codex app-server did not answer ${method}`)), CONTROL_MS);
             this.#send({ id, method, params });
           });
@@ -2152,6 +2278,7 @@ var init_codex = __esm({
         };
       }
     };
+    codexWorktreeExitGraceMs = 500;
     persistentThreadSourceKinds = [
       "cli",
       "vscode",
@@ -2195,7 +2322,7 @@ var init_codex = __esm({
         this.#socket = createConnection(socketPath);
         const key = randomBytes(16).toString("base64");
         const accept = createHash3("sha1").update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
-        this.#ready = new Promise((resolve2, reject) => {
+        this.#ready = new Promise((resolve3, reject) => {
           const timer = setTimeout(() => this.#fail(new CodexNativeProtocolError("transport", "Codex persistent WebSocket upgrade timed out")), requestTimeoutMs);
           const disconnected = (error) => {
             clearTimeout(timer);
@@ -2227,7 +2354,7 @@ Sec-WebSocket-Key: ${key}\r
                 this.#buffer = this.#buffer.subarray(end + 4);
                 this.#upgraded = true;
                 clearTimeout(timer);
-                resolve2();
+                resolve3();
               }
               this.#drainFrames();
             } catch {
@@ -2373,8 +2500,8 @@ Sec-WebSocket-Key: ${key}\r
         const id = ++this.#requestId;
         const timer = setTimeout(() => this.#fail(new CodexNativeProtocolError("transport", `Codex persistent ${method} timed out`)), this.#requestTimeoutMs);
         try {
-          return await new Promise((resolve2, reject) => {
-            this.#pending.set(id, { method, mapRefusal, resolve: resolve2, reject });
+          return await new Promise((resolve3, reject) => {
+            this.#pending.set(id, { method, mapRefusal, resolve: resolve3, reject });
             this.#send({ id, method, params });
           });
         } finally {
@@ -2536,14 +2663,14 @@ Sec-WebSocket-Key: ${key}\r
         let { threadId, turnId } = request;
         let notifyTerminal = () => {
         };
-        const completed = new Promise((resolve2) => {
-          notifyTerminal = () => resolve2(void 0);
+        const completed = new Promise((resolve3) => {
+          notifyTerminal = () => resolve3(void 0);
         });
         let poll;
         let releaseIdentity = () => {
         };
-        const identityReady = new Promise((resolve2) => {
-          releaseIdentity = () => resolve2(void 0);
+        const identityReady = new Promise((resolve3) => {
+          releaseIdentity = () => resolve3(void 0);
         });
         const terminals = /* @__PURE__ */ new Map();
         this.onFailure(fail);
@@ -2599,8 +2726,8 @@ Sec-WebSocket-Key: ${key}\r
           if (recorded && recorded.status !== "inProgress") terminals.set(exactTurn, recorded);
           releaseIdentity();
           while (!terminals.has(exactTurn)) {
-            await wait(Promise.race([completed, new Promise((resolve2) => {
-              poll = setTimeout(resolve2, 1e3);
+            await wait(Promise.race([completed, new Promise((resolve3) => {
+              poll = setTimeout(resolve3, 1e3);
             })]));
             clearTimeout(poll);
             if (!terminals.has(exactTurn)) {
@@ -2746,22 +2873,29 @@ __export(cursor_exports, {
   CURSOR_COMMAND: () => CURSOR_COMMAND,
   CURSOR_VERSION_ARGS: () => CURSOR_VERSION_ARGS,
   CursorAcpError: () => CursorAcpError,
+  connectCursorInvocation: () => connectCursorInvocation,
   cursorAcpCancel: () => cursorAcpCancel,
   cursorAcpInitialize: () => cursorAcpInitialize,
+  cursorBoundRequestMatches: () => cursorBoundRequestMatches,
   cursorCloseMatches: () => cursorCloseMatches,
+  cursorInvocationMatches: () => cursorInvocationMatches,
   cursorLaunchArgs: () => cursorLaunchArgs,
   cursorModelArgument: () => cursorModelArgument,
   cursorPromptQuotaFailure: () => cursorPromptQuotaFailure,
+  cursorSettledOutputMatches: () => cursorSettledOutputMatches,
+  cursorSettledQuota: () => cursorSettledQuota,
+  cursorSettlementTiming: () => cursorSettlementTiming,
   cursorTerminalCancelled: () => cursorTerminalCancelled,
   cursorTerminalCompleted: () => cursorTerminalCompleted,
   cursorUsageLimitNotice: () => cursorUsageLimitNotice,
   encodeCursorAcpPacket: () => encodeCursorAcpPacket,
   inspectCursorCliVersion: () => inspectCursorCliVersion,
-  observeCursorAcp: () => observeCursorAcp
+  observeCursorAcp: () => observeCursorAcp,
+  prepareCursorInvocation: () => prepareCursorInvocation
 });
 import { randomUUID } from "node:crypto";
-import { isAbsolute as isAbsolute2, relative, resolve } from "node:path";
-import { createInterface as createInterface2 } from "node:readline";
+import { isAbsolute as isAbsolute2, relative, resolve as resolve2 } from "node:path";
+import { createInterface as createInterface3 } from "node:readline";
 function inspectCursorCliVersion(launch) {
   const version = runNativeCliProbe(launch, CURSOR_VERSION_ARGS);
   const cliVersion = version.stdout?.trim();
@@ -2803,6 +2937,36 @@ function cursorLaunchArgs(workspace, mode, model) {
     "acp"
   ];
 }
+function prepareCursorInvocation(launch, mode, modelValue) {
+  const args = cursorLaunchArgs(launch.cwd, mode, cursorModelArgument(modelValue));
+  return { args, cliVersion: inspectCursorCliVersion(launch) };
+}
+function cursorInvocationMatches(plan, modelValue) {
+  if (!Array.isArray(plan.args)) return false;
+  const expected = cursorLaunchArgs(plan.workspace, plan.mode, cursorModelArgument(modelValue));
+  return plan.args.length === expected.length && plan.args.every((arg, index) => arg === expected[index]);
+}
+function cursorBoundRequestMatches(request, planDigest) {
+  return request?.planDigest === planDigest && nonempty2(request.sessionId) && nonempty2(request.requestId) && (request.reportedModel === void 0 || nonempty2(request.reportedModel));
+}
+function cursorSettledOutputMatches(output, requestDigest, exit, signalled) {
+  return output?.requestDigest === requestDigest && cursorTerminalCompleted(output) && typeof output.text === "string" && (output.reportedModel === void 0 || nonempty2(output.reportedModel)) && cursorCloseMatches(exit, signalled);
+}
+function terminalQuotaReceipt(request, output, digest) {
+  return {
+    requestDigest: digest(request),
+    sessionId: request.sessionId,
+    requestId: request.requestId,
+    evidence: "usage_limit",
+    source: "acp_terminal",
+    outputDigest: digest(output)
+  };
+}
+function cursorSettledQuota(receipt, quotaDigest, managed, request, output, digest) {
+  const quota = object3(receipt)?.source === "acp_terminal";
+  if (quota !== (quotaDigest !== void 0) || quota && (!managed || !cursorUsageLimitNotice(output.text) || digest(receipt) !== quotaDigest || digest(terminalQuotaReceipt(request, output, digest)) !== quotaDigest)) return void 0;
+  return quota;
+}
 function cursorAcpInitialize() {
   return { id: 1, method: "initialize", params: { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false } } };
 }
@@ -2811,6 +2975,51 @@ function cursorAcpCancel(sessionId) {
 }
 function encodeCursorAcpPacket(packet) {
   return JSON.stringify({ jsonrpc: "2.0", ...packet }) + "\n";
+}
+function connectCursorInvocation({ stdin, stdout }, plan, prompt, hooks) {
+  const { onQuotaReceipt } = hooks;
+  const send = (packet) => {
+    stdin.write(encodeCursorAcpPacket(packet));
+  };
+  let boundRequest;
+  let terminal = false, cancelSent = false;
+  const observed = observeCursorAcp(stdout, plan, prompt, send, {
+    onSession: hooks.onSession,
+    isInterrupted: hooks.isInterrupted,
+    digestRequest: hooks.digest,
+    startPrompt: async (request) => {
+      if (!await hooks.startPrompt(request)) return false;
+      boundRequest = request;
+      return true;
+    },
+    onTerminal(output) {
+      terminal = true;
+      hooks.onTerminal(output);
+      stdin.end();
+    },
+    ...onQuotaReceipt ? {
+      onProviderQuota: (request, evidence) => onQuotaReceipt({
+        requestDigest: hooks.digest(request),
+        sessionId: request.sessionId,
+        requestId: request.requestId,
+        evidence
+      })
+    } : {}
+  }).then(({ output, textOnlyWithoutTools }) => ({
+    output,
+    cancellationAcknowledgment: cancelSent && cursorTerminalCancelled(output) ? { stopReason: output.stopReason } : void 0,
+    quota: boundRequest && onQuotaReceipt && textOnlyWithoutTools && cursorUsageLimitNotice(output.text) ? terminalQuotaReceipt(boundRequest, output, hooks.digest) : void 0
+  }));
+  return {
+    observed,
+    start: () => send(cursorAcpInitialize()),
+    cancel() {
+      if (!boundRequest || terminal || cancelSent || stdin.destroyed || stdin.writableEnded) return false;
+      cancelSent = true;
+      send(cursorAcpCancel(boundRequest.sessionId));
+      return true;
+    }
+  };
 }
 function reportedModel(packet) {
   const modelConfig = Array.isArray(packet.configOptions) ? packet.configOptions.map(object3).find((option) => option?.category === "model" && option.type === "select") : void 0;
@@ -2823,7 +3032,7 @@ function permissionResult(params, plan, sessionId) {
   const withinWorktree = (location) => {
     const path = object3(location)?.path;
     if (!nonempty2(path)) return false;
-    const fromWorkspace = relative(plan.workspace, resolve(plan.workspace, path));
+    const fromWorkspace = relative(plan.workspace, resolve2(plan.workspace, path));
     return !isAbsolute2(fromWorkspace) && fromWorkspace !== ".." && !fromWorkspace.startsWith("../") && fromWorkspace !== ".git" && !fromWorkspace.startsWith(".git/");
   };
   const editable = plan.mode === "edit" && tool?.kind === "edit" && Array.isArray(tool.locations) && tool.locations.length > 0 && tool.locations.every(withinWorktree);
@@ -2832,7 +3041,7 @@ function permissionResult(params, plan, sessionId) {
   return nonempty2(option?.optionId) ? { outcome: { outcome: "selected", optionId: option.optionId } } : { outcome: { outcome: "cancelled" } };
 }
 async function observeCursorAcp(stdout, plan, prompt, send, hooks) {
-  const lines = createInterface2({ input: stdout, crlfDelay: Infinity });
+  const lines = createInterface3({ input: stdout, crlfDelay: Infinity });
   const chunks = [];
   let awaiting = 1;
   let sessionId, model;
@@ -2952,12 +3161,13 @@ async function observeCursorAcp(stdout, plan, prompt, send, hooks) {
   }
   return { output: terminal, textOnlyWithoutTools };
 }
-var CURSOR_COMMAND, CURSOR_VERSION_ARGS, CursorAcpError, object3, nonempty2, cursorUsageLimitNotice;
+var CURSOR_COMMAND, CURSOR_VERSION_ARGS, cursorSettlementTiming, CursorAcpError, object3, nonempty2, cursorUsageLimitNotice;
 var init_cursor = __esm({
   "src/llm_manager/native/cursor.mjs"() {
     init_cli_probe();
     CURSOR_COMMAND = "cursor-agent";
     CURSOR_VERSION_ARGS = Object.freeze(["--version"]);
+    cursorSettlementTiming = Object.freeze({ stopMs: 15e3, cancelGraceMs: 1e3, eofGraceMs: 500 });
     CursorAcpError = class extends Error {
       /**
        * @param {AcpErrorCode} code
@@ -3017,7 +3227,7 @@ __export(grok_exports, {
   prepareGrokStructuredInvocation: () => prepareGrokStructuredInvocation
 });
 import { createHash as createHash4, randomUUID as randomUUID2 } from "node:crypto";
-import { createInterface as createInterface3 } from "node:readline";
+import { createInterface as createInterface4 } from "node:readline";
 import { finished } from "node:stream/promises";
 function grokNativeModel(value) {
   if (!value.trim() || value.includes("\0"))
@@ -3043,7 +3253,12 @@ function grokTerminalFailure(terminal, exit) {
   return { code: "failed", message: "Grok native turn did not complete successfully" };
 }
 function grokAcpNativeFailure(failure, exit, managed) {
-  return failure.kind === "rate_limited" && managed && exit.code === 0 && exit.signal === null ? { code: "provider_quota_exhausted", message: "Grok ACP reported HTTP 429 in the stopped native prompt" } : { code: "failed", message: "Grok native ACP prompt did not complete successfully" };
+  if (managed && exit.code === 0 && exit.signal === null) {
+    if (failure.kind === "balance_exhausted") return grokBalanceFailure;
+    if (failure.kind === "rate_limited")
+      return { code: "provider_quota_exhausted", message: "Grok ACP reported HTTP 429 in the stopped native prompt" };
+  }
+  return { code: "failed", message: "Grok native ACP prompt did not complete successfully" };
 }
 function grokAcpProtocolFailure(code, message) {
   if (code === "cancellation_pending") return { code: "failed", message };
@@ -3208,9 +3423,16 @@ function prepareGrokStructuredInvocation({ launch, mode, sessionId, prompt, prom
       }
       const { failure } = observation;
       const error = grokAcpNativeFailure(failure, exit, managed);
-      if (error.code === "provider_quota_exhausted" && failure.kind === "rate_limited") {
+      if (error.code === "provider_quota_exhausted" && failure.kind !== "prompt_error") {
         const { sessionId: sessionId2, requestId, rpcCode, message } = failure;
-        return { error, diagnostic: { name: "acp-rate-limit-diagnostic.json", payload: { sessionId: sessionId2, requestId, rpcCode, message } } };
+        const name = failure.kind === "balance_exhausted" ? "acp-balance-exhaustion-diagnostic.json" : "acp-rate-limit-diagnostic.json";
+        return { error, diagnostic: { name, payload: {
+          sessionId: sessionId2,
+          requestId,
+          rpcCode,
+          message,
+          ...error.httpStatus === void 0 ? {} : { httpStatus: error.httpStatus }
+        } } };
       }
       return { error };
     }
@@ -3274,10 +3496,10 @@ async function observeGrokNativeAcp(stdout, stdin, request, onTerminal) {
   const nestedQueuePrompts = /* @__PURE__ */ new Set();
   let terminal;
   let awaiting = "initialize";
-  const send = (packet) => new Promise((resolve2, reject) => {
+  const send = (packet) => new Promise((resolve3, reject) => {
     stdin.write(JSON.stringify({ jsonrpc: "2.0", ...packet }) + "\n", (error) => {
       if (error) reject(new GrokAcpProtocolError("Grok ACP stdin could not be written", "transport_error"));
-      else resolve2();
+      else resolve3();
     });
   });
   const sendRequest = (method, params) => send({ id: requestIds[method], method, params });
@@ -3350,7 +3572,12 @@ async function observeGrokNativeAcp(stdout, stdin, request, onTerminal) {
       if (!Number.isSafeInteger(error?.code) || typeof error?.message !== "string")
         throw new GrokAcpProtocolError("Grok ACP agent returned an invalid RPC error");
       if (awaiting !== "session/prompt") throw new GrokAcpProtocolError(`Grok ACP ${awaiting} was rejected`);
-      terminal = error.code === -32003 && error.message === "Rate limited" ? { ...identity, kind: "rate_limited", rpcCode: -32003, message: "Rate limited" } : { ...identity, kind: "prompt_error" };
+      const billing = object4(error.data);
+      if (error.code === -32003 && error.message === "Rate limited")
+        terminal = { ...identity, kind: "rate_limited", rpcCode: -32003, message: "Rate limited" };
+      else if (error.code === -32603 && error.message === "Internal error" && billing?.http_status === 402 && billing.message === grokBalanceMessage && Object.keys(billing).length === 2)
+        terminal = { ...identity, kind: "balance_exhausted", rpcCode: -32603, message: "Internal error" };
+      else terminal = { ...identity, kind: "prompt_error" };
     } else {
       const result = object4(packet.result);
       if (!result) throw new GrokAcpProtocolError("Grok ACP agent returned an invalid RPC result");
@@ -3381,7 +3608,7 @@ async function observeGrokNativeAcp(stdout, stdin, request, onTerminal) {
   return terminal;
 }
 async function* streamingLines(stdout) {
-  const lines = createInterface3({ input: stdout, crlfDelay: Infinity });
+  const lines = createInterface4({ input: stdout, crlfDelay: Infinity });
   const close = () => lines.close();
   stdout.once("close", close);
   try {
@@ -3468,9 +3695,20 @@ function observeGrokNativeStderr(stderr, flags) {
   const httpStatuses = /* @__PURE__ */ new Set();
   const startupErrors = /* @__PURE__ */ new Map();
   let bytes = 0, lineBytes = 0, discardLine = false, oversizedLine = false, usageBalanceExhausted = false, readError = false;
+  let balanceHttpStatus;
+  let wrappedQuotaLine = 0;
   const finishLine = () => {
     if (!discardLine) {
       const startupLine = line.toString("utf8", 0, lineBytes).replace(/\r$/, ""), text2 = startupLine.trim();
+      if (startupLine === grokWrappedQuotaLines[wrappedQuotaLine]) {
+        wrappedQuotaLine++;
+        if (wrappedQuotaLine === grokWrappedQuotaLines.length) {
+          httpStatuses.add(402);
+          usageBalanceExhausted = true;
+          balanceHttpStatus = 402;
+          wrappedQuotaLine = 0;
+        }
+      } else wrappedQuotaLine = Number(startupLine === grokWrappedQuotaLines[0]);
       const argument = /^error: unexpected argument '(--[a-z][a-z-]*)' found$/.exec(startupLine);
       if (argument && argument[0] === startupLine && flags.has(argument[1])) startupErrors.set(argument[1], { kind: "unexpected_argument", flag: argument[1] });
       const errno = startupLine === "Error: No such file or directory (os error 2)" ? "ENOENT" : startupLine === "Error: Permission denied (os error 13)" ? "EACCES" : void 0;
@@ -3480,7 +3718,7 @@ function observeGrokNativeStderr(stderr, flags) {
       const body = (status?.message ?? text2.replace(/^error:[ \t]*/i, "")).trimStart();
       const message = body.startsWith(":") ? body.slice(1).trimStart() : body;
       if (/^(?:usage balance exhausted|you hit your weekly limit)[.!]?$/i.test(message)) usageBalanceExhausted = true;
-    }
+    } else wrappedQuotaLine = 0;
     lineBytes = 0;
     discardLine = false;
   };
@@ -3509,6 +3747,7 @@ function observeGrokNativeStderr(stderr, flags) {
     readError,
     httpStatuses: [...httpStatuses].sort((a, b) => a - b),
     usageBalanceExhausted,
+    ...balanceHttpStatus === void 0 ? {} : { balanceHttpStatus },
     ...startupErrors.size ? { startupErrors: [...startupErrors.values()] } : {}
   });
 }
@@ -3517,9 +3756,10 @@ function grokStderrHasQuotaExhaustion({ ended, readError, oversizedLine, usageBa
 }
 function grokStreamingQuotaFailure(stderr, exit) {
   if (exit.signal !== null || exit.code === null || exit.code === 0 || !grokStderrHasQuotaExhaustion(stderr)) return void 0;
+  if (stderr.balanceHttpStatus === 402) return grokBalanceFailure;
   return { code: "provider_quota_exhausted", message: "Grok provider reported quota exhaustion in the stopped native invocation" };
 }
-var GROK_MAX_SCHEMA_ARGUMENT_BYTES, grokSettlementTiming, grokReadOnlyGuidance, exitDeadlineMessage, GrokAcpProtocolError, requestIds, stopReasons;
+var GROK_MAX_SCHEMA_ARGUMENT_BYTES, grokSettlementTiming, grokReadOnlyGuidance, exitDeadlineMessage, grokBalanceMessage, grokBalanceFailure, GrokAcpProtocolError, requestIds, stopReasons, grokWrappedQuotaLines;
 var init_grok = __esm({
   "src/llm_manager/native/grok.mjs"() {
     init_cli_probe();
@@ -3531,6 +3771,18 @@ var init_grok = __esm({
       candidate: "The current worktree holds the frozen candidate for this independent review. Inspect it directly with read_file, grep, and list_dir. Trace the relevant source, tests, and requirements to complete the requested review. Test execution is a separate verification stage."
     });
     exitDeadlineMessage = "Grok native exit was not observed before the settlement deadline";
+    grokBalanceMessage = "API error (status 402 Payment Required): Grok Build usage balance exhausted";
+    grokBalanceFailure = Object.freeze({
+      code: (
+        /** @type {const} */
+        "provider_quota_exhausted"
+      ),
+      message: "Grok Build reported HTTP 402 usage balance exhausted",
+      httpStatus: (
+        /** @type {const} */
+        402
+      )
+    });
     GrokAcpProtocolError = class extends Error {
       /** @param {string} message @param {GrokProtocolErrorCode} code */
       constructor(message, code = "invalid_protocol") {
@@ -3540,6 +3792,10 @@ var init_grok = __esm({
     };
     requestIds = Object.freeze({ initialize: 1, authenticate: 2, "session/new": 3, "session/prompt": 4 });
     stopReasons = /* @__PURE__ */ new Set(["end_turn", "max_tokens", "max_turn_requests", "refusal", "cancelled"]);
+    grokWrappedQuotaLines = `Error: Internal error: ${JSON.stringify({
+      message: grokBalanceMessage,
+      http_status: 402
+    }, null, 2)}`.split("\n");
   }
 });
 
@@ -3550,6 +3806,7 @@ __export(zcode_exports, {
   ZCodeProtocolError: () => ZCodeProtocolError,
   assertZCodeMcpRequestContext: () => assertZCodeMcpRequestContext,
   assertZCodeModelSnapshot: () => assertZCodeModelSnapshot,
+  connectZCodeStructuredSession: () => connectZCodeStructuredSession,
   decodeZCodeJsonText: () => decodeZCodeJsonText,
   decodeZCodeStructuredText: () => decodeZCodeStructuredText,
   inspectZCodeCliVersion: () => inspectZCodeCliVersion,
@@ -3560,6 +3817,7 @@ __export(zcode_exports, {
   isZCodePublicHttp429: () => isZCodePublicHttp429,
   nativeRpcTimeoutMessage: () => nativeRpcTimeoutMessage,
   observeZCodeFrozenReadTurn: () => observeZCodeFrozenReadTurn,
+  prepareZCodeRuntime: () => prepareZCodeRuntime,
   zcodeAppServerArgs: () => zcodeAppServerArgs,
   zcodeAssertSendAck: () => zcodeAssertSendAck,
   zcodeCapability: () => zcodeCapability,
@@ -3567,6 +3825,8 @@ __export(zcode_exports, {
   zcodeEventCollector: () => zcodeEventCollector,
   zcodeIdleObservation: () => zcodeIdleObservation,
   zcodeIsTerminal: () => zcodeIsTerminal,
+  zcodeLaunchIdentity: () => zcodeLaunchIdentity,
+  zcodeLaunchIdentityMatches: () => zcodeLaunchIdentityMatches,
   zcodeMcpClientMatches: () => zcodeMcpClientMatches,
   zcodeMessages: () => zcodeMessages,
   zcodeNativeConfigModel: () => zcodeNativeConfigModel,
@@ -3574,6 +3834,7 @@ __export(zcode_exports, {
   zcodeNativeIdentity: () => zcodeNativeIdentity,
   zcodeNativeModel: () => zcodeNativeModel,
   zcodeNativeSelection: () => zcodeNativeSelection,
+  zcodeNoninteractiveReadInstruction: () => zcodeNoninteractiveReadInstruction,
   zcodePermissionScope: () => zcodePermissionScope,
   zcodePlanModelMatches: () => zcodePlanModelMatches,
   zcodeProofEvent: () => zcodeProofEvent,
@@ -3594,9 +3855,11 @@ __export(zcode_exports, {
   zcodeWorktreeResponse: () => zcodeWorktreeResponse,
   zcodeWorktreeTurnMatches: () => zcodeWorktreeTurnMatches
 });
-import { randomUUID as randomUUID3 } from "node:crypto";
+import { createHash as createHash5, randomUUID as randomUUID3 } from "node:crypto";
+import { existsSync as existsSync2, mkdirSync, readFileSync as readFileSync3, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { constants as constants2 } from "node:os";
-import { join as join3 } from "node:path";
+import { dirname as dirname2, join as join3 } from "node:path";
+import { createInterface as createInterface5 } from "node:readline";
 import { isDeepStrictEqual } from "node:util";
 function isZCodeProviderRejection(failure) {
   return failure?.code === "unsupported" && failure.message === providerRejection;
@@ -3764,6 +4027,23 @@ function inspectZCodeCliVersion(launch, nativeConfiguration) {
   }
   return cliVersion;
 }
+function zcodeLaunchIdentity(cliPath, nativeConfiguration) {
+  const sha256 = (path) => createHash5("sha256").update(readFileSync3(path)).digest("hex");
+  const cliSha256 = sha256(cliPath);
+  const { builtinPath } = zcodeCapability;
+  const builtinSha256 = existsSync2(builtinPath) ? sha256(builtinPath) : void 0;
+  if (!nativeConfiguration) {
+    if (cliSha256 !== zcodeCapability.cliSha256 || builtinSha256 !== zcodeCapability.builtinSha256)
+      throw new ZCodeProtocolError("unsupported", "ZCode CLI or public builtin capability digest is unverified");
+    return { cliSha256, builtinSha256 };
+  }
+  return { cliSha256, builtinPath, ...builtinSha256 ? { builtinSha256 } : {} };
+}
+function zcodeLaunchIdentityMatches(evidence, nativeConfiguration) {
+  const sha256 = /^[a-f0-9]{64}$/;
+  const hasBuiltinDigest = typeof evidence.builtinSha256 === "string" && sha256.test(evidence.builtinSha256);
+  return typeof evidence.cliVersion === "string" && evidence.cliVersion.length > 0 && sha256.test(evidence.cliSha256) && (nativeConfiguration ? evidence.builtinPath === zcodeCapability.builtinPath && (evidence.builtinSha256 === void 0 || hasBuiltinDigest) : hasBuiltinDigest);
+}
 function zcodeRuntimeFiles(home, hostHome) {
   return {
     config: join3(home, ".zcode", "cli", "config.json"),
@@ -3793,6 +4073,24 @@ function zcodeRuntimeConfiguration() {
 }
 function zcodeWorktreeConfiguration() {
   return { ...zcodeRuntimeConfiguration(), features: { mcp: false, subagent: false, memory: false, skill: false } };
+}
+function prepareZCodeRuntime({ home, hostHome, tmp, path, worktree }) {
+  const { config, credentialSource, personal, credentialLink } = zcodeRuntimeFiles(home, hostHome);
+  for (const directory of [dirname2(config), dirname2(credentialLink)]) mkdirSync(directory, { recursive: true, mode: 448 });
+  const bytes = JSON.stringify(worktree ? zcodeWorktreeConfiguration() : zcodeRuntimeConfiguration());
+  if (existsSync2(config)) {
+    if (readFileSync3(config, "utf8") !== bytes) throw new ZCodeProtocolError("stale_result", "ZCode immutable native evidence differs");
+  } else {
+    const temporary = `${config}.${randomUUID3()}.tmp`;
+    writeFileSync(temporary, bytes, { mode: 256 });
+    renameSync(temporary, config);
+  }
+  if (existsSync2(credentialSource)) symlinkSync(credentialSource, credentialLink);
+  return {
+    config,
+    env: zcodeRuntimeEnv({ home, tmp, path, personal }),
+    protectedPaths: [config, credentialLink, credentialSource, personal, zcodeCapability.builtinPath]
+  };
 }
 function zcodePermissionScope(request, sessionId) {
   if (request.sessionId !== sessionId) return void 0;
@@ -3847,7 +4145,7 @@ function zcodeRpc(transport, { sessionId, permission, onProtocolError, isEnded, 
   const pending = /* @__PURE__ */ new Map();
   let nextId = 0;
   let closed = false;
-  const request = (method, params) => new Promise((resolve2, reject) => {
+  const request = (method, params) => new Promise((resolve3, reject) => {
     if (closed || isEnded?.() || !transport.isWritable()) {
       reject(new ZCodeProtocolError("cancellation_pending", "ZCode native transport ended before exact settlement"));
       return;
@@ -3857,7 +4155,7 @@ function zcodeRpc(transport, { sessionId, permission, onProtocolError, isEnded, 
       pending.delete(id);
       reject(new ZCodeProtocolError("native_rpc_timeout", nativeRpcTimeoutMessage(method)));
     }, timeoutMs);
-    pending.set(id, { resolve: resolve2, reject, timer });
+    pending.set(id, { resolve: resolve3, reject, timer });
     try {
       transport.write(zcodeProtocolLine({ id, method, params }));
     } catch (error) {
@@ -3966,6 +4264,71 @@ function zcodeRpc(transport, { sessionId, permission, onProtocolError, isEnded, 
         waiter.reject(new ZCodeProtocolError("cancellation_pending", "ZCode transport closed"));
       }
       pending.clear();
+    }
+  };
+}
+function connectZCodeStructuredSession({ stdin, stdout }, { identity, worktree, managed, permission, ...rpcOptions }) {
+  const { sessionId } = identity;
+  const lines = createInterface5({ input: stdout });
+  const rpc = zcodeRpc({
+    write: (line) => {
+      stdin.write(line);
+    },
+    isWritable: () => stdin.writable,
+    subscribe: (receive) => {
+      lines.on("line", receive);
+      return () => {
+        lines.off("line", receive);
+      };
+    }
+  }, { ...rpcOptions, sessionId, ...permission ? { permission: (request) => permission(zcodePermissionScope(request, sessionId)) } : {} });
+  const collector = zcodeEventCollector({ ...identity, worktree });
+  return {
+    /** @param {Omit<Parameters<typeof zcodeCreateInput>[0], 'sessionId'> & {generic: boolean}} input
+     * @param {(sessionId: string) => void | Promise<void>} onCreated
+     */
+    async open({ generic, ...input }, onCreated) {
+      const session = zcodeRequireSession(await rpc.create(zcodeCreateInput({ ...input, sessionId })), sessionId);
+      await onCreated(sessionId);
+      return zcodeSelectSessionModel(session, await rpc.readModel(), input.selection, generic);
+    },
+    /** @param {ReturnType<typeof zcodeSendInput>} input @param {string} queryId */
+    async send(input, queryId) {
+      zcodeAssertSendAck(await rpc.send(input, queryId), sessionId);
+    },
+    /** @param {Parameters<ReturnType<typeof zcodeEventCollector>['accept']>[1] & {
+     *   beforePoll(): void | Promise<void>, onEvents(events: NativeEvent[], counts: Record<string, number>): void
+     * }} observation
+     * @param {() => boolean} [canRetry]
+     */
+    async poll({ beforePoll, onEvents, ...observation }, canRetry) {
+      const attempt = async () => {
+        await beforePoll();
+        const terminal = await collector.accept(await rpc.events(collector.cursor), observation);
+        onEvents(collector.events, collector.counts);
+        const failure = zcodeTerminalFailure(terminal, worktree, managed);
+        if (failure) throw failure;
+        return terminal;
+      };
+      try {
+        return await attempt();
+      } catch (error) {
+        if (!canRetry?.() || !isZCodeEventsTimeout(error)) throw error;
+        const recovered = await attempt();
+        if (!canRetry() || zcodeSuccessfulTerminal({ ...identity, turnId: collector.turnId }, recovered) === void 0) throw error;
+        return recovered;
+      }
+    },
+    messages: rpc.messages,
+    stop: rpc.stop,
+    /** @param {string | undefined} turnId */
+    async readIdle(turnId) {
+      return zcodeIdleObservation(await rpc.readIdle(), { sessionId, turnId });
+    },
+    closeSession: rpc.closeSession,
+    close() {
+      lines.close();
+      rpc.close();
     }
   };
 }
@@ -4383,7 +4746,7 @@ function observeZCodeFrozenReadTurn({ sessionId, turnId, inputId, prompt, provid
   }
   return { calls, reads, response, realUserModelSelection: record(user.info.modelSelection) };
 }
-var zcodeCapability, ZCodeProtocolError, providerRejection, ZCodeNativeTurnFailedError, nativeRpcTimeoutMessage, zcodeVersionArgs, zcodeNativeIdentity, zcodeAppServerArgs, terminalTypes;
+var zcodeCapability, zcodeNoninteractiveReadInstruction, ZCodeProtocolError, providerRejection, ZCodeNativeTurnFailedError, nativeRpcTimeoutMessage, zcodeVersionArgs, zcodeNativeIdentity, zcodeAppServerArgs, terminalTypes;
 var init_zcode = __esm({
   "src/llm_manager/native/zcode.mjs"() {
     init_cli_probe();
@@ -4394,6 +4757,7 @@ var init_zcode = __esm({
       builtinPath: "/Applications/ZCode.app/Contents/Resources/config/provider/zcode-builtin.json",
       tool: "mcp__frozen__spex_read_frozen"
     });
+    zcodeNoninteractiveReadInstruction = "This read-only turn must return the complete schema JSON. Do not request plan approval or call ExitPlanMode.\n";
     ZCodeProtocolError = class extends Error {
       /** @param {ProtocolErrorCode} code @param {string} message @param {{threadId?: string, turnId?: string}} [detail] */
       constructor(code, message, detail = {}) {
@@ -4433,9 +4797,9 @@ init_cursor();
 init_grok();
 init_zcode();
 import { spawn, spawnSync as spawnSync2 } from "node:child_process";
-import { realpathSync as realpathSync2 } from "node:fs";
+import { realpathSync as realpathSync3 } from "node:fs";
 var nativeRuntimeVersion = 1;
-var nativeAdapterContract = 6;
+var nativeAdapterContract = 7;
 var commands = Object.freeze({
   claude: "claude",
   codex: "codex",
@@ -4460,7 +4824,7 @@ function loadNativeAdapter(vendor) {
 function findNativeExecutable(vendor) {
   const located = spawnSync2("/usr/bin/which", [commands[vendor]], { encoding: "utf8", timeout: 1e4 });
   const executable = located.status === 0 && located.stdout.trim();
-  return executable ? realpathSync2(executable) : void 0;
+  return executable ? realpathSync3(executable) : void 0;
 }
 function spawnGatedNativeProcess(command, args, { cwd, env, stderr = "pipe" }) {
   return spawn("/bin/sh", [
