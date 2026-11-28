@@ -3695,6 +3695,7 @@ function observeGrokNativeStderr(stderr, flags) {
   const httpStatuses = /* @__PURE__ */ new Set();
   const startupErrors = /* @__PURE__ */ new Map();
   let bytes = 0, lineBytes = 0, discardLine = false, oversizedLine = false, usageBalanceExhausted = false, readError = false;
+  let balanceHttpStatus;
   let wrappedQuotaLine = 0;
   const finishLine = () => {
     if (!discardLine) {
@@ -3704,6 +3705,7 @@ function observeGrokNativeStderr(stderr, flags) {
         if (wrappedQuotaLine === grokWrappedQuotaLines.length) {
           httpStatuses.add(402);
           usageBalanceExhausted = true;
+          balanceHttpStatus = 402;
           wrappedQuotaLine = 0;
         }
       } else wrappedQuotaLine = Number(startupLine === grokWrappedQuotaLines[0]);
@@ -3745,6 +3747,7 @@ function observeGrokNativeStderr(stderr, flags) {
     readError,
     httpStatuses: [...httpStatuses].sort((a, b) => a - b),
     usageBalanceExhausted,
+    ...balanceHttpStatus === void 0 ? {} : { balanceHttpStatus },
     ...startupErrors.size ? { startupErrors: [...startupErrors.values()] } : {}
   });
 }
@@ -3753,7 +3756,7 @@ function grokStderrHasQuotaExhaustion({ ended, readError, oversizedLine, usageBa
 }
 function grokStreamingQuotaFailure(stderr, exit) {
   if (exit.signal !== null || exit.code === null || exit.code === 0 || !grokStderrHasQuotaExhaustion(stderr)) return void 0;
-  if (stderr.usageBalanceExhausted && stderr.httpStatuses.includes(402)) return grokBalanceFailure;
+  if (stderr.balanceHttpStatus === 402) return grokBalanceFailure;
   return { code: "provider_quota_exhausted", message: "Grok provider reported quota exhaustion in the stopped native invocation" };
 }
 var GROK_MAX_SCHEMA_ARGUMENT_BYTES, grokSettlementTiming, grokReadOnlyGuidance, exitDeadlineMessage, grokBalanceMessage, grokBalanceFailure, GrokAcpProtocolError, requestIds, stopReasons, grokWrappedQuotaLines;

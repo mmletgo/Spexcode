@@ -855,6 +855,7 @@ test('Grok passes the real HTTP 402 through after exact native stop and no termi
   assert.deepEqual(await stopGrokStructuredTurn(f.state()), { nativeStopped: true, acknowledged: false, nativeStatus: 'stopped' })
   const receipt = JSON.parse(readFileSync(join(f.sessionRoot, 'missing-terminal-diagnostic.json'), 'utf8'))
   assert.deepEqual(receipt.stderr.httpStatuses, [402])
+  assert.equal(receipt.stderr.balanceHttpStatus, 402)
   assert.equal(receipt.stderr.usageBalanceExhausted, true)
   assert.equal(existsSync(join(f.sessionRoot, 'result.json')), false)
 })
