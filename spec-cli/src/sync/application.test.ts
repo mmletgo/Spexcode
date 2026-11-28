@@ -38,7 +38,7 @@ import { composeControlledRequest, prepareControlledRequest, renderControlledDec
 import { inspectTrustedRuntime } from './trusted-hooks.js'
 import type { NativeRunPlan, NativeRunCheckpoint } from './native-run.js'
 import type { SyncCoordinatorPlan } from './coordinator-types.js'
-import type { ApplyJournal, BaselinePair, VerificationResultBlob } from './operation-types.js'
+import type { ApplyJournal, BaselinePair, SyncOperation, VerificationResultBlob } from './operation-types.js'
 
 const settings = {
   version: 'sync-settings-v1', nodeIds: ['demo'], sourcePaths: ['src'], testPaths: ['tests'], readPaths: ['package.json'],
@@ -1505,6 +1505,71 @@ test('暂停启用后显式提交快照初始化与自动观察共用 operation 
     await f.application.wait(next.id)
     assert.ok(f.calls.some(call => call.model === next.model))
   } finally { await f.application.stopService(); f.cleanup() }
+})
+
+test('有提交观察历史时继续同一提交的显式初始化', async t => {
+  for (const timing of ['恢复前', '观察选路期间'] as const) await t.test(timing, async () => {
+  const f = await fixture({ ...settings, model: 'claude:default' }, undefined, true)
+  try {
+    governDemoCode(f)
+    await f.application.enable()
+    f.application.start = () => {}
+    await f.application.startService({ compensationMs: 10000 })
+    const source = (await captureInputSnapshot(f.root, { committed: true })).source
+    const old = f.application.store.listCommittedObservationFrontiers(source).find(item => item.operationId)
+    assert.ok(old?.operationId)
+
+    await f.application.automaticControl('pause')
+    writeFileSync(join(f.root, 'src/demo.mjs'), 'export const demo = text => String(text)\n')
+    f.git(['add', 'src/demo.mjs']); f.git(['commit', '-qm', 'source repaired before a new initial'])
+    const submissions: SyncOperation[] = []
+    const submit = async () => {
+      const operation = (await f.application.submit({
+        nodeId: 'demo', requestId: 'refrozen-explicit-initial', origin: 'initial', committed: true, model: 'grok:default',
+      })).operation!
+      assert.equal(operation.phase, 'queued')
+      assert.notEqual(operation.input.id, old.input.id)
+      submissions.push(operation)
+    }
+    if (timing === '恢复前') await submit()
+    else {
+      const resolve = f.application['resolveDefaultModel'].bind(f.application)
+      f.application['resolveDefaultModel'] = async (...args) => {
+        f.application['resolveDefaultModel'] = resolve
+        await submit()
+        return resolve(...args)
+      }
+    }
+    await f.application.automaticControl('resume')
+    if (timing === '观察选路期间') {
+      assert.ok(f.application.store.listObservations(source).some(item => item.reason?.code === 'SYNC_OBSERVATION_BINDING'))
+      await f.application['scanObservedInput']()
+    }
+    assert.equal(submissions.length, 1)
+    const [explicit] = submissions
+    assert.notEqual(f.application.store.readOperation(explicit.id).phase, 'superseded')
+    const operations = f.application.store.listOperations(source.repositoryId)
+    assert.deepEqual(operations.filter(item => item.input.id === explicit.input.id).map(item => item.id), [explicit.id])
+    const consumed = f.application.store.listCommittedObservationFrontiers(source).find(item => item.input.id === explicit.input.id && item.operationId)
+    assert.ok(consumed)
+    assert.equal(consumed.operationId, explicit.id)
+    assert.equal(consumed.outcome, 'duplicate')
+    const difference = JSON.parse(readEvidence(source.commonDir, { sha256: consumed.latestDifferenceDigest }).toString('utf8'))
+    assert.equal(difference.policyDigest, explicit.policyDigest)
+    assert.equal(difference.selection, consumed.selectionDigest)
+    assert.equal(consumed.selectionDigest, explicit.baselineSelection?.digest)
+    await f.application.wait(explicit.id)
+
+    writeFileSync(join(f.root, 'src/demo.mjs'), 'export const demo = text => String(text).trim()\n')
+    f.git(['add', 'src/demo.mjs']); f.git(['commit', '-qm', 'later code change'])
+    await f.application['scanObservedInput']()
+    const next = f.application.store.listOperations(source.repositoryId)[0]
+    assert.equal(next.origin, 'code')
+    assert.notEqual(next.input.id, explicit.input.id)
+    const plan = JSON.parse(readEvidence(source.commonDir, next.planBlob!).toString('utf8'))
+    assert.equal(plan.commitTrigger.before.id, explicit.input.id)
+  } finally { await f.application.stopService(); f.cleanup() }
+  })
 })
 
 test('首次自动观察归并重新入队的提交初始化，保留被替换的旧接入', async () => {

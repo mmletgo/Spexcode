@@ -67,6 +67,7 @@ type RevalidationProof = ReturnType<typeof proveUnadoptedDelivery>
 type NativeDispatchBinding = Pick<DispatchPlan, 'key' | 'purpose' | 'requestDigest' | 'managedModel'>
 const sameDispatchBinding = (a: NativeDispatchBinding, b: NativeDispatchBinding): boolean =>
   a.purpose === b.purpose && a.requestDigest === b.requestDigest && a.managedModel === b.managedModel
+type ExplicitInitialObservation = { policyDigest: string; selectionDigest: string; operationId?: string }
 type ObservedDispatchFence = {
   fenceDigest: string; dataVersion: number; totalChanges: number; expiresAtMs: number; deadlineAtMs: number | null
   dispatches: Map<string, NativeDispatchBinding>
@@ -412,7 +413,8 @@ export class SyncStore {
   }
   /** 稳定接入记录与既有消息派发计划共享一个 SQL 事务。 */
   admitAndEnqueue(input: AdmitSyncInput): SyncOperation { return this.admitWithObservation(input) }
-  private admitWithObservation(input: AdmitSyncInput, observation?: SyncObservation, explicitInitialId?: string): SyncOperation {
+  private admitWithObservation(input: AdmitSyncInput, observation?: SyncObservation, explicitInitial?: ExplicitInitialObservation): SyncOperation {
+    const explicitInitialId = explicitInitial?.operationId
     validateScope(input.scope)
     if (input.automaticSourceAdoption !== undefined && (input.automaticSourceAdoption !== 'canonical-source-v1' || !['initial', 'spec', 'code', 'combined'].includes(input.origin))) fail('SYNC_AUTOMATIC_ADOPTION_POLICY', '自动主来源采纳只接受可信应用冻结的新操作政策')
     if (input.recordUnverifiedCoverage !== undefined && (input.recordUnverifiedCoverage !== true || observation || input.requestBlob || !input.planBlob || !['initial', 'code'].includes(input.origin))) fail('SYNC_COVERAGE_AUTHORITY', '记录未执行验收覆盖需要显式只读同步请求')
@@ -458,6 +460,7 @@ export class SyncStore {
       if (observation) {
         if (this.physicalControl(tx, physicalScope(input.input.source)).revision !== observation.controlRevision) fail('SYNC_CONTROL_STALE', 'observation physical control changed')
         if (!input.baselineSelection || input.baselineSelection.digest !== observation.selectionDigest) fail('SYNC_BASELINE_STALE', 'observation selection differs from frozen input')
+        if (explicitInitial && this.explicitCommittedInitial(tx, input.input, explicitInitial.policyDigest, explicitInitial.selectionDigest)?.id !== explicitInitialId) fail('SYNC_OBSERVATION_BINDING', '观察准入期间显式初始化身份发生变化')
       }
       if (observation && input.baselineSelection) this.assertSelection(tx, input.input.source, input.baselineSelection, scopeResources(input.scope))
       const finish = (operation: SyncOperation, outcome: 'admitted' | 'coalesced' | 'duplicate'): SyncOperation => {
@@ -608,13 +611,13 @@ export class SyncStore {
     const observation = this.observation(input, expected)
     return this.write(tx => { this.saveObservation(tx, observation); return observation })
   }
-  observeAndAdmit(input: SyncObservationInput, admission: AdmitSyncInput, expected: { controlRevision: number; selectionDigest: string; explicitInitialId?: string }): ObserveAndAdmitResult {
+  observeAndAdmit(input: SyncObservationInput, admission: AdmitSyncInput, expected: { controlRevision: number; selectionDigest: string; explicitInitial?: ExplicitInitialObservation }): ObserveAndAdmitResult {
     this.blob(input.configRef)
     const observation = this.observation(input, expected)
     if (input.failure) { observation.outcome = 'blocked'; observation.reason = clone(input.failure); this.write(tx => this.saveObservation(tx, observation)); return { outcome: 'blocked', observation, reason: input.failure } }
     try {
       if (!input.selection || digest(inputPayload(input.input)) !== digest(inputPayload(admission.input)) || input.selection.digest !== admission.baselineSelection?.digest || input.selection.digest !== expected.selectionDigest) fail('SYNC_OBSERVATION_BINDING', 'captured snapshot or selection differs from planned admission')
-      const operation = this.admitWithObservation(admission, observation, expected.explicitInitialId)
+      const operation = this.admitWithObservation(admission, observation, expected.explicitInitial)
       return { outcome: observation.outcome as 'admitted' | 'coalesced' | 'duplicate', operation, observation }
     } catch (error) {
       if (!(error instanceof SyncStoreError)) throw error
@@ -1255,14 +1258,17 @@ export class SyncStore {
     return this.write(tx => parseRecord<SyncOperation>(tx.query('SELECT record_json FROM sync_operations WHERE ingress_key=? OR EXISTS (SELECT 1 FROM json_each(sync_operations.ingress_aliases_json) WHERE value=?)', ingressKey, ingressKey)[0]))
   }
   findExplicitCommittedInitial(input: InputSnapshot, policyDigest: string, selectionDigest: string): SyncOperation | null {
+    return this.write(tx => this.explicitCommittedInitial(tx, input, policyDigest, selectionDigest))
+  }
+  private explicitCommittedInitial(tx: ProtocolTransaction, input: InputSnapshot, policyDigest: string, selectionDigest: string): SyncOperation | null {
     const prefix = `application:${input.source.repositoryId}:${input.source.canonicalRoot}:`
-    return this.write(tx => parseRecord<SyncOperation>(tx.query(`SELECT record_json FROM sync_operations
+    return parseRecord<SyncOperation>(tx.query(`SELECT record_json FROM sync_operations
       WHERE repository_id=? AND source_root=? AND source_key=? AND substr(ingress_key,1,length(?))=?
         AND json_extract(record_json,'$.origin')='initial' AND json_extract(record_json,'$.input.captureKind')='commit'
         AND json_extract(record_json,'$.input.id')=? AND json_extract(record_json,'$.policyDigest')=?
         AND json_extract(record_json,'$.baselineSelection.digest')=? AND json_extract(record_json,'$.requestBlob') IS NULL
         AND json_extract(record_json,'$.retryOf') IS NULL AND json_extract(record_json,'$.recordUnverifiedCoverage') IS NULL
-      ORDER BY generation DESC LIMIT 1`, input.source.repositoryId, input.source.canonicalRoot, identityKey(input.source), prefix, prefix, input.id, policyDigest, selectionDigest)[0]))
+      ORDER BY generation DESC LIMIT 1`, input.source.repositoryId, input.source.canonicalRoot, identityKey(input.source), prefix, prefix, input.id, policyDigest, selectionDigest)[0])
   }
   findIngressReceipt(ingressKey: string): SyncIngressReceipt | null { return this.write(tx => parseRecord<SyncIngressReceipt>(tx.query('SELECT record_json FROM sync_ingress_receipts WHERE ingress_key=?', ingressKey)[0])) }
   /** 只找当前 HEAD 的正式后继；真实采纳仍由应用在来源发布锁内完整核验。 */

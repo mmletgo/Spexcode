@@ -146,7 +146,7 @@ Dashboard 的受控正文保存继续直接 submit，requestBlob 即时触发 sp
 
 自动 ingress 固定到提交快照与节点，同一 commit 重放不因 baseline 或差异证据推进而重新派发；已结算 receipt/baseline 继续按真实意图消费和采纳证明消除同步自身交付/采纳提交的回声，不按 Git author 或 session trailer 猜测作者。停机提交在 service 启动及周期补偿中继续发现。新 commit 沿既有作用域、物理控制和预算族门禁，不新增触发配置开关。
 
-首次自动观察遇到已显式接入的同一 committed initial，按精确来源、输入、节点计划与基线选择认出该接入。同一初始化经正式替换后重新入队时，绑定最新一代操作。自动接入复用原计划和已固定模型，沿既有事务归并指定操作及记录当前提交消费边界。原请求、预算、配置和验收保持。带正文差量、显式重试和未执行覆盖授权的操作保持各自接入边界，真正的新提交继续自动分类。
+自动观察遇到已显式接入的同一 committed initial，按精确来源、输入、无累计提交触发的初始化计划与基线选择认出该接入。已有提交消费前沿时，观察从同一快照推断的方向仍以精确的显式初始化为当前提交接入；后续不同提交继续按累计差量自动分类。同一初始化经正式替换后重新入队时，绑定最新一代操作。自动接入复用原计划和已固定模型，沿既有事务归并指定操作及记录当前提交消费边界。原请求、预算、配置和验收保持。带正文差量、显式重试和未执行覆盖授权的操作保持各自接入边界。
 
 混合资源heads中的旧只读context不改原差异判据。仅从当前exact selection的非null pair定位其实际receipt/journal，核原source、启用配置与节点授权、全部settled journal、四层证据、实际完整scope及Git commit/tree/parent/effect，且当前HEAD/tree精确等于该完整receipt时，观察器才可沿原baseline消费接缝消除自身写回。最近已消费frontier到真实receipt parent只允许空差量，或唯一同mode普通配置文件的有效完整项目JSON变化。parent/current配置原字节摘要与mode须等于receipt原input，且当前已重新授权。完整交付已按该input冻结的配置及验证政策通过全部门禁，配置字段不另设可消费名册。未被该完整receipt逐字绑定的配置、code、业务Spec、只读docs或混合差量保原观察。外部同tree新commit不冒认receipt，同一已接入快照的重复记录仍复用既有前沿，不伪结算原外部操作。此证明复用[[sync-source-adoption]]的纯settledReceipt与[[sync-landing-status]]读取，不调用adopt写入准入、不要求物理run或无在途资源。paused观察仍健康且不派发，仅写既有observation消费证据，不新建或改写receipt、baseline、journal与业务完成状态。
 
