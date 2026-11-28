@@ -141,7 +141,8 @@ try{
   if(scenario==='settled-read-pending'){
    const home=join(runtimeRoot(),'structured-read-only-v1/data/codex-home'),proof=JSON.parse(readFileSync(join(home,'pending-settlement-read.json'),'utf8')),before=readRecord(id).structuredExecution.cancellation;
    const row=(await listSessions()).find(s=>s.id===id);
-   if(proof.threadId!==cancellation.threadId||proof.turnId!==cancellation.turnId||proof.status!=='interrupted'||cancellation.nativeStopped||cancellation.acknowledged||cancellation.error!=='exact structured turn read timed out'||readRecord(id).structuredExecution.state!=='cancelling'||row.liveness!=='unknown')throw new Error('settled native turn without an exact read became falsely terminal');
+   // The host deadline detaches the Manager observer while the exact native read is unanswered.
+   if(proof.threadId!==cancellation.threadId||proof.turnId!==cancellation.turnId||proof.status!=='interrupted'||cancellation.nativeStopped||cancellation.acknowledged||cancellation.error!=='Codex persistent observer detached'||readRecord(id).structuredExecution.state!=='cancelling'||row.liveness!=='unknown')throw new Error('settled native turn without an exact read became falsely terminal');
    try{await runStructuredSession(request('second','queue-before-read-proof',300));throw new Error('unread settled native task released its model capacity');}catch(e){if(e.code!=='timeout')throw e;}
    const count=JSON.parse(readFileSync(join(home,'protocol-counts.json'),'utf8'));if(count.threadStarts!==1||count.turnStarts!==1)throw new Error('unread settlement launched a second native task');
    writeFileSync(join(home,'release-settlement-read'),'released');
