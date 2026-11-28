@@ -1,4 +1,4 @@
-import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE, ELABORATION_GENERATION_GUIDANCE_V1, ELABORATION_GENERATION_GUIDANCE_V2, ELABORATION_GENERATION_GUIDANCE_V3, ELABORATION_GENERATION_GUIDANCE_V4, READONLY_SPEC_REPAIR_RENDER_BASE, partitionedElaborationCoverageMatches, type AnalysisOnlyPartitionEvidence, type ElaborationGenerationGuidance } from './elaboration-types.js'
+import { ELABORATION_BOUNDARIES, ELABORATION_COMPACT_CONTEXT, ELABORATION_GENERATION_GUIDANCE, ELABORATION_GENERATION_GUIDANCE_V1, ELABORATION_GENERATION_GUIDANCE_V2, ELABORATION_GENERATION_GUIDANCE_V3, ELABORATION_GENERATION_GUIDANCE_V4, READONLY_SPEC_REPAIR_RENDER_BASE, partitionedElaborationCoverageMatches, type AnalysisOnlyPartitionEvidence, type ElaborationGenerationGuidance } from './elaboration-types.js'
 import { finiteSyncBudget, syncDeadlineExpired } from './budget.js'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { assertWorktreeSyncModel, syncModel, syncModelBinding } from './model-selection.js'
@@ -5231,20 +5231,29 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
       if (!elaboration) {
         store.renewLease(fence, leaseMs); await yieldToControl(); store.renewLease(fence, leaseMs)
         if (operation.phase === 'analyzing') store.startElaboration(fence)
-        let protocol = stage<{ version: 'elaboration-draft-v1' } & Pick<ElaborationInput, 'incrementalDraft' | 'generationGuidance' | 'applicabilityGuidance' | 'reviewItemIdGuidance' | 'compactSealDiagnostics' | 'citationRepairDiagnostics' | 'defaultExportCitation' | 'sharedDraftDiagnostics' | 'draftRepairDisposition' | 'parentInterfaceReview' | 'propagateAuthoredParentScope'>>(store, operation, attempt, 'elaboration-draft-protocol')
+        let protocol = stage<{ version: 'elaboration-draft-v1' } & Pick<ElaborationInput, 'incrementalDraft' | 'generationGuidance' | 'applicabilityGuidance' | 'reviewItemIdGuidance' | 'nativeContext' | 'compactSealDiagnostics' | 'citationRepairDiagnostics' | 'defaultExportCitation' | 'sharedDraftDiagnostics' | 'draftRepairDisposition' | 'parentInterfaceReview' | 'propagateAuthoredParentScope'>>(store, operation, attempt, 'elaboration-draft-protocol')
         if (!protocol && options.plan.agentWorkflow && !attempt.dispatchPlans.some(dispatch => dispatch.purpose.startsWith('elaboration_'))) {
           const approved = reviewContinuation?.elaboration
           const propagateAuthoredParentScope = approved
             ? stage<Pick<ElaborationInput, 'propagateAuthoredParentScope'>>(store, store.readOperation(approved.operationId), store.readAttempt(approved.attemptId), 'elaboration-draft-protocol')?.propagateAuthoredParentScope
             : options.plan.version === 'sync-coordinator-v2' && options.plan.direction === 'spec_to_code' ? true : undefined
-          protocol = { version: 'elaboration-draft-v1', incrementalDraft: incrementalDraftCommand(), generationGuidance: ELABORATION_GENERATION_GUIDANCE, applicabilityGuidance: 'root-summary-v1', reviewItemIdGuidance: 'contract-item-ids-v1', compactSealDiagnostics: true, citationRepairDiagnostics: 'actionable-v1', defaultExportCitation: true, sharedDraftDiagnostics: true, draftRepairDisposition: true, parentInterfaceReview: 'scope-v2', ...(propagateAuthoredParentScope ? { propagateAuthoredParentScope } : {}) }
+          let nativeContext: ElaborationInput['nativeContext'] = ELABORATION_COMPACT_CONTEXT
+          for (const owner of retryOperationLineage(store, operation)) {
+            const prior = store.listAttempts(owner.id).reverse()
+              .find(prior => prior.id !== attempt!.id && prior.dispatchPlans.some(dispatch => dispatch.purpose.startsWith('elaboration_')))
+            if (!prior) continue
+            nativeContext = stage<Pick<ElaborationInput, 'nativeContext'>>(store, owner, prior, 'elaboration-draft-protocol')?.nativeContext
+            break
+          }
+          protocol = { version: 'elaboration-draft-v1', incrementalDraft: incrementalDraftCommand(), generationGuidance: ELABORATION_GENERATION_GUIDANCE, applicabilityGuidance: 'root-summary-v1', reviewItemIdGuidance: 'contract-item-ids-v1', ...(nativeContext ? { nativeContext } : {}), compactSealDiagnostics: true, citationRepairDiagnostics: 'actionable-v1', defaultExportCitation: true, sharedDraftDiagnostics: true, draftRepairDisposition: true, parentInterfaceReview: 'scope-v2', ...(propagateAuthoredParentScope ? { propagateAuthoredParentScope } : {}) }
           saveStage(store, fence, 'elaboration-draft-protocol', protocol)
         }
         if (protocol && Object.hasOwn(protocol, 'generationGuidance') && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V1 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V2 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V3 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE_V4 && protocol.generationGuidance !== ELABORATION_GENERATION_GUIDANCE) fail('elaboration_generation_guidance_unsupported', '持久P1生成提示版本不受支持；仅字段缺席允许原提示')
         if (protocol?.applicabilityGuidance !== undefined && protocol.applicabilityGuidance !== 'root-summary-v1') fail('elaboration_applicability_guidance_unsupported', '持久P1根级适用性提示版本不受支持')
         if (protocol?.reviewItemIdGuidance !== undefined && protocol.reviewItemIdGuidance !== 'contract-item-ids-v1') fail('elaboration_review_item_id_guidance_unsupported', '持久P1独审条目 ID 提示版本不受支持')
+        if (protocol?.nativeContext !== undefined && protocol.nativeContext !== ELABORATION_COMPACT_CONTEXT) fail('elaboration_native_context_unsupported', '持久P1提示传输版本不受支持')
         const draftProtocol = protocol?.version
-        const elaborationInput = { ...makeElaborationInput(draftProtocol), incrementalDraft: protocol?.incrementalDraft, generationGuidance: protocol?.generationGuidance, applicabilityGuidance: protocol?.applicabilityGuidance, reviewItemIdGuidance: protocol?.reviewItemIdGuidance, compactSealDiagnostics: protocol?.compactSealDiagnostics, citationRepairDiagnostics: protocol?.citationRepairDiagnostics, defaultExportCitation: protocol?.defaultExportCitation, sharedDraftDiagnostics: protocol?.sharedDraftDiagnostics, draftRepairDisposition: protocol?.draftRepairDisposition, parentInterfaceReview: protocol?.parentInterfaceReview, propagateAuthoredParentScope: protocol?.propagateAuthoredParentScope }
+        const elaborationInput = { ...makeElaborationInput(draftProtocol), incrementalDraft: protocol?.incrementalDraft, generationGuidance: protocol?.generationGuidance, applicabilityGuidance: protocol?.applicabilityGuidance, reviewItemIdGuidance: protocol?.reviewItemIdGuidance, nativeContext: protocol?.nativeContext, compactSealDiagnostics: protocol?.compactSealDiagnostics, citationRepairDiagnostics: protocol?.citationRepairDiagnostics, defaultExportCitation: protocol?.defaultExportCitation, sharedDraftDiagnostics: protocol?.sharedDraftDiagnostics, draftRepairDisposition: protocol?.draftRepairDisposition, parentInterfaceReview: protocol?.parentInterfaceReview, propagateAuthoredParentScope: protocol?.propagateAuthoredParentScope }
         const loadDraft = draftProtocol ? (schemaDigest: string): ElaborationDraft | null => {
           const draft = loadElaborationDraft('elaboration', undefined, schemaDigest)
           return draft && cacheDraft ? { ...draft, errors: [...draft.errors, ...cacheDraft.errors] } : draft
