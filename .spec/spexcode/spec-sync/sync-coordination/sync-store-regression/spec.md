@@ -14,7 +14,7 @@ code:
 
 ## expanded spec
 
-writer81→82 和 writer82→83 复用真实 SQLite 围栏回归，核对失败原子回滚、旧 writer 拒写、原表与索引一致及在线备份可由旧 writer 打开。
+writer81→82、writer82→83 和 writer83→84 复用真实 SQLite 围栏回归，核对失败原子回滚、旧 writer 拒写、原表与索引一致及在线备份可由旧 writer 打开。
 
 writer76 升 writer77 保留实际 SQLite 索引及原检查点，旧 writer 拒绝读取较新标记，一致备份可回退。
 

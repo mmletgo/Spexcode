@@ -1935,7 +1935,7 @@ type ApprovalSourceLineage = { ancestors?: SyncOperation[]; settled: Set<string>
 type ApprovedBehaviorPartition = NonNullable<CodeBehaviorAnalysis['partitionEvidence']>[number]
 type ApprovalSourceOptions = {
   expectedReadSetDigest: string; expectedComposedDigest: string
-  frozenLegacy?: boolean; inline?: boolean; analysisSchemaDigest?: string; authorization?: P0ReviewAuthorization
+  frozenLegacy?: boolean; inline?: boolean; exactRetryFreeze?: true; analysisSchemaDigest?: string; authorization?: P0ReviewAuthorization
 }
 
 function* approvedBehaviorPartitionSource(store: SyncStore, operation: SyncOperation, ownerOperation: SyncOperation, origin: SyncAttempt, planDigest: string, member: ApprovedBehaviorPartition, selection: FrozenBaselineSelection | undefined, checkpoints: (attempt: SyncAttempt) => SyncCheckpointStageView, lineage: ApprovalSourceLineage, options: ApprovalSourceOptions): Generator<void, string | SyncAttempt> {
@@ -1974,7 +1974,7 @@ function* approvedBehaviorPartitionSource(store: SyncStore, operation: SyncOpera
       if (currentPosition < 0 || previousPosition <= currentPosition) return `原P0 owner没有严格更早的正式retryOf来源: ${member.partitionId}`
       for (const ancestor of lineage.ancestors.slice(currentPosition + 1, previousPosition + 1)) {
         if (lineage.settled.has(ancestor.id)) continue
-        if (!settledApprovalSource(store, ancestor) || frozenLegacy && (canonical(ancestor.input) !== canonical(operation.input) || ancestor.planBlob?.sha256 !== operation.planBlob?.sha256)) return `原P0 owner正式祖先未结算或冻结身份已改变: ${member.partitionId}`
+        if (!settledApprovalSource(store, ancestor) || (frozenLegacy || options.exactRetryFreeze) && (canonical(ancestor.input) !== canonical(operation.input) || ancestor.planBlob?.sha256 !== operation.planBlob?.sha256)) return `原P0 owner正式祖先未结算或冻结身份已改变: ${member.partitionId}`
         lineage.settled.add(ancestor.id)
         yield
       }
@@ -2019,16 +2019,22 @@ function historicalBehaviorAuthor(store: SyncStore, source: CrossFreezeSource, p
         || local.result.guidanceContractVersion !== CODE_BEHAVIOR_GUIDANCE_VERSION
         || canonical([...partition.changedPaths].sort()) !== canonical([...changedPaths].sort())
         || local.result.inputId !== old.input.id || local.result.policyDigest !== old.policyDigest) return null
+    const lineage: ApprovalSourceLineage = { settled: new Set() }
     const origin = finishApprovalProof(approvedBehaviorPartitionSource(store, old, owner, attempt, plan.resultRef.sha256,
       { partitionId, changedPaths: [...changedPaths], analysisRef: local.resultRef, analysis: local.result },
-      selection, indexFor, { settled: new Set() }, { expectedReadSetDigest: wrapper.readSetDigest, expectedComposedDigest: attempt.composedInput.contentDigest }))
-    if (typeof origin === 'string' || origin.operationId !== old.id || !source.attempts.some(item => item.id === origin.id)) return null
-    const continuation = partitionStage<CodeBehaviorContinuation>(store, owner, origin, `${key}:continuation`, selection, indexFor(origin))?.result
+      selection, indexFor, lineage, { expectedReadSetDigest: wrapper.readSetDigest, expectedComposedDigest: attempt.composedInput.contentDigest, exactRetryFreeze: true }))
+    if (typeof origin === 'string') return null
+    const originalOwner = source.attempts.some(item => item.id === origin.id)
+      ? old
+      : lineage.ancestors?.find(ancestor => ancestor.id === origin.operationId && lineage.settled.has(ancestor.id))
+    if (!originalOwner) return null
+    const originBasis = withCheckpointStageBasis(originalOwner, wrapper.readSetDigest, selection)
+    const continuation = partitionStage<CodeBehaviorContinuation>(store, originBasis, origin, `${key}:continuation`, selection, indexFor(origin))?.result
     const draft = continuation?.drafts.code_behavior_analyze, ready = continuation?.readyAnalysis
     if (!draft || !ready || ready.draftOid !== draft.oid || ready.resultCommit !== draft.resultCommit || ready.trace.purpose !== 'code_behavior_analyze'
         || canonical(ready.trace) !== canonical(local.result.traces[0]) || draft.sourceInputId !== old.input.id
-        || !authenticateApprovedBehaviorPartition(store, owner, origin, key, local.result, changedPaths, selection, indexFor, draft.schemaDigest, true, undefined, readRecord)) return null
-    return { old, origin, draft, authorTrace: ready.trace, reviewTrace: local.result.traces[1], analysisRef: local.resultRef, analysis: local.result }
+        || !authenticateApprovedBehaviorPartition(store, originBasis, origin, key, local.result, changedPaths, selection, indexFor, draft.schemaDigest, true, undefined, readRecord)) return null
+    return { owner: originalOwner, origin, draft, authorTrace: ready.trace, reviewTrace: local.result.traces[1], analysisRef: local.resultRef, analysis: local.result }
   }
   return null
 }
@@ -2208,7 +2214,7 @@ function crossFreezeP0ImpactInput(
   readPaths: readonly string[], timeoutMs: ElaborationSessionRequest['timeoutMs'], rawRef: BlobRef,
 ): Parameters<typeof prepareCrossFreezeImpactReview>[0] {
   return {
-    operation, attemptId, source, owner: partitionId, stage: 'p0', seed, timeoutMs, readPaths,
+    operation, attemptId, source: { ...source, operation: author.owner, attempts: [author.origin] }, owner: partitionId, stage: 'p0', seed, timeoutMs, readPaths,
     prior: { attemptId: author.origin.id, candidateDigest: rawRef.sha256, resultRef: rawRef, approvalRef: author.analysisRef,
       author: author.authorTrace, reviewer: author.reviewTrace },
   }
@@ -2219,8 +2225,8 @@ function crossFreezeP0AuthorProof(
   partitionId: string, bindingRef: BlobRef, impactReviewRef: BlobRef,
 ): CodeBehaviorCrossFreezeAuthorProof {
   return {
-    version: 'code-behavior-cross-freeze-author-v1', oldOperationId: author.old.id, oldAttemptId: author.origin.id,
-    oldPartitionId: partitionId, oldResultRef: author.analysisRef, oldInputId: author.old.input.id,
+    version: 'code-behavior-cross-freeze-author-v1', oldOperationId: author.owner.id, oldAttemptId: author.origin.id,
+    oldPartitionId: partitionId, oldResultRef: author.analysisRef, oldInputId: author.owner.input.id,
     oldInputDigest: author.authorTrace.inputDigest, bindingRef, impactReviewRef,
   }
 }

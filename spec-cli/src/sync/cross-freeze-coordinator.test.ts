@@ -35,6 +35,7 @@ const digest = (value: unknown): string => contentHash(JSON.stringify(value))
 
 const scenarios = [
   { useBaseline: false, mainBranch: 'main', checkout: 'main' },
+  { useBaseline: false, mainBranch: 'main', checkout: 'main', priorFormalRetry: true },
   { useBaseline: true, mainBranch: 'main', checkout: 'main' },
   { useBaseline: true, mainBranch: 'main', checkout: 'feature' },
   { useBaseline: true, mainBranch: 'stable', checkout: 'stable' },
@@ -45,7 +46,7 @@ const scenarios = [
 ] as const
 
 for (const scenario of scenarios) test(
-  '跨冻结正式 P0 ' + ('formalImpactRetry' in scenario ? 'formal-impact-retry' : 'retryImpactFormat' in scenario ? '影响复核覆盖格式沿原稿续审'
+  '跨冻结正式 P0 ' + ('priorFormalRetry' in scenario ? '保留前序正式重试承接的旧作者' : 'formalImpactRetry' in scenario ? 'formal-impact-retry' : 'retryImpactFormat' in scenario ? '影响复核覆盖格式沿原稿续审'
     : 'hideCurrentReview' in scenario ? 'whole 冷恢复缺少当前独审原件'
     : 'challengeApproval' in scenario ? '正式质疑沿原稿派带诊断的独审'
     : `configured=${scenario.mainBranch} checkout=${scenario.checkout} baseline=${scenario.useBaseline}`),
@@ -110,13 +111,14 @@ for (const scenario of scenarios) test(
     facts: [], verifications: [], mandatoryTests: [],
     partitionPolicy: { version: 'sync-partition-policy-v1', maxReadBytes: 32768, maxParallel: 1 },
   }
-  const admit = async (input: typeof oldInput, name: string) => {
+  const admit = async (input: typeof oldInput, name: string, retryOf?: string) => {
     assert.equal(git(root, 'status', '--porcelain'), '')
     const executionScope = { paths: [exportSpec, importSpec, 'src/export.js', importSource], contractIds: [], flowIds: [] }
     const selected = useBaseline ? store.readBaselineSelection(input.source, executionScope.paths.map(path => ({ kind: 'path' as const, path }))) : undefined
     if (selected && !('selection' in selected)) assert.fail(selected.failure.message)
     const next = store.admitAndEnqueue(await prepareSyncAdmission(input, plan, {
       ingressKey: name, rootCauseId: name, origin: 'initial', budget: formalImpactRetry ? { maxAttempts: 1, maxCalls: 24, maxRepairs: 1, timeoutMs: 150_000 } : { mode: 'unlimited' }, managedRoot, model: 'claude:default',
+      ...(retryOf ? { retryOf } : {}),
       ...(selected ? { baselineSelection: selected.selection, executionScope } : {}),
     }))
     return store.ackDispatch(input.source.repositoryId, next.dispatchMessageId)
@@ -239,6 +241,23 @@ for (const scenario of scenarios) test(
   assert.equal(original.reviewPassed, true)
   assert.equal(store.readRetryEligibility(old.id).eligible, true)
 
+  let carrier = old
+  if ('priorFormalRetry' in scenario) {
+    reopen()
+    active = await admit(oldInput, 'old-formal-retry', old.id)
+    carrier = active
+    const carried = await runUntilP0()
+    assert.equal(carried.failure?.message, boundary, JSON.stringify(carried.failure))
+    assert.equal(carried.operation.input.id, old.input.id)
+    assert.equal(carried.operation.callsUsed, 0)
+    const [carriedAttempt] = store.listAttempts(carrier.id)
+    const carriedStages = stages(carriedAttempt)
+    const key = 'partition:' + unaffected + ':analysis'
+    assert.deepEqual(carriedStages.get(key)?.resultRef, oldStages.get(key)?.resultRef)
+    const ancestry = read<{ fromOperationId: string; fromAttemptId: string }>(carriedStages.get(key + ':provenance')!.resultRef)
+    assert.equal(ancestry.fromOperationId, old.id)
+    assert.equal(ancestry.fromAttemptId, oldAttempt.id)
+  }
   write(importSource, 'export class ImportService {} // H2 import dependency\n')
   write(importTest, readFileSync(join(root, importTest), 'utf8') + '// H2 test discovery assertion context\n')
   commit('new clean committed initial')
@@ -305,7 +324,7 @@ for (const scenario of scenarios) test(
     assert.ok(locked)
     const binding = read<{ canonicalBranch: string; oldOperationId: string }>(locked.ref)
     assert.equal(binding.canonicalBranch, `refs/heads/${mainBranch}`)
-    assert.equal(binding.oldOperationId, old.id)
+    assert.equal(binding.oldOperationId, carrier.id)
     const originalDraft = oldContinuation.drafts.code_behavior_analyze
     assert.ok(originalDraft)
     const reused = read<CodeBehaviorAnalysis>(currentStages.get('partition:' + unaffected + ':analysis')!.resultRef)
@@ -316,6 +335,8 @@ for (const scenario of scenarios) test(
     assert.notEqual(reused.inputDigest, original.inputDigest)
     assert.notEqual(reused.traces[1].sessionId, original.traces[1].sessionId)
     assert.notEqual(reused.traces[1].sessionId, newImpact.trace.sessionId)
+    assert.equal(reused.crossFreezeAuthor?.oldOperationId, old.id)
+    assert.equal(newImpact.binding.prior.operationId, old.id)
     assert.equal(reused.crossFreezeAuthor?.oldAttemptId, oldAttempt.id)
     assert.equal(reused.crossFreezeAuthor?.oldInputDigest, original.inputDigest)
     assert.deepEqual(reused.crossFreezeAuthor?.impactReviewRef, impactStage.resultRef)

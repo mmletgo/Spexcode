@@ -1,5 +1,6 @@
 # 持续同步编排
 
+- 跨冻结 P0 沿原批准的正式重试链核取真实作者。只接受同一冻结输入和计划的已结算祖先，根来源 binding 保持。writer84 升降级沿 [[sync-migrations]]。
 - 本目录复用 session 原生工作树执行与 spec-core/contracts；不自行维护第二份契约图或会话执行器。旧受限结构化策略只按原绑定恢复历史任务。
 - 新 Native P1 精简上下文由 attempt 草稿协议冻结，后继沿谱系的原协议。只读 Git 分区分析附件按摘要匹配，独审直接读取候选正文。writer83 升降级沿 [[sync-migrations]]。
 - 新 Native P1 独审的条目 ID 说明由 attempt 的草稿协议冻结，节点定位留在 `evidence`，`affectedIds` 沿原图和 owner 门禁。历史派发按原字节回放，writer78 沿 [[sync-migrations]] 升降级。
