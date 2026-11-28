@@ -2218,8 +2218,11 @@ function committedDraftFixture(f: Awaited<ReturnType<typeof fixture>>, request: 
   return nativeWorktreeResult(workspace, seed)
 }
 
-for (const missingLaunch of [false, true]) test(`Grok P1 独审退出超时结算后只重审原Git候选 missingLaunch=${missingLaunch}`, async t => {
-  const failureMessage = 'Grok native exit was not observed before the settlement deadline'
+for (const scenario of ['exit-timeout', 'missing-launch', 'preterminal', 'preterminal-missing-stop', 'preterminal-foreign-cancel', 'preterminal-published'] as const) test(`Grok P1 独审结算后只重审原Git候选 ${scenario}`, async t => {
+  const preterminal = scenario.startsWith('preterminal'), missingLaunch = scenario === 'missing-launch'
+  const invalidEvidence = scenario !== 'exit-timeout' && scenario !== 'preterminal'
+  const failureMessage = preterminal ? 'Grok native stream closed without its original terminal' : 'Grok native exit was not observed before the settlement deadline'
+  const failureCode = preterminal ? 'cancellation_pending' : 'failed'
   const budget = { maxAttempts: 2, maxCalls: 8, maxRepairs: 1, timeoutMs: 120_000 }
   const f = await fixture(t, budget, false, original, 'project', original, {
     version: 'sync-coordinator-v2', direction: 'spec_to_code', sourcePaths: ['src/export.js'], agentWorkflow: 'native-worktree-v1',
@@ -2252,6 +2255,7 @@ const prior = fs.existsSync(log) ? fs.readFileSync(log, 'utf8') : ''
 const hold = review && !prior.includes('"purpose":"elaboration_review"')
 const purpose = review ? 'elaboration_review' : 'elaboration_generate'
 fs.appendFileSync(log, JSON.stringify({ purpose, mode, sessionId, commit: git('rev-parse', 'HEAD'), tree: git('rev-parse', 'HEAD^{tree}') }) + '\\n', { mode: 0o600 })
+if (hold && ${preterminal}) process.exit(0)
 let output = { verdict: 'accept', checkedBoundaries: ${JSON.stringify(ELABORATION_BOUNDARIES)}, findings: [] }
 if (!review) {
   const draft = ${JSON.stringify({ ...draft, version: 'elaboration-target-rows-v3', changes })}
@@ -2268,7 +2272,8 @@ else setTimeout(() => process.exit(0), 100)
 `, { mode: 0o700 })
 
   f.options.runner = undefined
-  f.store.expandContractScope = () => { throw new StructuredSessionError('unsupported', 'fixture在P1独审通过后停止') }
+  const stopAfterApproval = () => { throw new StructuredSessionError('unsupported', 'fixture在P1独审通过后停止') }
+  f.store.expandContractScope = stopAfterApproval
   const commonDir = f.input.source.commonDir
   const read = <T>(ref: BlobRef): T => JSON.parse(readEvidence(commonDir, ref).toString('utf8')) as T
   const readLocal = (attempt: SyncAttempt) => {
@@ -2278,7 +2283,7 @@ else setTimeout(() => process.exit(0), 100)
   }
   const recordFailure = f.store.recordFailure.bind(f.store)
   let saved: { failure: SyncAttempt['failure']; local: ReturnType<typeof readLocal>; resource: string; record: string; archive: string; hiddenLaunch?: string } | undefined
-  f.store.recordFailure = (fence, issue) => {
+  if (!preterminal) f.store.recordFailure = (fence, issue) => {
     const recorded = recordFailure(fence, issue)
     if (saved || issue.message !== failureMessage) return recorded
     const attempt = f.store.readAttempt(fence.attemptId), dispatch = attempt.dispatchPlans.find(item => item.purpose === 'elaboration_review')!
@@ -2291,13 +2296,50 @@ else setTimeout(() => process.exit(0), 100)
     return recorded
   }
 
-  const result = await runSyncOperation(f.store, f.operation.id, f.options)
-  const attempts = f.store.listAttempts(f.operation.id), [before, after] = attempts
+  let store = f.store
+  let result = await runSyncOperation(store, f.operation.id, f.options)
+  if (preterminal) {
+    assert.equal(result.failure?.code, failureCode, JSON.stringify(result.failure))
+    const [origin] = store.listAttempts(f.operation.id)
+    const dispatch = origin.dispatchPlans.find(item => item.purpose === 'elaboration_review')!
+    const id = sessionIdForCreateKey(dispatch.sessionCreateKey), observation = store.findResource(origin.id, dispatch.key)!
+    assert.equal(observation.phase, 'created')
+    const interrupted = read<NativeRunCheckpoint>(observation.checkpointRef)
+    assert.equal(interrupted.nativeState, 'cancelling')
+    assert.ok(interrupted.nativeCallRequested && !interrupted.nativeStarted)
+    assert.deepEqual(interrupted.session, { sessionId: id, threadId: null, turnId: null })
+    assert.equal(store.requestControl(f.operation.id, 'pause').phase, 'paused')
+    const recovery = await recoverSyncOperationResources(store, f.operation.id, { root: f.root, inputId: f.input.id, artifactRoot: f.artifactRoot })
+    assert.equal(recovery.status, 'resources_recovered', JSON.stringify(recovery.failure))
+    const record = readRecord(id)!, settled = store.findResource(origin.id, dispatch.key)!
+    assert.ok(settled.checkpoints.some(item => item.checkpointRef.sha256 === observation.checkpointRef.sha256))
+    const nativeRoot = record.structuredExecution!.grokNative!.root
+    const launch = readFileSync(join(nativeRoot, 'launch.json'))
+    const cancel = join(nativeRoot, 'cancel.json')
+    assert.deepEqual(JSON.parse(readFileSync(cancel, 'utf8')), { launchDigest: contentHash(launch) })
+    if (scenario === 'preterminal-missing-stop') rmSync(join(nativeRoot, 'process-stop-observations.jsonl'))
+    if (scenario === 'preterminal-foreign-cancel') {
+      writeFileSync(`${cancel}.foreign`, JSON.stringify({ launchDigest: '0'.repeat(64) }))
+      renameSync(`${cancel}.foreign`, cancel)
+    }
+    const resultFile = join(nativeRoot, 'result.json')
+    if (scenario === 'preterminal-published') writeFileSync(resultFile, '{}')
+    saved = { failure: origin.failure, local: readLocal(origin), resource: JSON.stringify(settled), record: JSON.stringify(record), archive: f.git('rev-parse', `refs/spex-archive/${id}`) }
+    f.closeForRestart()
+    const protocol = openProtocol(join(f.parent, 'sync.sqlite'))
+    t.after(() => protocol.close())
+    store = new SyncStore(protocol, { readBlob: ref => readEvidence(commonDir, ref) })
+    store.expandContractScope = stopAfterApproval
+    store.requestControl(f.operation.id, 'run')
+    result = await runSyncOperation(store, f.operation.id, f.options)
+    if (scenario === 'preterminal-published') rmSync(resultFile)
+  }
+  const attempts = store.listAttempts(f.operation.id), [before, after] = attempts
   if (!saved) assert.fail(JSON.stringify({ failure: result.failure, attempts: attempts.map(attempt => ({ failure: attempt.failure, dispatches: attempt.dispatchPlans.map(dispatch => dispatch.purpose) })), calls: existsSync(log) ? readFileSync(log, 'utf8') : '' }))
   if (saved.hiddenLaunch) renameSync(`${saved.hiddenLaunch}.hidden`, saved.hiddenLaunch)
   assert.equal(attempts.length, 2)
   assert.deepEqual(before.dispatchPlans.map(dispatch => dispatch.purpose), ['elaboration_generate', 'elaboration_review'])
-  const [generate, review] = before.dispatchPlans, resource = f.store.findResource(before.id, review.key)!
+  const [generate, review] = before.dispatchPlans, resource = store.findResource(before.id, review.key)!
   const originalPlan = read<NativeRunPlan>(resource.plan.planBlob), checkpoint = read<NativeRunCheckpoint>(resource.checkpointRef)
   const reviewId = sessionIdForCreateKey(review.sessionCreateKey), record = readRecord(reviewId)!, state = record.structuredExecution!
   const originalRound = saved.local.result.rounds.at(-1)!, seed = originalPlan.request.worktree!
@@ -2306,14 +2348,14 @@ else setTimeout(() => process.exit(0), 100)
   assert.equal(JSON.stringify(resource), saved.resource)
   assert.equal(JSON.stringify(record), saved.record)
   assert.equal(resource.phase, 'removed')
-  assert.equal(checkpoint.phase, 'removed'); assert.equal(checkpoint.status, 'failed')
-  assert.deepEqual(checkpoint.failure, { code: 'failed', message: failureMessage })
-  assert.deepEqual(saved.local.result.failure, { code: 'failed', message: failureMessage, sessionId: reviewId })
+  assert.equal(checkpoint.phase, 'removed'); assert.equal(checkpoint.status, preterminal ? 'cancelled' : 'failed')
+  assert.deepEqual(checkpoint.failure, preterminal ? undefined : { code: 'failed', message: failureMessage })
+  assert.deepEqual(saved.local.result.failure, { code: failureCode, message: failureMessage, sessionId: reviewId })
   assert.ok(checkpoint.nativeCallRequested && !checkpoint.nativeStarted)
   assert.deepEqual(checkpoint.session, { sessionId: reviewId, threadId: null, turnId: null })
   assert.equal(checkpoint.stop?.nativeStatus, 'stopped')
-  assert.ok(resource.checkpoints.some(({ checkpointRef }) => read<NativeRunCheckpoint>(checkpointRef).nativeState === 'failed'))
-  assert.equal(state.state, 'failed'); assert.equal(state.output, undefined); assert.equal(state.resultWorktree, undefined)
+  assert.ok(resource.checkpoints.some(({ checkpointRef }) => read<NativeRunCheckpoint>(checkpointRef).nativeState === (preterminal ? 'cancelling' : 'failed')))
+  assert.equal(state.state, preterminal ? 'cancelled' : 'failed'); assert.equal(state.output, undefined); assert.equal(state.resultWorktree, undefined)
   assert.equal(state.grokNative?.turnId, undefined)
   assert.equal(existsSync(join(state.grokNative!.root, 'result.json')), false)
   assert.equal(f.git('rev-parse', `refs/spex-archive/${reviewId}`), saved.archive)
@@ -2327,17 +2369,20 @@ else setTimeout(() => process.exit(0), 100)
   const candidateChange = originalRound.candidate.changes[0]
   assert.equal(readObject(commonDir, readTree(commonDir, seed.tree).find(entry => entry.path === candidateChange.path)!.oid).toString('utf8'), candidateChange.source)
   const calls = readFileSync(log, 'utf8').trimEnd().split('\n').map(line => JSON.parse(line) as { purpose: string; mode: string; sessionId: string; commit: string; tree: string })
-  t.diagnostic(JSON.stringify({ dispatches: attempts.map(attempt => attempt.dispatchPlans.map(dispatch => dispatch.purpose)), callsUsed: result.operation.callsUsed, failure: result.failure?.code }))
+  t.diagnostic(JSON.stringify({ dispatches: attempts.map(attempt => attempt.dispatchPlans.map(dispatch => dispatch.purpose)), callsUsed: result.operation.callsUsed, failure: result.failure }))
   assert.equal(result.operation.id, f.operation.id)
   assert.deepEqual(result.operation.budget, f.operation.budget)
-  assert.deepEqual(after.dispatchPlans.map(dispatch => dispatch.purpose), missingLaunch ? [] : ['elaboration_review'], '下一轮只可派发原候选的独审')
-  assert.deepEqual(calls.map(call => call.purpose), missingLaunch ? ['elaboration_generate', 'elaboration_review'] : ['elaboration_generate', 'elaboration_review', 'elaboration_review'])
-  assert.equal(result.operation.callsUsed, missingLaunch ? 2 : 3)
-  if (missingLaunch) {
-    assert.ok(result.failure, '缺少原生启动原件须明确拒绝')
+  assert.deepEqual(after.dispatchPlans.map(dispatch => dispatch.purpose), invalidEvidence ? [] : ['elaboration_review'], '下一轮只可派发原候选的独审')
+  assert.deepEqual(calls.map(call => call.purpose), invalidEvidence ? ['elaboration_generate', 'elaboration_review'] : ['elaboration_generate', 'elaboration_review', 'elaboration_review'])
+  assert.equal(result.operation.callsUsed, invalidEvidence ? 2 : 3)
+  if (invalidEvidence) {
+    assert.equal(result.failure?.code, 'stale_result', '原生启动、停止、取消或发布状态失配须明确拒绝')
+    const originalReason = scenario === 'preterminal-foreign-cancel' ? 'Grok original native cancellation binding differs'
+      : scenario === 'preterminal-published' ? 'Grok source lacks its original unpublished exit' : 'Grok original native evidence is missing'
+    assert.equal(result.failure?.message, originalReason)
   } else {
     const approved = readLocal(after).result, approvedRound = approved.rounds.at(-1)!, [newReview] = after.dispatchPlans
-    const newResource = f.store.findResource(after.id, newReview.key)!, newPlan = read<NativeRunPlan>(newResource.plan.planBlob)
+    const newResource = store.findResource(after.id, newReview.key)!, newPlan = read<NativeRunPlan>(newResource.plan.planBlob)
     assert.equal(approved.reviewPassed, true)
     assert.equal(approved.candidateDigest, saved.local.result.candidateDigest)
     assert.deepEqual(approvedRound.candidate, originalRound.candidate)
@@ -2357,7 +2402,7 @@ else setTimeout(() => process.exit(0), 100)
     assert.notEqual(newReview.session?.sessionId, generate.session?.sessionId)
     assert.equal(after.failure?.code, 'unsupported')
   }
-  assert.equal(f.store.listJournals(f.operation.id).length, 0)
+  assert.equal(store.listJournals(f.operation.id).length, 0)
   assert.deepEqual(readFileSync(join(f.root, '.git/index')), f.index)
   assert.deepEqual(readFileSync(join(f.root, 'src/export.js')), f.bytes)
   assert.deepEqual(readFileSync(join(f.root, 'tests/export.test.mjs')), readFileSync(new URL('tests/export.test.mjs', fixturePath)))

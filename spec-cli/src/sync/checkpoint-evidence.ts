@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from 'node:util'
 import { assertRejectedOutput, isManagedReservationRejection, structuredDispatchUnstarted, structuredExecutionPolicy, type RejectedStructuredOutput, type StructuredExecution } from '../session-structured-policy.js'
 import { nativeWorktreePrompt } from '../native-worktree-runtime.js'
-import { assertGrokRejectedFinalSource, isGrokNativeExitFailure } from '../grok-structured.js'
+import { assertGrokRejectedFinalSource, assertGrokUnpublishedExitSource, isGrokNativeExitFailure } from '../grok-structured.js'
 import { assertCursorRejectedFinalSource } from '../cursor-structured.js'
 import { assertCodexRejectedFinalSource } from '../codex-native-worktree-structured.js'
 import { readSessionCreateTermination, sessionIdForCreateKey } from '../sessions.js'
@@ -145,22 +145,24 @@ function authenticateNativeDispatch(store: SyncStore, operation: SyncOperation, 
   return { read, plan, checkpoint, resource, dispatch }
 }
 
-export function authenticateNativeFailure(store: SyncStore, operation: SyncOperation, origin: SyncAttempt, key: string, failure: NonNullable<ElaborationResult['failure']>, readNativeRecord: typeof readRecord = readRecord, allowStoppedSource = false): { plan: NativeRunPlan; checkpoint: NativeRunCheckpoint; record: NonNullable<ReturnType<typeof readRecord>>; state: StructuredExecution; observedFailure: boolean } {
+export function authenticateNativeFailure(store: SyncStore, operation: SyncOperation, origin: SyncAttempt, key: string, failure: NonNullable<ElaborationResult['failure']>, readNativeRecord: typeof readRecord = readRecord, allowStoppedSource = false): { plan: NativeRunPlan; checkpoint: NativeRunCheckpoint; record: NonNullable<ReturnType<typeof readRecord>>; state: StructuredExecution; observedFailure: boolean; interruptedGrokReview: boolean } {
   const { read, plan, checkpoint, resource, dispatch } = authenticateNativeDispatch(store, operation, origin, key)
   if (failure.sessionId !== plan.expectedSessionId) fail('失败的原请求、身份或输入摘要不匹配')
   const { request } = plan
-  const unpublishedGrok = allowStoppedSource && request.model?.startsWith('grok:') && isGrokNativeExitFailure(failure)
+  const interruptedReview = allowStoppedSource && request.purpose === 'elaboration_review' && failure.code === 'cancellation_pending'
+  const interruptedGrokReview = interruptedReview && request.model?.startsWith('grok:') === true && request.worktree?.mode === 'read'
+    && failure.threadId === undefined && failure.turnId === undefined
+  const unpublishedGrok = interruptedGrokReview || allowStoppedSource && request.model?.startsWith('grok:') && isGrokNativeExitFailure(failure)
     && (request.worktree?.mode === 'edit' && (request.purpose === 'code_behavior_analyze' || request.purpose === 'elaboration_generate')
       || request.worktree?.mode === 'read' && request.purpose === 'elaboration_review')
   const sameIdentity = (slot: string | null, expected?: string): boolean => slot === expected || !!unpublishedGrok && slot === null && expected === undefined
   const bound = (item: NativeRunCheckpoint): boolean => item.operationId === operation.id && item.attemptId === origin.id && item.inputId === operation.input.id && item.candidateDigest === plan.candidateDigest && item.candidateDigest === resource.plan.candidateDigest && item.requestDigest === plan.requestDigest && item.expectedSessionId === plan.expectedSessionId && item.session.sessionId === plan.expectedSessionId && sameIdentity(item.session.threadId, failure.threadId) && sameIdentity(item.session.turnId, failure.turnId)
   const observedFailure = resource.checkpoints.some(item => { const observed = read<NativeRunCheckpoint>(item.checkpointRef); return bound(observed) && observed.nativeState === 'failed' })
-  const interruptedReview = allowStoppedSource && request.purpose === 'elaboration_review' && failure.code === 'cancellation_pending'
   if (interruptedReview && !resource.checkpoints.some(({ phase, checkpointRef }) => {
     if (phase !== 'created') return false
     const observed = read<NativeRunCheckpoint>(checkpointRef)
-    return bound(observed) && observed.phase === 'created' && observed.nativeState === 'cancelling' && observed.nativeCallRequested && observed.nativeStarted
-      && !observed.failure && !observed.result && !observed.stop
+    return bound(observed) && observed.schemaVersion === 1 && observed.phase === 'created' && observed.nativeState === 'cancelling' && observed.nativeCallRequested
+      && observed.nativeStarted === !interruptedGrokReview && !observed.failure && !observed.result && !observed.stop && !observed.creationTermination
   })) fail('独审缺少原正式中断观察')
   if (!bound(checkpoint) || checkpoint.phase !== resource.phase || !observedFailure && !allowStoppedSource) fail('失败缺少原failed资源观察；后续控制不补签旧失败')
   const prompt = plan.request.worktree ? nativeWorktreePrompt(plan.request.prompt, plan.request.worktree) : plan.request.prompt
@@ -173,7 +175,14 @@ export function authenticateNativeFailure(store: SyncStore, operation: SyncOpera
   if (allowStoppedSource && state.cancellation?.nativeStopped && resource.phase === 'removed' && !isDeepStrictEqual(checkpoint.stop, { sessionId: plan.expectedSessionId, state: state.state, ...(!unpublishedGrok || state.threadId !== undefined ? { threadId: state.threadId } : {}), ...(!unpublishedGrok || state.turnId !== undefined ? { turnId: state.turnId } : {}), nativeStopped: true, acknowledged: state.cancellation.acknowledged, nativeStatus: state.cancellation.nativeStatus, ...(state.cancellation.error ? { error: state.cancellation.error } : {}) })) fail('失败的checkpoint与canonical停止原值不一致')
   if (allowStoppedSource && dispatch.session && (dispatch.session.sessionId !== checkpoint.session.sessionId || dispatch.session.threadId !== null && dispatch.session.threadId !== checkpoint.session.threadId || dispatch.session.turnId !== null && dispatch.session.turnId !== checkpoint.session.turnId)) fail('停止来源缺少原派发的精确 Native 身份')
   if (allowStoppedSource && (state.state !== 'cancelled' && !(state.state === 'failed' && observedFailure) || resource.phase !== 'removed' || state.cancellation?.nativeStopped !== true)) fail('停止来源须有原正式取消或已认证失败及资源停止证明')
-  return { plan, checkpoint, record, state, observedFailure }
+  if (interruptedGrokReview) {
+    if (checkpoint.nativeStarted !== false || record.harness !== 'grok-structured' || !record.stopped || resource.checkpoints.some(({ checkpointRef }) => {
+      const observed = read<NativeRunCheckpoint>(checkpointRef)
+      return !bound(observed) || observed.nativeStarted || !!observed.result || observed.nativeState === 'completed'
+    })) fail('Grok 独审中断与原未发布派发不匹配')
+    assertGrokUnpublishedExitSource(record.session, prompt, state, record.worktreePath, 'elaboration_review', 'cancelled')
+  }
+  return { plan, checkpoint, record, state, observedFailure, interruptedGrokReview }
 }
 
 /** 未启动的只读独审可以沿原请求续审；原失败不是验证结论。 */
