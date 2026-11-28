@@ -8,7 +8,7 @@ import { readRecord, type SessRec } from '../session-record.js'
 import { isGrokNativeExitFailure } from '../grok-structured.js'
 import { closeSession, sessionIdForCreateKey, readSessionCreateTermination, recoverSessionCreateTermination, verifyPreservedSessionCreateTermination, type SessionCreateTermination } from '../sessions.js'
 import { cancelStructuredSession, runStructuredSession, SettledSessionCreateTimeoutError, StructuredSessionError, type StructuredCancellationResult } from '../session-structured.js'
-import { assertRejectedOutput, prepareFrozenReaderRuntime, structuredExecutionPolicy, pinNativeConfiguration, pinZCodeToolPolicy, type FrozenReaderRuntime, type StructuredExecution } from '../session-structured-policy.js'
+import { assertRejectedOutput, isManagedReservationRejection, prepareFrozenReaderRuntime, structuredExecutionPolicy, pinNativeConfiguration, pinZCodeToolPolicy, type FrozenReaderRuntime, type StructuredExecution } from '../session-structured-policy.js'
 import { assertFrozenBinding, prepareFrozenPrompt } from '../frozen-context.js'
 import { verifyStructuredFrozenReadProof as verifyFrozenReadProof } from '../structured-frozen-evidence.js'
 import { nativeWorktreePrompt } from '../native-worktree-runtime.js'
@@ -77,6 +77,11 @@ export function hasSettledNativeTurnTransportFailure(store: SyncStore, operation
   return failure.code === 'native_turn_transport_failed' && hasSettledNativeFailure(store, operation, attempt, failure)
 }
 
+/** 原 Manager 拒绝已按原派发和未启动证据结算后，才允许协调器安排同组新尝试。 */
+export function hasSettledManagerReservationRejection(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, failure: NativeFailureIdentity): boolean {
+  return failure.code === 'llm_manager_route_unavailable' && hasSettledNativeFailure(store, operation, attempt, failure)
+}
+
 /** 认证 Grok P0 退出失败，分别供本轮继续调度和整轮结算后重试。 */
 export function hasSettledGrokP0ExitFailure(store: SyncStore, operation: SyncOperation, attempt: SyncAttempt, failure: NativeFailureIdentity & Pick<StructuredSessionError, 'rejectedOutput' | 'failedWorktree'>, settlement: 'attempt' | 'native-session' = 'attempt'): boolean {
   if (!isGrokNativeExitFailure(failure) || !failure.sessionId
@@ -122,7 +127,17 @@ function hasSettledNativeFailure(store: SyncStore, operation: SyncOperation, att
     if (resource!.plan.key !== dispatch.key || plan.schemaVersion !== 1 || checkpoint.schemaVersion !== 1
       || !request.worktree || request.frozenContext || dispatch.purpose !== request.purpose
       || dispatch.session?.sessionId !== checkpoint.session.sessionId || dispatch.session.threadId !== checkpoint.session.threadId || dispatch.session.turnId !== checkpoint.session.turnId
-      || !checkpoint.nativeCallRequested || stop?.nativeStatus !== 'stopped') return false
+      || !checkpoint.nativeCallRequested) return false
+    if (failure.code === 'llm_manager_route_unavailable') {
+      const record = readRecord(plan.expectedSessionId), state = record?.structuredExecution
+      const execution = structuredExecutionPolicy(request), prompt = nativeWorktreePrompt(request.prompt, request.worktree)
+      return !!state && isManagedReservationRejection(state) && state.error === failure.message && record?.session === plan.expectedSessionId && record.harnessSessionId === null
+        && record.createRequestId === sha(dispatch.sessionCreateKey) && record.createPayloadHash === nativeCreatePayloadHash(prompt, request.base, execution)
+        && hash(structuredExecutionPolicy(state)) === hash(execution) && stop?.nativeStatus === 'notStarted' && stop.acknowledged === false && stop.error === undefined
+        && !checkpoint.nativeStarted && !checkpoint.creationTermination && !checkpoint.result && !checkpoint.failure?.failedWorktree && !checkpoint.failure?.rejectedOutput
+        && matchesNativeDispatchModel(operation, dispatch, request)
+    }
+    if (stop?.nativeStatus !== 'stopped') return false
     if (failure.code === 'native_turn_transport_failed') return request.model?.startsWith('zcode:') === true
       && (request.purpose === 'code_behavior_analyze' || request.purpose === 'code_behavior_review')
       && failure.requestKey === request.requestKey && failure.inputDigest === request.inputDigest && !!failure.threadId && !!failure.turnId
@@ -227,6 +242,8 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
     }
     const stoppedFailedEvidence = (state: StructuredExecution): NativeRunCheckpoint['failure'] | null => {
       if (state.state !== 'failed' || !state.cancellation?.nativeStopped) return null
+      if (state.errorCode === 'llm_manager_route_unavailable' && (!isManagedReservationRejection(state) || checkpoint.nativeStarted || checkpoint.session.threadId || checkpoint.session.turnId))
+        throw new StructuredSessionError('stale_result', 'Manager reservation rejection lacks its original unstarted native identity', errorIdentity())
       if (state.errorCode === 'native_turn_transport_failed' && (!request.worktree || !request.model?.startsWith('zcode:') || !state.threadId || !state.turnId
         || state.zcodeNative?.sessionId !== state.threadId || state.zcodeNative.turnId !== state.turnId || state.cancellation.nativeStatus !== 'stopped'
         || state.failedWorktree || state.rejectedOutput || state.resultWorktree || state.output !== undefined || state.resultDigest !== undefined)) throw new StructuredSessionError('stale_result', 'typed native turn transport failure lacks its exact stopped ZCode identity', errorIdentity())
@@ -254,6 +271,11 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
       const stop = checkpoint.stop
       if (!checkpoint.failure || checkpoint.nativeState !== 'failed' || !stop?.nativeStopped || stop.state !== 'failed' || stop.sessionId !== expectedSessionId || (stop.threadId ?? null) !== checkpoint.session.threadId || (stop.turnId ?? null) !== checkpoint.session.turnId) throw new StructuredSessionError('stale_result', 'native failure lacks its exact durable stop evidence', errorIdentity())
       const record = runtime.readRecord(expectedSessionId), state = record?.structuredExecution
+      if (checkpoint.failure.code === 'llm_manager_route_unavailable' && (!record || !state || record.session !== expectedSessionId
+        || record.createRequestId !== sha(dispatch!.sessionCreateKey) || record.createPayloadHash !== expectedCreateHash || record.harnessSessionId !== null
+        || hash(structuredExecutionPolicy(state)) !== hash(execution) || !isManagedReservationRejection(state) || !checkpoint.nativeCallRequested || checkpoint.creationTermination
+        || stop.nativeStatus !== 'notStarted' || stop.acknowledged || stop.error !== undefined || checkpoint.result || hash(stoppedFailedEvidence(state)) !== hash(checkpoint.failure)))
+        throw new StructuredSessionError('stale_result', 'Manager reservation rejection checkpoint differs from its original stopped record', errorIdentity())
       if (checkpoint.failure.code === 'native_turn_transport_failed' && (!record || !state || record.session !== expectedSessionId || record.createRequestId !== sha(dispatch!.sessionCreateKey) || record.createPayloadHash !== expectedCreateHash
         || hash(structuredExecutionPolicy(state)) !== hash(execution) || record.harnessSessionId !== null && record.harnessSessionId !== state.threadId
         || dispatch!.session?.sessionId !== expectedSessionId || dispatch!.session.threadId !== checkpoint.session.threadId || dispatch!.session.turnId !== checkpoint.session.turnId
@@ -368,6 +390,7 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
       if (stopped?.nativeStopped && stopped.sessionId === expectedSessionId && ['completed', 'cancelled', 'timeout'].includes(stopped.state) && (stopped.threadId ?? null) === (state.threadId ?? null) && (stopped.turnId ?? null) === (state.turnId ?? null)) settle(stopped.state === 'timeout' ? 'timeout' : 'cancelled', { stop: stopped })
       if (stopped?.nativeStopped && stopped.sessionId === expectedSessionId && stopped.state === 'failed' && stoppedFailure && (stopped.threadId ?? null) === (state.threadId ?? null) && (stopped.turnId ?? null) === (state.turnId ?? null)) settle('failed', { stop: stopped, failure: stoppedFailure })
       if (failure) throw failure
+      if (resource!.phase === 'removed' && stoppedFailure?.code === 'llm_manager_route_unavailable') throw new StructuredSessionError(stoppedFailure.code, stoppedFailure.message, errorIdentity())
       throw new StructuredSessionError(resource!.phase === 'removed' ? 'cancelled' : 'cancellation_pending', resource!.phase === 'removed' ? 'native execution cancelled and exact stop settled' : stopped?.error ?? 'native cancellation has not been proven', errorIdentity())
     }
     if (resource.phase === 'terminal') {
@@ -395,12 +418,14 @@ export function createAttemptRunner(store: SyncStore, fence: WriteFence, options
           const stoppedFailure = state ? stoppedFailedEvidence(state) : null
           if (stoppedFailure) {
             if (!(outcome.error instanceof StructuredSessionError) || outcome.error.code !== stoppedFailure.code || state!.error !== outcome.error.message || outcome.error.sessionId !== expectedSessionId || outcome.error.threadId !== state!.threadId || outcome.error.turnId !== state!.turnId) throw new StructuredSessionError('stale_result', 'native failure lacks its matching stopped failed record', errorIdentity())
-            if (outcome.error.code === 'native_turn_transport_failed' && (outcome.error.requestKey !== request.requestKey || outcome.error.inputDigest !== request.inputDigest)) throw new StructuredSessionError('stale_result', 'typed native turn transport failure differs from its fixed request', errorIdentity())
+            if ((outcome.error.code === 'native_turn_transport_failed' || outcome.error.code === 'llm_manager_route_unavailable')
+              && (outcome.error.requestKey !== request.requestKey || outcome.error.inputDigest !== request.inputDigest)) throw new StructuredSessionError('stale_result', 'typed native failure differs from its fixed request', errorIdentity())
             if (hash(outcome.error.failedWorktree ?? null) !== hash(state!.failedWorktree ?? null)) throw new StructuredSessionError('stale_result', 'failed stage Git witness differs from its exact stopped native error', errorIdentity())
             settle('failed', { failure: stoppedFailure, stop: { sessionId: expectedSessionId, state: 'failed', threadId: state!.threadId, turnId: state!.turnId, nativeStopped: true, acknowledged: state!.cancellation!.acknowledged, nativeStatus: state!.cancellation!.nativeStatus } })
           }
           if (outcome.error instanceof StructuredSessionError && outcome.error.code === 'native_rpc_timeout' && !stoppedFailure) throw new StructuredSessionError('stale_result', 'typed native RPC failure has no exact stopped failed record', errorIdentity())
           if (outcome.error instanceof StructuredSessionError && outcome.error.code === 'native_turn_transport_failed' && !stoppedFailure) throw new StructuredSessionError('stale_result', 'typed native turn transport failure has no exact stopped failed record', errorIdentity())
+          if (outcome.error instanceof StructuredSessionError && outcome.error.code === 'llm_manager_route_unavailable' && !stoppedFailure) throw new StructuredSessionError('stale_result', 'Manager reservation rejection has no original unstarted native record', errorIdentity())
           if (state?.cancellation?.nativeStopped && (state.state === 'cancelled' || state.state === 'timeout')) settle(state.state, { stop: { sessionId: expectedSessionId, state: state.state, threadId: state.threadId, turnId: state.turnId, nativeStopped: true, acknowledged: state.cancellation.acknowledged, nativeStatus: state.cancellation.nativeStatus } })
           if (outcome.error instanceof StructuredSessionError && outcome.error.rejectedOutput) {
             const rejectedOutput = outcome.error.rejectedOutput

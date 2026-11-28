@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from 'node:util'
-import { assertRejectedOutput, structuredExecutionPolicy, type RejectedStructuredOutput, type StructuredExecution } from '../session-structured-policy.js'
+import { assertRejectedOutput, isManagedReservationRejection, structuredDispatchUnstarted, structuredExecutionPolicy, type RejectedStructuredOutput, type StructuredExecution } from '../session-structured-policy.js'
 import { nativeWorktreePrompt } from '../native-worktree-runtime.js'
 import { assertGrokRejectedFinalSource, isGrokNativeExitFailure } from '../grok-structured.js'
 import { assertCursorRejectedFinalSource } from '../cursor-structured.js'
@@ -185,16 +185,18 @@ export function authenticateUnstartedElaborationReview(store: SyncStore, operati
   const { read, plan, checkpoint, resource, dispatch } = authenticateNativeDispatch(store, operation, origin, key)
   const { request, expectedSessionId } = plan
   const session = { sessionId: expectedSessionId, threadId: null, turnId: null }
-  const stop = { sessionId: expectedSessionId, state: 'cancelled', nativeStopped: true, acknowledged: false, nativeStatus: 'notStarted' }
+  const rejectedReservation = failure.code === 'llm_manager_route_unavailable', terminal = rejectedReservation ? 'failed' : 'cancelled'
+  const stop = { sessionId: expectedSessionId, state: terminal, nativeStopped: true, acknowledged: false, nativeStatus: 'notStarted' }
+  const expectedFailure = rejectedReservation ? { code: failure.code, message: failure.message } : undefined
   const bound = (item: NativeRunCheckpoint): boolean => item.schemaVersion === 1 && item.operationId === plan.operationId && item.attemptId === plan.attemptId
     && item.inputId === plan.inputId && item.candidateDigest === plan.candidateDigest && item.expectedSessionId === expectedSessionId
     && item.requestDigest === plan.requestDigest && isDeepStrictEqual(item.session, session) && item.nativeCallRequested && !item.nativeStarted
-    && !item.result && !item.failure
-  if (failure.code !== 'failed' || failure.threadId !== undefined || failure.turnId !== undefined || request.purpose !== 'elaboration_review'
+    && !item.result
+  if (!rejectedReservation && failure.code !== 'failed' || failure.threadId !== undefined || failure.turnId !== undefined || request.purpose !== 'elaboration_review'
     || request.worktree?.mode !== 'read' || plan.schemaVersion !== 1 || plan.candidateDigest !== resource.plan.candidateDigest
     || plan.candidateDigest !== null && plan.candidateDigest !== candidateDigest
     || resource.attemptId !== origin.id || resource.generation !== origin.generation || resource.plan.key !== key || resource.phase !== 'removed'
-    || checkpoint.phase !== 'removed' || checkpoint.status !== 'cancelled' || !bound(checkpoint)
+    || checkpoint.phase !== 'removed' || checkpoint.status !== terminal || !bound(checkpoint) || !isDeepStrictEqual(checkpoint.failure, expectedFailure)
     || dispatch.session && !isDeepStrictEqual(dispatch.session, session) || !isDeepStrictEqual(checkpoint.stop, stop))
     fail('未启动独审缺少原只读派发及精确结算证明')
   const execution = structuredExecutionPolicy(request), base = request.worktree.baseCommit
@@ -202,7 +204,7 @@ export function authenticateUnstartedElaborationReview(store: SyncStore, operati
   const payloadHash = hash({ prompt: nativeWorktreePrompt(request.prompt, request.worktree), parent: null, launcher: null, base, structuredExecution: execution })
   if (checkpoint.creationTermination) {
     const receipt = readSessionCreateTermination(plan.sessionCreateKey)
-    if (failure.sessionId !== undefined || checkpoint.nativeState !== 'unpublished' || !receipt
+    if (rejectedReservation || failure.sessionId !== undefined || checkpoint.nativeState !== 'unpublished' || !receipt
       || receipt.sessionId !== expectedSessionId || receipt.requestDigest !== requestDigest || receipt.payloadHash !== payloadHash
       || receipt.code !== 'session_create_cancelled' || !isDeepStrictEqual(receipt, checkpoint.creationTermination)
       || readRecord(expectedSessionId)) fail('独审创建取消缺少原请求的未启动证明')
@@ -211,15 +213,14 @@ export function authenticateUnstartedElaborationReview(store: SyncStore, operati
   const observedFailure = resource.checkpoints.some(({ phase, checkpointRef }) => {
     if (phase !== 'created') return false
     const item = read<NativeRunCheckpoint>(checkpointRef)
-    return item.phase === 'created' && item.nativeState === 'failed' && bound(item) && !item.stop && !item.creationTermination
+    return item.phase === 'created' && item.nativeState === 'failed' && bound(item) && !item.failure && !item.stop && !item.creationTermination
   })
   const record = readRecord(expectedSessionId), state = record?.structuredExecution
-  if (failure.sessionId !== expectedSessionId || checkpoint.nativeState !== 'cancelled' || !observedFailure || !record || !state
+  if (failure.sessionId !== expectedSessionId || checkpoint.nativeState !== terminal || !observedFailure || !record || !state
     || !record.archived || !record.stopped || record.harnessSessionId !== null || record.createRequestId !== requestDigest || record.createPayloadHash !== payloadHash
     || record.session !== expectedSessionId || record.base !== base || record.forkCommit !== base || hash(structuredExecutionPolicy(state)) !== hash(execution)
-    || state.state !== 'cancelled' || (state.errorCode ?? 'failed') !== failure.code || state.error !== failure.message || state.threadId || state.turnId || state.turnStartRequested
-    || state.claudeNative || state.zcodeNative || state.grokNative || state.cursorNative || state.codexNative
-    || state.rejectedOutput || state.failedWorktree || state.resultWorktree || state.output !== undefined || state.resultDigest !== undefined
+    || state.state !== terminal || (state.errorCode ?? 'failed') !== failure.code || state.error !== failure.message || !structuredDispatchUnstarted(state)
+    || rejectedReservation && (!isManagedReservationRejection(state) || !dispatch.session)
     || state.cancellation?.reason !== 'cancelled' || state.cancellation.nativeStopped !== true
     || state.cancellation.nativeStatus !== 'notStarted' || state.cancellation.acknowledged !== false || state.cancellation.error !== undefined)
     fail('未启动独审缺少原失败、canonical Native记录及精确停止')

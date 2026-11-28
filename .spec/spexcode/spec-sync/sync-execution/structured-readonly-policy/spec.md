@@ -72,3 +72,5 @@ native_worktree_result_invalid 仅为原生 Git 结果后置合约的精确失�
 计时器产生的 native_rpc_timeout 是显式原生故障观测，不能从错误文本补分类。ZCode 原生工作树正式停止后可在原 errorCode 保存由精确公开 EPIPE 终态产生的 native_turn_transport_failed；仅由 [[zcode-structured-runtime]] 精确认定的不可重试 provider 业务拒绝可保存既有 unsupported。errorCode 是终态观测，不进入固定 policy/创建哈希；无新策略、字段、版本或迁移，历史码与缺席保持。失败可选 failedWorktree 仅承载原 seed 下已认证且确证停止的 Git 事实，与成功 resultWorktree 分离，不参与固定策略摘要、不授予成功 output 或候选；旧记录缺席保持。资源终态及续修准入由 [[sync-native-run]] 与 [[sync-coordinator]] 分别核验。
 
 原生额度错误可携带 Manager 归一的安全 HTTP 状态。确证原进程已停止时，待结算标记随原会话的运行态取消记录保存，固定 Manager 路线与可选状态，恢复时仍复核原停止证据。标记不改变固定策略摘要、创建键、既有权限或验收门禁。标记缺席的既有记录沿原停止与结算流程恢复。
+
+`llm_manager_route_unavailable` 仅在 Manager 对原预约明确拒绝且仍无原生启动、身份和产物时作为失败观测持久保存。该观测和精确 `notStarted` 回执不参与固定策略摘要。历史错误正文不得补签为该认证状态。
