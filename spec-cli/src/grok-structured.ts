@@ -16,55 +16,49 @@ export type GrokNativeState = { version: 1; root: string; sessionId: string; pid
 export type GrokStructuredExecution = StructuredExecution
 type Callbacks = { onNative(state: GrokNativeState): Promise<void>; onThread(id: string): Promise<void>; onTurn(id: string): Promise<void>; onTurnStarting?(): Promise<void>; onTimeout?(): Promise<void>; signal?: AbortSignal }
 type NativeResult = { threadId: string; turnId: string; text: string; frozenReadProof?: never }
-type NativePlan = { version: 1; acp?: { version: 1; promptId: string }; readGuidance?: 'direct-git-read-v1' | 'native-file-read-v2' | 'native-candidate-read-v3' | 'native-review-table-read-v4' | 'native-behavior-evidence-v5'; structuredOutput?: 'native-schema-v1'; root: string; sessionId: string; workspace: string; promptDigest: string; policyDigest: string; cliPath: string; cliVersion: string }
+type NativePlan = { version: 1; readGuidance?: 'direct-git-read-v1' | 'native-file-read-v2' | 'native-candidate-read-v3' | 'native-review-table-read-v4' | 'native-behavior-evidence-v5'; root: string; sessionId: string; workspace: string; promptDigest: string; policyDigest: string; cliPath: string; cliVersion: string }
 type NativeLaunch = { planDigest: string; pid: number; receiptFile: string; receiptDigest: string }
 type OwnedLaunch = NativePlan & NativeLaunch
-type Terminal = { sessionId: string; requestId: string; cwd: string; stopReason: string; models: string[] }
+type Terminal = { sessionId: string; requestId: string }
 type NativeOutput = { terminal: Terminal; text: string; structuredOutput?: 'present' | 'missing' }
-type GrokAcpFailure = Omit<Terminal, 'stopReason' | 'models'> & (
-  | { kind: 'rate_limited'; rpcCode: -32003; message: 'Rate limited' }
-  | { kind: 'prompt_error' }
-)
-type GrokStderrDiagnostic = {
-  bytes: number; sha256: string; ended: boolean; oversizedLine: boolean; readError: boolean
-  httpStatuses: number[]; usageBalanceExhausted: boolean
+type NativeDiagnostic = Record<string, unknown>
+type NativeFailure = { code: 'failed' | 'provider_quota_exhausted'; message: string }
+type GrokInvocation = {
+  cliVersion: string
+  profile: Record<string, unknown>
+  args: readonly string[]
+  environment(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv
+  connect(pipes: {
+    stdin: Writable; stdout: Readable; stderr: Readable; released: Promise<boolean>
+  }, onTerminal: (terminal?: Terminal) => void): { observed: Promise<unknown>; diagnostics: () => NativeDiagnostic }
+  describeError(error: unknown): { message: string; missingTerminal: boolean; waitForExit: boolean } | undefined
+  classifyStoppedError(error: unknown, facts: {
+    stderr?: NativeDiagnostic; exit?: Exit; stdoutEnded: boolean; managed: boolean
+  }): NativeFailure | undefined
+  settle(observation: unknown, exit: Exit, managed: boolean): { output: NativeOutput } | {
+    error: NativeFailure; diagnostic?: { name: string; payload: NativeDiagnostic }
+  }
 }
-type GrokTerminalFailure = { code: 'failed' | 'provider_quota_exhausted'; message: string }
 type GrokAdapter = {
-  grokNativeModel(model: string): string | undefined
-  inspectGrokStructuredCli(launch: { command: string; args: readonly string[]; cwd: string }, mode: 'read' | 'edit', schemaArgument: string): {
-    cliVersion: string; useAcp: boolean; nativeSchema: boolean
-  } | undefined
-  grokAcpArguments(): string[]
-  grokStreamingArguments(options: {
-    cwd: string; sessionId: string; promptFile: string; mode: 'read' | 'edit'; model?: string; schemaArgument?: string
-  }): string[]
-  grokInvocationEnvironment(env: NodeJS.ProcessEnv, useAcp: boolean): NodeJS.ProcessEnv
-  grokInvocationFlags(args: string[], useAcp: boolean): ReadonlySet<string>
-  observeGrokNativeStderr(stderr: Readable, flags: ReadonlySet<string>): () => GrokStderrDiagnostic
+  prepareGrokStructuredInvocation(request: {
+    launch: { command: string; args: readonly string[]; cwd: string }; mode: 'read' | 'edit'
+    sessionId: string; prompt: string; promptFile: string; schema: unknown; model: string
+  }): GrokInvocation
   grokTerminalCompleted(terminal?: Terminal): boolean
   classifyGrokNativeExit(observation: {
     terminal?: Terminal; deadline: number; observedAt?: number; interrupted: boolean; observationFailed: boolean
   }): 'accepted' | 'unproven' | { code: 'failed'; message: string; kind: 'exit_deadline' }
   grokCleanNativeExit(terminal: Terminal | undefined, exit?: Exit): boolean
-  grokAcpNativeFailure(failure: GrokAcpFailure, exit: Exit, managed: boolean): GrokTerminalFailure
-  grokStreamingQuotaFailure(diagnostic: GrokStderrDiagnostic, exit: Exit): GrokTerminalFailure | undefined
-  grokTerminalFailure(terminal: Terminal, exit: Exit): GrokTerminalFailure | undefined
-  grokAcpProtocolFailure(code: string, message: string): GrokTerminalFailure | undefined
-  observeGrokStructured(options: {
-    stdout: Readable; stdin: Writable; sessionId: string; cwd: string; nativeSchema?: boolean
-    acp?: { promptId: string; prompt: string; schema: unknown; model?: string }
-  }, onTerminal: (terminal?: Terminal) => void): Promise<NativeObservation>
-  describeGrokStructuredError(error: unknown, useAcp: boolean): { message: string; missingTerminal: boolean; finishInput: boolean } | undefined
 }
-type NativeObservation = { output: NativeOutput } | { failure: GrokAcpFailure }
 type Exit = { code: number | null; signal: NodeJS.Signals | null }
 type NativeSettlement = { launchDigest: string; outputDigest: string; stopDigest: string; exit: Exit }
 type StopResult = { nativeStopped: boolean; acknowledged: false; nativeStatus?: string; error?: string }
 
-const replay = grokReplay as Pick<GrokAdapter, 'grokCleanNativeExit'> & {
+const replay = grokReplay as {
+  grokReadOnlyGuidance: { repository: string; candidate: string; legacy: string }
   grokSettlementTiming: { stopMs: number; nativeShutdownGraceMs: number }
-  grokSettledOutputMatches(output: NativeOutput, request: { sessionId: string; cwd: string; promptId?: string; nativeSchema: boolean }): boolean
+  grokStructuredProfileMatches(plan: NativePlan, mode?: 'read' | 'edit'): boolean
+  grokSettledInvocationMatches(plan: NativePlan, output: NativeOutput, exit: Exit): boolean
   isGrokNativeExitFailure(failure: { code?: string; message?: string }): boolean
 }
 const { stopMs: STOP_MS, nativeShutdownGraceMs: NATIVE_SHUTDOWN_GRACE_MS } = replay.grokSettlementTiming
@@ -93,13 +87,13 @@ function writeEvidence(root: string, name: string, value: unknown): void {
 
 const candidateReviewPurposes = new Set(['elaboration_review', 'code_review'])
 const behaviorDraftPurposes = new Set(['code_behavior_analyze', 'code_behavior_review'])
-const nativeFileReadGuidance = 'For checked-out repository evidence, use the built-in read-only tools read_file, grep, and list_dir. Do not use run_terminal_command to inspect checked-out files or run tests, and do not use search_tool or use_tool for local files. Use an exact read-only Git command only if the task explicitly requires inspecting a historical Git object that is not in the checked-out tree.'
+const { grokReadOnlyGuidance } = replay
 
 const readGuidanceText = {
-  'direct-git-read-v1': 'For repository inspection, use built-in file readers or read-only shell commands such as cat, rg, and git show. Read the exact files and Git objects in this worktree and avoid the search_tool and use_tool discovery wrappers for this local evidence.',
-  'native-file-read-v2': nativeFileReadGuidance,
-  'native-candidate-read-v3': 'The current worktree holds the frozen candidate for this independent review. Inspect it directly with read_file, grep, and list_dir. Trace the relevant source, tests, and requirements to complete the requested review. Test execution is a separate verification stage.',
-  'native-review-table-read-v4': nativeFileReadGuidance + String.raw` Interpret Markdown table cells before comparing code literals to source code. Outside a matched code span, \\ encodes one literal backslash and \| encodes a cell character. Inside a code span, preserve literal backslashes except for an escaped table separator. For example, a plain cell containing /\\s+/ denotes /\s+/ in the contract. Check the decoded meaning against the actual implementation and tests, including any genuinely different decoded literal.`,
+  'direct-git-read-v1': grokReadOnlyGuidance.legacy,
+  'native-file-read-v2': grokReadOnlyGuidance.repository,
+  'native-candidate-read-v3': grokReadOnlyGuidance.candidate,
+  'native-review-table-read-v4': grokReadOnlyGuidance.repository + String.raw` Interpret Markdown table cells before comparing code literals to source code. Outside a matched code span, \\ encodes one literal backslash and \| encodes a cell character. Inside a code span, preserve literal backslashes except for an escaped table separator. For example, a plain cell containing /\\s+/ denotes /\s+/ in the contract. Check the decoded meaning against the actual implementation and tests, including any genuinely different decoded literal.`,
   'native-behavior-evidence-v5': 'Ground current and previous business behavior in the frozen source and historical role objects identified in the task. Cite the actual repository path and symbol, condition, or assertion. Do not cite the current worktree HEAD, its ancestry, or temporary .spex-sync-drafts commits as business evidence. Analyze and review have separate seed and draft commits. On repair, replace inherited claims about temporary Git identities with evidence from the actual frozen business files. In independent review, reject incorrect frozen-object or code claims and request correction of misleading draft HEAD claims. Still inspect every required path and verify the substantive claims against the source and tests.',
 } satisfies Record<NonNullable<NativePlan['readGuidance']>, string>
 
@@ -113,9 +107,7 @@ function assertPlan(plan: NativePlan, root: string, execution: GrokStructuredExe
     ? execution.worktree?.mode === 'edit' && behaviorDraftPurposes.has(execution.purpose)
     : Object.hasOwn(readGuidanceText, guidance) && execution.worktree?.mode === 'read' && (
       guidance === 'direct-git-read-v1' || guidance === 'native-file-read-v2' || candidateReviewPurposes.has(execution.purpose)))
-  if (plan?.version !== 1 || !guidanceMatches || plan.structuredOutput !== undefined && plan.structuredOutput !== 'native-schema-v1'
-    || plan.acp !== undefined && (plan.acp?.version !== 1 || execution.worktree?.mode !== 'edit' || plan.structuredOutput !== 'native-schema-v1'
-      || typeof plan.acp.promptId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(plan.acp.promptId))
+  if (plan?.version !== 1 || !guidanceMatches || !replay.grokStructuredProfileMatches(plan, execution.worktree?.mode)
     || native?.version !== 1 || plan.root !== root || native.root !== root || plan.sessionId !== native.sessionId
     || execution.threadId && execution.threadId !== plan.sessionId || execution.turnId && execution.turnId !== native.turnId || worktreePath !== undefined && worktreePath !== plan.workspace
     || plan.policyDigest !== digest(structuredExecutionPolicy(execution)) || !plan.cliPath || !plan.cliVersion
@@ -160,8 +152,7 @@ function readSettledOutput(root: string, prompt: string, execution: GrokStructur
   const output = read<NativeOutput>(root, 'result.json'), settlement = read<NativeSettlement>(root, 'settlement.json')
   if (settlement?.launchDigest !== digest(launch) || settlement.outputDigest !== digest(output) || typeof settlement.stopDigest !== 'string'
     || existsSync(join(root, 'cancel.json'))
-    || !replay.grokSettledOutputMatches(output, { sessionId: plan.sessionId, cwd: plan.workspace, promptId: plan.acp?.promptId, nativeSchema: plan.structuredOutput === 'native-schema-v1' })
-    || !replay.grokCleanNativeExit(output.terminal, settlement.exit)
+    || !replay.grokSettledInvocationMatches(plan, output, settlement.exit)
     || output.terminal.requestId !== execution.turnId || output.terminal.requestId !== execution.grokNative?.turnId
     || output.terminal.sessionId !== execution.threadId)
     throw stale('Grok settled native terminal or stopped process evidence differs')
@@ -270,36 +261,29 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
 
   const runtime = await loadManagerNativeRuntime()
   const provider = await runtime.loadNativeAdapter('grok') as GrokAdapter
-  let model: string | undefined
-  try { model = provider.grokNativeModel(nativeModelValue(execution.model, 'grok')) }
-  catch (error) {
-    if (!(error instanceof Error) || !('code' in error) || error.code !== 'unsupported') throw error
-    throw new StructuredSessionError('unsupported', error.message)
-  }
   const cliPath = runtime.findNativeExecutable('grok')
   if (!cliPath) throw new StructuredSessionError('unsupported', 'Grok Build CLI is unavailable')
   if (realpathSync(worktreePath) !== worktreePath) throw new StructuredSessionError('unsupported', 'Grok Build requires the exact physical worktree path')
   const launch = nativeWorktreeLaunch(worktreePath, cliPath, [])
-  const schemaArgument = JSON.stringify(execution.schema)
-  const nativeCli = provider.inspectGrokStructuredCli({ ...launch, cwd: worktreePath }, execution.worktree.mode, schemaArgument)
-  if (!nativeCli) throw new StructuredSessionError('unsupported', 'Grok Build CLI did not report a version')
-  const { cliVersion, nativeSchema, useAcp } = nativeCli
-  const acp = useAcp ? { version: 1 as const, promptId: randomUUID() } : undefined
-
   const native = { version: 1 as const, root, sessionId: randomUUID() }
   const readGuidance = execution.worktree.mode === 'read'
     ? candidateReviewPurposes.has(execution.purpose) ? 'native-review-table-read-v4' : 'native-file-read-v2'
     : behaviorDraftPurposes.has(execution.purpose) ? 'native-behavior-evidence-v5' : undefined
   const promptPath = join(root, 'prompt.txt'), promptBytes = nativePrompt(prompt, execution, readGuidance), receiptFile = join(root, 'process.json'), tmp = join(root, 'tmp')
-  const plan: NativePlan = {
-    ...native, ...(acp ? { acp } : {}), ...(readGuidance ? { readGuidance } : {}), ...(nativeSchema ? { structuredOutput: 'native-schema-v1' } : {}),
-    workspace: worktreePath, cliPath, cliVersion, promptDigest: sha256(promptBytes), policyDigest: digest(structuredExecutionPolicy(execution)),
+  let invocation: GrokInvocation
+  try {
+    invocation = provider.prepareGrokStructuredInvocation({
+      launch: { ...launch, cwd: worktreePath }, mode: execution.worktree.mode, model: nativeModelValue(execution.model, 'grok'),
+      sessionId: native.sessionId, prompt: promptBytes, promptFile: promptPath, schema: execution.schema,
+    })
+  } catch (error) {
+    if (!(error instanceof Error) || !('code' in error) || error.code !== 'unsupported') throw error
+    throw new StructuredSessionError('unsupported', error.message)
   }
-  const args = acp ? provider.grokAcpArguments() : provider.grokStreamingArguments({
-    cwd: worktreePath, sessionId: native.sessionId, promptFile: promptPath, mode: execution.worktree.mode, model,
-    ...(nativeSchema ? { schemaArgument } : {}),
-  })
-  const flags = provider.grokInvocationFlags(args, acp !== undefined)
+  const plan: NativePlan = {
+    ...invocation.profile, ...native, ...(readGuidance ? { readGuidance } : {}),
+    workspace: worktreePath, cliPath, cliVersion: invocation.cliVersion, promptDigest: sha256(promptBytes), policyDigest: digest(structuredExecutionPolicy(execution)),
+  }
   mkdirSync(realm, { recursive: true, mode: 0o700 })
   try { mkdirSync(root, { mode: 0o700 }) }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw pending('Grok original dispatch is already reserved'); throw error }
@@ -311,12 +295,11 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
   if (callbacks.signal?.aborted) throw cancelled()
   await callbacks.onTurnStarting?.()
 
-  const env = provider.grokInvocationEnvironment({ ...process.env, TMPDIR: tmp }, acp !== undefined)
+  const env = invocation.environment({ ...process.env, TMPDIR: tmp })
   for (const key of sessionIdentityEnvVars()) delete env[key]
   const launchedAt = performance.now()
-  const child = runtime.spawnGatedNativeProcess(launch.command, [...launch.args, ...args], { cwd: worktreePath, env }) as ChildProcessWithoutNullStreams
+  const child = runtime.spawnGatedNativeProcess(launch.command, [...launch.args, ...invocation.args], { cwd: worktreePath, env }) as ChildProcessWithoutNullStreams
   const gate = child.stdio[3] as Writable
-  const stderrDiagnostic = provider.observeGrokNativeStderr(child.stderr, flags)
   let observedExit: Exit | undefined
   let exitAtMs: number | null = null
   const exited = new Promise<Exit & { observedAt: number }>(resolve => child.once('exit', (code, signal) => {
@@ -335,9 +318,10 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
   let census: ReturnType<typeof setInterval> | undefined
   let terminalAtMs: number | undefined, deadlineAtMs: number | undefined, timerFiredAtMs: number | null = null
   let timedOut = false, observerFailure: unknown, timeoutFailure: unknown
+  let originalObserverError: unknown
   let stopPhase = 'native-exit-or-terminal'
-  let beginAcp: ((start: boolean) => void) | undefined
-  const acpReady = acp && new Promise<boolean>(resolve => { beginAcp = resolve })
+  let release!: (start: boolean) => void
+  const released = new Promise<boolean>(resolve => { release = resolve })
   let expire!: () => void
   const expiry = new Promise<null>(resolve => { expire = () => resolve(null) })
   const armStop = (): void => {
@@ -352,7 +336,7 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
   }
   const interrupt = (): void => {
     armStop()
-    beginAcp?.(false)
+    release(false)
     gate.destroy()
     child.stdin.destroy()
     if (owned) signalOwnedGroup(owned)
@@ -369,23 +353,18 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
     armStop()
     notifyTerminal()
   }
-  const observe = (): Promise<NativeObservation> => provider.observeGrokStructured({
-    stdout: child.stdout, stdin: child.stdin, sessionId: plan.sessionId, cwd: plan.workspace,
-    nativeSchema: plan.structuredOutput === 'native-schema-v1',
-    ...(acp ? { acp: { promptId: acp.promptId, prompt: promptBytes, schema: execution.schema, model } } : {}),
-  }, onTerminal)
-  const observed: Promise<NativeObservation | null> = (acpReady ? acpReady.then(start => start ? observe() : null) : observe())
+  const connected = invocation.connect({ stdout: child.stdout, stdin: child.stdin, stderr: child.stderr, released }, onTerminal)
+  const observed = connected.observed
     .catch((error: unknown) => {
-      const protocolError = provider.describeGrokStructuredError(error, acp !== undefined)
+      const protocolError = invocation.describeError(error)
       if (observerFailure === undefined) {
+        originalObserverError = error
         missingTerminal = protocolError?.missingTerminal === true
         observerFailure = protocolError ? pending(protocolError.message) : error
       }
       if (stopPhase === 'native-exit-or-terminal') stopPhase = 'native-stdout-protocol'
-      if (protocolError?.finishInput) {
-        armStop()
-        child.stdin.end()
-      } else abort()
+      if (protocolError?.waitForExit) armStop()
+      else abort()
       return null
     }).finally(() => { stdoutFinished = true })
   callbacks.signal?.addEventListener('abort', abort, { once: true })
@@ -415,9 +394,8 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
     await sampleNativeWorktreeProcesses(owned)
     if (callbacks.signal?.aborted || timedOut || existsSync(join(root, 'cancel.json'))) abort()
     else {
-      if (!acp) child.stdin.end()
       gate.end('start\n')
-      beginAcp?.(true)
+      release(true)
     }
     if (deadline === undefined) census = setInterval(periodicNativeWorktreeSampler(owned, () => deadline !== undefined, error => {
       stopPhase = 'native-periodic-process-observation'
@@ -476,21 +454,17 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
     if (callbacks.signal?.aborted || timedOut || existsSync(join(root, 'cancel.json'))) throw Object.assign(cancelled(timedOut), timeoutFailure === undefined ? {} : { cause: timeoutFailure })
     if (observerFailure) throw observerFailure
     if (processFailed || !observation || !child.stdout.readableEnded || Date.now() >= stopDeadline) throw pending('Grok native stdout EOF was not observed within the settlement window')
-    if ('failure' in observation) {
-      const { failure } = observation
-      const classified = provider.grokAcpNativeFailure(failure, exit, !!managedRoute(execution.model))
-      if (classified.code === 'provider_quota_exhausted' && failure.kind === 'rate_limited') {
-        writeEvidence(root, 'acp-rate-limit-diagnostic.json', {
+    const settlement = invocation.settle(observation, exit, !!managedRoute(execution.model))
+    if ('error' in settlement) {
+      if (settlement.diagnostic) {
+        writeEvidence(root, settlement.diagnostic.name, {
           version: 1, launchDigest: digest(binding), planDigest: digest(plan), stopDigest: stopObservation(root, binding),
-          sessionId: failure.sessionId, requestId: failure.requestId,
-          rpcCode: failure.rpcCode, message: failure.message, exit, stdoutEnded: true,
+          ...settlement.diagnostic.payload, exit, stdoutEnded: true,
         })
       }
-      throw new StructuredSessionError(classified.code, classified.message)
+      throw new StructuredSessionError(settlement.error.code, settlement.error.message)
     }
-    const { output } = observation
-    const terminalFailure = provider.grokTerminalFailure(output.terminal, exit)
-    if (terminalFailure) throw new StructuredSessionError(terminalFailure.code, terminalFailure.message)
+    const { output } = settlement
     const turnId = output.terminal.requestId
     await callbacks.onThread(native.sessionId)
     await callbacks.onNative({ ...running, turnId })
@@ -527,8 +501,9 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
     }
     if (!stopped) throw Object.assign(pending(`Grok native stop remains unproven (${stopPhase})`), { cause: error })
     if (exitWindowFailure && error === exitWindowFailure && (callbacks.signal?.aborted || timedOut || existsSync(join(root, 'cancel.json')))) throw cancelled(timedOut)
+    let stderr: NativeDiagnostic | undefined
     if (error === observerFailure && missingTerminal && launchBinding && observedExit) {
-      const stderr = stderrDiagnostic()
+      stderr = connected.diagnostics()
       try {
         writeEvidence(root, 'missing-terminal-diagnostic.json', {
           version: 1, launchDigest: digest(launchBinding), planDigest: launchBinding.planDigest,
@@ -542,14 +517,12 @@ export async function grokStructuredTurn(realm: string, id: string, prompt: stri
         console.warn('spex grok native missing-terminal diagnostic unavailable')
         throw error
       }
-      if (managedRoute(execution.model) && !timedOut && !callbacks.signal?.aborted && !existsSync(join(root, 'cancel.json'))) {
-        const classified = provider.grokStreamingQuotaFailure(stderr, observedExit)
-        if (classified) throw new StructuredSessionError(classified.code, classified.message)
-      }
     }
-    if (acp && error === observerFailure && error instanceof StructuredSessionError
+    if (error === observerFailure
       && !timedOut && !callbacks.signal?.aborted && !existsSync(join(root, 'cancel.json'))) {
-      const classified = provider.grokAcpProtocolFailure(error.code, error.message)
+      const classified = invocation.classifyStoppedError(originalObserverError, {
+        stderr, exit: observedExit, stdoutEnded: child.stdout.readableEnded, managed: !!managedRoute(execution.model),
+      })
       if (classified) throw new StructuredSessionError(classified.code, classified.message)
     }
     throw error

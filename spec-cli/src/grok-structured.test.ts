@@ -5,7 +5,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
-import { delimiter, join } from 'node:path'
+import { delimiter, dirname, join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { assertGrokRejectedFinalSource, grokStructuredTurn, stopGrokStructuredTurn, type GrokStructuredExecution } from './grok-structured.js'
 import { managedModel } from './llm-manager-route.js'
@@ -22,7 +22,7 @@ type Scenario = 'startup-error' | 'success' | 'wrong-session' | 'wrong-cwd' | 'm
   | 'native-schema-success' | 'native-schema-trailing' | 'native-schema-missing' | 'native-schema-mismatch'
   | 'acp-success' | 'acp-missing' | 'acp-quota' | 'acp-startup-quota' | 'acp-startup-delayed-quota' | 'acp-auth-quota' | 'acp-auth-stderr-quota' | 'acp-prompt-stderr-quota' | 'acp-signal' | 'acp-mismatched-response'
 
-function fixture(t: TestContext, scenario: Scenario, model = 'grok:default', purpose = 'grok-fixture', stderrChunks: readonly string[] = []) {
+function fixture(t: TestContext, scenario: Scenario, model = 'grok:default', purpose = 'grok-fixture', stderrChunks: readonly string[] = [], mode: 'read' | 'edit' = scenario === 'read' ? 'read' : 'edit') {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'spex-grok-fixture-')))
   const bin = join(root, 'bin'), cli = join(bin, 'grok'), source = join(root, 'source'), workspace = join(root, 'workspace')
   const realm = join(root, 'realm'), sessionRoot = join(realm, 'dispatch'), started = join(sessionRoot, 'fixture-started.json')
@@ -37,7 +37,7 @@ function fixture(t: TestContext, scenario: Scenario, model = 'grok:default', pur
   const git = (...args: string[]): string => execFileSync('git', ['-C', source, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
   git('init', '-q'); git('config', 'user.name', 'Grok fixture'); git('config', 'user.email', 'grok-fixture@example.invalid')
   writeFileSync(join(source, 'seed.txt'), 'immutable seed\n'); git('add', 'seed.txt'); git('commit', '-qm', 'seed')
-  const worktree = { baseCommit: git('rev-parse', 'HEAD'), tree: git('rev-parse', 'HEAD^{tree}'), mode: scenario === 'read' ? 'read' as const : 'edit' as const }
+  const worktree = { baseCommit: git('rev-parse', 'HEAD'), tree: git('rev-parse', 'HEAD^{tree}'), mode }
   git('worktree', 'add', '--detach', '-q', workspace, worktree.baseCommit)
   const requestId = randomUUID()
   writeFileSync(cli, String.raw`#!${process.execPath}
@@ -118,8 +118,8 @@ if (acp) {
 const option = key => args[args.indexOf(key) + 1]
 const cwd = option('--cwd'), sessionId = option('--session-id'), promptFile = option('--prompt-file')
 assert.equal(option('--output-format'), 'streaming-json')
-assert.equal(option('--permission-mode'), scenario === 'read' ? 'plan' : 'bypassPermissions')
-if (scenario === 'read') {
+assert.equal(option('--permission-mode'), ${JSON.stringify(mode)} === 'read' ? 'plan' : 'bypassPermissions')
+if (${JSON.stringify(mode)} === 'read') {
   assert.equal(option('--disallowed-tools'), 'enter_plan_mode,exit_plan_mode')
   assert.equal(process.env.GROK_TELEMETRY_TRACE_UPLOAD, 'false')
 }
@@ -388,6 +388,22 @@ test('Grok native schema uses the split terminal value and replays it without th
 
 test('Grok ACP edits bind the original Git result and replay after natural zero and EOF', async t => {
   const f = fixture(t, 'acp-success', 'grok:grok-4.7-build')
+  const manager = join(dirname(f.cli), 'manager.mjs'), python = join(dirname(f.cli), 'manager-entry')
+  const bundled = new URL('../llm-manager/native-runtime.mjs', import.meta.url).href
+  writeFileSync(manager, `export * from ${JSON.stringify(bundled)}
+import { grokReplay } from ${JSON.stringify(bundled)}
+const { prepareGrokStructuredInvocation, grokTerminalCompleted, grokCleanNativeExit, classifyGrokNativeExit } = grokReplay
+export const loadNativeAdapter = vendor => {
+  if (vendor !== 'grok') throw new Error('unexpected adapter')
+  return { prepareGrokStructuredInvocation, grokTerminalCompleted, grokCleanNativeExit, classifyGrokNativeExit }
+}
+`)
+  writeFileSync(python, `#!${process.execPath}
+process.stdout.write(JSON.stringify({ version: 1, path: ${JSON.stringify(manager)} }))
+`, { mode: 0o700 })
+  const env = process.env
+  process.env = { ...env, SPEX_LLM_MANAGER_PYTHON: python, SPEX_LLM_MANAGER_CONFIG: join(dirname(f.cli), 'config.json') }
+  t.after(() => { process.env = env })
   const result = await f.run()
   const plan = JSON.parse(readFileSync(join(f.sessionRoot, 'plan.json'), 'utf8'))
   const start = JSON.parse(readFileSync(f.started, 'utf8'))
@@ -795,6 +811,18 @@ for (const scenario of ['wrong-session', 'wrong-cwd', 'missing-request', 'duplic
 }
 
 const stderrPadding = ' \t'.repeat(2_000)
+test('Grok reports an exactly stopped nonzero streaming exit without a terminal as a settled failure', async t => {
+  const f = fixture(t, 'missing-terminal', managedGrok, 'elaboration_review', ['Unclassified native CLI failure\n'], 'read')
+  await assert.rejects(f.run(), { code: 'failed', message: 'Grok native stream closed without its original terminal' })
+  assert.deepEqual(await stopGrokStructuredTurn(f.state()), { nativeStopped: true, acknowledged: false, nativeStatus: 'stopped' })
+  const diagnostic = JSON.parse(readFileSync(join(f.sessionRoot, 'missing-terminal-diagnostic.json'), 'utf8'))
+  assert.deepEqual(diagnostic.exit, { code: 1, signal: null })
+  assert.deepEqual(diagnostic.stderr.httpStatuses, [])
+  assert.equal(f.state().turnId, undefined)
+  assert.equal(existsSync(join(f.sessionRoot, 'result.json')), false)
+  assert.equal(existsSync(join(f.sessionRoot, 'settlement.json')), false)
+})
+
 for (const [label, chunks, statuses, exhausted, oversizedLine] of [
   ['empty', [], [], false, false],
   ['split HTTP and quota evidence', ['Error: HT', 'TP 429: usage balance exhausted\n', 'Authorization: Bearer FAKE_SECRET_CANARY\n', 'HTTP/1.1 503 Service Unavailable\r\n'], [429, 503], true, false],
@@ -807,7 +835,7 @@ for (const [label, chunks, statuses, exhausted, oversizedLine] of [
 ] as const) {
   test(`Grok records safe missing-terminal stderr diagnostics for ${label}`, async t => {
     const f = fixture(t, 'missing-terminal', 'grok:default', 'grok-fixture', chunks)
-    await assert.rejects(f.run(), { code: 'cancellation_pending', message: 'Grok native stream closed without its original terminal' })
+    await assert.rejects(f.run(), { code: chunks.length ? 'failed' : 'cancellation_pending', message: 'Grok native stream closed without its original terminal' })
     const root = f.sessionRoot
     const read = (name: string): string => readFileSync(join(root, name), 'utf8')
     const observedStop = read('process-stop-observations.jsonl').trimEnd().split('\n').at(-1)!
@@ -875,7 +903,7 @@ for (const [label, chunks, startupErrors, oversizedLine] of [
 ] as const) {
   test(`Grok startup stderr projects only safe fixed reasons for ${label}`, async t => {
     const f = fixture(t, 'startup-error', 'grok:default', 'grok-fixture', chunks)
-    await assert.rejects(f.run(), { code: 'cancellation_pending', message: 'Grok native stream closed without its original terminal' })
+    await assert.rejects(f.run(), { code: 'failed', message: 'Grok native stream closed without its original terminal' })
     const raw = readFileSync(join(f.sessionRoot, 'missing-terminal-diagnostic.json'), 'utf8')
     const diagnostic = JSON.parse(raw)
     assert.deepEqual(diagnostic.exit, { code: 1, signal: null })

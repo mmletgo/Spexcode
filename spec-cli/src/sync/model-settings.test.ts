@@ -18,9 +18,9 @@ test('settings and operation selection share the authoritative Manager bridge', 
   const unmanaged = await readSyncModelSettings()
   const runtime = await loadManagerNativeRuntime()
   assert.equal(runtime.nativeRuntimeVersion, 1)
-  assert.equal(runtime.nativeAdapterContract, 5)
+  assert.equal(runtime.nativeAdapterContract, 6)
   for (const [vendor, method] of [
-    ['grok', 'classifyGrokNativeExit'],
+    ['grok', 'prepareGrokStructuredInvocation'],
     ['claude', 'claudeControlledTerminalExit'],
     ['zcode', 'zcodeReplayTerminal'],
     ['cursor', 'cursorCloseMatches'],
@@ -75,7 +75,7 @@ if (process.argv[3] === '-m' && process.argv[4] === 'llm_manager.native_runtime'
 
   const oldNative = join(root, 'old-native.mjs'), oldPython = join(root, 'old-python')
   writeFileSync(oldNative, `export const nativeRuntimeVersion=1
-export const nativeAdapterContract=4
+export const nativeAdapterContract=5
 export const findNativeExecutable = () => { throw new Error('must not probe the CLI') }
 export const spawnGatedNativeProcess = findNativeExecutable
 export const spawnNativeProcess = findNativeExecutable
