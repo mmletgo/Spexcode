@@ -10,7 +10,7 @@ import type { ContractFinding } from '@spexcode/spec-core/contracts'
 import { StructuredSessionError, rejectedFinalOutput } from '../session-structured-policy.js'
 import { nativeWorktreePrompt, nativeWorktreeResult } from '../native-worktree-runtime.js'
 import { draftVerificationOwnershipMatches, elaborate, elaborationMaterialContext, elaborationDigest, freezeElaborationInput, incrementalDraftCommand, matchesProviderDraftSeed, sealPartitionedElaboration, verifyElaborationDraftCache, withDraftVerificationRows } from './elaboration.js'
-import { ELABORATION_BOUNDARIES, ELABORATION_GENERATION_GUIDANCE } from './elaboration-types.js'
+import { ELABORATION_BOUNDARIES, ELABORATION_COMPACT_CONTEXT, ELABORATION_GENERATION_GUIDANCE } from './elaboration-types.js'
 import type { ElaborationCrossFreezeAuthor, ElaborationInput, ElaborationRepairDiagnostics, ElaborationRunner, ElaborationSessionRequest } from './elaboration-types.js'
 import { captureInputSnapshot, contentHash, readEvidence, readObject, readTree, writeEvidence, writeObject, writeTree } from './snapshot.js'
 import { captureStageDraft, overlayStageTree, readStageDraft, readStoppedPhysicalDraft, stageDraftEditorPath, stageWorktree, type StageDraftMaterialRequest } from './stage-worktree.js'
@@ -1447,12 +1447,95 @@ async function reviewedDetailFixture(t: test.TestContext, scope: 'whole' | 'part
   return { ...f, input: { ...input, mode: 'reelaborate' as const, facts: analysis.facts }, corrected, rejected, evidence: { ref: writeEvidence(f.commonDir, analysis), analysis } }
 }
 
-for (const scope of ['whole', 'partition'] as const) test(`Native P1当前受审analysis完整同入${scope}生成与独审，空特殊授权不遮盖非冲突明细`, async t => {
+test('原生P1精简提示A/B保留完整局部分析、同稿续审及独立性', async t => {
+  const f = await reviewedDetailFixture(t, 'partition')
+  const analysis = { ...f.evidence.analysis, changes: f.evidence.analysis.changes.map(change => ({
+    ...change, evidence: change.evidence + '上游事实原件只读核对。'.repeat(2400),
+  })) }
+  const evidence = { ref: writeEvidence(f.commonDir, analysis), analysis }
+  const inputWithAnalysis = { ...f.input, analysis: evidence, facts: [...analysis.facts, ...analysis.facts] }
+  const reviewOutput = { verdict: 'repair', checkedBoundaries: [...ELABORATION_BOUNDARIES], findings: [{
+    code: 'check-output', kind: 'repair', affectedIds: ['STEP-EXPORT-01'], message: '核对既有处理结果',
+    evidence: path, decision: '对照冻结源码及测试',
+  }] }
+  const operatorDiagnostic = { ref: writeEvidence(f.commonDir, '这轮复核'), text: '从原Git候选检索 STEP-EXPORT-01', evidencePaths: [path] }
+  const results: { inputDigest: string; candidateDigest: string | null; bytes: number[] }[] = []
+  for (const nativeContext of [undefined, ELABORATION_COMPACT_CONTEXT] as const) {
+    const start = f.requests.length
+    const input = { ...inputWithAnalysis, requestKey: 'context-' + (nativeContext ?? 'original'), nativeContext }
+    const run = f.run(() => JSON.stringify(f.corrected))
+    const rejected = await elaborate(input, { runner: async request => {
+      const result = await run(request)
+      return request.purpose === 'elaboration_review' ? { ...result, output: reviewOutput, resultDigest: contentHash(JSON.stringify(reviewOutput)) } : result
+    } })
+    assert.equal(rejected.structurePassed, true)
+    assert.equal(rejected.reviewPassed, false)
+    const [author, originalReview] = f.requests.slice(start)
+    const originalBytes = JSON.stringify(rejected)
+    const accepted = await elaborate({ ...input, requestKey: input.requestKey + ':resume' }, {
+      repairDiagnostics: {
+        requestKey: input.requestKey, inputDigest: rejected.inputDigest, resultRef: writeEvidence(f.commonDir, rejected),
+        failure: rejected.failure!, round: rejected.rounds[0],
+        settledReview: { kind: 'operator-challenge', operatorDiagnostic, prompt: originalReview.prompt, worktree: originalReview.worktree, schema: originalReview.schema },
+      },
+      runner: f.run(() => assert.fail('复审只派新独审')),
+    })
+    const requests = f.requests.slice(start)
+    assert.deepEqual(requests.map(request => request.purpose), ['elaboration_generate', 'elaboration_review', 'elaboration_review'])
+    const resumed = requests[2]
+    assert.equal(accepted.reviewPassed, true, JSON.stringify(accepted.failure))
+    assert.equal(accepted.candidateDigest, rejected.candidateDigest)
+    assert.equal(JSON.stringify(rejected), originalBytes)
+    assert.deepEqual(accepted.rounds[0].traces[0], rejected.rounds[0].traces[0])
+    assert.notEqual(accepted.rounds[0].traces[1].sessionId, rejected.rounds[0].traces[1].sessionId)
+    assert.deepEqual(resumed.schema, originalReview.schema)
+    assert.deepEqual(resumed.worktree, originalReview.worktree)
+    assert.ok(resumed.prompt.includes(operatorDiagnostic.text))
+    assert.ok(resumed.prompt.includes(JSON.stringify(reviewOutput)))
+
+    if (nativeContext) {
+      assert.doesNotMatch(resumed.prompt, /"parsedBusinessRows":/)
+      assert.deepEqual(accepted.changes.map(change => change.path), [path])
+      const authorTask = JSON.parse(author.prompt.split('\n任务:\n')[1].split('\n')[0])
+      assert.deepEqual(authorTask.facts, analysis.facts)
+      for (const request of requests) {
+        const task = JSON.parse(request.prompt.split('\n任务:\n')[1].split('\n')[0])
+        assert.deepEqual(task.analysis.ref, evidence.ref)
+        assert.equal(task.analysis.analysis, undefined)
+        const entry = readTree(f.commonDir, request.worktree!.tree).find(entry => entry.path === task.analysis.path)!
+        assert.equal(entry.mode, '100644')
+        const bytes = readObject(f.commonDir, entry.oid)
+        assert.equal(contentHash(bytes), task.analysis.sha256)
+        assert.deepEqual(JSON.parse(bytes.toString('utf8')), analysis)
+        assert.ok(!request.prompt.includes(analysis.changes[0].evidence))
+      }
+      const taskAttachment = readTree(f.commonDir, author.worktree!.tree).find(entry => entry.path === authorTask.analysis.path)!
+      const binding = rejected.rounds[0].draft!
+      const baseline = { binding, worktree: author.worktree!, inputDigest: rejected.inputDigest, readonlyOverlay: [taskAttachment] }
+      assert.ok(elaborationMaterialContext(f.commonDir, author, baseline))
+      const invalidTree = overlayStageTree(f.commonDir, author.worktree!.tree, [{ path: taskAttachment.path, source: 'poison' }])
+      const invalidSeed = stageWorktree(f.commonDir, f.snapshot.headCommit, invalidTree, 'edit')
+      assert.throws(() => elaborationMaterialContext(f.commonDir, { ...author, worktree: invalidSeed }, baseline), /精确程序任务/)
+    } else {
+      assert.match(resumed.prompt, /"parsedBusinessRows":/)
+    }
+    results.push({ inputDigest: accepted.inputDigest, candidateDigest: accepted.candidateDigest, bytes: requests.map(request => Buffer.byteLength(request.prompt)) })
+  }
+  const [original, compact] = results
+  assert.equal(compact.inputDigest, original.inputDigest)
+  assert.equal(compact.candidateDigest, original.candidateDigest)
+  compact.bytes.forEach((bytes, index) => assert.ok(bytes * 2 < original.bytes[index]))
+  t.diagnostic(JSON.stringify({ promptBytes: { original: original.bytes, compact: compact.bytes } }))
+})
+
+for (const mode of ['whole', 'partition', 'compact-partition'] as const) test(`Native P1当前受审analysis完整同入${mode}生成与独审，空特殊授权不遮盖非冲突明细`, async t => {
+  const scope = mode === 'whole' ? 'whole' : 'partition'
+  const nativeContext: ElaborationInput['nativeContext'] = mode === 'compact-partition' ? ELABORATION_COMPACT_CONTEXT : undefined
   const f = await reviewedDetailFixture(t, scope), original = JSON.stringify(f.rejected), draft = f.rejected.rounds[0].draft!
   const local = f.evidence, planDigest = contentHash('controlled detail partition plan')
   const combined = { ...local.analysis, partitionCoverage: { planDigest, partitionIds: ['detail-owner'], changedPaths: ['src/export.js'] }, partitionEvidence: [{ partitionId: 'detail-owner', changedPaths: ['src/export.js'], analysisRef: local.ref, analysis: local.analysis }] }
   const analysis = scope === 'whole' ? local : { ref: writeEvidence(f.commonDir, combined), analysis: combined }
-  const input = { ...f.input, requestKey: `current-analysis-${scope}`, analysis }
+  const input = { ...f.input, requestKey: 'current-analysis-' + mode, analysis, nativeContext }
   const callStart = f.requests.length, runner = f.run((_request, workspace, draftPath) => {
     assert.equal(readFileSync(join(workspace, draftPath), 'utf8'), readStageDraft(f.commonDir, draft, draft))
     return JSON.stringify(f.corrected)
@@ -1463,12 +1546,19 @@ for (const scope of ['whole', 'partition'] as const) test(`Native P1当前受审
     : await elaborateSyncPartitions(input, plan, 1, { load: () => null, save: (_key, value) => writeEvidence(f.commonDir, value), loadElaborationDraft: () => draft }, runner)
   const requests = f.requests.slice(callStart)
   const evidenceDir = process.env.SPEX_NATIVE_ANALYSIS_BRIEF_EVIDENCE_DIR
-  if (evidenceDir) writeFileSync(join(evidenceDir, `${scope}.json`), JSON.stringify({ controlledNative: true, scope, analysis, local, oldResult: f.rejected, originalDraft: readStageDraft(f.commonDir, draft, draft), requests, result }, null, 2))
+  if (evidenceDir) writeFileSync(join(evidenceDir, mode + '.json'), JSON.stringify({ controlledNative: true, scope, analysis, local, oldResult: f.rejected, originalDraft: readStageDraft(f.commonDir, draft, draft), requests, result }, null, 2))
   assert.equal(result.status, 'complete', JSON.stringify(result.rounds.map(round => round.findings)))
   assert.deepEqual(requests.map(request => request.purpose), ['elaboration_generate', 'elaboration_review'])
   for (const request of requests) {
     const task = JSON.parse(request.prompt.split('\n任务:\n')[1].split('\n')[0])
-    assert.deepEqual(task.analysis, local, '生成与独审必须收到当前真实受审分析ref和完整正文，不只authorChanges或facts')
+    if (nativeContext) {
+      assert.deepEqual(task.analysis.ref, local.ref)
+      assert.equal(task.analysis.analysis, undefined)
+      const entry = readTree(f.commonDir, request.worktree!.tree).find(entry => entry.path === task.analysis.path)!
+      assert.deepEqual(JSON.parse(readObject(f.commonDir, entry.oid).toString('utf8')), local.analysis)
+    } else {
+      assert.deepEqual(task.analysis, local, '历史生成与独审继续沿原分区内联分析')
+    }
     assert.equal(task.authorChanges, undefined, '原authorChanges仅在完整analysis内出现，不另造重复投影')
     assert.deepEqual(task.targets, [{ targetIndex: 0, nodeId: 'export-contract', path }])
     assert.equal(task.mode, 'reelaborate'); assert.deepEqual(task.authorizedChanges, [])

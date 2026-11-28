@@ -1,6 +1,7 @@
 # 持续同步编排
 
 - 本目录复用 session 原生工作树执行与 spec-core/contracts；不自行维护第二份契约图或会话执行器。旧受限结构化策略只按原绑定恢复历史任务。
+- 新 Native P1 精简上下文由 attempt 草稿协议冻结，后继沿谱系的原协议。只读 Git 分区分析附件按摘要匹配，独审直接读取候选正文。writer83 升降级沿 [[sync-migrations]]。
 - 新 Native P1 独审的条目 ID 说明由 attempt 的草稿协议冻结，节点定位留在 `evidence`，`affectedIds` 沿原图和 owner 门禁。历史派发按原字节回放，writer78 沿 [[sync-migrations]] 升降级。
 - 新普通 Native 叶的分批草稿 CLI/MCP 共用既有校验和渲染。只读配置留在原 seed，正式候选仍核 Git 对象与完整结构。writer76 升级沿 [[sync-migrations]] 的一致备份和原检查点恢复。
 - 普通正式重试可按 [[sync-coordinator]] 承接已结算祖先的 P1 合格稿。仅为格式、真实额度和有精确只读停止证明的独审失败续审。原作者及失败证据沿真实 operation/attempt，在 [[sync-checkpoint-evidence]] 冷验；writer79 升降级沿 [[sync-migrations]]。

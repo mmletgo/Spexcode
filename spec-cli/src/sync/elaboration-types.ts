@@ -7,6 +7,7 @@ import type { RejectedStructuredOutput, StructuredExecution, ZCodeToolPolicy } f
 import type { ManagedRoute } from '../llm-manager-route.js'
 import type { Contract, ContractCoverage, ContractFinding, ContractGraph, Gap, ParseContractInput, Verification } from '@spexcode/spec-core/contracts'
 
+export const ELABORATION_COMPACT_CONTEXT = 'compact-git-context-v1'
 export const ELABORATION_BOUNDARIES = ['permissions', 'mutation', 'async', 'network', 'concurrency', 'callbacks', 'retries', 'cancellation', 'idempotency', 'external_side_effects'] as const
 export const ELABORATION_GENERATION_GUIDANCE_V1 = 'ac-test-binding-v1'
 export const ELABORATION_GENERATION_GUIDANCE_V2 = 'ac-test-flow-binding-v2'
@@ -48,6 +49,8 @@ export type ElaborationInput = {
   worktree?: { baseCommit: string; tree: string; mode: 'read' | 'edit' }
   /** 新派发显式冻结；缺席继续使用原请求协议，不重写历史reserved请求。 */
   draftProtocol?: 'elaboration-draft-v1'
+  /** 首次派发冻结的提示传输协议，不进入业务输入摘要。 */
+  nativeContext?: typeof ELABORATION_COMPACT_CONTEXT
   /** 由新 attempt 冻结；已有派发的草稿协议继续沿原字节恢复。 */
   incrementalDraft?: { node: string; cli: string }
   /** 原attempt阶段冻结的生成提示版本，仅影响Native generation的请求摘要。 */

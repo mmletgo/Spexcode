@@ -45,6 +45,8 @@ draft.errors保留每项原finding的code/message及实际存在的severity、no
 
 可选 `draftRepairDisposition` 冻结 [[sync-elaboration]] 的 Native 完整叶冷续稿诊断角色。`deferToImplementation` 仅匹配冷验原候选的独审前结构 finding，`deferredImplementationPolicy` 说明该角色；二者仅进入新生成请求，不进入业务输入摘要、Git 稿、持久 finding 或批准。
 
+可选 `nativeContext` 选择 [[sync-elaboration]] 的原生请求投影。精简模式把只读分析附件和精确提示绑定到实际派发，业务输入摘要、候选及已批准结果仍取同一原件。历史字段缺席继续重放原提示。
+
 可选 `sharedDraftDiagnostics` 只选择 [[sync-elaboration]] 的提示投影。两组原诊断继续保存在各自对象中，若同序原值完全相等，提示可共用一份内容。业务输入摘要、原失败记录、候选和独审资格保持。
 
 可选 `parentInterfaceReview` 选择 [[sync-elaboration]] 的 Native 纯父接口独审提示。历史 `true` 重放原字节，新 attempt 选择 `scope-v2`。业务输入与候选摘要保持。Native 实际请求摘要绑定冻结提示和独审诊断。认证原独审或其未启动结算的 `settledReview.kind` 只在当次重建新独审请求时使用。完整原报告、拒稿和原件继续沿既有诊断及来源引用保留。
