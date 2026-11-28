@@ -33,7 +33,7 @@ const stopBeforeGeneration = 'fixture reached P1 whole before generation'
 const oldReviewFailure = 'fixture old read-only reviewer stopped without a verdict'
 const digest = (value: unknown): string => contentHash(JSON.stringify(value))
 
-for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent', 'prior-attempt-reviewer-present', 'prior-attempt-reviewer-absent', 'operator-challenge', 'impact-format-retry', 'impact-format-formal-retry', 'impact-format-formal-retry-missing-native', 'impact-format-formal-retry-missing-sibling-reviewer'] as const) test('跨冻结正式 P1 复用与冷验 ' + mode, async t => {
+for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent', 'prior-attempt-reviewer-present', 'prior-attempt-reviewer-absent', 'operator-challenge', 'formal-retry-before-p1', 'impact-format-retry', 'impact-format-formal-retry', 'impact-format-formal-retry-missing-native', 'impact-format-formal-retry-missing-sibling-reviewer'] as const) test('跨冻结正式 P1 复用与冷验 ' + mode, async t => {
   const oldApproved = mode !== 'old-unapproved', operatorChallenge = mode === 'operator-challenge'
   const formalImpactRetry = mode.startsWith('impact-format-formal-retry')
   const retryImpactFormat = mode === 'impact-format-retry' || formalImpactRetry
@@ -238,6 +238,7 @@ for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent',
     } },
   }
   let interruptAfter: string | undefined
+  let failAfterP0 = false
   let omittedBudgetHint: { minimumCalls: number; remainingCalls: number } | undefined
   const runUntilP1 = async () => {
     const checkpoint = store.checkpoint.bind(store)
@@ -249,6 +250,7 @@ for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent',
         return store.readAttempt(fence.attemptId)
       }
       const saved = checkpoint(fence, ref)
+      if (failAfterP0 && stage === 'analysis') throw new StructuredSessionError('unsupported', 'fixture stopped after P0 and before P1 dispatch')
       if (stage && stage === interruptAfter) throw new SyncStoreError('SYNC_FENCE_EXPIRED', 'fixture exits after saving ' + stage)
       if (stage === 'elaboration') throw new StructuredSessionError('unsupported', stopBeforeGeneration)
       return saved
@@ -282,7 +284,28 @@ for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent',
   active = await admit(currentInput, 'p1-current-initial')
   const oldBefore = { operation: store.readOperation(old.id), attempts: store.listAttempts(old.id), resources: store.listResources(oldAttempt.id) }
   assert.equal(oldBefore.operation.phase, 'superseded')
-  const currentCalls = () => calls.filter(call => call.operationId === active.id)
+  let p0Carrier: string | undefined
+  if (mode === 'formal-retry-before-p1') {
+    const originalCurrent = active
+    failAfterP0 = true
+    const stopped = await runUntilP1()
+    assert.equal(stopped.operation.phase, 'failed', JSON.stringify(stopped.failure))
+    assert.ok(store.readOperation(active.id).crossFreezeBinding)
+    assert.deepEqual(calls.filter(call => call.operationId === active.id).map(call => call.impact ?? call.purpose), ['p0', 'code_behavior_review'])
+    assert.equal(store.readRetryEligibility(active.id).eligible, true)
+    p0Carrier = active.id
+    reopen()
+    const retry = store.admitAndEnqueue(await prepareSyncAdmission(currentInput, plan, {
+      ingressKey: 'p1-formal-retry-before-impact', rootCauseId: 'p1-formal-retry-before-impact', retryOf: originalCurrent.id,
+      origin: originalCurrent.origin, budget: originalCurrent.budget, managedRoot, model: 'claude:default',
+      baselineSelection: store.readBusinessBaselineSelection(originalCurrent.id), executionScope: originalCurrent.scope, impactDigest: originalCurrent.impactDigest,
+    }))
+    active = store.ackDispatch(currentInput.source.repositoryId, retry.dispatchMessageId)
+    assert.equal(active.input.id, originalCurrent.input.id)
+    assert.equal(active.crossFreezeBinding, undefined)
+    failAfterP0 = false
+  }
+  const currentCalls = () => calls.filter(call => call.operationId === active.id || call.operationId === p0Carrier)
   if (retryImpactFormat) {
     let result = await runUntilP1()
     const originalCurrent = active
@@ -408,6 +431,10 @@ for (const mode of ['old-approved', 'old-unapproved', 'current-reviewer-absent',
   assert.equal(interrupted.failure?.code, 'SYNC_FENCE_EXPIRED')
   assert.deepEqual(currentCalls().map(call => call.impact ?? call.purpose), ['p0', 'code_behavior_review', 'p1'])
   assert.ok(stages(store.listAttempts(active.id)[0]).has(impactKey))
+  if (p0Carrier) {
+    const impactRef = stages(store.listAttempts(active.id)[0]).get(impactKey)!
+    assert.deepEqual(read<{ sourceRef: BlobRef }>(impactRef).sourceRef, store.readOperation(p0Carrier).crossFreezeBinding?.ref)
+  }
   interruptAfter = localKey
   reopen()
 

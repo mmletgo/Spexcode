@@ -2145,7 +2145,7 @@ function findLockedCrossFreezeSource(store: SyncStore, operation: SyncOperation,
   return null
 }
 
-/** 只以原分区失败记录选取既有来源，不替正式重试重新挑选旧冻结。 */
+/** 从原分区失败记录找回同一份已开始影响复核的原稿。 */
 function pendingCrossFreezeImpactSource(store: SyncStore, operation: SyncOperation, key: string, inputDigest: string, composed: ComposedInputRef) {
   if (!operation.retryOf) return null
   for (const owner of crossFreezeRetryOwners(store, operation)) {
@@ -4415,15 +4415,28 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
         }
         return null
       }
+      const loadCrossFreezeDispatchSource = (key: string, inputDigest: string, existing?: BlobRef) => {
+        if (existing) {
+          const locked = findLockedCrossFreezeSource(store, operation, existing)
+          return locked && { ...locked, pendingImpact: false }
+        }
+        if (crossFreezeSource) return { owner: operation, selected: crossFreezeSource, pendingImpact: false }
+        const pending = pendingCrossFreezeImpactSource(store, operation, key, inputDigest, view.composed)
+        if (pending) return { ...pending, pendingImpact: true }
+        for (const owner of crossFreezeRetryOwners(store, operation)) {
+          if (owner.id === operation.id || !owner.crossFreezeBinding) continue
+          const selected = readLockedCrossFreezeSource(store, owner)
+          return selected && { owner, selected, pendingImpact: false }
+        }
+        return null
+      }
       const loadCrossFreezeBehaviorAuthor: NonNullable<PartitionCheckpoints['loadCrossFreezeBehaviorAuthor']> = async (key, plan, partition, currentInputDigest, binding, existing) => {
-        const locked = existing ? findLockedCrossFreezeSource(store, operation, existing.bindingRef)
-          : crossFreezeSource ? { owner: operation, selected: crossFreezeSource }
-            : pendingCrossFreezeImpactSource(store, operation, key, currentInputDigest, view.composed)
+        const locked = loadCrossFreezeDispatchSource(key, currentInputDigest, existing?.bindingRef)
         if (!locked) return null
-        const { owner: bindingOwner, selected } = locked
+        const { owner: bindingOwner, selected, pendingImpact } = locked
         assertMaterialFence()
         const author = historicalBehaviorAuthor(store, selected.source, partition.id, binding.changedPaths)
-        if (!author && !existing && bindingOwner.id !== operation.id) fail('cross_freeze_native_binding', 'P0 影响续审缺少可核验的原 Git 作者')
+        if (!author && pendingImpact) fail('cross_freeze_native_binding', 'P0 影响续审缺少可核验的原 Git 作者')
         if (!author) return null
         const commonDir = operation.input.source.commonDir
         const current = store.readAttempt(fence!.attemptId), retryKey = `${key}:cross-freeze-impact-retry`
@@ -4450,7 +4463,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           if (impact && (!existing || canonical(existing) === canonical(impact.proof))) return impact.result.evidence.verdict === 'reuse'
             ? { draft: author.draft, trace: author.authorTrace, proof: impact.proof, independentOf: [author.reviewTrace, impact.result.evidence.trace] } : null
         }
-        if (existing || bindingOwner.id !== operation.id && !retrying) return null
+        if (existing) return null
         const sizing = stage<{ minimumCalls: number; remainingCalls: number | null }>(store, operation, current, 'partition-budget')
         if (budget && !retrying && (!sizing || sizing.remainingCalls === null || sizing.remainingCalls < sizing.minimumCalls + 2 * plan.partitions.length)) return null
         const prepared = prepareCrossFreezeImpactReview(impactInput(operation, current, callTimeoutMs))
@@ -4469,14 +4482,12 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
       }
       const loadCrossFreezeElaborationAuthor: NonNullable<PartitionCheckpoints['loadCrossFreezeElaborationAuthor']> = async (key, plan, partition, input, inputDigest, existing) => {
         if (!input.worktree || input.phase || input.refinement || input.gapRepair || input.readonlySpecRepair) return null
-        const locked = existing ? findLockedCrossFreezeSource(store, operation, existing.bindingRef)
-          : crossFreezeSource ? { owner: operation, selected: crossFreezeSource }
-            : pendingCrossFreezeImpactSource(store, operation, key, inputDigest, view.composed)
+        const locked = loadCrossFreezeDispatchSource(key, inputDigest, existing?.bindingRef)
         if (!locked) return null
-        const { owner: bindingOwner, selected } = locked
+        const { owner: bindingOwner, selected, pendingImpact } = locked
         assertMaterialFence()
         const author = historicalElaborationAuthor(store, selected.source, partition.id)
-        if (!author && !existing && bindingOwner.id !== operation.id) fail('cross_freeze_native_binding', 'P1 影响续审缺少可核验的原 Git 作者')
+        if (!author && pendingImpact) fail('cross_freeze_native_binding', 'P1 影响续审缺少可核验的原 Git 作者')
         if (!author) return null
         const current = store.readAttempt(fence!.attemptId), retryKey = `${key}:cross-freeze-impact-retry`
         const commonDir = operation.input.source.commonDir, { tree } = input.worktree
@@ -4498,7 +4509,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           const proof = readCrossFreezeP1Impact(store, owner, prior, key, inputDigest, selected, author, options.nativeExecution?.runtime?.readRecord)
           if (proof && (!existing || canonical(existing) === canonical(proof.author.proof))) return proof.verdict === 'reuse' ? proof.author : null
         }
-        if (existing || bindingOwner.id !== operation.id && !retrying || tree !== view.composed.tree) return null
+        if (existing || tree !== view.composed.tree) return null
         const sizing = stage<{ minimumCalls: number; remainingCalls: number | null }>(store, operation, current, 'partition-budget')
         if (budget && !retrying && (!sizing || sizing.remainingCalls === null || sizing.remainingCalls < sizing.minimumCalls + 2 * plan.partitions.length)) return null
         const prepared = prepareCrossFreezeImpactReview(impactInput(operation, current, callTimeoutMs))

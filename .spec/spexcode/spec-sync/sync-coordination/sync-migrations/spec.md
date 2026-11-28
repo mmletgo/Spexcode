@@ -14,6 +14,8 @@ code:
 
 ## expanded spec
 
+writer85 追加无 DDL 标记，保护 [[sync-coordinator]] 中正式重试从已锁定来源首次派出的分区影响复核。升级先停写并结算资源，保存一致 writer84 SQLite online backup 及配套 enabled、Git 和 CAS。回滚先结算新版，再恢复原备份及检查点。
+
 writer84 追加无 DDL 标记，保护 [[sync-coordinator]] 从已结算正式重试祖先认证的跨冻结 P0 原作者证据。升级先停写并结算旧会话，保存一致 writer83 SQLite online backup 及配套 enabled 和 Git/CAS，沿原冻结检查点恢复。回滚先结算新版，再恢复升级前整套备份和原检查点。
 
 writer83 追加无 DDL 标记，保护 [[sync-elaboration]] 的精简原生请求协议与只读分析附件。升级先停写并结算旧会话，保存一致 writer82 SQLite online backup 及配套 enabled 和 Git/CAS。回滚先结算新版，再恢复原备份及检查点。

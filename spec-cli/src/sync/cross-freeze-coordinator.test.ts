@@ -42,11 +42,12 @@ const scenarios = [
   { useBaseline: true, mainBranch: 'main', checkout: 'main', hideCurrentReview: true },
   { useBaseline: true, mainBranch: 'main', checkout: 'main', retryImpactFormat: true },
   { useBaseline: true, mainBranch: 'main', checkout: 'main', retryImpactFormat: true, formalImpactRetry: true },
+  { useBaseline: true, mainBranch: 'main', checkout: 'main', retryBeforeImpact: true },
   { useBaseline: true, mainBranch: 'main', checkout: 'main', challengeApproval: true },
 ] as const
 
 for (const scenario of scenarios) test(
-  '跨冻结正式 P0 ' + ('priorFormalRetry' in scenario ? '保留前序正式重试承接的旧作者' : 'formalImpactRetry' in scenario ? 'formal-impact-retry' : 'retryImpactFormat' in scenario ? '影响复核覆盖格式沿原稿续审'
+  '跨冻结正式 P0 ' + ('retryBeforeImpact' in scenario ? '正式重试承接尚未影响复核的原来源' : 'priorFormalRetry' in scenario ? '保留前序正式重试承接的旧作者' : 'formalImpactRetry' in scenario ? 'formal-impact-retry' : 'retryImpactFormat' in scenario ? '影响复核覆盖格式沿原稿续审'
     : 'hideCurrentReview' in scenario ? 'whole 冷恢复缺少当前独审原件'
     : 'challengeApproval' in scenario ? '正式质疑沿原稿派带诊断的独审'
     : `configured=${scenario.mainBranch} checkout=${scenario.checkout} baseline=${scenario.useBaseline}`),
@@ -55,6 +56,7 @@ for (const scenario of scenarios) test(
   const hideCurrentReview = 'hideCurrentReview' in scenario
   const retryImpactFormat = 'retryImpactFormat' in scenario
   const formalImpactRetry = 'formalImpactRetry' in scenario
+  const retryBeforeImpact = 'retryBeforeImpact' in scenario
   const challengeApproval = 'challengeApproval' in scenario
   const canonicalCheckout = mainBranch === checkout
   assert.ok(process.env.SPEXCODE_TEST_HOME, '必须通过 test-home 隔离正式会话夹具')
@@ -207,12 +209,16 @@ for (const scenario of scenarios) test(
   let interruptAfterImpact: string | undefined
   let interruptAfterWhole = false
   let pauseAfterWhole = false
+  let failBeforeImpact = false
   const impactWrites: string[] = []
   const runUntilP0 = async () => {
     const checkpoint = store.checkpoint.bind(store)
     store.checkpoint = (fence, ref) => {
       const saved = checkpoint(fence, ref)
       const stage = read<{ stage?: string }>(ref).stage
+      if (failBeforeImpact && stage === 'behavior-draft-protocol') {
+        throw new StructuredSessionError('unsupported', 'fixture stopped after the source was locked and before first dispatch')
+      }
       if (stage === 'analysis') {
         if (pauseAfterWhole) {
           store.requestControl(fence.operationId, 'pause')
@@ -283,12 +289,19 @@ for (const scenario of scenarios) test(
   }
   interruptAfterWhole = hideCurrentReview
   pauseAfterWhole = challengeApproval
+  failBeforeImpact = retryBeforeImpact
   let second = await runUntilP0()
   const originalCurrent = active
-  if (formalImpactRetry) {
-    assert.equal(second.operation.phase, 'budget_exhausted', JSON.stringify(second.failure))
+  if (formalImpactRetry || retryBeforeImpact) {
+    assert.equal(second.operation.phase, formalImpactRetry ? 'budget_exhausted' : 'failed', JSON.stringify(second.failure))
     assert.equal(store.readRetryEligibility(active.id).eligible, true)
     assert.equal(store.listAttempts(active.id).length, 1)
+    const [originalAttempt] = store.listAttempts(active.id)
+    if (retryBeforeImpact) {
+      assert.ok(store.readOperation(active.id).crossFreezeBinding)
+      assert.equal(originalAttempt.dispatchPlans.length, 0)
+      assert.equal(impactWrites.length, 0)
+    }
     reopen()
     const retry = store.admitAndEnqueue(await prepareSyncAdmission(currentInput, plan, {
       ingressKey: 'p0-formal-impact-retry', rootCauseId: 'p0-formal-impact-retry', retryOf: originalCurrent.id,
@@ -298,6 +311,7 @@ for (const scenario of scenarios) test(
     active = store.ackDispatch(currentInput.source.repositoryId, retry.dispatchMessageId)
     assert.equal(active.input.id, originalCurrent.input.id)
     assert.equal(active.crossFreezeBinding, undefined)
+    failBeforeImpact = false
     second = await runUntilP0()
   }
   if (challengeApproval) {
@@ -337,6 +351,7 @@ for (const scenario of scenarios) test(
     assert.notEqual(reused.traces[1].sessionId, newImpact.trace.sessionId)
     assert.equal(reused.crossFreezeAuthor?.oldOperationId, old.id)
     assert.equal(newImpact.binding.prior.operationId, old.id)
+    assert.equal(newImpact.binding.current.operationId, active.id)
     assert.equal(reused.crossFreezeAuthor?.oldAttemptId, oldAttempt.id)
     assert.equal(reused.crossFreezeAuthor?.oldInputDigest, original.inputDigest)
     assert.deepEqual(reused.crossFreezeAuthor?.impactReviewRef, impactStage.resultRef)
