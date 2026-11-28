@@ -12,9 +12,7 @@ permissions:
 
 jobs:
   sync-conformance:
-    # This label denotes an isolated, single-job macOS ARM64 host with Codex's
-    # existing system authentication and a running Linux Docker engine. The
-    # structured adapter proves Seatbelt isolation; Linux has no such adapter yet.
+    # The dedicated host supplies the acceptance Manager group and Docker.
     runs-on: [self-hosted, macOS, ARM64, spex-sync-conformance]
     timeout-minutes: 30
     steps:
@@ -30,7 +28,9 @@ jobs:
         run: |
           test "$(uname -s)" = Darwin
           test -x /usr/bin/sandbox-exec
-          test "$(codex --version)" = 'codex-cli 0.160.0'
+          test -x "${SPEX_LLM_MANAGER_PYTHON:?LLM Manager Python entry is required}"
+          test -f "${SPEX_LLM_MANAGER_CONFIG:?LLM Manager acceptance group is required}"
+          "$SPEX_LLM_MANAGER_PYTHON" -I -m llm_manager.native_runtime > /dev/null
           docker info > /dev/null
       - name: Install and build protected target checker
         run: |

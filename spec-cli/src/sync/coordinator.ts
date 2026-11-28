@@ -528,6 +528,8 @@ function settledElaborationReview(store: SyncStore, operation: SyncOperation, pr
   if (!resource || resource.phase !== 'removed' || prior.dispatchPlans.some(dispatch => store.findResource(prior.id, dispatch.key)?.phase !== 'removed')) fail('review_retry_binding', '独审失败缺少原正式资源及结算证明')
   const proof = authenticateNativeFailure(store, operation, prior, key, failure, readRecord, true)
   const { plan, checkpoint, record, state } = proof, { request } = plan, { session } = checkpoint
+  if (proof.unpublishedGrokQuota && (!quota || !record.archived))
+    fail('review_retry_binding', 'Grok 额度独审缺少原 Manager 结算或正式归档')
   const nativeClaudeFormat = reviewFormatRepairCodes.has(failure.code) && request.model?.startsWith('claude:') && record.harness === 'claude-headless'
     && state.state === 'failed' && state.claudeNative?.sessionId === session.threadId && state.claudeNative.userUuid === session.turnId
   if (formatWithoutPacket && !nativeClaudeFormat) return
@@ -564,14 +566,14 @@ function settledElaborationReview(store: SyncStore, operation: SyncOperation, pr
   const expectedFailure = stoppedReview ? undefined : { code: failure.code, message: failure.message, ...(rejection ? { rejectedOutput: checkpoint.failure?.rejectedOutput } : {}), ...(failedWorktree ? { failedWorktree } : {}) }
   if (resource.attemptId !== prior.id || resource.generation !== prior.generation || plan.schemaVersion !== 1 || checkpoint.schemaVersion !== 1
     || request.purpose !== 'elaboration_review' || request.worktree?.mode !== 'read' || !transportMatches || record.base !== request.base || record.forkCommit !== request.base
-    || !checkpoint.nativeCallRequested || !grokExit && !proof.interruptedGrokReview && !publishedIdentity || checkpoint.status !== terminalStatus || checkpoint.nativeState !== terminalStatus
+    || !checkpoint.nativeCallRequested || !grokExit && !proof.interruptedGrokReview && !proof.unpublishedGrokQuota && !publishedIdentity || checkpoint.status !== terminalStatus || checkpoint.nativeState !== terminalStatus
     || !quota && !stoppedReview && !nativeClaudeFormat && checkpoint.stop?.nativeStatus !== 'stopped' || checkpoint.result || checkpoint.creationTermination
     || checkpoint.candidateDigest !== null && checkpoint.candidateDigest !== round.candidateDigest
     || canonical(prior.dispatchPlans.find(dispatch => dispatch.key === key)?.session) !== canonical(session)
     || canonical(checkpoint.failure) !== canonical(expectedFailure)
     || record.harnessSessionId !== session.threadId || state.resultWorktree || state.output !== undefined || state.resultDigest !== undefined) fail('review_retry_binding', '独审失败缺少同owner原只读请求及精确已结算的Native失败身份')
   if (providerReview) assertZCodeSettledProviderFailure(record.session, nativeWorktreePrompt(request.prompt, request.worktree), state as ZCodeStructuredExecution, record.worktreePath, 'elaboration_review')
-  return boundElaborationReview(store, operation, prior, ownerKey, result, round, request, quota)
+  return boundElaborationReview(store, operation, prior, ownerKey, result, round, request, quota, proof.unpublishedGrokQuota ? record.session : undefined)
 }
 
 function authenticateElaborationReviewRejection(store: SyncStore, owner: SyncOperation, source: SyncAttempt, sourceKey: string, sourceFailure: NonNullable<ElaborationResult['failure']>, sourceRejection: NonNullable<ElaborationResult['rounds'][number]['rejectedOutput']>, original: NativeRunCheckpoint): void {

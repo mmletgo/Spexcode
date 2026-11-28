@@ -363,6 +363,7 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
     // Existing queue/drain owns execution capacity. A retry can rejoin an exact running native turn after
     // transport loss without manufacturing a second session or consulting an arbitrary assistant message.
     let recoveryRequested = false
+    let observerReleaseDeadline: number | undefined
     for (;;) {
       if (request.signal?.aborted) {
         const stopped = await cancel('cancelled')
@@ -373,6 +374,12 @@ export async function runStructuredSession(request: StructuredSessionRequest): P
       if (!state) throw new StructuredSessionError('stale_result', 'structured execution policy/result is missing')
       if (state.version !== execution.version || state.policy !== execution.policy || digest(structuredExecutionPolicy(state)) !== digest(execution))
         throw new StructuredSessionError('stale_result', 'structured result no longer matches its pinned input/schema/policy')
+      if (state.worktree && (state.state === 'completed' || state.state === 'failed') && structuredObserverState(state) !== 'gone') {
+        observerReleaseDeadline ??= Date.now() + 15_000
+        if (Date.now() >= observerReleaseDeadline) throw new StructuredSessionError('cancellation_pending', 'Exact structured terminal observer has not released the original record')
+        await new Promise<void>(resolvePromise => setTimeout(resolvePromise, 50))
+        continue
+      }
       if (state.state === 'completed') {
         if (!state.threadId || !state.turnId || !state.resultDigest || state.resultDigest !== digest(state.output) || !validate(state.output))
           throw new StructuredSessionError('stale_result', 'structured result identity or digest is invalid')

@@ -486,7 +486,7 @@ export class SyncApplication {
         explicit = this.store.findExplicitCommittedInitial(snapshot, syncPlanDigest(explicitPlan), selection.digest)
         if (explicit) dispatchPlan = explicitPlan
       }
-      const model = explicit ? syncModel(explicit) : await resolveSyncModel(configuredSyncModel(settings, Boolean(plan.agentWorkflow)), Boolean(plan.agentWorkflow))
+      const model = explicit ? syncModel(explicit) : await this.resolveDefaultModel(settings, Boolean(plan.agentWorkflow))
       const admission = await prepareSyncAdmission(snapshot, dispatchPlan, { ingressKey, rootCauseId: ingressKey, origin: observedOrigin, ...syncModelBinding(model), budget: settings.budget, managedRoot: this.managedRoot, baselineSelection: selection, automaticSourceAdoption: this.automaticSourceAdoption(snapshot) })
       if (!this.ownsObservation()) return
       if (!explicit) this.prepareTools(ingressKey, this.store.findOperationByIngressKey(ingressKey), model, plan.agentWorkflow)
@@ -497,6 +497,10 @@ export class SyncApplication {
       const failure = (error as { syncFailure?: NonNullable<SyncObservation['failure']> }).syncFailure ?? { code: error instanceof SyncApplicationError || error instanceof SyncStoreError ? error.code : 'sync_observation_planning_failed', message: error instanceof Error ? error.message : String(error), kind: 'unsupported' as const, evidenceRefs: [] }
       this.latestObservation = this.store.recordObservation({ input: snapshot, configRef, selection, latestDifferenceDigest: writeEvidence(snapshot.source.commonDir, { nodeId, configDigest, selection: selection?.digest ?? null, failure, content: snapshot.contentDigest }).sha256, failure }, { controlRevision: control.revision, selectionDigest: selection?.digest ?? null })
     }
+  }
+  private resolveDefaultModel(settings: { model?: string }, nativeWorkflow: boolean): Promise<string> {
+    const testRunner = this.options.runner !== undefined
+    return resolveSyncModel(configuredSyncModel(settings, nativeWorkflow, testRunner), nativeWorkflow, { testRunner })
   }
   private async retryEligibility(operation: SyncOperation, snapshot: InputSnapshot, currentness?: boolean): Promise<SyncOperationDetail['retryEligibility']> {
     const eligibility = this.store.readRetryEligibility(operation.id)
@@ -777,8 +781,11 @@ export class SyncApplication {
         if (!request.changed) return { changed: false, operation: null }
         requestBlob = request.requestBlob
       }
-      const requested = input.model ?? (prior || retry ? syncModel(prior ?? retry!) : configuredSyncModel(settings, Boolean(plan.agentWorkflow)))
-      const inherited = prior ?? (input.model === undefined ? retry : undefined)
+      const nativeWorkflow = Boolean(plan.agentWorkflow), testRunner = this.options.runner !== undefined
+      const configuredModel = configuredSyncModel(settings, nativeWorkflow, testRunner)
+      const inheritedRetry = input.model === undefined && retry && (configuredModel !== 'llm-manager' || managedRoute(syncModel(retry))) ? retry : undefined
+      const inherited = prior ?? inheritedRetry
+      const requested = input.model ?? (inherited ? syncModel(inherited) : configuredModel)
       const previous = !prior && retry && input.model === 'llm-manager' && retry.currentAttemptId
         ? this.store.readAttempt(retry.currentAttemptId) : undefined
       const quotaRetry = retry && previous?.status === 'failed' && previous.failure?.code === 'provider_quota_exhausted'
@@ -786,7 +793,7 @@ export class SyncApplication {
       if (quotaRetry && managedRoute(syncModel(retry)) && !nextAfter)
         throw new SyncApplicationError('sync_llm_manager_quota_binding', '正式额度重试缺少实际失败派发的 Manager 路线')
       const groupAnchor = retry && input.model === 'llm-manager' ? managedRoute(syncModel(retry)) : undefined
-      const model = await resolveSyncModel(requested, Boolean(plan.agentWorkflow), inherited ? syncModel(inherited) : undefined, nextAfter, groupAnchor)
+      const model = await resolveSyncModel(requested, nativeWorkflow, { previouslyBound: inherited ? syncModel(inherited) : undefined, nextAfter, sameGroupAs: groupAnchor, testRunner })
       if (prior && (syncModel(prior) !== model || (ingress?.origin ?? prior.origin) !== origin || (prior.retryOf ?? null) !== (retry?.id ?? null) || (ingress?.input ?? prior.input).id !== snapshot.id || JSON.stringify((ingress?.input ?? prior.input).source) !== JSON.stringify(snapshot.source) || prior.policyDigest !== syncPlanDigest(plan) || ((ingress ?? prior).requestBlob?.sha256 ?? null) !== (requestBlob?.sha256 ?? null))) throw new SyncStoreError('SYNC_IDEMPOTENCY_CONFLICT', ingressKey)
       const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: input.requestId, origin, ...syncModelBinding(model), ...(input.inheritRetryBudget ? { inheritRetryBudget: true } : {}), ...(recordUnverifiedCoverage ? { recordUnverifiedCoverage } : {}), ...(retry ? { retryOf: retry.id, ...(retry.baselineSelection ? { executionScope: retry.scope, impactDigest: retry.impactDigest } : {}) } : {}), budget: retry && (revalidation || input.inheritRetryBudget || readP0ReviewChallenges(this.store, retry).size) ? retry.budget : settings.budget, managedRoot: this.managedRoot, ...(requestBlob ? { requestBlob } : {}), previousBaselinePair, ...(frozen ? { baselineSelection: frozen.selection } : {}), automaticSourceAdoption }, businessSelection)
       if (nextAfter || (ingress ?? prior)?.managedQuotaRetry) admission.managedQuotaRetry = true
@@ -852,7 +859,7 @@ export class SyncApplication {
       for (const item of after.graph.items.values()) if (paths.includes(item.path) && item.kind !== 'VERIFY') { const resource = item.kind === 'FLOW' ? { kind: 'flow' as const, id: item.id } : { kind: 'contract' as const, id: item.id }; resources.set(JSON.stringify(resource), resource) }
       const selected = this.store.readBaselineSelection(snapshot.source, [...resources.values()])
       if ('failure' in selected) throw new SyncApplicationError(selected.failure.code, selected.failure.message)
-      const model = await resolveSyncModel(configuredSyncModel(settings, Boolean(plan.agentWorkflow)), Boolean(plan.agentWorkflow))
+      const model = await this.resolveDefaultModel(settings, Boolean(plan.agentWorkflow))
       const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: original.rootCauseId, origin: 'combined', ...syncModelBinding(model), budget: settings.budget, managedRoot: this.managedRoot, requestBlob, baselineSelection: selected.selection })
       this.prepareTools(ingressKey, null, model, plan.agentWorkflow)
       const operation = this.store.admitAndEnqueue(admission)
@@ -929,7 +936,7 @@ export class SyncApplication {
       if (selected && 'failure' in selected) throw Object.assign(new SyncApplicationError(selected.failure.code, selected.failure.message), { syncFailure: selected.failure })
       const selection = selected?.selection, plan = this.operationPlan(original)
       plan.agentWorkflow = 'native-worktree-v1'
-      const model = await resolveSyncModel(configuredSyncModel(settings, true), true)
+      const model = await this.resolveDefaultModel(settings, true)
       this.decorateDecisionPlan(plan, snapshot, input, context.analysis, requestBlob, selection ?? previousBaselinePair)
       const admission = await prepareSyncAdmission(snapshot, plan, { ingressKey, rootCauseId: original.rootCauseId, origin: 'decision', ...syncModelBinding(model), budget: settings.budget, managedRoot: this.managedRoot, requestBlob, previousBaselinePair, ...(selection ? { baselineSelection: selection, executionScope: original.scope, impactDigest: original.impactDigest } : {}) })
       this.prepareTools(ingressKey, null, model, plan.agentWorkflow)
@@ -1026,7 +1033,9 @@ export class SyncApplication {
     const finished = runSyncOperation(this.store, id, { plan, ...(recoveryOnly ? { recoveryOnly: true } : {}), readCurrentPlan: async () => {
       const current = await captureInputSnapshot(this.root, { committed: operation.input.captureKind === 'commit' }); this.requireEnabled(current, operation)
       return plan
-    }, managedRoot: this.managedRoot, artifactRoot: this.artifactRoot, tools, runner: this.options.runner, verificationDriver: this.options.verificationDriver, verificationTransport: this.options.verificationTransport, signal: controller.signal, callTimeoutMs: settings.callTimeoutMs }).then(async result => {
+    }, managedRoot: this.managedRoot, artifactRoot: this.artifactRoot, tools, nativeExecution: { requireManagedRoute: true },
+    runner: this.options.runner, verificationDriver: this.options.verificationDriver, verificationTransport: this.options.verificationTransport,
+    signal: controller.signal, callTimeoutMs: settings.callTimeoutMs }).then(async result => {
       advance = !recoveryOnly && result.status !== 'busy' && result.operation.phase !== 'queued'
       if (advance && result.status === 'workspace_synced' && result.receipt && result.operation.automaticSourceAdoption) await this.observer?.scanNow()
       return result

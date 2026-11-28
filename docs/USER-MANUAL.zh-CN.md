@@ -641,7 +641,7 @@ spex sync show <操作ID>
 
 登记 `SPEX_LLM_MANAGER_PYTHON` 和 `SPEX_LLM_MANAGER_CONFIG` 后，从宿主设置页进入 LLM Manager。可为 Claude Code 配置兼容 Anthropic Messages 的 API 地址、Key 和模型，也可登记使用本机认证的 Claude Code、Cursor、Codex、Grok Build 和 ZCode。功能组决定供应商顺序、可用时段和冷却恢复。Manager 负责供应商启动和协议，SpexCode 继续核验原请求、工作树和交付。
 
-已登记完整管理的宿主，新同步由功能组统一选路。正式验收也可使用独立的通用功能组。没有登记管理的宿主可用 `--model cursor:default`、`--model zcode:default` 或 `--model grok:default` 显式选择本机 CLI。已结束的操作通过 `--retry-of` 沿原冻结输入和验收条件继续。
+新同步由 LLM Manager 的功能组统一选路，正式验收可使用单独的通用功能组。请从同步模型设置进入 LLM Manager，配置本机 CLI 和 API 路线。已结束的操作可通过 `--retry-of` 沿同一冻结输入和验收条件继续。
 
 ### 14.4 从代码修改开始
 

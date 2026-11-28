@@ -177,11 +177,14 @@ export function assertGrokRejectedFinalSource(prompt: string, execution: GrokStr
 }
 
 /** 冷验未发布的原生退出，供同步继续原草稿或只读独审。 */
-export function assertGrokUnpublishedExitSource(id: string, prompt: string, execution: GrokStructuredExecution, worktreePath: string, purpose: 'code_behavior_analyze' | 'elaboration_generate' | 'elaboration_review', terminal: 'failed' | 'cancelled' = 'failed'): void {
+export function assertGrokUnpublishedExitSource(id: string, prompt: string, execution: GrokStructuredExecution, worktreePath: string, purpose: 'code_behavior_analyze' | 'elaboration_generate' | 'elaboration_review', terminal: 'failed' | 'cancelled' | 'quota' = 'failed'): void {
   const native = execution.grokNative, realm = structuredRealmRoot(execution)
   const mode = purpose === 'elaboration_review' ? 'read' : 'edit'
-  if (!realm || !native || native.root !== join(realm, id) || execution.state !== terminal || execution.errorCode
-    || (terminal === 'cancelled' ? mode !== 'read' || execution.cancellation?.reason !== 'cancelled' : !isGrokNativeExitFailure({ code: 'failed', message: execution.error }))
+  const byControl = terminal !== 'failed'
+  const state = terminal === 'cancelled' ? 'cancelled' : 'failed'
+  const code = terminal === 'quota' ? 'provider_quota_exhausted' : undefined
+  if (!realm || !native || native.root !== join(realm, id) || execution.state !== state || execution.errorCode !== code
+    || (byControl ? mode !== 'read' || execution.cancellation?.reason !== 'cancelled' : !isGrokNativeExitFailure({ code: 'failed', message: execution.error }))
     || execution.worktree?.mode !== mode || execution.purpose !== purpose || !execution.turnStartRequested
     || execution.threadId !== undefined || execution.turnId !== undefined || native.turnId !== undefined || execution.rejectedOutput || execution.resultWorktree || execution.failedWorktree
     || execution.output !== undefined || execution.resultDigest !== undefined || execution.cancellation?.nativeStopped !== true
@@ -191,7 +194,7 @@ export function assertGrokUnpublishedExitSource(id: string, prompt: string, exec
   const plan = read<NativePlan>(native.root, 'plan.json'), launch = read<NativeLaunch>(native.root, 'launch.json')
   assertPlan(plan, native.root, execution, prompt, worktreePath)
   assertLaunch(plan, launch, execution)
-  if (terminal === 'cancelled' ? read<{ launchDigest: string }>(native.root, 'cancel.json')?.launchDigest !== digest(launch) : existsSync(join(native.root, 'cancel.json')))
+  if (byControl ? read<{ launchDigest: string }>(native.root, 'cancel.json')?.launchDigest !== digest(launch) : existsSync(join(native.root, 'cancel.json')))
     throw stale('Grok original native cancellation binding differs')
   if (!detachedRuntimeIsGone(launch.pid, launch.receiptFile)) throw stale('Grok unpublished exit process identity is not gone')
   stopObservation(native.root, launch)

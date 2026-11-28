@@ -92,7 +92,7 @@ test('Manager正式额度重试只沿被采纳的唯一已结算派发游标', t
     findResource: (_attemptId: string, key: string) => resources.find(resource => resource.plan.key === key),
     listResources: () => resources,
   } as unknown as SyncStore
-  const add = (key: string, route: ManagedRoute, checkpointCode: 'failed' | 'provider_quota_exhausted') => {
+  const add = (key: string, route: ManagedRoute, checkpointCode: 'failed' | 'provider_quota_exhausted', legacy = false) => {
     const sessionCreateKey = `sync-call-${key}`, expectedSessionId = sessionIdForCreateKey(sessionCreateKey)
     const model = managedModel(route)
     const request: NativeRunPlan['request'] = {
@@ -102,7 +102,7 @@ test('Manager正式额度重试只沿被采纳的唯一已结算派发游标', t
     const requestDigest = contentHash(JSON.stringify(request))
     const identity = { schemaVersion: 1 as const, operationId: operation.id, attemptId: attempt.id, inputId: operation.input.id, candidateDigest: null, requestDigest, expectedSessionId }
     const session = { sessionId: expectedSessionId, threadId: 'thread', turnId: 'turn' }
-    const dispatch: DispatchPlan = { key, purpose: request.purpose, requestDigest, managedModel: model, session, sessionCreateKey }
+    const dispatch: DispatchPlan = { key, purpose: request.purpose, requestDigest, ...(legacy ? {} : { managedModel: model }), session, sessionCreateKey }
     const checkpoint: NativeRunCheckpoint = {
       ...identity, phase: 'removed', status: 'failed', nativeState: 'failed', nativeCallRequested: true, nativeStarted: true, session,
       failure: { code: checkpointCode, message: 'quota' },
@@ -118,7 +118,9 @@ test('Manager正式额度重试只沿被采纳的唯一已结算派发游标', t
     attempt.dispatchPlans.push(dispatch)
     return { ref, dispatch }
   }
-  assert.deepEqual(readManagedQuotaRetryRoute(store, operation, attempt), fallback, '旧准入可作历史游标')
+  assert.equal(readManagedQuotaRetryRoute(store, operation, attempt), undefined, '缺少真实会话不能取得游标')
+  add('legacy', fallback, 'provider_quota_exhausted', true)
+  assert.deepEqual(readManagedQuotaRetryRoute(store, operation, attempt), fallback, '有实际会话的旧准入可作历史游标')
   const unrelated = add('unrelated', fallback, 'failed')
   const actual = add('actual', preferred, 'provider_quota_exhausted')
   const next = add('other-quota', fallback, 'provider_quota_exhausted')

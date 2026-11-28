@@ -2382,12 +2382,42 @@ test('没有冻结保护测试时拒绝未执行覆盖授权', async () => {
   } finally { await f.application.stopService(); f.cleanup() }
 })
 
+test('正式应用缺少 Manager 配置时既不准入也不登记原生派发', async t => {
+  const original = process.env
+  process.env = { ...original }
+  t.after(() => { process.env = original })
+  delete process.env.SPEX_LLM_MANAGER_CONFIG
+  delete process.env.SPEX_LLM_MANAGER_PYTHON
+  const f = await fixture({ ...settings, model: 'grok:default' }, undefined, true)
+  const app = await SyncApplication.create(f.root, { protocol: f.protocol, runtimeDirectory: join(f.temp, 'runtime') })
+  try {
+    await app.enable()
+    await app.automaticControl('pause')
+    for (const model of [undefined, 'grok:default']) {
+      await assert.rejects(app.submit({ nodeId: 'demo', requestId: 'missing-manager', model }), { code: 'sync_llm_manager_config' })
+    }
+    assert.deepEqual((await app.status()).operations, [])
+    assert.equal(f.calls.length, 0)
+  } finally { await app.stopService(); await f.application.stopService(); f.cleanup() }
+})
+
 test('llm_manager 新准入固定正式路线、冷重放和普通重试均沿原绑定', async t => {
   const f = await fixture({ ...settings, model: 'zcode:default' }, undefined, true)
   const command = join(f.temp, 'route-python'), config = join(f.temp, 'route.json'), calls = join(f.temp, 'route-calls')
   const envelopes = join(f.temp, 'route-envelopes')
   const route = (vendor: string, model: string) => writeFileSync(config, JSON.stringify({ ok: true, value: { routeId: 'a'.repeat(64), vendor, model, kind: 'cli' } }))
-  writeFileSync(command, '#!/bin/sh\n[ "$1" = "-I" ] && [ "$3" = "rpc" ] || exit 2\n[ -z "\${SPEX_LLM_MANAGER_TEST_ENV_TRAP+x}" ] || exit 2\n\n/bin/cat >> route-envelopes\n/bin/echo >> route-envelopes\nprintf "called\\n" >> route-calls\n/bin/cat "$4"\n', { mode: 0o700 })
+  const managerRuntime = fileURLToPath(new URL('../../llm-manager/native-runtime.mjs', import.meta.url))
+  writeFileSync(command, `#!${process.execPath}
+const { appendFileSync, readFileSync } = require('node:fs')
+if (process.argv[2] !== '-I' || process.env.SPEX_LLM_MANAGER_TEST_ENV_TRAP) process.exit(2)
+if (process.argv[3] === '-m' && process.argv[4] === 'llm_manager.native_runtime') {
+  process.stdout.write(JSON.stringify({ version: 1, path: ${JSON.stringify(managerRuntime)} }))
+} else if (process.argv[4] === 'rpc') {
+  appendFileSync('route-envelopes', readFileSync(0, 'utf8') + '\\n')
+  appendFileSync('route-calls', 'called\\n')
+  process.stdout.write(readFileSync(process.argv[5]))
+} else process.exit(2)
+`, { mode: 0o700 })
   for (const [key, value] of Object.entries({ SPEX_LLM_MANAGER_PYTHON: command, SPEX_LLM_MANAGER_CONFIG: config, SPEX_LLM_MANAGER_TEST_ENV_TRAP: 'host-only' })) {
     const previous = process.env[key]
     process.env[key] = value
@@ -2431,14 +2461,8 @@ test('llm_manager 新准入固定正式路线、冷重放和普通重试均沿�
     f.application.store.recordFailure(fence, { code: 'provider_quota_exhausted', message: 'fixture quota', kind: 'unsupported', evidenceRefs: [] })
     route('zcode', 'fallback/fixture')
     const request = { nodeId: 'demo', requestId: 'manager-native-quota-retry', retryOf: selected.id, model: 'llm-manager' }
-    const quota = (await f.application.submit(request)).operation!
-    const previousRoute = managedRoute(selected.model)
-    assert.equal(quota.managedQuotaRetry, true)
-    assert.equal(f.application.store.findIngressReceipt(quota.ingressKey)?.managedQuotaRetry, true)
-    assert.deepEqual(JSON.parse(readFileSync(envelopes, 'utf8').trim().split('\n').at(-1)!), { action: 'resolve', nextAfter: previousRoute, sameGroupAs: previousRoute })
-    assert.deepEqual((await f.application.submit(request)).operation, quota)
-    assert.equal(readFileSync(calls, 'utf8'), 'called\ncalled\ncalled\n')
-    await f.application.control(quota.id, 'cancel')
+    await assert.rejects(f.application.submit(request), { code: 'sync_llm_manager_quota_binding' })
+    assert.equal(readFileSync(calls, 'utf8'), 'called\ncalled\n')
     assert.equal(f.calls.length, 0)
   } finally { await f.application.stopService(); f.cleanup() }
 })

@@ -21,6 +21,8 @@ P1 托管额度续审只允许只读候选请求，使用精确已结算失败�
 显式额度重试刚准入时，首个原生派发兑现 Manager 在准入时选择的后继。Store 用该 operation 自己的首次调用预留原子确认资格。并发不同键只有首个胜出可用后继绑定，其他新键重新从原组首位选路。同键重放沿原请求摘要和执行路线。
 Manager 托管的原生工作树会话在首次预留派发前从原功能组重新选路。实际路线和完整请求摘要在同一 `reserveDispatch` 事务中冻结，据此应用对应 CLI 的原生工具与配置政策。已预留但尚未创建资源的请求在冷恢复时仍校验完整原请求并重用原路线。已有资源使用原 Native 计划，原会话的观察、恢复、结算及 Git 证据继续绑定该次实际派发。首次同键并发共用已冻结请求与一次调用预算。历史派发缺少实际路线字段时沿原准入模型认证。
 
+正式协调器继续观察和结算已有派发。历史操作尚未预留的新请求须具有 Manager 准入绑定，缺失时在预留和原生调用前明确停止。原生工作树操作可通过正式 retryOf 取得当前组的 Manager 路线。
+
 并发冷却后的预约拒绝由原会话返回 `llm_manager_route_unavailable`。资源桥核验固定请求、会话及 `notStarted` 证明，原失败经 terminal→removed 结算。冷读复核同一原件并保留失败。同候选新派发须另用合法请求与创建键，由 Manager 按原组当前顺序选路。原拒绝无原生调用用量、额度游标、输出或 Git 结果授权；既有预算预留及不明停止保护仍生效。
 
 协调器显式启用已结算工作树回收：原请求、派发、removed checkpoint与canonical Native身份必须完全相同，当前Git须clean。completed另核不可变Git结果与output；failed/cancelled另核原停止全值、error/code及允许缺席的thread/turn身份，不要求不存在的turn。复用[[archive]]的正式close先保活archive，再归档record并回收目录/登记，保留branch、原result/checkpoint、Native历史及JSON对象。返回原成功结果或抛原失败，close失败只打印pending，不增加调用或制造批准/success/failedWorktree。已归档成功仍按原请求冷重放；已归档失败的P0/P1材料观察沿原Native/CAS/owner/schema/source/tests门临时还原同一checkout，原稿续入新seed而非从零开始，观察后复用原close的物理回收段。dirty、未知停止或身份漂移保留；removed仍只表示执行/停止资源结算，不新增持久cleanup状态。

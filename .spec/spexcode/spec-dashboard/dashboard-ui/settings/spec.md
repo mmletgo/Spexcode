@@ -100,17 +100,15 @@ Settings page refit locally without claiming tmux geometry; returning to Session
   scrollbar geometry, and this component supplies only its centered content), and the single home for
   future settings. Today it owns the language picker, the terminal base-surface and font-size controls, the shortcuts editor,
   the theme-preset picker, the CLI-backed launcher profile list, and the optional raw project config editor.
-  The Sync model section takes its mode from the current host. When LLM Manager is authoritative, the section
-  shows the host's current route (or that no route is ready) and a single entry to the official LLM Manager
+  The Sync model section shows the host's current Manager route (or that no route is ready)
+  and a single entry to the official LLM Manager
   settings, when the local host has installed that page. The host's settings document mounts the official
   React 19 component and sends its management actions to the same-origin settings endpoint. The dashboard's
   React 18 build remains independent of that optional document. The management component supplies its own
-  localized copy. The project model picker and its save controls are absent in authoritative mode.
-  On an unmanaged host, the section reads the local project's saved model and uses the same revision-guarded
-  project config API to update only `sync.model` for an enabled project. Users can choose a supported native
-  CLI with its local default or an exact model. A revision conflict requires a reload. After saving, the page
-  explains how committing the config and re-enabling sync takes effect for new operations under
-  [[sync-model-selection]].
+  localized copy. A host without a configured Manager shows that Manager is required before new synchronization.
+  The paired single-project dashboard and remote project views direct users to their host's local console.
+  The official configuration link appears in the local console's project view. This section reads host status
+  and leaves Provider preferences to [[sync-model-selection]] and LLM Manager.
   Launcher profiles are read through the same `/api/settings` path as the New Session picker. The page can add
   multiple named launchers of the same harness type, including headless variants, by collecting a name, type, and
   command and writing the same `sessions.launchers` object the CLI reads. It also owns an optional raw
