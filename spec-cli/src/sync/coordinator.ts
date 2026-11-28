@@ -3742,9 +3742,10 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
           const failure = source?.result.failure, round = source?.result.rounds.at(-1)
           if (source && rememberUnavailableQuota(prior, source.result)) continue
           const rejectedReviewFormat = failure && reviewFormatRepairCodes.has(failure.code)
-          const formatAfterSiblingStop = prior.status === 'superseded' && prior.failure?.kind === 'unsupported' && prior.failure.code === 'cancellation_pending'
+          const formatAfterSiblingAbort = prior.status === 'superseded' && prior.failure?.kind === 'unsupported'
+            && (prior.failure.code === 'cancellation_pending' || prior.failure.code === 'checkpoint_artifact_binding')
             && !!binding && source?.result.structurePassed && !!round?.draft && !!round.candidate && rejectedReviewFormat
-          const formatAfterAbort = formatAfterSiblingStop || prior.status === 'superseded' && prior.failure?.kind === 'unsupported'
+          const formatAfterAbort = formatAfterSiblingAbort || prior.status === 'superseded' && prior.failure?.kind === 'unsupported'
             && prior.failure.code === 'coordinator_failed' && rejectedReviewFormat
           const managedReviewQuota = failure?.code === 'provider_quota_exhausted' && !!source?.result.structurePassed && !source.result.reviewPassed
           const interruptedReview = failure?.code === 'cancellation_pending' && source?.result.structurePassed
@@ -3764,7 +3765,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
                 && ['ENOENT', 'ENOTDIR', 'EISDIR', 'EACCES', 'EPERM', 'EIO', 'ELOOP'].includes(code ?? '')
               const evidenceError = error instanceof SyntaxError || error instanceof StructuredSessionError && error.code === 'stale_result'
                 || ['checkpoint_artifact_binding', 'evidence_blob_missing', 'evidence_blob_mismatch'].includes(code ?? '') || evidenceReadError
-              if ((!providerReview && !formatAfterSiblingStop) || !evidenceError) throw error
+              if ((!providerReview && !formatAfterSiblingAbort) || !evidenceError) throw error
               fail('review_retry_binding', '原独审失败缺少精确只读派发、Git候选或已结算Native原件')
             }
             if (settledReview) {
@@ -3775,7 +3776,7 @@ async function runSyncOperationInScope(store: SyncStore, operationId: string, su
             }
           }
           if (providerReview) fail('review_retry_binding', 'ZCode 原独审失败没有可认证的同候选结构及审查身份')
-          if (!newerGeneration && formatAfterSiblingStop) fail('review_retry_binding', '分区原独审格式失败没有可认证的同候选停止及拒稿原件')
+          if (!newerGeneration && formatAfterSiblingAbort) fail('review_retry_binding', '分区原独审格式失败没有可认证的同候选停止及拒稿原件')
           const errors = round?.findings.filter(issue => issue.severity === 'error') ?? []
           const paused = prior.status === 'superseded' && !prior.failure
           const interruptedPartition = !!binding && ['failed', 'superseded'].includes(prior.status)
